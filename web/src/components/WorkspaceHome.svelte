@@ -716,33 +716,30 @@
     failed_gates: wsMrs.filter(m => m._gates?.failed > 0).length,
   });
 
-  // ── Secondary tab bar ────────────────────────────────────────────────
-  // Auto-selects the most useful tab based on data state:
-  // - If specs are pending approval → Specs tab
-  // - If MRs have gate failures → MRs tab
-  // - If agents are active → Agents tab
-  // - Otherwise → Activity (recent events)
-  let secondaryTabOverride = $state(null);
-  let secondaryTab = $derived.by(() => {
-    if (secondaryTabOverride) return secondaryTabOverride;
-    // Smart defaults based on workspace state
-    const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending').length;
-    if (pendingSpecs > 0) return 'specs';
-    const failedMrs = wsMrs.filter(m => m._gates?.failed > 0).length;
-    if (failedMrs > 0) return 'mrs';
-    const activeAgents = wsAgents.filter(a => a.status === 'active').length;
-    if (activeAgents > 0) return 'agents';
-    return 'activity';
+  // ── Activity filter + pagination ──────────────────────────────────────
+  let activityFilter = $state('');
+  let activityLimit = $state(20);
+  let specsExpanded = $state(false);
+
+  let filteredActivity = $derived.by(() => {
+    if (!activityFilter) return activityEvents;
+    return activityEvents.filter(e => {
+      const t = e.event_type ?? e.type ?? '';
+      if (activityFilter === 'spec') return t.includes('spec');
+      if (activityFilter === 'task') return t.includes('task');
+      if (activityFilter === 'agent') return t.includes('agent');
+      if (activityFilter === 'mr') return t.includes('mr') || t.includes('merg') || t.includes('creat');
+      if (activityFilter === 'gate') return t.includes('gate');
+      return true;
+    });
   });
-  function setSecondaryTab(id) { secondaryTabOverride = id; }
-  const SECONDARY_TABS = [
-    { id: 'activity', label: 'Activity' },
-    { id: 'specs', label: 'Specs' },
-    { id: 'tasks', label: 'Tasks' },
-    { id: 'mrs', label: 'Merge Requests' },
-    { id: 'agents', label: 'Agents' },
-    { id: 'budget', label: 'Budget' },
-  ];
+
+  // Legacy: keep setSecondaryTab for summary card clicks when multiple repos exist
+  function setSecondaryTab(id) {
+    // When clicking a summary card with multiple repos, auto-expand the relevant detail section
+    const el = document.querySelector(`[data-testid="section-${id}-detail"] > summary`);
+    if (el) el.click();
+  }
 
   // ── Repo card data ────────────────────────────────────────────────────
   // repoHealth(repo) function already defined above (line ~265)
@@ -1140,34 +1137,172 @@
         </div>
       </section>
 
-      <!-- ── Zone 5: Secondary tabbed panel ────────────────────────────── -->
-      <div class="secondary-panel" data-testid="secondary-tabs">
-        <div class="secondary-tab-bar" role="tablist" aria-label="Workspace data">
-          {#each SECONDARY_TABS as tab}
-            <button
-              class="secondary-tab-btn"
-              class:active={secondaryTab === tab.id}
-              role="tab"
-              aria-selected={secondaryTab === tab.id}
-              onclick={() => { setSecondaryTab(tab.id); }}
-            >
-              {tab.label}
-              {#if tab.id === 'specs' && specs.filter(s => (s.approval_status ?? s.status) === 'pending').length > 0}
-                <span class="tab-count tab-count-warn">{specs.filter(s => (s.approval_status ?? s.status) === 'pending').length}</span>
-              {:else if tab.id === 'tasks' && wsTasks.length > 0}
-                <span class="tab-count">{wsTasks.length}</span>
-              {:else if tab.id === 'mrs' && wsMrs.length > 0}
-                <span class="tab-count">{wsMrs.length}</span>
-              {:else if tab.id === 'agents' && wsAgents.filter(a => a.status === 'active').length > 0}
-                <span class="tab-count tab-count-active">{wsAgents.filter(a => a.status === 'active').length}</span>
-              {/if}
-            </button>
-          {/each}
+      <!-- ── Zone 5: Two-column overview (activity + summary) ─────────── -->
+      <div class="overview-columns" data-testid="overview-columns">
+        <!-- Left: Activity timeline (what's happening) -->
+        <div class="overview-activity">
+          <div class="overview-section-header">
+            <h3 class="overview-section-title">Activity</h3>
+            <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity">
+              <option value="">All</option>
+              <option value="spec">Specs</option>
+              <option value="task">Tasks</option>
+              <option value="agent">Agents</option>
+              <option value="mr">Merge Requests</option>
+              <option value="gate">Gates</option>
+            </select>
+          </div>
+          {#if activityLoading}
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+          {:else if filteredActivity.length === 0}
+            <p class="empty-text">No recent activity. Push specs and approve them to get started.</p>
+          {:else}
+            <div class="activity-timeline">
+              {#each filteredActivity.slice(0, activityLimit) as event, i}
+                {@const variant = activityVariant(event)}
+                {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                <button
+                  class="activity-item activity-item-clickable"
+                  onclick={() => {
+                    if (primaryType && primaryId) {
+                      const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                      nav(primaryType, primaryId, data);
+                    }
+                  }}
+                >
+                  <div class="activity-dot activity-dot-{variant}"></div>
+                  {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                  <div class="activity-content">
+                    <span class="activity-icon">{activityIcon(event)}</span>
+                    <span class="activity-label">{activityLabel(event)}</span>
+                    {#if event.entity_name ?? event.title ?? event.description}
+                      <span class="activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
+                    {/if}
+                    {#if event.repo_id && repoMap[event.repo_id]}
+                      <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
+                    {/if}
+                    {#if event.timestamp ?? event.created_at}
+                      <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                    {/if}
+                  </div>
+                </button>
+              {/each}
+            </div>
+            {#if filteredActivity.length > activityLimit}
+              <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
+                Show more ({filteredActivity.length - activityLimit} remaining)
+              </button>
+            {/if}
+          {/if}
         </div>
 
-        <div class="secondary-tab-content">
-        {#if secondaryTab === 'specs'}
-          <!-- ── Specs tab ──────────────────────────────────────────────── -->
+        <!-- Right: Summary cards (quick glances, clickable) -->
+        <div class="overview-summary">
+          <!-- Specs summary -->
+          <button class="summary-card" onclick={() => { if (repos.length === 1) onSelectRepo?.(repos[0], 'specs'); else setSecondaryTab('specs'); }} title="View all specs">
+            <div class="summary-card-header">
+              <span class="summary-card-icon">S</span>
+              <span class="summary-card-title">Specs</span>
+              <span class="summary-card-count">{specs.length}</span>
+            </div>
+            {#if specs.length > 0}
+              <div class="summary-card-breakdown">
+                {#if pipelineSpecs.pending > 0}<span class="summary-stat summary-stat-warn">{pipelineSpecs.pending} pending</span>{/if}
+                {#if pipelineSpecs.approved > 0}<span class="summary-stat summary-stat-ok">{pipelineSpecs.approved} approved</span>{/if}
+                {#if specs.filter(s => (s.approval_status ?? s.status) === 'draft').length > 0}<span class="summary-stat">{specs.filter(s => (s.approval_status ?? s.status) === 'draft').length} draft</span>{/if}
+              </div>
+            {/if}
+          </button>
+
+          <!-- Tasks summary -->
+          <button class="summary-card" onclick={() => { if (repos.length === 1) onSelectRepo?.(repos[0], 'tasks'); else setSecondaryTab('tasks'); }} title="View all tasks">
+            <div class="summary-card-header">
+              <span class="summary-card-icon">T</span>
+              <span class="summary-card-title">Tasks</span>
+              <span class="summary-card-count">{wsTasks.length}</span>
+            </div>
+            {#if wsTasks.length > 0}
+              <div class="summary-card-breakdown">
+                {#if pipelineTasks.in_progress > 0}<span class="summary-stat summary-stat-active">{pipelineTasks.in_progress} active</span>{/if}
+                {#if pipelineTasks.blocked > 0}<span class="summary-stat summary-stat-danger">{pipelineTasks.blocked} blocked</span>{/if}
+                {#if pipelineTasks.done > 0}<span class="summary-stat summary-stat-ok">{pipelineTasks.done} done</span>{/if}
+              </div>
+            {/if}
+          </button>
+
+          <!-- Agents summary -->
+          <button class="summary-card" onclick={() => { if (repos.length === 1) onSelectRepo?.(repos[0], 'agents'); else setSecondaryTab('agents'); }} title="View all agents">
+            <div class="summary-card-header">
+              <span class="summary-card-icon">A</span>
+              <span class="summary-card-title">Agents</span>
+              <span class="summary-card-count">{wsAgents.length}</span>
+            </div>
+            {#if wsAgents.length > 0}
+              <div class="summary-card-breakdown">
+                {#if pipelineAgents.active > 0}<span class="summary-stat summary-stat-active">{pipelineAgents.active} running</span>{/if}
+                {#if wsAgents.filter(a => a.status === 'completed' || a.status === 'idle').length > 0}<span class="summary-stat summary-stat-ok">{wsAgents.filter(a => a.status === 'completed' || a.status === 'idle').length} completed</span>{/if}
+                {#if wsAgents.filter(a => a.status === 'failed' || a.status === 'dead').length > 0}<span class="summary-stat summary-stat-danger">{wsAgents.filter(a => a.status === 'failed' || a.status === 'dead').length} failed</span>{/if}
+              </div>
+            {/if}
+          </button>
+
+          <!-- MRs summary -->
+          <button class="summary-card" onclick={() => { if (repos.length === 1) onSelectRepo?.(repos[0], 'mrs'); else setSecondaryTab('mrs'); }} title="View all merge requests">
+            <div class="summary-card-header">
+              <span class="summary-card-icon">M</span>
+              <span class="summary-card-title">Merge Requests</span>
+              <span class="summary-card-count">{wsMrs.length}</span>
+            </div>
+            {#if wsMrs.length > 0}
+              <div class="summary-card-breakdown">
+                {#if pipelineMrs.open > 0}<span class="summary-stat summary-stat-info">{pipelineMrs.open} open</span>{/if}
+                {#if pipelineMrs.failed_gates > 0}<span class="summary-stat summary-stat-danger">{pipelineMrs.failed_gates} failed gates</span>{/if}
+                {#if pipelineMrs.merged > 0}<span class="summary-stat summary-stat-ok">{pipelineMrs.merged} merged</span>{/if}
+              </div>
+            {/if}
+          </button>
+
+          <!-- Budget summary -->
+          {#if budgetData}
+            {@const config = budgetData.config ?? budgetData}
+            {@const usage = budgetData.usage ?? {}}
+            <div class="summary-card summary-card-budget">
+              <div class="summary-card-header">
+                <span class="summary-card-icon">$</span>
+                <span class="summary-card-title">Budget</span>
+              </div>
+              <div class="summary-card-breakdown">
+                {#if config.max_concurrent_agents != null}
+                  {@const activeCount = wsAgents.filter(a => a.status === 'active').length}
+                  <div class="budget-mini">
+                    <span class="budget-mini-label">Agents</span>
+                    <span class="budget-mini-value">{activeCount}/{config.max_concurrent_agents}</span>
+                  </div>
+                {/if}
+                {#if config.max_tokens_per_day != null}
+                  {@const usedTokens = usage.tokens_today ?? 0}
+                  {@const pct = config.max_tokens_per_day > 0 ? Math.round((usedTokens / config.max_tokens_per_day) * 100) : 0}
+                  <div class="budget-mini">
+                    <span class="budget-mini-label">Tokens</span>
+                    <span class="budget-mini-value" class:budget-warn={pct > 80}>{pct}%</span>
+                  </div>
+                {/if}
+              </div>
+            </div>
+          {/if}
+        </div>
+      </div>
+
+      <!-- ── Zone 6: Expandable detail tables (on-demand, collapsed by default) ── -->
+      <details class="detail-table-section" data-testid="section-specs-detail" bind:open={specsExpanded}>
+        <summary class="detail-table-toggle">
+          <span class="detail-table-title">Specs</span>
+          <span class="detail-table-count">{specs.length}</span>
+          {#if pipelineSpecs.pending > 0}<span class="detail-table-badge detail-table-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
+        </summary>
+        <div class="detail-table-body">
           <div class="tab-header-controls">
             <select class="filter-select" value={specsStatusFilter} onchange={(e) => { specsStatusFilter = e.target.value; }} aria-label={$t('workspace_home.filter_specs_by_status')} data-testid="specs-status-filter">
               <option value="">{$t('workspace_home.all_statuses')}</option>
@@ -1180,51 +1315,29 @@
           </div>
           {#if specsLoading}
             <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
           {:else if specsError}
             <div class="error-row" role="alert">
               <p class="error-text">{specsError}</p>
-              <button class="retry-btn" onclick={loadSpecs} aria-label={$t('workspace_home.retry_loading_specs')}>{$t('common.retry')}</button>
+              <button class="retry-btn" onclick={loadSpecs}>{$t('common.retry')}</button>
             </div>
           {:else if filteredSpecs.length === 0}
-            <p class="empty-text" data-testid="specs-empty">
-              {specsStatusFilter ? $t('workspace_home.specs_no_status') : $t('workspace_home.specs_empty')}
-            </p>
+            <p class="empty-text">{specsStatusFilter ? $t('workspace_home.specs_no_status') : $t('workspace_home.specs_empty')}</p>
           {:else}
             <table class="specs-table" data-testid="specs-table">
               <thead>
                 <tr>
-                  <th scope="col" aria-sort={specsSortCol === 'repo' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>{$t('workspace_home.sections.repos')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('repo')}</span></button>
-                  </th>
-                  <th scope="col" aria-sort={specsSortCol === 'path' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('path')}>{$t('workspace_home.col_path')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('path')}</span></button>
-                  </th>
-                  <th scope="col" aria-sort={specsSortCol === 'status' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('status')}>{$t('workspace_home.col_status')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('status')}</span></button>
-                  </th>
-                  <th scope="col" aria-sort={specsSortCol === 'progress' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('progress')}>{$t('workspace_home.col_progress')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('progress')}</span></button>
-                  </th>
-                  <th scope="col">Owner</th>
-                  <th scope="col" aria-sort={specsSortCol === 'updated_at' ? (specsSortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
-                    <button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>{$t('workspace_home.col_last_activity')} <span class="sort-arrow" aria-hidden="true">{specsSortArrow('updated_at')}</span></button>
-                  </th>
+                  <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>Repo {specsSortArrow('repo')}</button></th>
+                  <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('path')}>Spec {specsSortArrow('path')}</button></th>
+                  <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('status')}>Status {specsSortArrow('status')}</button></th>
+                  <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('progress')}>Progress {specsSortArrow('progress')}</button></th>
+                  <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>Updated {specsSortArrow('updated_at')}</button></th>
                   <th scope="col" class="ws-th-action"></th>
                 </tr>
               </thead>
               <tbody>
                 {#each filteredSpecs as spec (spec.id ?? spec.path)}
-                  <tr
-                    class="spec-row"
-                    onclick={() => navigateToSpec(spec)}
-                    role="button"
-                    tabindex="0"
-                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigateToSpec(spec); }}
-                    data-testid="spec-row"
-                    aria-label={$t('workspace_home.open_spec', { values: { path: spec.path } })}
-                  >
-                    <td class="spec-repo ws-cell-link">{#if spec.repo_id && repoMap[spec.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }} title="Go to repo">{repoMap[spec.repo_id].name}</button>{:else if spec.repo_id}<span class="mono" title={spec.repo_id}>{entityName('repo', spec.repo_id)}</span>{:else}—{/if}</td>
+                  <tr class="spec-row" onclick={() => navigateToSpec(spec)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigateToSpec(spec); }} data-testid="spec-row">
+                    <td class="spec-repo ws-cell-link">{#if spec.repo_id && repoMap[spec.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }}>{repoMap[spec.repo_id].name}</button>{:else}—{/if}</td>
                     <td class="spec-path" title={spec.path}>{spec.path.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</td>
                     <td class="spec-status" title={specStatusTooltip(spec.approval_status ?? spec.status)}>
                       <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.approval_status ?? spec.status] ?? '•'}</span>
@@ -1233,28 +1346,19 @@
                     <td class="spec-progress">
                       {#if spec.tasks_total != null && spec.tasks_total > 0}
                         {@const pct = Math.round(((spec.tasks_done ?? 0) / spec.tasks_total) * 100)}
-                        <div class="progress-cell" title="{spec.tasks_done ?? 0} of {spec.tasks_total} tasks done ({pct}%)">
+                        <div class="progress-cell" title="{spec.tasks_done ?? 0}/{spec.tasks_total} tasks ({pct}%)">
                           <span class="progress-text">{spec.tasks_done ?? 0}/{spec.tasks_total}</span>
-                          <div class="progress-mini-bar">
-                            <div class="progress-mini-fill" class:progress-complete={pct === 100} style="width: {pct}%"></div>
-                          </div>
+                          <div class="progress-mini-bar"><div class="progress-mini-fill" class:progress-complete={pct === 100} style="width: {pct}%"></div></div>
                         </div>
-                      {:else if spec.tasks_total != null}
-                        <span class="secondary">0/0</span>
-                      {:else}
-                        <span class="secondary">—</span>
-                      {/if}
+                      {:else}<span class="secondary">—</span>{/if}
                     </td>
-                    <td class="spec-owner ws-cell-mono">{spec.owner ?? ''}</td>
                     <td class="spec-activity">{relTime(spec.updated_at)}</td>
                     <td class="ws-cell-action">
                       {#if (spec.approval_status ?? spec.status) === 'pending'}
-                        <button class="ws-quick-action-btn ws-quick-action-in_progress" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionLoading === spec.path} title="Approve this spec">
+                        <button class="ws-quick-action-btn ws-quick-action-in_progress" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionLoading === spec.path}>
                           {specActionLoading === spec.path ? '...' : 'Approve'}
                         </button>
-                        <button class="ws-quick-action-btn ws-quick-action-blocked" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionLoading === spec.path} title="Reject this spec">
-                          Reject
-                        </button>
+                        <button class="ws-quick-action-btn ws-quick-action-blocked" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionLoading === spec.path}>Reject</button>
                       {/if}
                     </td>
                   </tr>
@@ -1262,44 +1366,36 @@
               </tbody>
             </table>
           {/if}
+        </div>
+      </details>
 
-        {:else if secondaryTab === 'tasks'}
-          <!-- ── Tasks tab ──────────────────────────────────────────────── -->
-        <div class="tab-body" data-testid="section-tasks">
+      <details class="detail-table-section" data-testid="section-tasks-detail">
+        <summary class="detail-table-toggle">
+          <span class="detail-table-title">Tasks</span>
+          <span class="detail-table-count">{wsTasks.length}</span>
+          {#if pipelineTasks.in_progress > 0}<span class="detail-table-badge detail-table-badge-active">{pipelineTasks.in_progress} active</span>{/if}
+        </summary>
+        <div class="detail-table-body" data-testid="section-tasks">
           {#if tasksLoading}
             <div class="skeleton-row"></div>
           {:else if wsTasks.length === 0}
             <p class="empty-text">No tasks in this workspace yet.</p>
           {:else}
             <table class="ws-entity-table">
-              <thead>
-                <tr>
-                  <th>Status</th>
-                  <th>Title</th>
-                  <th>Priority</th>
-                  <th>Type</th>
-                  <th>Spec</th>
-                  <th>Agent</th>
-                  <th>Repo</th>
-                  <th>Created</th>
-                  <th class="ws-th-action"></th>
-                </tr>
-              </thead>
+              <thead><tr><th>Status</th><th>Title</th><th>Spec</th><th>Agent</th><th>Repo</th><th>Created</th><th class="ws-th-action"></th></tr></thead>
               <tbody>
-                {#each wsTasks.slice(0, 10) as task}
+                {#each wsTasks.slice(0, 20) as task}
                   <tr class="ws-entity-row" onclick={() => nav('task', task.id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('task', task.id, task); }}>
                     <td><span class="status-badge status-{task.status ?? 'backlog'}" title={taskStatusTooltip(task.status)}>{task.status ?? 'backlog'}</span></td>
                     <td class="ws-cell-title">{task.title ?? 'Untitled'}</td>
-                    <td>{#if task.priority}<span class="priority-badge priority-{task.priority}">{task.priority}</span>{/if}</td>
-                    <td class="ws-cell-type">{task.task_type ?? ''}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('agent', task.assigned_to, { repo_id: task.repo_id }); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if task.repo_id && repoMap[task.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[task.repo_id]); }} title="Go to repo">{repoMap[task.repo_id].name}</button>{:else}{repoMap[task.repo_id]?.name ?? ''}{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }}>{task.spec_path.split('/').pop()}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('agent', task.assigned_to, { repo_id: task.repo_id }); }}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if task.repo_id && repoMap[task.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[task.repo_id]); }}>{repoMap[task.repo_id].name}</button>{/if}</td>
                     <td class="ws-cell-time">{relTime(task.created_at)}</td>
                     <td class="ws-cell-action">
                       {#if WS_TASK_TRANSITIONS[task.status]?.length}
                         {#each WS_TASK_TRANSITIONS[task.status] as nextStatus}
-                          <button class="ws-quick-action-btn ws-quick-action-{nextStatus}" onclick={(e) => quickChangeWsTaskStatus(task, nextStatus, e)} disabled={changingWsTaskId === task.id} title="Move to {nextStatus.replace(/_/g, ' ')}">{changingWsTaskId === task.id ? '...' : nextStatus === 'in_progress' ? 'Start' : nextStatus === 'done' ? 'Done' : nextStatus === 'blocked' ? 'Block' : nextStatus.replace(/_/g, ' ')}</button>
+                          <button class="ws-quick-action-btn ws-quick-action-{nextStatus}" onclick={(e) => quickChangeWsTaskStatus(task, nextStatus, e)} disabled={changingWsTaskId === task.id}>{changingWsTaskId === task.id ? '...' : nextStatus === 'in_progress' ? 'Start' : nextStatus === 'done' ? 'Done' : nextStatus === 'blocked' ? 'Block' : nextStatus.replace(/_/g, ' ')}</button>
                         {/each}
                       {/if}
                     </td>
@@ -1307,47 +1403,34 @@
                 {/each}
               </tbody>
             </table>
-            {#if wsTasks.length > 10}
-              <p class="show-more-hint">
-                {wsTasks.length - 10} more tasks not shown
-                {#if repos.length === 1}
-                  <button class="view-all-link" onclick={() => viewAllForTab('tasks')}>View All</button>
-                {/if}
-              </p>
+            {#if wsTasks.length > 20}
+              <p class="show-more-hint">{wsTasks.length - 20} more tasks not shown</p>
             {/if}
           {/if}
         </div>
+      </details>
 
-        {:else if secondaryTab === 'mrs'}
-          <!-- ── MRs tab ────────────────────────────────────────────────── -->
-        <div class="tab-body" data-testid="section-mrs">
+      <details class="detail-table-section" data-testid="section-mrs-detail">
+        <summary class="detail-table-toggle">
+          <span class="detail-table-title">Merge Requests</span>
+          <span class="detail-table-count">{wsMrs.length}</span>
+          {#if pipelineMrs.failed_gates > 0}<span class="detail-table-badge detail-table-badge-danger">{pipelineMrs.failed_gates} failed</span>{/if}
+          {#if pipelineMrs.open > 0}<span class="detail-table-badge detail-table-badge-info">{pipelineMrs.open} open</span>{/if}
+        </summary>
+        <div class="detail-table-body" data-testid="section-mrs">
           {#if mrsLoading}
             <div class="skeleton-row"></div>
           {:else if wsMrs.length === 0}
             <p class="empty-text">No merge requests in this workspace yet.</p>
           {:else}
             <table class="ws-entity-table">
-              <thead>
-                <tr>
-                  <th>Status</th>
-                  <th>Title</th>
-                  <th>Branch</th>
-                  <th>Agent</th>
-                  <th>Gates</th>
-                  <th>Changes</th>
-                  <th>Spec</th>
-                  <th>Repo</th>
-                  <th>Created</th>
-                  <th class="ws-th-action"></th>
-                </tr>
-              </thead>
+              <thead><tr><th>Status</th><th>Title</th><th>Branch</th><th>Gates</th><th>Changes</th><th>Repo</th><th>Created</th><th class="ws-th-action"></th></tr></thead>
               <tbody>
-                {#each wsMrs.slice(0, 10) as mr}
+                {#each wsMrs.slice(0, 20) as mr}
                   <tr class="ws-entity-row" onclick={() => nav('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('mr', mr.id, mr); }}>
                     <td><span class="status-badge status-{mr.queue_position != null ? 'queued' : (mr.status ?? 'open')}" title={mrStatusTooltip(mr)}>{mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')}</span>{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
                     <td class="ws-cell-title">{mr.title ?? 'Untitled MR'}</td>
                     <td class="ws-cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if mr.author_agent_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('agent', mr.author_agent_id, { repo_id: mr.repository_id ?? mr.repo_id }); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{/if}</td>
                     <td>
                       {#if mr._gates?.total > 0}
                         <button class="gate-cell-ws gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
@@ -1372,204 +1455,61 @@
                         <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
                       {/if}
                     </td>
-                    <td class="ws-cell-mono ws-cell-link">
-                      {#if mr.spec_ref}
-                        {@const specPath = mr.spec_ref.split('@')[0]}
-                        <button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>
-                      {/if}
-                    </td>
-                    <td class="ws-cell-mono ws-cell-link">{#if mr.repository_id && repoMap[mr.repository_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id]); }} title="Go to repo">{repoMap[mr.repository_id].name}</button>{:else}{repoMap[mr.repository_id]?.name ?? ''}{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if mr.repository_id && repoMap[mr.repository_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id]); }}>{repoMap[mr.repository_id].name}</button>{/if}</td>
                     <td class="ws-cell-time">{relTime(mr.created_at)}</td>
                     <td class="ws-cell-action">
                       {#if mr.status === 'open' && mr.queue_position == null}
-                        <button class="ws-quick-action-btn" onclick={(e) => quickEnqueueMr(mr, e)} disabled={enqueuingMrId === mr.id} title="Enqueue for merge">{enqueuingMrId === mr.id ? '...' : 'Enqueue'}</button>
+                        <button class="ws-quick-action-btn" onclick={(e) => quickEnqueueMr(mr, e)} disabled={enqueuingMrId === mr.id}>{enqueuingMrId === mr.id ? '...' : 'Enqueue'}</button>
                       {/if}
                     </td>
                   </tr>
                 {/each}
               </tbody>
             </table>
-            {#if wsMrs.length > 10}
-              <p class="show-more-hint">
-                {wsMrs.length - 10} more MRs not shown
-                {#if repos.length === 1}
-                  <button class="view-all-link" onclick={() => viewAllForTab('mrs')}>View All</button>
-                {/if}
-              </p>
+            {#if wsMrs.length > 20}
+              <p class="show-more-hint">{wsMrs.length - 20} more MRs not shown</p>
             {/if}
           {/if}
         </div>
+      </details>
 
-        {:else if secondaryTab === 'agents'}
-          <!-- ── Agents tab ─────────────────────────────────────────────── -->
-        <div class="tab-body" data-testid="section-agents">
+      <details class="detail-table-section" data-testid="section-agents-detail">
+        <summary class="detail-table-toggle">
+          <span class="detail-table-title">Agents</span>
+          <span class="detail-table-count">{wsAgents.length}</span>
+          {#if pipelineAgents.active > 0}<span class="detail-table-badge detail-table-badge-active">{pipelineAgents.active} running</span>{/if}
+        </summary>
+        <div class="detail-table-body" data-testid="section-agents">
           {#if agentsLoading}
             <div class="skeleton-row"></div>
           {:else if wsAgents.length === 0}
             <p class="empty-text">No agents in this workspace.</p>
           {:else}
             <table class="ws-entity-table">
-              <thead>
-                <tr>
-                  <th>Status</th>
-                  <th>Name</th>
-                  <th>Spec</th>
-                  <th>Task</th>
-                  <th>Branch</th>
-                  <th>Duration</th>
-                  <th>MR</th>
-                  <th>Repo</th>
-                </tr>
-              </thead>
+              <thead><tr><th>Status</th><th>Name</th><th>Spec</th><th>Task</th><th>Branch</th><th>Duration</th><th>MR</th><th>Repo</th></tr></thead>
               <tbody>
-                {#each wsAgents.slice(0, 10) as agent}
+                {#each wsAgents.slice(0, 20) as agent}
                   {@const taskId = agent.task_id ?? agent.current_task_id}
                   {@const spawnedAt = agent.created_at ?? agent.spawned_at}
                   <tr class="ws-entity-row" onclick={() => nav('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('agent', agent.id, agent); }}>
                     <td><span class="status-badge status-{agent.status ?? 'active'}" title={agentStatusTooltip(agent.status)}>{agent.status ?? 'active'}</span>{#if agent.status === 'active' && spawnedAt}{@const elapsed = Math.round((Date.now() / 1000 - spawnedAt) / 60)}<span class="agent-elapsed" title="Running for {elapsed} minutes">{elapsed < 60 ? `${elapsed}m` : `${Math.floor(elapsed/60)}h${elapsed%60}m`}</span>{/if}</td>
                     <td class="ws-cell-title">{agent.name ?? shortId(agent.id)}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if agent.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', agent.spec_path, { path: agent.spec_path, repo_id: agent.repo_id }); }} title={agent.spec_path}>{agent.spec_path.split('/').pop()}</button>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('task', taskId, { repo_id: agent.repo_id }); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if agent.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', agent.spec_path, { path: agent.spec_path, repo_id: agent.repo_id }); }}>{agent.spec_path.split('/').pop()}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('task', taskId, { repo_id: agent.repo_id }); }}>{entityName('task', taskId)}</button>{/if}</td>
                     <td class="ws-cell-mono"><span class="branch-ref">{agent.branch ?? ''}</span></td>
                     <td class="ws-cell-time">{formatDuration(spawnedAt, agent.completed_at)}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if agent.mr_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('mr', agent.mr_id, { repository_id: agent.repo_id }); }} title={agent.mr_id}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if agent.repo_id && repoMap[agent.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id]); }} title="Go to repo">{repoMap[agent.repo_id].name}</button>{:else}{repoMap[agent.repo_id]?.name ?? ''}{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if agent.mr_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('mr', agent.mr_id, { repository_id: agent.repo_id }); }}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
+                    <td class="ws-cell-mono ws-cell-link">{#if agent.repo_id && repoMap[agent.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id]); }}>{repoMap[agent.repo_id].name}</button>{/if}</td>
                   </tr>
                 {/each}
               </tbody>
             </table>
-            {#if wsAgents.length > 10}
-              <p class="show-more-hint">{wsAgents.length - 10} more agents not shown</p>
+            {#if wsAgents.length > 20}
+              <p class="show-more-hint">{wsAgents.length - 20} more agents not shown</p>
             {/if}
-
           {/if}
         </div>
-
-        {:else if secondaryTab === 'activity'}
-          <!-- ── Activity tab ───────────────────────────────────────────── -->
-          <div class="tab-body" data-testid="section-activity">
-            {#if activityLoading}
-              <div class="skeleton-row"></div>
-            {:else if activityEvents.length === 0}
-              <p class="empty-text">No recent activity.</p>
-            {:else}
-              <div class="activity-timeline">
-                {#each activityEvents.slice(0, 20) as event, i}
-                  {@const variant = activityVariant(event)}
-                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                  <button
-                    class="activity-item activity-item-clickable"
-                    onclick={() => {
-                      if (primaryType && primaryId) {
-                        const data = event.entity_id ? event : primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : {};
-                        nav(primaryType, primaryId, data);
-                      }
-                    }}
-                  >
-                    <div class="activity-dot activity-dot-{variant}"></div>
-                    {#if i < Math.min(activityEvents.length, 20) - 1}<div class="activity-line"></div>{/if}
-                    <div class="activity-content">
-                      <span class="activity-icon">{activityIcon(event)}</span>
-                      <span class="activity-label">{activityLabel(event)}</span>
-                      {#if event.entity_name ?? event.title ?? event.description}
-                        <span class="activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
-                      {/if}
-                      {#if event.repo_id && repoMap[event.repo_id]}
-                        <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
-                      {/if}
-                      {#if event.timestamp ?? event.created_at}
-                        <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                      {/if}
-                    </div>
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </div>
-
-        {:else if secondaryTab === 'budget'}
-          <!-- ── Budget tab ─────────────────────────────────────────────── -->
-          <div class="tab-body" data-testid="section-budget">
-            {#if budgetLoading}
-              <div class="skeleton-row"></div>
-            {:else if budgetData || costData}
-              <div class="budget-overview">
-                {#if budgetData}
-                  {@const config = budgetData.config ?? budgetData}
-                  {@const usage = budgetData.usage ?? {}}
-                  <div class="budget-meters">
-                    {#if config.max_concurrent_agents != null}
-                      {@const activeCount = wsAgents.filter(a => a.status === 'active').length}
-                      {@const pct = config.max_concurrent_agents > 0 ? Math.round((activeCount / config.max_concurrent_agents) * 100) : 0}
-                      <div class="budget-meter">
-                        <div class="budget-meter-header">
-                          <span class="budget-meter-label">Concurrent Agents</span>
-                          <span class="budget-meter-value">{activeCount} / {config.max_concurrent_agents}</span>
-                        </div>
-                        <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
-                          <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
-                        </div>
-                      </div>
-                    {/if}
-                    {#if config.max_tokens_per_day != null}
-                      {@const usedTokens = usage.tokens_today ?? 0}
-                      {@const pct = config.max_tokens_per_day > 0 ? Math.round((usedTokens / config.max_tokens_per_day) * 100) : 0}
-                      <div class="budget-meter">
-                        <div class="budget-meter-header">
-                          <span class="budget-meter-label">Tokens Today</span>
-                          <span class="budget-meter-value">{usedTokens.toLocaleString()} / {config.max_tokens_per_day.toLocaleString()} ({pct}%)</span>
-                        </div>
-                        <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
-                          <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
-                        </div>
-                      </div>
-                    {/if}
-                    {#if config.max_cost_per_day != null}
-                      {@const usedCost = usage.cost_today ?? 0}
-                      {@const pct = config.max_cost_per_day > 0 ? Math.round((usedCost / config.max_cost_per_day) * 100) : 0}
-                      <div class="budget-meter">
-                        <div class="budget-meter-header">
-                          <span class="budget-meter-label">Cost Today</span>
-                          <span class="budget-meter-value">${usedCost.toFixed(2)} / ${config.max_cost_per_day.toFixed(2)} ({pct}%)</span>
-                        </div>
-                        <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
-                          <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
-                        </div>
-                      </div>
-                    {/if}
-                  </div>
-                {:else}
-                  <p class="empty-text">No budget limits configured.</p>
-                {/if}
-                {#if costData}
-                  {@const entries = Array.isArray(costData) ? costData : (costData.entries ?? costData.agents ?? [])}
-                  {#if entries.length > 0}
-                    <div class="cost-breakdown">
-                      <span class="progress-section-label">Cost by Agent</span>
-                      <table class="ws-entity-table">
-                        <thead><tr><th>Agent</th><th>Tokens</th><th>Cost</th></tr></thead>
-                        <tbody>
-                          {#each entries.slice(0, 5) as entry}
-                            <tr class="ws-entity-row" onclick={() => nav('agent', entry.agent_id, { repo_id: entry.repo_id })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('agent', entry.agent_id, { repo_id: entry.repo_id }); }}>
-                              <td class="ws-cell-title">{entityName('agent', entry.agent_id)}</td>
-                              <td>{(entry.total_tokens ?? entry.tokens ?? 0).toLocaleString()}</td>
-                              <td>${(entry.total_cost ?? entry.cost ?? 0).toFixed(2)}</td>
-                            </tr>
-                          {/each}
-                        </tbody>
-                      </table>
-                    </div>
-                  {/if}
-                {/if}
-              </div>
-            {:else}
-              <p class="empty-text">No budget configured. Set limits in workspace settings.</p>
-            {/if}
-          </div>
-        {/if}
-        </div>
-      </div>
+      </details>
     </div><!-- .focused-dashboard -->
   {/if}
 </div>
@@ -1651,56 +1591,188 @@
   .activity-dot-warning { background: var(--color-warning); }
   .activity-dot-info { background: var(--color-info, #1e90ff); }
 
-  /* ── Secondary tab bar ─────────────────────────────────────────────── */
-  .secondary-panel {
+  /* ── Two-column overview layout ──────────────────────────────────── */
+  .overview-columns {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: var(--space-4);
+  }
+
+  @media (max-width: 768px) {
+    .overview-columns {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .overview-activity {
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     background: var(--color-surface);
     overflow: hidden;
   }
 
-  .secondary-tab-bar {
+  .overview-section-header {
     display: flex;
     align-items: center;
-    gap: 0;
+    justify-content: space-between;
+    padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--color-border);
-    overflow-x: auto;
-    background: var(--color-surface);
-    padding: 0 var(--space-2);
+    background: var(--color-surface-elevated);
   }
 
-  .secondary-tab-btn {
+  .overview-section-title {
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+
+  .overview-activity .activity-timeline {
     padding: var(--space-3) var(--space-4);
+    max-height: 500px;
+    overflow-y: auto;
+  }
+
+  .overview-activity .empty-text {
+    padding: var(--space-4);
+  }
+
+  .show-more-btn {
+    display: block;
+    width: 100%;
+    padding: var(--space-2);
     background: transparent;
     border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--color-text-secondary);
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
+    border-top: 1px solid var(--color-border);
+    color: var(--color-link);
+    font-size: var(--text-xs);
     cursor: pointer;
-    white-space: nowrap;
-    transition: color var(--transition-fast), border-color var(--transition-fast);
-    margin-bottom: -1px;
+    text-align: center;
+    font-family: var(--font-body);
+  }
+
+  .show-more-btn:hover { background: var(--color-surface-elevated); text-decoration: underline; }
+
+  /* Summary cards */
+  .overview-summary {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .summary-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    width: 100%;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  }
+
+  .summary-card:hover { border-color: var(--color-primary); box-shadow: var(--shadow-sm); }
+  .summary-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .summary-card-budget { cursor: default; }
+  .summary-card-budget:hover { border-color: var(--color-border); box-shadow: none; }
+
+  .summary-card-header {
     display: flex;
     align-items: center;
     gap: var(--space-2);
   }
 
-  .secondary-tab-btn:hover { color: var(--color-text); }
-
-  .secondary-tab-btn.active {
-    color: var(--color-text);
-    border-bottom-color: var(--color-primary);
-    font-weight: 500;
-  }
-
-  .secondary-tab-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: -2px;
-  }
-
-  .tab-count {
+  .summary-card-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
     font-size: 10px;
+    font-weight: 700;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .summary-card-title {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+    flex: 1;
+  }
+
+  .summary-card-count {
+    font-size: var(--text-lg);
+    font-weight: 700;
+    color: var(--color-text);
+    font-family: var(--font-mono);
+  }
+
+  .summary-card-breakdown {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .summary-stat {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+  }
+
+  .summary-stat-warn { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
+  .summary-stat-ok { color: var(--color-success); }
+  .summary-stat-active { color: var(--color-success); font-weight: 600; }
+  .summary-stat-danger { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
+  .summary-stat-info { color: var(--color-info, #1e90ff); }
+
+  .budget-mini {
+    display: flex;
+    justify-content: space-between;
+    font-size: var(--text-xs);
+    width: 100%;
+  }
+
+  .budget-mini-label { color: var(--color-text-muted); }
+  .budget-mini-value { font-weight: 600; font-family: var(--font-mono); color: var(--color-text); }
+  .budget-mini-value.budget-warn { color: var(--color-warning); }
+
+  /* ── Expandable detail tables ───────────────────────────────────── */
+  .detail-table-section {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+  }
+
+  .detail-table-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    cursor: pointer;
+    user-select: none;
+    font-family: var(--font-body);
+  }
+
+  .detail-table-toggle:hover { background: var(--color-surface-elevated); }
+
+  .detail-table-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .detail-table-count {
+    font-size: var(--text-xs);
     background: var(--color-border);
     color: var(--color-text-secondary);
     border-radius: 8px;
@@ -1708,18 +1780,27 @@
     min-width: 16px;
     text-align: center;
     line-height: 16px;
+    font-family: var(--font-mono);
   }
 
-  .tab-count-warn { background: var(--color-warning); color: var(--color-text); }
-  .tab-count-active { background: var(--color-success); color: #fff; }
+  .detail-table-badge {
+    font-size: var(--text-xs);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    font-weight: 500;
+    margin-left: auto;
+  }
 
-  .secondary-tab-content {
+  .detail-table-badge-warn { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
+  .detail-table-badge-active { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
+  .detail-table-badge-danger { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
+  .detail-table-badge-info { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 10%, transparent); }
+
+  .detail-table-body {
     padding: var(--space-4);
-    overflow-y: auto;
-    max-height: 600px;
+    border-top: 1px solid var(--color-border);
+    overflow-x: auto;
   }
-
-  .tab-body { min-height: 100px; }
 
   .tab-header-controls {
     display: flex;
