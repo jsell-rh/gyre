@@ -21,6 +21,11 @@
       label: 'Specs',
       count: specs.total,
       detail: specs.pending > 0 ? `${specs.pending} pending` : specs.approved > 0 ? `${specs.approved} approved` : '',
+      tooltip: specs.pending > 0
+        ? `${specs.pending} spec(s) awaiting your approval before agents can begin work`
+        : specs.approved > 0
+        ? `${specs.approved} approved spec(s) ready for implementation`
+        : 'No specs yet — push a spec manifest to get started',
       alert: specs.pending > 0,
       alertColor: 'var(--color-warning)',
     },
@@ -28,7 +33,14 @@
       id: 'tasks',
       label: 'Tasks',
       count: tasks.total,
-      detail: tasks.blocked > 0 ? `${tasks.blocked} blocked` : tasks.in_progress > 0 ? `${tasks.in_progress} active` : '',
+      detail: tasks.blocked > 0 ? `${tasks.blocked} blocked` : tasks.in_progress > 0 ? `${tasks.in_progress} active` : tasks.done > 0 ? `${tasks.done} done` : '',
+      tooltip: tasks.blocked > 0
+        ? `${tasks.blocked} task(s) blocked — may need dependency resolution or spec changes`
+        : tasks.in_progress > 0
+        ? `${tasks.in_progress} task(s) being worked on by agents`
+        : tasks.done > 0
+        ? `${tasks.done} of ${tasks.total} tasks completed`
+        : 'No tasks yet — approve specs to generate tasks',
       alert: tasks.blocked > 0,
       alertColor: 'var(--color-danger)',
     },
@@ -36,7 +48,12 @@
       id: 'agents',
       label: 'Agents',
       count: agents.total,
-      detail: agents.active > 0 ? `${agents.active} active` : '',
+      detail: agents.active > 0 ? `${agents.active} running` : '',
+      tooltip: agents.active > 0
+        ? `${agents.active} agent(s) actively implementing code`
+        : agents.total > 0
+        ? `${agents.total} agent(s) have run — none currently active`
+        : 'No agents spawned yet',
       alert: false,
       alertColor: '',
       highlight: agents.active > 0,
@@ -45,7 +62,14 @@
       id: 'mrs',
       label: 'MRs',
       count: mrs.total,
-      detail: mrs.open > 0 ? `${mrs.open} open` : '',
+      detail: mrs.failed_gates > 0 ? `${mrs.failed_gates} failed` : mrs.open > 0 ? `${mrs.open} open` : '',
+      tooltip: mrs.failed_gates > 0
+        ? `${mrs.failed_gates} MR(s) with gate failures — review gates tab for details`
+        : mrs.open > 0
+        ? `${mrs.open} MR(s) open and ready for merge queue`
+        : mrs.total > 0
+        ? `${mrs.total} merge request(s) total`
+        : 'No merge requests yet',
       alert: mrs.failed_gates > 0,
       alertColor: 'var(--color-danger)',
     },
@@ -54,8 +78,12 @@
       label: 'Merged',
       count: mrs.merged,
       detail: '',
+      tooltip: mrs.merged > 0
+        ? `${mrs.merged} MR(s) successfully passed gates and merged to main`
+        : 'No merges yet',
       alert: false,
       alertColor: '',
+      highlight: mrs.merged > 0,
     },
   ]);
 </script>
@@ -74,7 +102,7 @@
       class:has-alert={stage.alert}
       class:has-highlight={stage.highlight}
       onclick={() => onStageClick?.(stage.id)}
-      title="{stage.label}: {stage.count}{stage.detail ? ` (${stage.detail})` : ''}"
+      title={stage.tooltip}
     >
       <span class="stage-count" style={stage.alert ? `color: ${stage.alertColor}` : ''}>{stage.count}</span>
       <span class="stage-label">{stage.label}</span>

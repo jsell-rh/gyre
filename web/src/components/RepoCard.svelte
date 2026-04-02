@@ -16,9 +16,10 @@
   } = $props();
 
   const HEALTH = {
-    healthy: { color: 'var(--color-success)', dot: '\u25CF', label: 'Healthy' },
-    gate_failure: { color: 'var(--color-danger)', dot: '\u26A0', label: 'Gate failure' },
-    idle: { color: 'var(--color-text-muted)', dot: '\u25CB', label: 'Idle' },
+    healthy: { color: 'var(--color-success)', dot: '\u25CF', label: 'Active — agents are implementing code' },
+    gate: { color: 'var(--color-danger)', dot: '\u26A0', label: 'Gate failure — needs attention' },
+    gate_failure: { color: 'var(--color-danger)', dot: '\u26A0', label: 'Gate failure — needs attention' },
+    idle: { color: 'var(--color-text-muted)', dot: '\u25CB', label: 'Idle — no active agents' },
   };
 
   let h = $derived(HEALTH[health] ?? HEALTH.idle);
