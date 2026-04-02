@@ -635,6 +635,17 @@
       .map(a => a.name ?? shortId(a.id));
   }
 
+  function repoLatestMr(repo) {
+    const mrs = wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id);
+    if (mrs.length === 0) return null;
+    // Sort by most recent first
+    return mrs.sort((a, b) => {
+      const aTime = a.merged_at ?? a.updated_at ?? a.created_at ?? 0;
+      const bTime = b.merged_at ?? b.updated_at ?? b.created_at ?? 0;
+      return bTime - aTime;
+    })[0];
+  }
+
   function repoSpecBreakdown(repo) {
     const repoSpecs = specs.filter(s => s.repo_id === repo.id);
     if (repoSpecs.length === 0) return null;
@@ -962,6 +973,7 @@
                   stats={repoStats(repo)}
                   activeAgentNames={repoActiveAgentNames(repo)}
                   specBreakdown={repoSpecBreakdown(repo)}
+                  latestMr={repoLatestMr(repo)}
                   onclick={() => onSelectRepo?.(repo)}
                 />
               {/each}
