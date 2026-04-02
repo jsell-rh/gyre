@@ -67,7 +67,7 @@
     }
     if (nt === 'spec_approval') {
       const specName = (body.spec_path ?? n.title ?? '').split('/').pop()?.replace(/\.md$/, '') ?? 'spec';
-      return `Spec "${specName}" needs your approval before agents can begin`;
+      return `Spec "${specName}" needs review before agents can begin`;
     }
     if (nt === 'agent_failed' && body.agent_name) {
       return `Agent "${body.agent_name}" failed${body.error ? `: ${body.error}` : ''}`;
@@ -121,11 +121,8 @@
             <span class="action-title">{getTitle(item)}</span>
           </div>
           <div class="action-buttons">
-            {#if nt === 'spec_approval' && onApproveSpec}
-              <button class="action-btn action-btn-approve" onclick={(e) => { e.stopPropagation(); onApproveSpec(item); }} title="Approve this spec">Approve</button>
-              {#if onRejectSpec}
-                <button class="action-btn action-btn-reject" onclick={(e) => { e.stopPropagation(); onRejectSpec(item); }} title="Reject this spec">Reject</button>
-              {/if}
+            {#if nt === 'spec_approval'}
+              <button class="action-btn action-btn-review" onclick={(e) => { e.stopPropagation(); handleClick(item); }} title="Review spec before approving">Review</button>
             {:else if nt === 'gate_failure' && onRetryGate && body.mr_id}
               <button class="action-btn" onclick={(e) => { e.stopPropagation(); onRetryGate(item); }} title="Re-enqueue for merge">Retry</button>
             {:else if (nt === 'agent_completed' || nt === 'mr_needs_review') && body.mr_id}
@@ -290,18 +287,15 @@
     border-color: var(--color-border-strong);
   }
 
-  .action-btn-approve {
-    background: color-mix(in srgb, var(--color-success) 10%, transparent);
-    border-color: color-mix(in srgb, var(--color-success) 30%, var(--color-border));
-    color: var(--color-success);
+  .action-btn-review {
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    border-color: color-mix(in srgb, var(--color-primary) 30%, var(--color-border));
+    color: var(--color-primary);
+    font-weight: 600;
   }
 
-  .action-btn-approve:hover {
-    background: color-mix(in srgb, var(--color-success) 20%, transparent);
-  }
-
-  .action-btn-reject {
-    color: var(--color-danger);
+  .action-btn-review:hover {
+    background: color-mix(in srgb, var(--color-primary) 20%, transparent);
   }
 
   .action-btn-dismiss {

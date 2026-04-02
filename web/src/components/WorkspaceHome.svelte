@@ -939,19 +939,23 @@
   }
 
   function activityIcon(event) {
-    const t = event.event_type ?? event.event ?? event.type ?? '';
+    const t = (event.event_type ?? event.event ?? event.type ?? '').toLowerCase();
     if (t.includes('spec') && t.includes('approv')) return '✓';
     if (t.includes('spec') && t.includes('reject')) return '✗';
-    if (t.includes('spec')) return '📋';
-    if (t.includes('task')) return '☑';
-    if (t.includes('agent') && t.includes('spawn')) return '▶';
-    if (t.includes('agent') && t.includes('complet')) return '⬛';
-    if (t.includes('mr') && t.includes('merg')) return '🔀';
-    if (t.includes('mr') && t.includes('creat')) return '📝';
-    if (t.includes('gate')) return '🚦';
-    if (t.includes('push')) return '⬆';
-    if (t.includes('graph')) return '🔗';
-    return '•';
+    if (t.includes('spec') && t.includes('link')) return '~';
+    if (t.includes('spec') && t.includes('pending')) return '?';
+    if (t.includes('spec')) return 'S';
+    if (t.includes('task')) return 'T';
+    if (t.includes('agent') && t.includes('spawn')) return '>';
+    if (t.includes('agent') && t.includes('complet')) return 'A';
+    if (t.includes('agent') && t.includes('fail')) return '!';
+    if (t.includes('mr') && t.includes('merg')) return 'M';
+    if (t.includes('mr') && t.includes('creat')) return '+';
+    if (t.includes('gate')) return 'G';
+    if (t.includes('push')) return '^';
+    if (t.includes('graph')) return '#';
+    if (t.includes('budget')) return '$';
+    return '*';
   }
 
   const ACTIVITY_LABELS = {
@@ -977,6 +981,22 @@
     'agent_failed': 'Agent failed',
     'spec_approved': 'Spec approved',
     'spec_rejected': 'Spec rejected',
+    'spec_approval': 'Spec needs approval',
+    'suggested_link': 'Spec link suggested',
+    'SuggestedSpecLink': 'Spec link suggested',
+    'SpecPendingApproval': 'Spec needs approval',
+    'SpecApproved': 'Spec approved',
+    'SpecRejected': 'Spec rejected',
+    'SpecChanged': 'Spec updated',
+    'AgentCompleted': 'Agent completed',
+    'AgentFailed': 'Agent failed',
+    'MrMerged': 'MR merged',
+    'MrCreated': 'MR created',
+    'MrNeedsReview': 'MR needs review',
+    'GateFailure': 'Gate failed',
+    'TaskCreated': 'Task created',
+    'BudgetWarning': 'Budget warning',
+    'MetaSpecDrift': 'Agent rules drifted',
     'spec_created': 'Spec created',
     'spec_updated': 'Spec updated',
     'task_created': 'Task created',
@@ -1323,10 +1343,9 @@
                     <td class="spec-activity">{relTime(spec.updated_at)}</td>
                     <td class="ws-cell-action">
                       {#if (spec.approval_status ?? spec.status) === 'pending'}
-                        <button class="ws-quick-action-btn ws-quick-action-in_progress" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionLoading === spec.path}>
-                          {specActionLoading === spec.path ? '...' : 'Approve'}
+                        <button class="ws-quick-action-btn ws-quick-action-review" onclick={(e) => { e.stopPropagation(); navigateToSpec(spec); }} title="Review spec content before approving">
+                          Review
                         </button>
-                        <button class="ws-quick-action-btn ws-quick-action-blocked" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionLoading === spec.path}>Reject</button>
                       {/if}
                     </td>
                   </tr>
@@ -2904,6 +2923,8 @@
   }
   .ws-quick-action-btn:hover:not(:disabled) { background: var(--color-surface-elevated); border-color: var(--color-primary); color: var(--color-primary); }
   .ws-quick-action-btn:disabled { opacity: 0.5; cursor: default; }
+  .ws-quick-action-review { color: var(--color-primary); border-color: color-mix(in srgb, var(--color-primary) 30%, var(--color-border)); font-weight: 600; }
+  .ws-quick-action-review:hover:not(:disabled) { background: color-mix(in srgb, var(--color-primary) 10%, transparent); }
   .ws-quick-action-done:hover:not(:disabled) { border-color: var(--color-success); color: var(--color-success); }
   .gate-names-ws { display: flex; flex-wrap: wrap; gap: 2px; }
   .gate-name-tag-ws {
@@ -3062,6 +3083,10 @@
     flex-shrink: 0;
     width: 16px;
     text-align: center;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    opacity: 0.7;
   }
 
   .activity-label {
