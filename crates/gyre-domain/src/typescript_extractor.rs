@@ -368,6 +368,44 @@ impl ExtractionContext {
             }
         }
 
+        // --- Express route detection ---
+        let express_routes = collect_express_routes(&content, root);
+        for (route_path, method, line) in &express_routes {
+            let endpoint_name = route_path
+                .replace('/', "_")
+                .trim_start_matches('_')
+                .to_string();
+            let endpoint_qname = format!("{module_qname}.route:{method}:{route_path}");
+
+            if self.name_to_id.contains_key(&endpoint_qname) {
+                continue;
+            }
+
+            let mut ep_node = self.make_node(
+                NodeType::Endpoint,
+                &endpoint_name,
+                &endpoint_qname,
+                &rel_path,
+                *line,
+                *line,
+                Visibility::Public,
+            );
+            ep_node.doc_comment = Some(format!("{} {}", method.to_uppercase(), route_path));
+            let ep_id = ep_node.id.clone();
+            self.name_to_id.insert(endpoint_qname, ep_id.clone());
+            self.nodes.push(ep_node);
+
+            let edge = self.make_edge(EdgeType::Contains, module_id.clone(), ep_id);
+            self.edges.push(edge);
+        }
+
+        // --- Next.js API route detection ---
+        let is_nextjs_api = rel_path.contains("pages/api/")
+            || (rel_path.contains("app/") && rel_path.contains("route."));
+        if is_nextjs_api {
+            self.extract_nextjs_api_routes(&content, root, &rel_path, &module_qname, &module_id);
+        }
+
         // --- Pass 2: full-tree walk for fetch/axios call sites ---------------
         let api_calls = collect_api_calls(&content, root);
         for (api_path, line) in api_calls {
@@ -548,6 +586,71 @@ impl ExtractionContext {
         }
     }
 
+    /// Detect Next.js API route exports: `export default function handler(req, res) { ... }`
+    /// or `export async function GET(request) { ... }`.
+    fn extract_nextjs_api_routes(
+        &mut self,
+        content: &str,
+        root: tree_sitter::Node,
+        rel_path: &str,
+        module_qname: &str,
+        module_id: &Id,
+    ) {
+        let nextjs_methods = ["handler", "GET", "POST", "PUT", "DELETE", "PATCH"];
+
+        for i in 0..root.child_count() {
+            let Some(child) = root.child(i) else {
+                continue;
+            };
+            if child.kind() != "export_statement" {
+                continue;
+            }
+            // Look for function declarations with matching names
+            for j in 0..child.child_count() {
+                let Some(inner) = child.child(j) else {
+                    continue;
+                };
+                if inner.kind() != "function_declaration" {
+                    continue;
+                }
+                let Some(name_node) = inner.child_by_field_name("name") else {
+                    continue;
+                };
+                let name = &content[name_node.byte_range()];
+                if !nextjs_methods.contains(&name) {
+                    continue;
+                }
+                let qname = format!("{module_qname}.{name}");
+                if self.name_to_id.contains_key(&qname) {
+                    // Already extracted as a regular function; upgrade to Endpoint.
+                    // Find and update the node type.
+                    if let Some(existing) =
+                        self.nodes.iter_mut().find(|n| n.qualified_name == qname)
+                    {
+                        existing.node_type = NodeType::Endpoint;
+                    }
+                } else {
+                    let line_start = inner.start_position().row as u32 + 1;
+                    let line_end = inner.end_position().row as u32 + 1;
+                    let ep_node = self.make_node(
+                        NodeType::Endpoint,
+                        name,
+                        &qname,
+                        rel_path,
+                        line_start,
+                        line_end,
+                        Visibility::Public,
+                    );
+                    let ep_id = ep_node.id.clone();
+                    self.name_to_id.insert(qname, ep_id.clone());
+                    let edge = self.make_edge(EdgeType::Contains, module_id.clone(), ep_id);
+                    self.nodes.push(ep_node);
+                    self.edges.push(edge);
+                }
+            }
+        }
+    }
+
     fn emit_export(
         &mut self,
         content: &str,
@@ -635,6 +738,77 @@ impl ExtractionContext {
 // ---------------------------------------------------------------------------
 // Pure tree traversal helpers (no mutation — collect then process)
 // ---------------------------------------------------------------------------
+
+/// HTTP method names recognized as Express/Koa/Hapi route methods.
+const EXPRESS_METHODS: &[&str] = &["get", "post", "put", "delete", "patch", "use", "all"];
+
+/// Identifiers commonly used as Express/Koa app or router variables.
+const ROUTER_NAMES: &[&str] = &["app", "router", "server", "route"];
+
+/// Collect Express-style route registrations: `app.get('/path', handler)`.
+///
+/// Returns `(route_path, http_method, line_number)`.
+fn collect_express_routes(content: &str, node: tree_sitter::Node) -> Vec<(String, String, u32)> {
+    let mut results = Vec::new();
+    collect_express_routes_inner(content, node, &mut results);
+    results
+}
+
+fn collect_express_routes_inner(
+    content: &str,
+    node: tree_sitter::Node,
+    results: &mut Vec<(String, String, u32)>,
+) {
+    if node.kind() == "call_expression" {
+        if let Some(route) = try_extract_express_route(content, node) {
+            results.push(route);
+        }
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            collect_express_routes_inner(content, child, results);
+        }
+    }
+}
+
+/// Try to extract an Express route from a call_expression node.
+///
+/// Matches: `app.get("/users", handler)`, `router.post("/items", createItem)`, etc.
+fn try_extract_express_route(
+    content: &str,
+    call_node: tree_sitter::Node,
+) -> Option<(String, String, u32)> {
+    let function_node = call_node.child_by_field_name("function")?;
+    if function_node.kind() != "member_expression" {
+        return None;
+    }
+
+    // Check object name: app, router, server, etc.
+    let object_node = function_node.child_by_field_name("object")?;
+    let object_name = &content[object_node.byte_range()];
+    if !ROUTER_NAMES.contains(&object_name) {
+        return None;
+    }
+
+    // Check method name: get, post, put, delete, etc.
+    let property_node = function_node.child_by_field_name("property")?;
+    let method_name = &content[property_node.byte_range()];
+    if !EXPRESS_METHODS.contains(&method_name) {
+        return None;
+    }
+
+    // Extract the path from the first string argument
+    let args_node = call_node.child_by_field_name("arguments")?;
+    let mut cursor = args_node.walk();
+    let first_arg = args_node.named_children(&mut cursor).next()?;
+    let path = extract_string_literal(content, first_arg)?;
+    if !path.starts_with('/') {
+        return None;
+    }
+
+    let line = call_node.start_position().row as u32 + 1;
+    Some((path, method_name.to_string(), line))
+}
 
 /// Recursively collect `(api_path, line_number)` for all `fetch`/`axios.*` call
 /// sites in the tree.  Returns an empty vec when no API calls are found.
@@ -1144,6 +1318,85 @@ class UserService {
         assert!(
             func.is_some(),
             "Pass 1 extraction should still work when script is missing"
+        );
+    }
+
+    #[test]
+    fn extract_express_routes_as_endpoints() {
+        let dir = make_tempdir();
+        let code = r#"import express from 'express';
+const app = express();
+
+app.get('/users', getUsers);
+app.post('/users', createUser);
+app.delete('/users/:id', deleteUser);
+"#;
+        let result = extract_ts(&dir, "server.ts", code);
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        let endpoints: Vec<_> = result
+            .nodes
+            .iter()
+            .filter(|n| n.node_type == NodeType::Endpoint)
+            .collect();
+
+        // Should have at least the 3 Express routes (may also have fetch endpoints)
+        let express_eps: Vec<_> = endpoints
+            .iter()
+            .filter(|n| n.qualified_name.contains("route:"))
+            .collect();
+        assert!(
+            express_eps.len() >= 3,
+            "should extract at least 3 Express route endpoints, got {}. Endpoints: {:?}",
+            express_eps.len(),
+            express_eps
+                .iter()
+                .map(|n| &n.qualified_name)
+                .collect::<Vec<_>>()
+        );
+
+        // Verify specific routes
+        assert!(
+            express_eps
+                .iter()
+                .any(|n| n.qualified_name.contains("get:/users")),
+            "should have GET /users endpoint"
+        );
+        assert!(
+            express_eps
+                .iter()
+                .any(|n| n.qualified_name.contains("post:/users")),
+            "should have POST /users endpoint"
+        );
+    }
+
+    #[test]
+    fn extract_nextjs_api_route_as_endpoint() {
+        let dir = make_tempdir();
+        fs::write(dir.path().join("package.json"), r#"{"name":"test"}"#).unwrap();
+
+        // Create a Next.js API route file
+        let api_dir = dir.path().join("pages").join("api");
+        fs::create_dir_all(&api_dir).unwrap();
+        let code = r#"export default function handler(req, res) {
+    res.status(200).json({ name: 'John Doe' });
+}
+"#;
+        fs::write(api_dir.join("hello.ts"), code).unwrap();
+
+        let result = TypeScriptExtractor.extract(dir.path(), "abc123");
+
+        let endpoint = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint && n.name == "handler");
+        assert!(
+            endpoint.is_some(),
+            "should extract Next.js API route handler as Endpoint node"
         );
     }
 }

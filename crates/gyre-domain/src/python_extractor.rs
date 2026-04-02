@@ -540,6 +540,12 @@ impl ExtractionContext {
                         .iter()
                         .find_map(|d| parse_route_decorator(*d, source));
 
+                    // Check for Click CLI decorators.
+                    let is_click_cmd = decorators.iter().any(|d| is_click_decorator(*d, source));
+
+                    // Check for Celery task decorators.
+                    let is_celery_task = decorators.iter().any(|d| is_celery_decorator(*d, source));
+
                     if let Some((path, method)) = route_info {
                         self.extract_endpoint_node(
                             def_node,
@@ -550,6 +556,24 @@ impl ExtractionContext {
                             parent_id,
                             &path,
                             &method,
+                        );
+                    } else if is_click_cmd {
+                        self.extract_cli_endpoint_node(
+                            def_node,
+                            &name,
+                            rel_path,
+                            parent_qname,
+                            parent_id,
+                            "click",
+                        );
+                    } else if is_celery_task {
+                        self.extract_cli_endpoint_node(
+                            def_node,
+                            &name,
+                            rel_path,
+                            parent_qname,
+                            parent_id,
+                            "celery",
                         );
                     } else {
                         self.extract_function_node(
@@ -648,6 +672,53 @@ impl ExtractionContext {
         self.nodes.push(node);
 
         let meta = serde_json::json!({ "path": route_path }).to_string();
+        let edge = GraphEdge {
+            id: Self::new_id(),
+            repo_id: Self::placeholder_repo_id(),
+            source_id: parent_id.clone(),
+            target_id: node_id,
+            edge_type: EdgeType::Contains,
+            metadata: Some(meta),
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
+        };
+        self.edges.push(edge);
+    }
+
+    // -----------------------------------------------------------------------
+    // CLI / task endpoint node creation
+    // -----------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn extract_cli_endpoint_node(
+        &mut self,
+        fn_node: tree_sitter::Node,
+        name: &str,
+        rel_path: &str,
+        parent_qname: &str,
+        parent_id: &Id,
+        kind: &str,
+    ) {
+        let qname = format!("{parent_qname}.{name}");
+        let line_start = fn_node.start_position().row as u32 + 1;
+        let line_end = fn_node.end_position().row as u32 + 1;
+
+        let mut node = self.make_node(
+            NodeType::Endpoint,
+            name,
+            &qname,
+            rel_path,
+            line_start,
+            line_end,
+            Visibility::Public,
+        );
+        node.doc_comment = Some(format!("{kind} entry point"));
+        let node_id = node.id.clone();
+        self.name_to_id.insert(qname, node_id.clone());
+        self.nodes.push(node);
+
+        let meta = serde_json::json!({ "kind": kind }).to_string();
         let edge = GraphEdge {
             id: Self::new_id(),
             repo_id: Self::placeholder_repo_id(),
@@ -922,6 +993,84 @@ fn find_child_by_kind<'a>(
         }
     }
     None
+}
+
+/// Check if a decorator is a Click CLI decorator (`@click.command()`, `@click.group()`).
+fn is_click_decorator(decorator: tree_sitter::Node, source: &[u8]) -> bool {
+    let mut cursor = decorator.walk();
+    for child in decorator.named_children(&mut cursor) {
+        match child.kind() {
+            "call" => {
+                if let Some(func) = child.child_by_field_name("function") {
+                    let text = func.utf8_text(source).unwrap_or("");
+                    if text == "click.command"
+                        || text == "click.group"
+                        || text == "cli.command"
+                        || text == "cli.group"
+                    {
+                        return true;
+                    }
+                    // Also check attribute form: click.command
+                    if func.kind() == "attribute" {
+                        if let Some(attr) = func.child_by_field_name("attribute") {
+                            let attr_name = attr.utf8_text(source).unwrap_or("");
+                            if attr_name == "command" || attr_name == "group" {
+                                if let Some(obj) = func.child_by_field_name("object") {
+                                    let obj_name = obj.utf8_text(source).unwrap_or("");
+                                    if obj_name == "click" || obj_name == "cli" {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "attribute" => {
+                let text = child.utf8_text(source).unwrap_or("");
+                if text == "click.command" || text == "click.group" {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Check if a decorator is a Celery task decorator (`@celery.task`, `@app.task`).
+fn is_celery_decorator(decorator: tree_sitter::Node, source: &[u8]) -> bool {
+    let mut cursor = decorator.walk();
+    for child in decorator.named_children(&mut cursor) {
+        match child.kind() {
+            "call" => {
+                if let Some(func) = child.child_by_field_name("function") {
+                    let text = func.utf8_text(source).unwrap_or("");
+                    if text.ends_with(".task") {
+                        return true;
+                    }
+                    if func.kind() == "attribute" {
+                        if let Some(attr) = func.child_by_field_name("attribute") {
+                            let attr_name = attr.utf8_text(source).unwrap_or("");
+                            if attr_name == "task" {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            "attribute" => {
+                if let Some(attr) = child.child_by_field_name("attribute") {
+                    let attr_name = attr.utf8_text(source).unwrap_or("");
+                    if attr_name == "task" {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Strip surrounding quotes from a Python string literal.
@@ -1298,5 +1447,79 @@ class Handler:
                 "should have Calls edge from Handler.handle -> compute, got {calls_count}"
             );
         }
+    }
+
+    #[test]
+    fn extract_click_command_as_endpoint() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+        let code = r#"import click
+
+@click.command()
+def deploy(env: str):
+    """Deploy to environment."""
+    pass
+
+@click.group()
+def cli():
+    pass
+"#;
+        fs::write(dir.path().join("cli.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        let deploy_ep = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint && n.name == "deploy");
+        assert!(
+            deploy_ep.is_some(),
+            "should extract @click.command() 'deploy' as Endpoint node"
+        );
+
+        let cli_ep = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint && n.name == "cli");
+        assert!(
+            cli_ep.is_some(),
+            "should extract @click.group() 'cli' as Endpoint node"
+        );
+    }
+
+    #[test]
+    fn extract_celery_task_as_endpoint() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+        let code = r#"from celery import Celery
+
+app = Celery('tasks')
+
+@app.task
+def process_payment(payment_id: str):
+    pass
+"#;
+        fs::write(dir.path().join("tasks.py"), code).unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        let task_ep = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint && n.name == "process_payment");
+        assert!(
+            task_ep.is_some(),
+            "should extract @app.task 'process_payment' as Endpoint node"
+        );
     }
 }
