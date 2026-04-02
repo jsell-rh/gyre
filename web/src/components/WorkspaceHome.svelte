@@ -822,6 +822,9 @@
         .map(e => {
           const mrId = e.merge_request_id ?? e.mr_id;
           const mr = mrDetails[mrId] ?? {};
+          // Enrich with gate data from already-loaded workspace MRs
+          const wsMr = wsMrs.find(m => m.id === mrId);
+          if (wsMr?._gates && !mr._gates) mr._gates = wsMr._gates;
           // Find deps from graph edges
           const graphEdges = graph?.edges ?? [];
           const deps = graphEdges.filter(edge => (edge.target ?? edge.to) === mrId).map(edge => edge.source ?? edge.from);
@@ -1082,7 +1085,13 @@
                     {/if}
                   </div>
                   <div class="mq-item-status">
-                    <span class="mq-status-badge">{item._status ?? 'queued'}</span>
+                    <span class="mq-status-badge mq-status-{item._status ?? 'queued'}">{item._status ?? 'queued'}</span>
+                    {#if item._mr?._gates?.total > 0}
+                      <span class="mq-gates-mini" title="{item._mr._gates.passed}/{item._mr._gates.total} gates passed">
+                        {#if item._mr._gates.failed > 0}<span class="gate-fail-inline">✗{item._mr._gates.failed}</span>{/if}
+                        {#if item._mr._gates.passed > 0}<span class="gate-pass-inline">✓{item._mr._gates.passed}</span>{/if}
+                      </span>
+                    {/if}
                   </div>
                 </div>
               {/each}
@@ -3378,6 +3387,12 @@
   .mq-status-failed, .mq-status-blocked {
     background: var(--color-danger-bg, rgba(239,68,68,0.15));
     color: var(--color-danger, #ef4444);
+  }
+
+  .mq-gates-mini {
+    display: flex;
+    gap: 2px;
+    font-size: 10px;
   }
 
   .mq-connector {
