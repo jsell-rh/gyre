@@ -726,27 +726,15 @@
   // ── Activity filter + pagination ──────────────────────────────────────
   let activityFilter = $state('');
   let activityLimit = $state(20);
-  // Auto-expand detail sections when they have actionable items
-  let specsExpanded = $state(false);
-  let tasksExpanded = $state(false);
-  let mrsExpanded = $state(false);
-  let agentsExpanded = $state(false);
 
-  // Auto-expand specs when there are pending approvals
+  // ── Workspace tab state (single tabbed panel replaces 4 details + activity) ──
+  let wsTab = $state('activity');
+
+  // Auto-select tab based on what needs attention
   $effect(() => {
-    if (!specsLoading && pipelineSpecs.pending > 0) specsExpanded = true;
-  });
-  // Auto-expand MRs when there are gate failures
-  $effect(() => {
-    if (!mrsLoading && pipelineMrs.failed_gates > 0) mrsExpanded = true;
-  });
-  // Auto-expand tasks when there are blocked tasks
-  $effect(() => {
-    if (!tasksLoading && pipelineTasks.blocked > 0) tasksExpanded = true;
-  });
-  // Auto-expand agents when there are active agents
-  $effect(() => {
-    if (!agentsLoading && pipelineAgents.active > 0) agentsExpanded = true;
+    if (!specsLoading && pipelineSpecs.pending > 0 && wsTab === 'activity') wsTab = 'specs';
+    else if (!mrsLoading && pipelineMrs.failed_gates > 0 && wsTab === 'activity') wsTab = 'mrs';
+    else if (!tasksLoading && pipelineTasks.blocked > 0 && wsTab === 'activity') wsTab = 'tasks';
   });
 
   let filteredActivity = $derived.by(() => {
@@ -810,10 +798,10 @@
   }
 
   function handlePipelineStageClick(stageId) {
-    const tabMap = { specs: 'specs', tasks: 'tasks', mrs: 'mrs', agents: 'agents' };
+    const tabMap = { specs: 'specs', tasks: 'tasks', mrs: 'mrs', agents: 'agents', merged: 'mrs' };
     if (tabMap[stageId]) {
-      setSecondaryTab(tabMap[stageId]);
-      document.querySelector('[data-testid="secondary-tabs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      wsTab = tabMap[stageId];
+      document.querySelector('[data-testid="ws-tabbed-panel"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }
 
@@ -1220,284 +1208,286 @@
         </div>
       </section>
 
-      <!-- ── Zone 5: Activity timeline (full width) ───────────────────── -->
-      <div class="overview-columns overview-columns-single" data-testid="overview-columns">
-        <div class="overview-activity">
-          <div class="overview-section-header">
-            <h3 class="overview-section-title">Activity</h3>
-            <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity">
-              <option value="">All</option>
-              <option value="spec">Specs</option>
-              <option value="task">Tasks</option>
-              <option value="agent">Agents</option>
-              <option value="mr">Merge Requests</option>
-              <option value="gate">Gates</option>
-            </select>
-          </div>
-          {#if activityLoading}
-            <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
-          {:else if filteredActivity.length === 0}
-            <p class="empty-text">No recent activity. Push specs and approve them to get started.</p>
-          {:else}
-            <div class="activity-timeline">
-              {#each filteredActivity.slice(0, activityLimit) as event, i}
-                {@const variant = activityVariant(event)}
-                {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                <button
-                  class="activity-item activity-item-clickable"
-                  onclick={() => {
-                    if (primaryType && primaryId) {
-                      const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                      nav(primaryType, primaryId, data);
-                    }
-                  }}
-                >
-                  <div class="activity-dot activity-dot-{variant}"></div>
-                  {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                  <div class="activity-content">
-                    <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
-                    <span class="activity-label">{activityLabel(event)}</span>
-                    {#if event.entity_name ?? event.title ?? event.description}
-                      <span class="activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
-                    {/if}
-                    {#if event.repo_id && repoMap[event.repo_id]}
-                      <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
-                    {/if}
-                    {#if event.timestamp ?? event.created_at}
-                      <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                    {/if}
-                  </div>
+      <!-- ── Zone 5: Tabbed workspace panel (replaces separate activity + 4 detail sections) ── -->
+      <section class="ws-tabbed-panel" data-testid="ws-tabbed-panel">
+        <nav class="ws-tab-nav" role="tablist">
+          <button class="ws-tab-btn" class:ws-tab-active={wsTab === 'activity'} onclick={() => wsTab = 'activity'} role="tab" aria-selected={wsTab === 'activity'}>
+            <Icon name="activity" size={14} />
+            Activity
+          </button>
+          <button class="ws-tab-btn" class:ws-tab-active={wsTab === 'specs'} onclick={() => wsTab = 'specs'} role="tab" aria-selected={wsTab === 'specs'}>
+            <Icon name="spec" size={14} />
+            Specs
+            <span class="ws-tab-count">{specs.length}</span>
+            {#if pipelineSpecs.pending > 0}<span class="ws-tab-alert">{pipelineSpecs.pending}</span>{/if}
+          </button>
+          <button class="ws-tab-btn" class:ws-tab-active={wsTab === 'tasks'} onclick={() => wsTab = 'tasks'} role="tab" aria-selected={wsTab === 'tasks'}>
+            <Icon name="task" size={14} />
+            Tasks
+            <span class="ws-tab-count">{wsTasks.length}</span>
+            {#if pipelineTasks.blocked > 0}<span class="ws-tab-alert ws-tab-alert-danger">{pipelineTasks.blocked}</span>{/if}
+          </button>
+          <button class="ws-tab-btn" class:ws-tab-active={wsTab === 'mrs'} onclick={() => wsTab = 'mrs'} role="tab" aria-selected={wsTab === 'mrs'}>
+            <Icon name="git-merge" size={14} />
+            MRs
+            <span class="ws-tab-count">{wsMrs.length}</span>
+            {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-alert ws-tab-alert-danger">{pipelineMrs.failed_gates}</span>{/if}
+          </button>
+          <button class="ws-tab-btn" class:ws-tab-active={wsTab === 'agents'} onclick={() => wsTab = 'agents'} role="tab" aria-selected={wsTab === 'agents'}>
+            <Icon name="agent" size={14} />
+            Agents
+            <span class="ws-tab-count">{wsAgents.length}</span>
+            {#if pipelineAgents.active > 0}<span class="ws-tab-badge-active">{pipelineAgents.active} running</span>{/if}
+          </button>
+        </nav>
+
+        <div class="ws-tab-content" role="tabpanel">
+          <!-- ── Activity tab ──────────────────────────────────────────── -->
+          {#if wsTab === 'activity'}
+            <div class="ws-tab-toolbar">
+              <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity">
+                <option value="">All events</option>
+                <option value="spec">Specs</option>
+                <option value="task">Tasks</option>
+                <option value="agent">Agents</option>
+                <option value="mr">Merge Requests</option>
+                <option value="gate">Gates</option>
+              </select>
+            </div>
+            {#if activityLoading}
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+            {:else if filteredActivity.length === 0}
+              <p class="empty-text">No recent activity. Push specs and approve them to get started.</p>
+            {:else}
+              <div class="activity-timeline">
+                {#each filteredActivity.slice(0, activityLimit) as event, i}
+                  {@const variant = activityVariant(event)}
+                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                  <button
+                    class="activity-item activity-item-clickable"
+                    onclick={() => {
+                      if (primaryType && primaryId) {
+                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                        nav(primaryType, primaryId, data);
+                      }
+                    }}
+                  >
+                    <div class="activity-dot activity-dot-{variant}"></div>
+                    {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                    <div class="activity-content">
+                      <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
+                      <span class="activity-label">{activityLabel(event)}</span>
+                      {#if event.entity_name ?? event.title ?? event.description}
+                        <span class="activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
+                      {/if}
+                      {#if event.repo_id && repoMap[event.repo_id]}
+                        <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
+                      {/if}
+                      {#if event.timestamp ?? event.created_at}
+                        <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                      {/if}
+                    </div>
+                  </button>
+                {/each}
+              </div>
+              {#if filteredActivity.length > activityLimit}
+                <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
+                  Show more ({filteredActivity.length - activityLimit} remaining)
                 </button>
-              {/each}
-            </div>
-            {#if filteredActivity.length > activityLimit}
-              <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
-                Show more ({filteredActivity.length - activityLimit} remaining)
-              </button>
+              {/if}
             {/if}
-          {/if}
-        </div>
 
-        <!-- Summary cards removed — pipeline overview + detail tables
-             provide the same information with less visual noise -->
-      </div>
-
-      <!-- ── Zone 6: Expandable detail tables (on-demand, collapsed by default) ── -->
-      <details class="detail-table-section" data-testid="section-specs-detail" bind:open={specsExpanded}>
-        <summary class="detail-table-toggle">
-          <span class="detail-table-title">Specs</span>
-          <span class="detail-table-count">{specs.length}</span>
-          {#if pipelineSpecs.pending > 0}<span class="detail-table-badge detail-table-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
-        </summary>
-        <div class="detail-table-body">
-          <div class="tab-header-controls">
-            <select class="filter-select" value={specsStatusFilter} onchange={(e) => { specsStatusFilter = e.target.value; }} aria-label={$t('workspace_home.filter_specs_by_status')} data-testid="specs-status-filter">
-              <option value="">{$t('workspace_home.all_statuses')}</option>
-              <option value="draft">{$t('workspace_home.status_draft')}</option>
-              <option value="pending">{$t('workspace_home.status_pending')}</option>
-              <option value="approved">{$t('workspace_home.status_approved')}</option>
-              <option value="rejected">Rejected</option>
-              <option value="implemented">{$t('workspace_home.status_implemented')}</option>
-            </select>
-          </div>
-          {#if specsLoading}
-            <div class="skeleton-row"></div>
-          {:else if specsError}
-            <div class="error-row" role="alert">
-              <p class="error-text">{specsError}</p>
-              <button class="retry-btn" onclick={loadSpecs}>{$t('common.retry')}</button>
+          <!-- ── Specs tab ──────────────────────────────────────────── -->
+          {:else if wsTab === 'specs'}
+            <div class="ws-tab-toolbar">
+              <select class="filter-select" value={specsStatusFilter} onchange={(e) => { specsStatusFilter = e.target.value; }} aria-label={$t('workspace_home.filter_specs_by_status')} data-testid="specs-status-filter">
+                <option value="">{$t('workspace_home.all_statuses')}</option>
+                <option value="draft">{$t('workspace_home.status_draft')}</option>
+                <option value="pending">{$t('workspace_home.status_pending')}</option>
+                <option value="approved">{$t('workspace_home.status_approved')}</option>
+                <option value="rejected">Rejected</option>
+                <option value="implemented">{$t('workspace_home.status_implemented')}</option>
+              </select>
             </div>
-          {:else if filteredSpecs.length === 0}
-            <p class="empty-text">{specsStatusFilter ? $t('workspace_home.specs_no_status') : $t('workspace_home.specs_empty')}</p>
-          {:else}
-            <table class="specs-table" data-testid="specs-table">
-              <thead>
-                <tr>
-                  <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>Repo {specsSortArrow('repo')}</button></th>
-                  <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('path')}>Spec {specsSortArrow('path')}</button></th>
-                  <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('status')}>Status {specsSortArrow('status')}</button></th>
-                  <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('progress')}>Progress {specsSortArrow('progress')}</button></th>
-                  <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>Updated {specsSortArrow('updated_at')}</button></th>
-                  <th scope="col" class="ws-th-action"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each filteredSpecs as spec (spec.id ?? spec.path)}
-                  <tr class="spec-row" onclick={() => navigateToSpec(spec)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigateToSpec(spec); }} data-testid="spec-row">
-                    <td class="spec-repo ws-cell-link">{#if spec.repo_id && repoMap[spec.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }}>{repoMap[spec.repo_id].name}</button>{:else}—{/if}</td>
-                    <td class="spec-path" title={spec.path}>{spec.path.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</td>
-                    <td class="spec-status" title={specStatusTooltip(spec.approval_status ?? spec.status)}>
-                      <span class="status-icon" aria-hidden="true"><Icon name={{ draft: 'edit', pending: 'clock', approved: 'check', rejected: 'x', implemented: 'check', merged: 'git-merge' }[spec.approval_status ?? spec.status] ?? 'circle'} size={12} /></span>
-                      {spec.approval_status ?? spec.status ?? '—'}
-                    </td>
-                    <td class="spec-progress">
-                      {#if spec.tasks_total != null && spec.tasks_total > 0}
-                        {@const pct = Math.round(((spec.tasks_done ?? 0) / spec.tasks_total) * 100)}
-                        <div class="progress-cell" title="{spec.tasks_done ?? 0}/{spec.tasks_total} tasks ({pct}%)">
-                          <span class="progress-text">{spec.tasks_done ?? 0}/{spec.tasks_total}</span>
-                          <div class="progress-mini-bar"><div class="progress-mini-fill" class:progress-complete={pct === 100} style="width: {pct}%"></div></div>
-                        </div>
-                      {:else}<span class="secondary">—</span>{/if}
-                    </td>
-                    <td class="spec-activity">{relTime(spec.updated_at)}</td>
-                    <td class="ws-cell-action">
-                      {#if (spec.approval_status ?? spec.status) === 'pending'}
-                        <button class="ws-quick-action-btn ws-quick-action-review" onclick={(e) => { e.stopPropagation(); navigateToSpec(spec); }} title="Review spec content before approving">
-                          Review
-                        </button>
-                      {/if}
-                    </td>
+            {#if specsLoading}
+              <div class="skeleton-row"></div>
+            {:else if specsError}
+              <div class="error-row" role="alert">
+                <p class="error-text">{specsError}</p>
+                <button class="retry-btn" onclick={loadSpecs}>{$t('common.retry')}</button>
+              </div>
+            {:else if filteredSpecs.length === 0}
+              <p class="empty-text">{specsStatusFilter ? $t('workspace_home.specs_no_status') : $t('workspace_home.specs_empty')}</p>
+            {:else}
+              <table class="ws-entity-table" data-testid="specs-table">
+                <thead>
+                  <tr>
+                    <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('repo')}>Repo {specsSortArrow('repo')}</button></th>
+                    <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('path')}>Spec {specsSortArrow('path')}</button></th>
+                    <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('status')}>Status {specsSortArrow('status')}</button></th>
+                    <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('progress')}>Progress {specsSortArrow('progress')}</button></th>
+                    <th scope="col"><button class="sort-btn" onclick={() => toggleSpecsSort('updated_at')}>Updated {specsSortArrow('updated_at')}</button></th>
+                    <th scope="col" class="ws-th-action"></th>
                   </tr>
-                {/each}
-              </tbody>
-            </table>
-          {/if}
-        </div>
-      </details>
-
-      <details class="detail-table-section" data-testid="section-tasks-detail" bind:open={tasksExpanded}>
-        <summary class="detail-table-toggle">
-          <span class="detail-table-title">Tasks</span>
-          <span class="detail-table-count">{wsTasks.length}</span>
-          {#if pipelineTasks.in_progress > 0}<span class="detail-table-badge detail-table-badge-active">{pipelineTasks.in_progress} active</span>{/if}
-        </summary>
-        <div class="detail-table-body" data-testid="section-tasks">
-          {#if tasksLoading}
-            <div class="skeleton-row"></div>
-          {:else if wsTasks.length === 0}
-            <p class="empty-text">No tasks in this workspace yet.</p>
-          {:else}
-            <table class="ws-entity-table">
-              <thead><tr><th>Status</th><th>Title</th><th>Spec</th><th>Agent</th><th>Repo</th><th>Created</th><th class="ws-th-action"></th></tr></thead>
-              <tbody>
-                {#each wsTasks.slice(0, 20) as task}
-                  <tr class="ws-entity-row" onclick={() => nav('task', task.id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('task', task.id, task); }}>
-                    <td><span class="status-badge status-{task.status ?? 'backlog'}" title={taskStatusTooltip(task)}>{task.status ?? 'backlog'}</span></td>
-                    <td class="ws-cell-title">{task.title ?? 'Untitled'}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }}>{task.spec_path.split('/').pop()}</button>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('agent', task.assigned_to, { repo_id: task.repo_id }); }}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if task.repo_id && repoMap[task.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[task.repo_id]); }}>{repoMap[task.repo_id].name}</button>{/if}</td>
-                    <td class="ws-cell-time">{relTime(task.created_at)}</td>
-                    <td class="ws-cell-action">
-                      {#if WS_TASK_TRANSITIONS[task.status]?.length}
-                        {#each WS_TASK_TRANSITIONS[task.status] as nextStatus}
-                          <button class="ws-quick-action-btn ws-quick-action-{nextStatus}" onclick={(e) => quickChangeWsTaskStatus(task, nextStatus, e)} disabled={changingWsTaskId === task.id}>{changingWsTaskId === task.id ? '...' : nextStatus === 'in_progress' ? 'Start' : nextStatus === 'done' ? 'Done' : nextStatus === 'blocked' ? 'Block' : nextStatus.replace(/_/g, ' ')}</button>
-                        {/each}
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-            {#if wsTasks.length > 20}
-              <p class="show-more-hint">{wsTasks.length - 20} more tasks not shown</p>
+                </thead>
+                <tbody>
+                  {#each filteredSpecs as spec (spec.id ?? spec.path)}
+                    <tr class="ws-entity-row" onclick={() => navigateToSpec(spec)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigateToSpec(spec); }} data-testid="spec-row">
+                      <td class="ws-cell-link">{#if spec.repo_id && repoMap[spec.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }}>{repoMap[spec.repo_id].name}</button>{:else}—{/if}</td>
+                      <td class="ws-cell-title" title={spec.path}>{spec.path.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</td>
+                      <td title={specStatusTooltip(spec.approval_status ?? spec.status)}>
+                        <span class="status-badge status-{spec.approval_status ?? spec.status ?? 'draft'}">
+                          <Icon name={{ draft: 'edit', pending: 'clock', approved: 'check', rejected: 'x', implemented: 'check', merged: 'git-merge' }[spec.approval_status ?? spec.status] ?? 'circle'} size={12} />
+                          {spec.approval_status ?? spec.status ?? '—'}
+                        </span>
+                      </td>
+                      <td>
+                        {#if spec.tasks_total != null && spec.tasks_total > 0}
+                          {@const pct = Math.round(((spec.tasks_done ?? 0) / spec.tasks_total) * 100)}
+                          <div class="progress-cell" title="{spec.tasks_done ?? 0}/{spec.tasks_total} tasks ({pct}%)">
+                            <span class="progress-text">{spec.tasks_done ?? 0}/{spec.tasks_total}</span>
+                            <div class="progress-mini-bar"><div class="progress-mini-fill" class:progress-complete={pct === 100} style="width: {pct}%"></div></div>
+                          </div>
+                        {:else}<span class="secondary">—</span>{/if}
+                      </td>
+                      <td class="ws-cell-time">{relTime(spec.updated_at)}</td>
+                      <td class="ws-cell-action">
+                        {#if (spec.approval_status ?? spec.status) === 'pending'}
+                          <button class="ws-quick-action-btn ws-quick-action-review" onclick={(e) => { e.stopPropagation(); navigateToSpec(spec); }} title="Review spec content before approving">
+                            Review
+                          </button>
+                        {/if}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
             {/if}
-          {/if}
-        </div>
-      </details>
 
-      <details class="detail-table-section" data-testid="section-mrs-detail" bind:open={mrsExpanded}>
-        <summary class="detail-table-toggle">
-          <span class="detail-table-title">Merge Requests</span>
-          <span class="detail-table-count">{wsMrs.length}</span>
-          {#if pipelineMrs.failed_gates > 0}<span class="detail-table-badge detail-table-badge-danger">{pipelineMrs.failed_gates} failed</span>{/if}
-          {#if pipelineMrs.open > 0}<span class="detail-table-badge detail-table-badge-info">{pipelineMrs.open} open</span>{/if}
-        </summary>
-        <div class="detail-table-body" data-testid="section-mrs">
-          {#if mrsLoading}
-            <div class="skeleton-row"></div>
-          {:else if wsMrs.length === 0}
-            <p class="empty-text">No merge requests in this workspace yet.</p>
-          {:else}
-            <table class="ws-entity-table">
-              <thead><tr><th>Status</th><th>Title</th><th>Branch</th><th>Gates</th><th>Changes</th><th>Repo</th><th>Created</th><th class="ws-th-action"></th></tr></thead>
-              <tbody>
-                {#each wsMrs.slice(0, 20) as mr}
-                  <tr class="ws-entity-row" onclick={() => nav('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('mr', mr.id, mr); }}>
-                    <td><span class="status-badge status-{mr.queue_position != null ? 'queued' : (mr.status ?? 'open')}" title={mrStatusTooltip(mr)}>{mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')}</span>{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
-                    <td class="ws-cell-title">{mr.title ?? 'Untitled MR'}</td>
-                    <td class="ws-cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
-                    <td>
-                      {#if mr._gates?.total > 0}
-                        <button class="gate-cell-ws gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
-                          <span class="gate-summary-inline">
-                            {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
-                            {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
-                            {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}<span class="gate-pending-inline">○{mr._gates.total - mr._gates.passed - mr._gates.failed}</span>{/if}
-                          </span>
-                          {#if mr._gates.details?.length > 0}
-                            <span class="gate-names-ws">
-                              {#each mr._gates.details as g}
-                                <span class="gate-name-tag-ws gate-tag-{g.status}">{g.name}</span>
-                              {/each}
+          <!-- ── Tasks tab ──────────────────────────────────────────── -->
+          {:else if wsTab === 'tasks'}
+            {#if tasksLoading}
+              <div class="skeleton-row"></div>
+            {:else if wsTasks.length === 0}
+              <p class="empty-text">No tasks in this workspace yet.</p>
+            {:else}
+              <table class="ws-entity-table">
+                <thead><tr><th>Status</th><th>Title</th><th>Spec</th><th>Agent</th><th>Repo</th><th>Created</th><th class="ws-th-action"></th></tr></thead>
+                <tbody>
+                  {#each wsTasks.slice(0, 20) as task}
+                    <tr class="ws-entity-row" onclick={() => nav('task', task.id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('task', task.id, task); }}>
+                      <td><span class="status-badge status-{task.status ?? 'backlog'}" title={taskStatusTooltip(task)}>{task.status ?? 'backlog'}</span></td>
+                      <td class="ws-cell-title">{task.title ?? 'Untitled'}</td>
+                      <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }}>{task.spec_path.split('/').pop()}</button>{/if}</td>
+                      <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('agent', task.assigned_to, { repo_id: task.repo_id }); }}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
+                      <td class="ws-cell-mono ws-cell-link">{#if task.repo_id && repoMap[task.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[task.repo_id]); }}>{repoMap[task.repo_id].name}</button>{/if}</td>
+                      <td class="ws-cell-time">{relTime(task.created_at)}</td>
+                      <td class="ws-cell-action">
+                        {#if WS_TASK_TRANSITIONS[task.status]?.length}
+                          {#each WS_TASK_TRANSITIONS[task.status] as nextStatus}
+                            <button class="ws-quick-action-btn ws-quick-action-{nextStatus}" onclick={(e) => quickChangeWsTaskStatus(task, nextStatus, e)} disabled={changingWsTaskId === task.id}>{changingWsTaskId === task.id ? '...' : nextStatus === 'in_progress' ? 'Start' : nextStatus === 'done' ? 'Done' : nextStatus === 'blocked' ? 'Block' : nextStatus.replace(/_/g, ' ')}</button>
+                          {/each}
+                        {/if}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+              {#if wsTasks.length > 20}
+                <p class="show-more-hint">{wsTasks.length - 20} more tasks not shown</p>
+              {/if}
+            {/if}
+
+          <!-- ── MRs tab ──────────────────────────────────────────── -->
+          {:else if wsTab === 'mrs'}
+            {#if mrsLoading}
+              <div class="skeleton-row"></div>
+            {:else if wsMrs.length === 0}
+              <p class="empty-text">No merge requests in this workspace yet.</p>
+            {:else}
+              <table class="ws-entity-table">
+                <thead><tr><th>Status</th><th>Title</th><th>Branch</th><th>Gates</th><th>Changes</th><th>Repo</th><th>Created</th><th class="ws-th-action"></th></tr></thead>
+                <tbody>
+                  {#each wsMrs.slice(0, 20) as mr}
+                    <tr class="ws-entity-row" onclick={() => nav('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('mr', mr.id, mr); }}>
+                      <td><span class="status-badge status-{mr.queue_position != null ? 'queued' : (mr.status ?? 'open')}" title={mrStatusTooltip(mr)}>{mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')}</span>{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title="Click to copy: {mr.merge_commit_sha}" onclick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); }} role="button" tabindex="0">{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
+                      <td class="ws-cell-title">{mr.title ?? 'Untitled MR'}</td>
+                      <td class="ws-cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
+                      <td>
+                        {#if mr._gates?.total > 0}
+                          <button class="gate-cell-ws gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
+                            <span class="gate-summary-inline">
+                              {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
+                              {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
+                              {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}<span class="gate-pending-inline">○{mr._gates.total - mr._gates.passed - mr._gates.failed}</span>{/if}
                             </span>
-                          {/if}
-                        </button>
-                      {/if}
-                    </td>
-                    <td class="ws-cell-diff">
-                      {#if mr.diff_stats}
-                        <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
-                        <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
-                      {/if}
-                    </td>
-                    <td class="ws-cell-mono ws-cell-link">{#if mr.repository_id && repoMap[mr.repository_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id]); }}>{repoMap[mr.repository_id].name}</button>{/if}</td>
-                    <td class="ws-cell-time">{relTime(mr.created_at)}</td>
-                    <td class="ws-cell-action">
-                      {#if mr.status === 'open' && mr.queue_position == null}
-                        <button class="ws-quick-action-btn" onclick={(e) => quickEnqueueMr(mr, e)} disabled={enqueuingMrId === mr.id}>{enqueuingMrId === mr.id ? '...' : 'Enqueue'}</button>
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-            {#if wsMrs.length > 20}
-              <p class="show-more-hint">{wsMrs.length - 20} more MRs not shown</p>
+                            {#if mr._gates.details?.length > 0}
+                              <span class="gate-names-ws">
+                                {#each mr._gates.details as g}
+                                  <span class="gate-name-tag-ws gate-tag-{g.status}">{g.name}</span>
+                                {/each}
+                              </span>
+                            {/if}
+                          </button>
+                        {/if}
+                      </td>
+                      <td class="ws-cell-diff">
+                        {#if mr.diff_stats}
+                          <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                          <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                        {/if}
+                      </td>
+                      <td class="ws-cell-mono ws-cell-link">{#if mr.repository_id && repoMap[mr.repository_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id]); }}>{repoMap[mr.repository_id].name}</button>{/if}</td>
+                      <td class="ws-cell-time">{relTime(mr.created_at)}</td>
+                      <td class="ws-cell-action">
+                        {#if mr.status === 'open' && mr.queue_position == null}
+                          <button class="ws-quick-action-btn" onclick={(e) => quickEnqueueMr(mr, e)} disabled={enqueuingMrId === mr.id}>{enqueuingMrId === mr.id ? '...' : 'Enqueue'}</button>
+                        {/if}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+              {#if wsMrs.length > 20}
+                <p class="show-more-hint">{wsMrs.length - 20} more MRs not shown</p>
+              {/if}
             {/if}
-          {/if}
-        </div>
-      </details>
 
-      <details class="detail-table-section" data-testid="section-agents-detail" bind:open={agentsExpanded}>
-        <summary class="detail-table-toggle">
-          <span class="detail-table-title">Agents</span>
-          <span class="detail-table-count">{wsAgents.length}</span>
-          {#if pipelineAgents.active > 0}<span class="detail-table-badge detail-table-badge-active">{pipelineAgents.active} running</span>{/if}
-        </summary>
-        <div class="detail-table-body" data-testid="section-agents">
-          {#if agentsLoading}
-            <div class="skeleton-row"></div>
-          {:else if wsAgents.length === 0}
-            <p class="empty-text">No agents in this workspace.</p>
-          {:else}
-            <table class="ws-entity-table">
-              <thead><tr><th>Status</th><th>Name</th><th>Spec</th><th>Task</th><th>Branch</th><th>Duration</th><th>MR</th><th>Repo</th></tr></thead>
-              <tbody>
-                {#each wsAgents.slice(0, 20) as agent}
-                  {@const taskId = agent.task_id ?? agent.current_task_id}
-                  {@const spawnedAt = agent.created_at ?? agent.spawned_at}
-                  <tr class="ws-entity-row" onclick={() => nav('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('agent', agent.id, agent); }}>
-                    <td><span class="status-badge status-{agent.status ?? 'active'}" title={agentStatusTooltip(agent.status)}>{agent.status ?? 'active'}</span>{#if agent.status === 'active' && spawnedAt}{@const elapsed = Math.round((Date.now() / 1000 - spawnedAt) / 60)}<span class="agent-elapsed" title="Running for {elapsed} minutes">{elapsed < 60 ? `${elapsed}m` : `${Math.floor(elapsed/60)}h${elapsed%60}m`}</span>{/if}</td>
-                    <td class="ws-cell-title">{agent.name ?? shortId(agent.id)}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if agent.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', agent.spec_path, { path: agent.spec_path, repo_id: agent.repo_id }); }}>{agent.spec_path.split('/').pop()}</button>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('task', taskId, { repo_id: agent.repo_id }); }}>{entityName('task', taskId)}</button>{/if}</td>
-                    <td class="ws-cell-mono"><span class="branch-ref">{agent.branch ?? ''}</span></td>
-                    <td class="ws-cell-time">{formatDuration(spawnedAt, agent.completed_at)}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if agent.mr_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('mr', agent.mr_id, { repository_id: agent.repo_id }); }}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
-                    <td class="ws-cell-mono ws-cell-link">{#if agent.repo_id && repoMap[agent.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id]); }}>{repoMap[agent.repo_id].name}</button>{/if}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-            {#if wsAgents.length > 20}
-              <p class="show-more-hint">{wsAgents.length - 20} more agents not shown</p>
+          <!-- ── Agents tab ──────────────────────────────────────────── -->
+          {:else if wsTab === 'agents'}
+            {#if agentsLoading}
+              <div class="skeleton-row"></div>
+            {:else if wsAgents.length === 0}
+              <p class="empty-text">No agents in this workspace.</p>
+            {:else}
+              <table class="ws-entity-table">
+                <thead><tr><th>Status</th><th>Name</th><th>Spec</th><th>Task</th><th>Branch</th><th>Duration</th><th>MR</th><th>Repo</th></tr></thead>
+                <tbody>
+                  {#each wsAgents.slice(0, 20) as agent}
+                    {@const taskId = agent.task_id ?? agent.current_task_id}
+                    {@const spawnedAt = agent.created_at ?? agent.spawned_at}
+                    <tr class="ws-entity-row" onclick={() => nav('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('agent', agent.id, agent); }}>
+                      <td><span class="status-badge status-{agent.status ?? 'active'}" title={agentStatusTooltip(agent.status)}>{agent.status ?? 'active'}</span>{#if agent.status === 'active' && spawnedAt}{@const elapsed = Math.round((Date.now() / 1000 - spawnedAt) / 60)}<span class="agent-elapsed" title="Running for {elapsed} minutes">{elapsed < 60 ? `${elapsed}m` : `${Math.floor(elapsed/60)}h${elapsed%60}m`}</span>{/if}</td>
+                      <td class="ws-cell-title">{agent.name ?? shortId(agent.id)}</td>
+                      <td class="ws-cell-mono ws-cell-link">{#if agent.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', agent.spec_path, { path: agent.spec_path, repo_id: agent.repo_id }); }}>{agent.spec_path.split('/').pop()}</button>{/if}</td>
+                      <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('task', taskId, { repo_id: agent.repo_id }); }}>{entityName('task', taskId)}</button>{/if}</td>
+                      <td class="ws-cell-mono"><span class="branch-ref">{agent.branch ?? ''}</span></td>
+                      <td class="ws-cell-time">{formatDuration(spawnedAt, agent.completed_at)}</td>
+                      <td class="ws-cell-mono ws-cell-link">{#if agent.mr_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('mr', agent.mr_id, { repository_id: agent.repo_id }); }}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
+                      <td class="ws-cell-mono ws-cell-link">{#if agent.repo_id && repoMap[agent.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id]); }}>{repoMap[agent.repo_id].name}</button>{/if}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+              {#if wsAgents.length > 20}
+                <p class="show-more-hint">{wsAgents.length - 20} more agents not shown</p>
+              {/if}
             {/if}
           {/if}
         </div>
-      </details>
+      </section>
     </div><!-- .focused-dashboard -->
   {/if}
 </div>
@@ -1579,56 +1569,7 @@
   .activity-dot-warning { background: var(--color-warning); }
   .activity-dot-info { background: var(--color-info, #1e90ff); }
 
-  /* ── Overview layout ────────────────────────────────────────────── */
-  .overview-columns {
-    display: grid;
-    grid-template-columns: 2fr 1fr;
-    gap: var(--space-4);
-  }
-
-  .overview-columns-single {
-    grid-template-columns: 1fr;
-  }
-
-  @media (max-width: 768px) {
-    .overview-columns {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  .overview-activity {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    background: var(--color-surface);
-    overflow: hidden;
-  }
-
-  .overview-section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-3) var(--space-4);
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
-  }
-
-  .overview-section-title {
-    font-family: var(--font-display);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text);
-    margin: 0;
-  }
-
-  .overview-activity .activity-timeline {
-    padding: var(--space-3) var(--space-4);
-    max-height: 500px;
-    overflow-y: auto;
-  }
-
-  .overview-activity .empty-text {
-    padding: var(--space-4);
-  }
+  /* ── Overview layout (unused, kept for compat) ──────────────────── */
 
   .show-more-btn {
     display: block;
@@ -1738,35 +1679,55 @@
   .budget-mini-value { font-weight: 600; font-family: var(--font-mono); color: var(--color-text); }
   .budget-mini-value.budget-warn { color: var(--color-warning); }
 
-  /* ── Expandable detail tables ───────────────────────────────────── */
-  .detail-table-section {
+  /* ── Workspace tabbed panel ──────────────────────────────────── */
+  .ws-tabbed-panel {
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     background: var(--color-surface);
+    overflow: hidden;
   }
 
-  .detail-table-toggle {
+  .ws-tab-nav {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ws-tab-btn {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-3) var(--space-4);
-    cursor: pointer;
-    user-select: none;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-text-secondary);
     font-family: var(--font-body);
-  }
-
-  .detail-table-toggle:hover { background: var(--color-surface-elevated); }
-
-  .detail-table-title {
     font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text);
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
   }
 
-  .detail-table-count {
+  .ws-tab-btn:hover {
+    color: var(--color-text);
+    background: color-mix(in srgb, var(--color-border) 30%, transparent);
+  }
+
+  .ws-tab-btn.ws-tab-active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+    font-weight: 600;
+  }
+
+  .ws-tab-count {
     font-size: var(--text-xs);
     background: var(--color-border);
-    color: var(--color-text-secondary);
+    color: var(--color-text-muted);
     border-radius: 8px;
     padding: 0 5px;
     min-width: 16px;
@@ -1775,29 +1736,57 @@
     font-family: var(--font-mono);
   }
 
-  .detail-table-badge {
-    font-size: var(--text-xs);
-    padding: 1px 6px;
-    border-radius: var(--radius-sm);
-    font-weight: 500;
-    margin-left: auto;
+  .ws-tab-active .ws-tab-count {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    color: var(--color-primary);
   }
 
-  .detail-table-badge-warn { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
-  .detail-table-badge-active { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
-  .detail-table-badge-danger { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
-  .detail-table-badge-info { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 10%, transparent); }
-
-  .detail-table-body {
-    padding: var(--space-4);
-    border-top: 1px solid var(--color-border);
-    overflow-x: auto;
+  .ws-tab-alert {
+    font-size: 10px;
+    background: var(--color-warning);
+    color: var(--color-text-inverse);
+    border-radius: 8px;
+    padding: 0 4px;
+    min-width: 14px;
+    text-align: center;
+    line-height: 14px;
+    font-weight: 700;
   }
 
-  .tab-header-controls {
+  .ws-tab-alert-danger {
+    background: var(--color-danger);
+  }
+
+  .ws-tab-badge-active {
+    font-size: 10px;
+    color: var(--color-success);
+    font-weight: 600;
+  }
+
+  .ws-tab-content {
+    min-height: 200px;
+    max-height: 600px;
+    overflow-y: auto;
+  }
+
+  .ws-tab-content .activity-timeline {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .ws-tab-content .empty-text {
+    padding: var(--space-6) var(--space-4);
+  }
+
+  .ws-tab-content .ws-entity-table {
+    margin: 0;
+  }
+
+  .ws-tab-toolbar {
     display: flex;
     justify-content: flex-end;
-    margin-bottom: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
   }
 
   /* ═══ Original styles ══════════════════════════════════════════════════ */
