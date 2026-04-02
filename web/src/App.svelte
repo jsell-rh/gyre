@@ -1032,8 +1032,8 @@
       </button>
 
       <!-- Left side: workspace selector or back arrow + breadcrumb -->
-      {#if mode === 'agent_rules'}
-        <!-- Agent rules mode: back arrow + WorkspaceName / Agent Rules -->
+      {#if mode === 'agent_rules' || mode === 'workspace_settings'}
+        <!-- Sub-page mode: back arrow + WorkspaceName / Page Name -->
         <div class="topbar-left repo-context">
           <button
             class="back-btn"
@@ -1054,7 +1054,7 @@
               {currentWorkspace?.name ?? 'Workspace'}
             </button>
             <span class="breadcrumb-sep" aria-hidden="true">/</span>
-            <span class="breadcrumb-repo" aria-current="page">{$t('topbar.agent_rules_label')}</span>
+            <span class="breadcrumb-repo" aria-current="page">{mode === 'workspace_settings' ? $t('topbar.workspace_settings') : $t('topbar.agent_rules_label')}</span>
           </nav>
         </div>
       {:else if mode === 'repo'}
