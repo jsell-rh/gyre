@@ -12,6 +12,7 @@
     tasks = { total: 0, in_progress: 0, blocked: 0, done: 0 },
     agents = { total: 0, active: 0 },
     mrs = { total: 0, open: 0, merged: 0, failed_gates: 0 },
+    budget = null,
     onStageClick = undefined,
   } = $props();
 
