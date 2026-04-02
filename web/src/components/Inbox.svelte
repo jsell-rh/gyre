@@ -2,6 +2,7 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { entityName } from '../lib/entityNames.svelte.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -26,31 +27,9 @@
   let actionStates = $state({});
   let workspaceMap = $state({});
 
-  // Entity name resolution cache
-  let entityNameCache = $state({});
-  function queueNameResolution(type, id) {
-    if (!id) return;
-    const key = `${type}:${id}`;
-    if (entityNameCache[key] !== undefined) return;
-    queueMicrotask(() => {
-      if (entityNameCache[key] !== undefined) return;
-      entityNameCache = { ...entityNameCache, [key]: null };
-      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                      type === 'task' ? api.task(id).then(t => t?.title) :
-                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
-                      Promise.resolve(null);
-      fetcher.then(name => {
-        if (name) entityNameCache = { ...entityNameCache, [key]: name };
-      }).catch(() => {});
-    });
-  }
+  // Entity name resolution uses shared singleton cache
   function resolveEntityName(type, id) {
-    if (!id) return '';
-    const key = `${type}:${id}`;
-    const cached = entityNameCache[key];
-    if (cached) return cached;
-    queueNameResolution(type, id);
-    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+    return entityName(type, id);
   }
 
   // Badge variant per notification type

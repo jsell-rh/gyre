@@ -13,6 +13,8 @@
   import { getContext, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { entityName as sharedEntityName, shortId as sharedShortId } from '../lib/entityNames.svelte.js';
+  import { absoluteTime } from '../lib/timeFormat.js';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
@@ -563,36 +565,18 @@
 
   function shortId(id) {
     if (!id || typeof id !== 'string') return '—';
-    return id.length > 12 ? id.slice(0, 8) + '…' : id;
+    return sharedShortId(id);
   }
 
-  // ── Entity name cache for workspace/resource resolution ────────────────
-  let nameCache = $state({});
-
+  // Entity name resolution uses shared singleton cache
   function resolveWorkspaceName(id) {
     if (!id) return '—';
-    const key = `ws:${id}`;
-    if (nameCache[key] !== undefined) return nameCache[key] || shortId(id);
-    nameCache = { ...nameCache, [key]: null };
-    api.workspace(id).then(ws => {
-      if (ws?.name) nameCache = { ...nameCache, [key]: ws.name };
-    }).catch(() => {});
-    return shortId(id);
+    return sharedEntityName('workspace', id);
   }
 
   function resolveEntityName(type, id) {
     if (!id) return shortId(id);
-    const key = `${type}:${id}`;
-    if (nameCache[key] !== undefined) return nameCache[key] || shortId(id);
-    nameCache = { ...nameCache, [key]: null };
-    const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                    type === 'repo' ? api.repo(id).then(r => r?.name) :
-                    type === 'ws' ? api.workspace(id).then(w => w?.name) :
-                    Promise.resolve(null);
-    fetcher.then(name => {
-      if (name) nameCache = { ...nameCache, [key]: name };
-    }).catch(() => {});
-    return shortId(id);
+    return sharedEntityName(type, id);
   }
 
   // ── Tab keyboard navigation ────────────────────────────────────────────

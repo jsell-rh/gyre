@@ -13,6 +13,8 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { entityName, shortId, seedEntityName } from '../lib/entityNames.svelte.js';
+  import { relativeTime, formatDuration } from '../lib/timeFormat.js';
   import Briefing from './Briefing.svelte';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import Modal from '../lib/Modal.svelte';
@@ -312,6 +314,7 @@
       const data = await api.workspaceRepos(workspace.id);
       repos = Array.isArray(data) ? data : [];
       repoMap = Object.fromEntries(repos.map(r => [r.id, r]));
+      seedRepoNames();
     } catch (e) {
       reposError = e.message || 'Failed to load repos';
       repos = [];
@@ -758,63 +761,18 @@
     })
   );
 
-  // ── Relative time helper ───────────────────────────────────────────────
+  // ── Relative time helper (i18n-aware wrapper around shared module) ──────
   function relTime(ts) {
     if (!ts) return '';
-    const ms = typeof ts === 'number' && ts < 1e12 ? ts * 1000 : new Date(ts).getTime();
-    const diff = Date.now() - ms;
-    const m = Math.floor(diff / 60000);
-    if (m < 1) return $t('common.time_just_now');
-    if (m < 60) return $t('common.time_minutes_ago', { values: { count: m } });
-    const h = Math.floor(m / 60);
-    if (h < 24) return $t('common.time_hours_ago', { values: { count: h } });
-    return $t('common.time_days_ago', { values: { count: Math.floor(h / 24) } });
+    return relativeTime(ts);
   }
 
-  // ── Human-friendly entity name cache ──────────────────────────────────
-  let entityNameCache = $state({});
-
-  function queueNameResolution(type, id) {
-    if (!id) return;
-    const key = `${type}:${id}`;
-    if (entityNameCache[key] !== undefined) return;
-    queueMicrotask(() => {
-      if (entityNameCache[key] !== undefined) return;
-      entityNameCache = { ...entityNameCache, [key]: null };
-      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                      type === 'task' ? api.task(id).then(t => t?.title) :
-                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
-                      type === 'repo' ? api.repo(id).then(r => r?.name) :
-                      type === 'workspace' ? api.workspace(id).then(w => w?.name) :
-                      Promise.resolve(null);
-      fetcher.then(name => {
-        if (name) entityNameCache = { ...entityNameCache, [key]: name };
-      }).catch(() => {});
-    });
-  }
-
-  function entityName(type, id) {
-    if (!id) return '';
-    // Check repo map first for repos
-    if (type === 'repo' && repoMap[id]?.name) return repoMap[id].name;
-    const cached = entityNameCache[`${type}:${id}`];
-    if (cached) return cached;
-    queueNameResolution(type, id);
-    return shortId(id);
-  }
-
-  function shortId(id) {
-    if (!id) return '';
-    return id.length > 12 ? id.slice(0, 8) + '...' : id;
-  }
-
-  function fmtDuration(startTs, endTs) {
-    if (!startTs) return '';
-    const end = endTs ?? Date.now() / 1000;
-    const secs = Math.round(end - startTs);
-    if (secs < 60) return `${secs}s`;
-    if (secs < 3600) return `${Math.floor(secs / 60)}m`;
-    return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+  // Entity name resolution + time formatting imported from shared modules.
+  // Seed repo names from loaded data so they're immediately available.
+  function seedRepoNames() {
+    for (const r of wsRepos) {
+      if (r.id && r.name) seedEntityName('repo', r.id, r.name);
+    }
   }
 
   // ── Merge Queue state ───────────────────────────────────────────────────
@@ -2012,7 +1970,7 @@
                     <td class="ws-cell-mono ws-cell-link">{#if agent.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', agent.spec_path, { path: agent.spec_path, repo_id: agent.repo_id }); }} title={agent.spec_path}>{agent.spec_path.split('/').pop()}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if taskId}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('task', taskId, { repo_id: agent.repo_id }); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
                     <td class="ws-cell-mono"><span class="branch-ref">{agent.branch ?? ''}</span></td>
-                    <td class="ws-cell-time">{fmtDuration(spawnedAt, agent.completed_at)}</td>
+                    <td class="ws-cell-time">{formatDuration(spawnedAt, agent.completed_at)}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if agent.mr_id}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('mr', agent.mr_id, { repository_id: agent.repo_id }); }} title={agent.mr_id}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if agent.repo_id && repoMap[agent.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id]); }} title="Go to repo">{repoMap[agent.repo_id].name}</button>{:else}{repoMap[agent.repo_id]?.name ?? ''}{/if}</td>
                   </tr>
