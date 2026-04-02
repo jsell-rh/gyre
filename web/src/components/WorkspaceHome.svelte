@@ -659,9 +659,17 @@
   function handlePipelineStageClick(stageId) {
     const tabMap = { specs: 'specs', tasks: 'tasks', mrs: 'mrs', agents: 'agents', merged: 'mrs' };
     const tab = tabMap[stageId];
-    if (tab && repos.length === 1 && onSelectRepo) {
+    if (!tab) return;
+    // Single repo: navigate directly to that repo's tab
+    if (repos.length === 1 && onSelectRepo) {
       onSelectRepo(repos[0], tab);
+      return;
     }
+    // Multiple repos: scroll to activity feed (which shows cross-repo data)
+    // and set a filter matching the stage type
+    const filterMap = { specs: 'spec', tasks: 'task', agents: 'agent', mrs: 'mr', merged: 'mr' };
+    if (filterMap[stageId]) activityFilter = filterMap[stageId];
+    document.querySelector('[data-testid="ws-tabbed-panel"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   // ── Merge Queue state ───────────────────────────────────────────────────
@@ -1309,6 +1317,12 @@
 
 <style>
   /* ═══ Focused Dashboard ═══════════════════════════════════════════════ */
+  .workspace-home {
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+  }
+
   .focused-dashboard {
     display: flex;
     flex-direction: column;
