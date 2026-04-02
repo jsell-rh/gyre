@@ -1000,6 +1000,11 @@
     <!-- ═══ Focused Dashboard (replaces cluttered section soup) ═══════ -->
     <div class="focused-dashboard">
 
+      <!-- Workspace header with description -->
+      {#if workspace.description}
+        <p class="ws-description">{workspace.description}</p>
+      {/if}
+
       <!-- Zone 1: Action Needed (with inline approve/reject/retry/dismiss) -->
       <ActionNeeded
         items={notifications}
@@ -1611,6 +1616,13 @@
     max-width: 1400px;
     margin: 0 auto;
     width: 100%;
+  }
+
+  .ws-description {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin: calc(-1 * var(--space-3)) 0 0 0;
+    line-height: 1.4;
   }
 
   /* ── Repo cards grid (responsive) ──────────────────────────────────── */
