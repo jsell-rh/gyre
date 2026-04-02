@@ -1166,7 +1166,7 @@
             <div class="ws-name-wrap">
               <button
                 class="back-btn"
-                onclick={() => goToCrossWorkspace()}
+                onclick={() => window.history.back()}
                 aria-label="Back to All Workspaces"
                 data-testid="back-btn"
               >
