@@ -993,6 +993,53 @@
         onStageClick={handlePipelineStageClick}
       />
 
+      <!-- ── Zone 2.5: Merge Queue (visible when items are queued) ───── -->
+      {#if mergeQueueItems.length > 0}
+        <section class="home-section merge-queue-section" aria-labelledby="section-merge-queue">
+          <div class="section-header">
+            <h2 class="section-title" id="section-merge-queue">
+              Merge Queue
+              <span class="section-badge">{mergeQueueItems.length}</span>
+            </h2>
+          </div>
+          <div class="section-body">
+            <div class="merge-queue-pipeline">
+              {#each mergeQueueItems.slice(0, 5) as item, i}
+                {@const mrId = item.merge_request_id ?? item.mr_id}
+                <div class="mq-item" class:mq-item-first={i === 0}>
+                  <span class="mq-item-position">#{i + 1}</span>
+                  <div class="mq-item-content">
+                    <button class="mq-item-title" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">{item._title}</button>
+                    <div class="mq-item-meta">
+                      {#if item._branch}<span class="mq-branch">{item._branch}</span>{/if}
+                      {#if item._agent}<button class="ws-entity-link mq-agent" onclick={(e) => { e.stopPropagation(); nav('agent', item._agent, { repo_id: item._mr?.repository_id }); }} title="View agent">{entityName('agent', item._agent)}</button>{/if}
+                      {#if item._spec_ref}
+                        {@const sp = item._spec_ref.split('@')[0]}
+                        <button class="ws-entity-link mq-spec" onclick={(e) => { e.stopPropagation(); nav('spec', sp, { path: sp, repo_id: item._mr?.repository_id }); }} title={item._spec_ref}>{sp.split('/').pop()}</button>
+                      {/if}
+                    </div>
+                    {#if item._deps?.length > 0}
+                      <div class="mq-deps">
+                        <span class="mq-dep-label">Waits for:</span>
+                        {#each item._deps as depId}
+                          <button class="mq-dep-link" onclick={() => nav('mr', depId)}>{entityName('mr', depId)}</button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                  <div class="mq-item-status">
+                    <span class="mq-status-badge">{item._status ?? 'queued'}</span>
+                  </div>
+                </div>
+              {/each}
+              {#if mergeQueueItems.length > 5}
+                <p class="show-more-hint">{mergeQueueItems.length - 5} more in queue</p>
+              {/if}
+            </div>
+          </div>
+        </section>
+      {/if}
+
       <!-- ── Zone 3: Decisions (promoted — the #1 human touchpoint) ────── -->
       <section class="home-section" aria-labelledby="section-decisions" data-testid="section-decisions">
         <div class="section-header">
@@ -3176,6 +3223,10 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     font-weight: 600;
+  }
+
+  .merge-queue-section {
+    border-left: 3px solid var(--color-primary);
   }
 
   /* ── Merge Queue pipeline ──────────────────────────────────────────── */
