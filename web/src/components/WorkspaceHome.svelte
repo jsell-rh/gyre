@@ -725,7 +725,28 @@
   // ── Activity filter + pagination ──────────────────────────────────────
   let activityFilter = $state('');
   let activityLimit = $state(20);
+  // Auto-expand detail sections when they have actionable items
   let specsExpanded = $state(false);
+  let tasksExpanded = $state(false);
+  let mrsExpanded = $state(false);
+  let agentsExpanded = $state(false);
+
+  // Auto-expand specs when there are pending approvals
+  $effect(() => {
+    if (!specsLoading && pipelineSpecs.pending > 0) specsExpanded = true;
+  });
+  // Auto-expand MRs when there are gate failures
+  $effect(() => {
+    if (!mrsLoading && pipelineMrs.failed_gates > 0) mrsExpanded = true;
+  });
+  // Auto-expand tasks when there are blocked tasks
+  $effect(() => {
+    if (!tasksLoading && pipelineTasks.blocked > 0) tasksExpanded = true;
+  });
+  // Auto-expand agents when there are active agents
+  $effect(() => {
+    if (!agentsLoading && pipelineAgents.active > 0) agentsExpanded = true;
+  });
 
   let filteredActivity = $derived.by(() => {
     if (!activityFilter) return activityEvents;
@@ -1410,7 +1431,7 @@
         </div>
       </details>
 
-      <details class="detail-table-section" data-testid="section-tasks-detail">
+      <details class="detail-table-section" data-testid="section-tasks-detail" bind:open={tasksExpanded}>
         <summary class="detail-table-toggle">
           <span class="detail-table-title">Tasks</span>
           <span class="detail-table-count">{wsTasks.length}</span>
@@ -1451,7 +1472,7 @@
         </div>
       </details>
 
-      <details class="detail-table-section" data-testid="section-mrs-detail">
+      <details class="detail-table-section" data-testid="section-mrs-detail" bind:open={mrsExpanded}>
         <summary class="detail-table-toggle">
           <span class="detail-table-title">Merge Requests</span>
           <span class="detail-table-count">{wsMrs.length}</span>
@@ -1514,7 +1535,7 @@
         </div>
       </details>
 
-      <details class="detail-table-section" data-testid="section-agents-detail">
+      <details class="detail-table-section" data-testid="section-agents-detail" bind:open={agentsExpanded}>
         <summary class="detail-table-toggle">
           <span class="detail-table-title">Agents</span>
           <span class="detail-table-count">{wsAgents.length}</span>
