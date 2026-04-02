@@ -48,9 +48,9 @@
         </span>
       {/if}
       {#if stats.agents != null && stats.agents > 0}
-        <span class="stat-chip stat-active" title="Active agents">
+        <span class="stat-chip stat-active" title="{stats.agents} agent{stats.agents !== 1 ? 's' : ''} actively implementing code">
           <span class="stat-icon" aria-hidden="true">A</span>
-          <span>{stats.agents}</span>
+          <span>{stats.agents} running</span>
         </span>
       {/if}
       {#if stats.mrs != null}
