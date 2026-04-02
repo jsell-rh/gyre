@@ -748,11 +748,14 @@
   // repoHealth(repo) function already defined above (line ~265)
 
   function repoStats(repo) {
+    const repoMrs = wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id);
     return {
       specs: specs.filter(s => s.repo_id === repo.id).length,
       tasks: wsTasks.filter(t => t.repo_id === repo.id).length,
       agents: wsAgents.filter(a => a.repo_id === repo.id && a.status === 'active').length,
-      mrs: wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id).length,
+      mrs: repoMrs.length,
+      openMrs: repoMrs.filter(m => m.status === 'open').length,
+      failedGates: repoMrs.filter(m => m._gates?.failed > 0).length,
       last_activity: null,
     };
   }
