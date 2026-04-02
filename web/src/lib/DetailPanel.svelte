@@ -1778,18 +1778,24 @@
               </div>
             {:else}
               {@const mr = mrDetail ?? entity.data ?? {}}
-              <!-- Prominent status journey block -->
+              <!-- Prominent status journey block — click steps to see details -->
               {#if mr._statusStory?.length > 0}
                 <div class="mr-status-journey">
                   <div class="status-journey-track">
                     {#each mr._statusStory as step, i}
-                      <div class="status-journey-node status-journey-node-{step.variant}" title={step.time ? fmtDate(step.time) : ''}>
+                      {@const stepTab = step.label?.toLowerCase().includes('gate') ? 'gates' : step.label?.toLowerCase().includes('merged') ? 'attestation' : step.label?.toLowerCase().includes('created') ? 'timeline' : step.label?.toLowerCase().includes('commit') ? 'commits' : null}
+                      <button
+                        class="status-journey-node status-journey-node-{step.variant}"
+                        class:status-journey-clickable={stepTab}
+                        title={stepTab ? `Click to view ${stepTab}${step.time ? ' — ' + fmtDate(step.time) : ''}` : (step.time ? fmtDate(step.time) : '')}
+                        onclick={() => { if (stepTab) activeTab = stepTab; }}
+                      >
                         <span class="status-journey-dot"></span>
                         <span class="status-journey-label">{step.label}</span>
                         {#if step.time}
                           <span class="status-journey-time">{fmtDate(step.time)}</span>
                         {/if}
-                      </div>
+                      </button>
                       {#if i < mr._statusStory.length - 1}
                         <span class="status-journey-connector"></span>
                       {/if}
@@ -6552,6 +6558,26 @@
     align-items: center;
     gap: 2px;
     min-width: 60px;
+    background: transparent;
+    border: none;
+    padding: var(--space-1);
+    border-radius: var(--radius);
+    cursor: default;
+    font-family: inherit;
+    transition: background var(--transition-fast);
+  }
+
+  .status-journey-clickable {
+    cursor: pointer;
+  }
+
+  .status-journey-clickable:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .status-journey-clickable:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
   }
 
   .status-journey-dot {
