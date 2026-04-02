@@ -507,6 +507,40 @@
     }
   }
 
+  // ── Quick spec approve/reject from sidebar ──────────────────────────────
+  let specActionStates = $state({});
+
+  async function quickApproveSpec(spec, e) {
+    e?.stopPropagation();
+    const sha = spec.current_sha ?? spec.sha;
+    if (!sha) { toastError('Cannot approve: spec SHA not available'); return; }
+    specActionStates = { ...specActionStates, [spec.path]: 'loading' };
+    try {
+      await api.approveSpec(spec.path, sha);
+      specActionStates = { ...specActionStates, [spec.path]: 'approved' };
+      toastSuccess(`Spec "${spec.path.split('/').pop()?.replace(/\.md$/, '')}" approved`);
+      // Update specs list to reflect the change
+      specs = specs.map(s => s.path === spec.path ? { ...s, approval_status: 'approved', status: 'approved' } : s);
+    } catch (err) {
+      specActionStates = { ...specActionStates, [spec.path]: 'error' };
+      toastError('Approve failed: ' + (err.message ?? err));
+    }
+  }
+
+  async function quickRejectSpec(spec, e) {
+    e?.stopPropagation();
+    specActionStates = { ...specActionStates, [spec.path]: 'loading' };
+    try {
+      await api.rejectSpec(spec.path, 'Rejected from dashboard');
+      specActionStates = { ...specActionStates, [spec.path]: 'rejected' };
+      toastSuccess(`Spec "${spec.path.split('/').pop()?.replace(/\.md$/, '')}" rejected`);
+      specs = specs.map(s => s.path === spec.path ? { ...s, approval_status: 'rejected', status: 'rejected' } : s);
+    } catch (err) {
+      specActionStates = { ...specActionStates, [spec.path]: 'error' };
+      toastError('Reject failed: ' + (err.message ?? err));
+    }
+  }
+
   // ── Spec navigation ────────────────────────────────────────────────────
   function navigateToSpec(spec) {
     const repo = repoMap[spec.repo_id];
@@ -1217,13 +1251,27 @@
               </h3>
               <ul class="sidebar-list">
                 {#each specs.filter(s => (s.approval_status ?? s.status) === 'pending').slice(0, 5) as spec}
+                  {@const actionState = specActionStates[spec.path]}
                   <li>
-                    <button class="sidebar-list-item" onclick={() => navigateToSpec(spec)}>
-                      <span class="sidebar-item-dot sidebar-dot-warn"></span>
-                      <span class="sidebar-item-name">{spec.path.split('/').pop()?.replace(/\.md$/, '')}</span>
-                      {#if spec.repo_id && repoMap[spec.repo_id]}<span class="sidebar-item-meta">{repoMap[spec.repo_id].name}</span>{/if}
-                      <span class="sidebar-action-tag">Review</span>
-                    </button>
+                    <div class="sidebar-list-item sidebar-spec-item">
+                      <button class="sidebar-spec-name" onclick={() => navigateToSpec(spec)} title="View spec details">
+                        <span class="sidebar-item-dot sidebar-dot-warn"></span>
+                        <span class="sidebar-item-name">{spec.path.split('/').pop()?.replace(/\.md$/, '')}</span>
+                        {#if spec.repo_id && repoMap[spec.repo_id]}<span class="sidebar-item-meta">{repoMap[spec.repo_id].name}</span>{/if}
+                      </button>
+                      {#if actionState === 'approved'}
+                        <span class="sidebar-action-done">Approved</span>
+                      {:else if actionState === 'rejected'}
+                        <span class="sidebar-action-done sidebar-action-rejected">Rejected</span>
+                      {:else if actionState === 'loading'}
+                        <span class="sidebar-action-done">...</span>
+                      {:else}
+                        <span class="sidebar-spec-actions">
+                          <button class="sidebar-approve-btn" onclick={(e) => quickApproveSpec(spec, e)} title="Approve this spec">Approve</button>
+                          <button class="sidebar-reject-btn" onclick={(e) => quickRejectSpec(spec, e)} title="Reject this spec">Reject</button>
+                        </span>
+                      {/if}
+                    </div>
                   </li>
                 {/each}
               </ul>
@@ -1460,6 +1508,73 @@
   .briefing-chip-done {
     color: var(--color-text-muted);
     background: var(--color-surface-elevated);
+  }
+
+  /* ── Sidebar spec items with approve/reject ─────────────────────────── */
+  .sidebar-spec-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-wrap: nowrap;
+  }
+
+  .sidebar-spec-name {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    text-align: left;
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+  }
+
+  .sidebar-spec-name:hover .sidebar-item-name { color: var(--color-primary); text-decoration: underline; }
+
+  .sidebar-spec-actions {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+
+  .sidebar-approve-btn,
+  .sidebar-reject-btn {
+    font-family: var(--font-body);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    border: none;
+    transition: background var(--transition-fast);
+  }
+
+  .sidebar-approve-btn {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
+  }
+  .sidebar-approve-btn:hover { background: color-mix(in srgb, var(--color-success) 25%, transparent); }
+
+  .sidebar-reject-btn {
+    color: var(--color-text-muted);
+    background: transparent;
+  }
+  .sidebar-reject-btn:hover { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 12%, transparent); }
+
+  .sidebar-action-done {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-success);
+    flex-shrink: 0;
+  }
+
+  .sidebar-action-rejected {
+    color: var(--color-text-muted);
   }
 
   /* ── Repos + Merge Queue two-column layout ─────────────────────────── */
