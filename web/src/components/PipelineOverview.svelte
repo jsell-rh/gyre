@@ -115,6 +115,13 @@
       {/if}
     </button>
   {/each}
+  {#if budget?.config?.monthly_limit_usd}
+    {@const pct = budget.usage?.total_cost_usd ? Math.round((budget.usage.total_cost_usd / budget.config.monthly_limit_usd) * 100) : 0}
+    <span class="pipeline-budget" title="Budget: ${budget.usage?.total_cost_usd?.toFixed(2) ?? '0'} / ${budget.config.monthly_limit_usd} ({pct}% used)">
+      <span class="budget-bar-mini"><span class="budget-bar-fill" class:budget-warn={pct > 75} class:budget-danger={pct > 90} style="width: {Math.min(pct, 100)}%"></span></span>
+      <span class="budget-pct" class:budget-warn={pct > 75} class:budget-danger={pct > 90}>{pct}%</span>
+    </span>
+  {/if}
 </div>
 
 <style>
@@ -199,6 +206,43 @@
     height: 6px;
     border-radius: 50%;
   }
+
+  .pipeline-budget {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 0 var(--space-2);
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .budget-bar-mini {
+    width: 40px;
+    height: 4px;
+    background: var(--color-border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .budget-bar-fill {
+    height: 100%;
+    background: var(--color-success);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .budget-bar-fill.budget-warn { background: var(--color-warning); }
+  .budget-bar-fill.budget-danger { background: var(--color-danger); }
+
+  .budget-pct {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+
+  .budget-pct.budget-warn { color: var(--color-warning); }
+  .budget-pct.budget-danger { color: var(--color-danger); }
 
   @media (max-width: 640px) {
     .pipeline-stage {
