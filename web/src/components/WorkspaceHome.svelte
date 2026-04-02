@@ -130,13 +130,16 @@
     }
   }
 
-  function taskStatusTooltip(status) {
+  function taskStatusTooltip(task) {
+    const status = typeof task === 'string' ? task : task?.status;
+    const specName = typeof task === 'object' ? task?.spec_path?.split('/').pop()?.replace(/\.md$/, '') : null;
+    const agentName = typeof task === 'object' && task?.assigned_to ? entityName('agent', task.assigned_to) : null;
     switch (status) {
-      case 'backlog': return 'Task is waiting to be assigned to an agent';
-      case 'in_progress': return 'An agent is actively working on this task';
-      case 'done': return 'Task has been completed — MR created or code merged';
-      case 'blocked': return 'Task is blocked by a dependency or external factor';
-      case 'cancelled': return 'Task was cancelled — the linked spec may have been rejected';
+      case 'backlog': return `Waiting to be assigned${specName ? ` (from spec: ${specName})` : ''}`;
+      case 'in_progress': return `${agentName ?? 'Agent'} is working on this${specName ? ` (spec: ${specName})` : ''}`;
+      case 'done': return `Completed${specName ? ` — implemented ${specName}` : ''}`;
+      case 'blocked': return 'Blocked by a dependency or external factor';
+      case 'cancelled': return 'Cancelled — linked spec may have been rejected';
       default: return '';
     }
   }
@@ -1424,7 +1427,7 @@
               <tbody>
                 {#each wsTasks.slice(0, 20) as task}
                   <tr class="ws-entity-row" onclick={() => nav('task', task.id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('task', task.id, task); }}>
-                    <td><span class="status-badge status-{task.status ?? 'backlog'}" title={taskStatusTooltip(task.status)}>{task.status ?? 'backlog'}</span></td>
+                    <td><span class="status-badge status-{task.status ?? 'backlog'}" title={taskStatusTooltip(task)}>{task.status ?? 'backlog'}</span></td>
                     <td class="ws-cell-title">{task.title ?? 'Untitled'}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if task.spec_path}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }}>{task.spec_path.split('/').pop()}</button>{/if}</td>
                     <td class="ws-cell-mono ws-cell-link">{#if task.assigned_to}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); nav('agent', task.assigned_to, { repo_id: task.repo_id }); }}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
