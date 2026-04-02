@@ -14,6 +14,7 @@
   import { entityName, shortId } from '../lib/entityNames.svelte.js';
   import { relativeTime } from '../lib/timeFormat.js';
   import Badge from '../lib/Badge.svelte';
+  import EntityLink from '../lib/EntityLink.svelte';
   import ExplorerView from './ExplorerView.svelte';
   import SpecDashboard from './SpecDashboard.svelte';
   import Inbox from './Inbox.svelte';
@@ -497,8 +498,8 @@
                   <td class="cell-title">{task.title ?? 'Untitled task'}</td>
                   <td>{#if task.priority}<Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />{/if}</td>
                   <td class="cell-type">{task.task_type ?? ''}</td>
-                  <td class="cell-mono">{#if task.spec_path}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id ?? repo?.id }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
-                  <td class="cell-mono">{#if task.assigned_to}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', task.assigned_to, {}); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
+                  <td class="cell-mono">{#if task.spec_path}<EntityLink type="spec" id={task.spec_path} data={{ path: task.spec_path, repo_id: task.repo_id ?? repo?.id }} />{/if}</td>
+                  <td class="cell-mono">{#if task.assigned_to}<EntityLink type="agent" id={task.assigned_to} />{/if}</td>
                   <td class="cell-time">{relativeTime(task.updated_at ?? task.created_at)}</td>
                   <td class="cell-action">
                     {#if TASK_STATUS_TRANSITIONS[task.status]?.length}
@@ -570,8 +571,8 @@
                   <td title={mr.queue_position != null ? `Position ${mr.queue_position + 1} in merge queue — gates will run before merge` : mr.status === 'merged' ? `Merged${mr.merge_commit_sha ? ' at ' + mr.merge_commit_sha.slice(0, 7) : ''}` : mr.status === 'open' ? 'Open — ready to enqueue for merge' : mr.status === 'closed' ? 'Closed without merging' : ''}><Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} />{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
                   <td class="cell-title">{mr.title ?? 'Untitled MR'}</td>
                   <td class="cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
-                  <td class="cell-mono">{#if mr.author_agent_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', mr.author_agent_id, {}); }} title={mr.author_agent_id}>{entityName('agent', mr.author_agent_id)}</button>{:else}{''}{/if}</td>
-                  <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? repo?.id }); }} title={mr.spec_ref}>{specPath.split('/').pop()}</button>{/if}</td>
+                  <td class="cell-mono">{#if mr.author_agent_id}<EntityLink type="agent" id={mr.author_agent_id} />{:else}{''}{/if}</td>
+                  <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<EntityLink type="spec" id={specPath} data={{ path: specPath, repo_id: mr.repository_id ?? repo?.id }} />{/if}</td>
                   <td>
                     {#if mr._gates?.total > 0}
                       <button class="gate-cell-repo gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}${g.duration_ms ? ' · ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
@@ -654,9 +655,9 @@
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('agent', agent.id, agent); }}>
                   <td title={agent.status === 'active' ? 'Currently working' : agent.status === 'idle' || agent.status === 'completed' ? 'Work complete' : agent.status === 'failed' ? 'Agent failed' : agent.status === 'dead' ? 'Agent died (killed or crashed)' : ''}><Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : (agent.status === 'failed' || agent.status === 'dead') ? 'danger' : 'muted'} /></td>
                   <td class="cell-title">{agent.name ?? shortId(agent.id)}</td>
-                  <td class="cell-mono">{#if agent.task_id ?? agent.current_task_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('task', agent.task_id ?? agent.current_task_id, {}); }} title={agent.task_id ?? agent.current_task_id}>{entityName('task', agent.task_id ?? agent.current_task_id)}</button>{/if}</td>
+                  <td class="cell-mono">{#if agent.task_id ?? agent.current_task_id}<EntityLink type="task" id={agent.task_id ?? agent.current_task_id} />{/if}</td>
                   <td class="cell-mono">{agent.branch ?? ''}</td>
-                  <td class="cell-mono">{#if agent.mr_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', agent.mr_id, {}); }} title={agent.mr_id}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
+                  <td class="cell-mono">{#if agent.mr_id}<EntityLink type="mr" id={agent.mr_id} />{/if}</td>
                   <td class="cell-time">{#if dur}{dur < 60 ? dur + 's' : dur < 3600 ? Math.round(dur / 60) + 'm' : Math.round(dur / 3600) + 'h'}{:else if agent.status === 'active' && agent.created_at}{@const elapsed = Math.round((Date.now() / 1000 - agent.created_at) / 60)}{elapsed}m{/if}</td>
                   <td class="cell-time">{relativeTime(agent.created_at)}</td>
                 </tr>
