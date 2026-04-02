@@ -19,7 +19,6 @@
   import PipelineOverview from './PipelineOverview.svelte';
   import RepoCard from './RepoCard.svelte';
   import Briefing from './Briefing.svelte';
-  import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import Modal from '../lib/Modal.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
@@ -773,7 +772,7 @@
   // Entity name resolution + time formatting imported from shared modules.
   // Seed repo names from loaded data so they're immediately available.
   function seedRepoNames() {
-    for (const r of wsRepos) {
+    for (const r of repos) {
       if (r.id && r.name) seedEntityName('repo', r.id, r.name);
     }
   }
@@ -801,8 +800,17 @@
     failed_gates: 0,
   });
 
-  // ── Collapsible detail sections ───────────────────────────────────────
-  let detailsExpanded = $state(false);
+  // ── Secondary tab bar ────────────────────────────────────────────────
+  // Replaces the old collapsible accordion with a clean tabbed view
+  let secondaryTab = $state('specs');
+  const SECONDARY_TABS = [
+    { id: 'specs', label: 'Specs' },
+    { id: 'tasks', label: 'Tasks' },
+    { id: 'mrs', label: 'Merge Requests' },
+    { id: 'agents', label: 'Agents' },
+    { id: 'activity', label: 'Activity' },
+    { id: 'budget', label: 'Budget' },
+  ];
 
   // ── Repo card data ────────────────────────────────────────────────────
   // repoHealth(repo) function already defined above (line ~265)
@@ -818,9 +826,10 @@
   }
 
   function handlePipelineStageClick(stageId) {
-    if (stageId === 'specs') {
-      document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      if (!detailsExpanded) detailsExpanded = true;
+    const tabMap = { specs: 'specs', tasks: 'tasks', mrs: 'mrs', agents: 'agents' };
+    if (tabMap[stageId]) {
+      secondaryTab = tabMap[stageId];
+      document.querySelector('[data-testid="secondary-tabs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }
 
@@ -1029,8 +1038,6 @@
     loadAgents();
     loadActivity();
     loadBudget();
-    loadAudit();
-    loadArchGraph();
     loadMergeQueue();
   });
 </script>
@@ -1071,139 +1078,7 @@
         onStageClick={handlePipelineStageClick}
       />
 
-      <!-- Zone 3: Main Content — two-column layout -->
-      <div class="home-main-grid">
-        <!-- Left: Activity + Briefing -->
-        <div class="home-main-left">
-          {#if activityEvents.length > 0}
-            <section class="home-compact-section">
-              <h3 class="compact-section-title">Recent Activity</h3>
-              <ul class="activity-feed">
-                {#each activityEvents.slice(0, 8) as event}
-                  <li class="activity-feed-item">
-                    <span class="activity-dot activity-dot-{event._color ?? 'muted'}" aria-hidden="true"></span>
-                    <span class="activity-feed-text">{event._label ?? event.event_type?.replace(/_/g, ' ') ?? 'Event'}</span>
-                    <span class="activity-feed-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                  </li>
-                {/each}
-              </ul>
-            </section>
-          {/if}
-
-          <section class="home-compact-section">
-            <Briefing workspaceId={workspace?.id} scope="workspace" workspaceName={workspace?.name ?? null} trustLevel={workspace?.trust_level ?? null} />
-          </section>
-        </div>
-
-        <!-- Right: Repos -->
-        <div class="home-main-right">
-          <section class="home-compact-section">
-            <div class="compact-section-header">
-              <h3 class="compact-section-title">Repositories ({repos.length})</h3>
-              <button class="compact-action-btn" onclick={() => { newRepoOpen = true; detailsExpanded = true; }}>+ New</button>
-            </div>
-            {#if reposLoading}
-              <p class="compact-loading">Loading...</p>
-            {:else if repos.length === 0}
-              <p class="compact-empty">No repositories yet</p>
-            {:else}
-              <div class="repo-cards-grid">
-                {#each repos as repo}
-                  <RepoCard
-                    {repo}
-                    health={repoHealth(repo)}
-                    stats={repoStats(repo)}
-                    onclick={() => onSelectRepo?.(repo)}
-                  />
-                {/each}
-              </div>
-            {/if}
-          </section>
-        </div>
-      </div>
-
-      <!-- Zone 4: Expandable Details -->
-      <details class="home-details" bind:open={detailsExpanded}>
-        <summary class="home-details-summary">
-          <span class="details-chevron" aria-hidden="true">{detailsExpanded ? '\u25BC' : '\u25B6'}</span>
-          All sections (Specs, Tasks, MRs, Agents, Architecture, Budget, Audit)
-        </summary>
-        <div class="home-details-content">
-
-    <div class="sections">
-
-      <!-- ── Provenance Pipeline Summary ──────────────────────────────── -->
-      {#if specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0}
-      {@const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending').length}
-      {@const approvedSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'approved').length}
-      {@const activeTasks = wsTasks.filter(t => t.status === 'in_progress').length}
-      {@const doneTasks = wsTasks.filter(t => t.status === 'done').length}
-      {@const activeAgentCount = wsAgents.filter(a => a.status === 'active').length}
-      {@const idleAgentCount = wsAgents.filter(a => a.status === 'idle' || a.status === 'completed').length}
-      {@const openMrs = wsMrs.filter(m => m.status === 'open').length}
-      {@const mergedMrs = wsMrs.filter(m => m.status === 'merged').length}
-        <div class="provenance-pipeline" data-testid="provenance-pipeline">
-          <div class="pipeline-stage" class:pipeline-has-pending={pendingSpecs > 0}>
-            <div class="pipeline-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="20" height="20"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            </div>
-            <div class="pipeline-count">{specs.length}</div>
-            <div class="pipeline-label">Specs</div>
-            {#if pendingSpecs > 0}
-              <div class="pipeline-detail pipeline-detail-warn">{pendingSpecs} pending</div>
-            {:else if approvedSpecs > 0}
-              <div class="pipeline-detail pipeline-detail-ok">{approvedSpecs} approved</div>
-            {/if}
-          </div>
-          <div class="pipeline-arrow">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-          </div>
-          <div class="pipeline-stage">
-            <div class="pipeline-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="20" height="20"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
-            </div>
-            <div class="pipeline-count">{wsTasks.length}</div>
-            <div class="pipeline-label">Tasks</div>
-            {#if activeTasks > 0}
-              <div class="pipeline-detail pipeline-detail-active">{activeTasks} active</div>
-            {:else if doneTasks > 0}
-              <div class="pipeline-detail pipeline-detail-ok">{doneTasks} done</div>
-            {/if}
-          </div>
-          <div class="pipeline-arrow">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-          </div>
-          <div class="pipeline-stage" class:pipeline-has-active={activeAgentCount > 0}>
-            <div class="pipeline-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="20" height="20"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
-            </div>
-            <div class="pipeline-count">{wsAgents.length}</div>
-            <div class="pipeline-label">Agents</div>
-            {#if activeAgentCount > 0}
-              <div class="pipeline-detail pipeline-detail-active">{activeAgentCount} running</div>
-            {:else if idleAgentCount > 0}
-              <div class="pipeline-detail pipeline-detail-ok">{idleAgentCount} completed</div>
-            {/if}
-          </div>
-          <div class="pipeline-arrow">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-          </div>
-          <div class="pipeline-stage">
-            <div class="pipeline-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="20" height="20"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 012 2v7"/><path d="M6 9v12"/></svg>
-            </div>
-            <div class="pipeline-count">{wsMrs.length}</div>
-            <div class="pipeline-label">Merge Requests</div>
-            {#if openMrs > 0}
-              <div class="pipeline-detail pipeline-detail-warn">{openMrs} open</div>
-            {:else if mergedMrs > 0}
-              <div class="pipeline-detail pipeline-detail-ok">{mergedMrs} merged</div>
-            {/if}
-          </div>
-        </div>
-      {/if}
-
-      <!-- ── Decisions ─────────────────────────────────────────────────── -->
+      <!-- ── Zone 3: Decisions (promoted — the #1 human touchpoint) ────── -->
       <section class="home-section" aria-labelledby="section-decisions" data-testid="section-decisions">
         <div class="section-header">
           <h2 class="section-title" id="section-decisions">
@@ -1346,352 +1221,102 @@
         </div>
       </section>
 
-      <!-- ── Provenance Overview ───────────────────────────────────────── -->
-      {#if !specsLoading && !tasksLoading && !agentsLoading && !mrsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
-        <section class="home-section provenance-overview-section" aria-labelledby="section-overview" data-testid="section-overview">
-          <div class="section-header">
-            <h2 class="section-title" id="section-overview">Development Flow</h2>
-          </div>
-          <div class="section-body">
-            <div class="prov-flow-bar">
-              <button class="prov-flow-node prov-flow-clickable" onclick={() => repos.length === 1 ? viewAllForTab('specs') : document.getElementById('section-specs')?.scrollIntoView({ behavior: 'smooth' })} title={repos.length === 1 ? 'Open Specs tab' : 'Jump to Specs section'}>
-                <span class="prov-flow-count">{provenanceSummary.approved + provenanceSummary.pending}</span>
-                <span class="prov-flow-label">Specs</span>
-                {#if provenanceSummary.pending > 0}
-                  <span class="prov-flow-sub prov-sub-pending">{provenanceSummary.pending} pending</span>
-                {/if}
-              </button>
-              <span class="prov-flow-arrow">→</span>
-              <button class="prov-flow-node prov-flow-clickable" onclick={() => repos.length === 1 ? viewAllForTab('tasks') : document.getElementById('section-tasks')?.scrollIntoView({ behavior: 'smooth' })} title={repos.length === 1 ? 'Open Tasks tab' : 'Jump to Tasks section'}>
-                <span class="prov-flow-count">{provenanceSummary.totalTasks}</span>
-                <span class="prov-flow-label">Tasks</span>
-                {#if provenanceSummary.inProgressTasks > 0}
-                  <span class="prov-flow-sub prov-sub-active">{provenanceSummary.inProgressTasks} in progress</span>
-                {/if}
-              </button>
-              <span class="prov-flow-arrow">→</span>
-              <button class="prov-flow-node prov-flow-clickable" onclick={() => repos.length === 1 ? viewAllForTab('agents') : document.getElementById('section-agents')?.scrollIntoView({ behavior: 'smooth' })} title={repos.length === 1 ? 'Open Agents tab' : 'Jump to Agents section'}>
-                <span class="prov-flow-count">{wsAgents.length}</span>
-                <span class="prov-flow-label">Agents</span>
-                {#if provenanceSummary.activeAgentCount > 0}
-                  <span class="prov-flow-sub prov-sub-active">{provenanceSummary.activeAgentCount} active</span>
-                {/if}
-              </button>
-              <span class="prov-flow-arrow">→</span>
-              <button class="prov-flow-node prov-flow-clickable" onclick={() => repos.length === 1 ? viewAllForTab('mrs') : document.getElementById('section-mrs')?.scrollIntoView({ behavior: 'smooth' })} title={repos.length === 1 ? 'Open MRs tab' : 'Jump to MRs section'}>
-                <span class="prov-flow-count">{wsMrs.length}</span>
-                <span class="prov-flow-label">MRs</span>
-                {#if provenanceSummary.openMrs > 0}
-                  <span class="prov-flow-sub prov-sub-pending">{provenanceSummary.openMrs} open</span>
-                {/if}
-                {#if provenanceSummary.mergedMrs > 0}
-                  <span class="prov-flow-sub prov-sub-merged">{provenanceSummary.mergedMrs} merged</span>
-                {/if}
-              </button>
-              {#if mergeQueueItems.length > 0}
-                <span class="prov-flow-arrow">→</span>
-                <button class="prov-flow-node prov-flow-clickable prov-flow-queue" onclick={() => document.getElementById('section-merge-queue')?.scrollIntoView({ behavior: 'smooth' })} title="Jump to Merge Queue">
-                  <span class="prov-flow-count">{mergeQueueItems.length}</span>
-                  <span class="prov-flow-label">Queue</span>
-                  <span class="prov-flow-sub prov-sub-active">processing</span>
-                </button>
-              {/if}
-              <span class="prov-flow-arrow">→</span>
-              <span class="prov-flow-node prov-flow-code">
-                <span class="prov-flow-count">{provenanceSummary.mergedMrs}</span>
-                <span class="prov-flow-label">Merged</span>
-              </span>
-            </div>
-          </div>
-        </section>
-      {/if}
-
-      <!-- ── Recent Activity ─────────────────────────────────────────────── -->
-      <section class="home-section" aria-labelledby="section-activity" data-testid="section-activity">
-        <div class="section-header">
-          <h2 class="section-title" id="section-activity">Recent Activity
-            {#if !activityLoading && activityEvents.length > 0}
-              <span class="section-badge">{activityEvents.length}</span>
-            {/if}
-          </h2>
-        </div>
-        <div class="section-body">
-          {#if activityLoading}
-            <div class="skeleton-row"></div>
-          {:else if activityEvents.length === 0}
-            <p class="empty-text">No recent activity.</p>
-          {:else}
-            <div class="activity-timeline">
-              {#each activityEvents.slice(0, 15) as event, i}
-                {@const variant = activityVariant(event)}
-                {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                <button
-                  class="activity-item activity-item-clickable"
-                  onclick={() => {
-                    if (primaryType && primaryId) {
-                      const data = event.entity_id ? event : primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : {};
-                      nav(primaryType, primaryId, data);
-                    }
-                  }}
-                >
-                  <div class="activity-dot activity-dot-{variant}"></div>
-                  {#if i < Math.min(activityEvents.length, 15) - 1}<div class="activity-line"></div>{/if}
-                  <div class="activity-content">
-                    <span class="activity-icon">{activityIcon(event)}</span>
-                    <span class="activity-label">{activityLabel(event)}</span>
-                    {#if event.entity_name ?? event.title ?? event.description}
-                      <span class="activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
-                    {/if}
-                    {#if event.entity_id && event.entity_type}
-                      <span class="activity-entity-name">{entityName(event.entity_type, event.entity_id)}</span>
-                    {:else}
-                      {#if event.agent_id}
-                        <span class="activity-entity-name">{entityName('agent', event.agent_id)}</span>
-                      {/if}
-                      {#if event.mr_id}
-                        <span class="activity-entity-name">{entityName('mr', event.mr_id)}</span>
-                      {/if}
-                      {#if event.task_id && !event.agent_id}
-                        <span class="activity-entity-name">{entityName('task', event.task_id)}</span>
-                      {/if}
-                      {#if event.spec_path && !event.agent_id && !event.mr_id}
-                        <span class="activity-entity-name">{event.spec_path.split('/').pop()}</span>
-                      {/if}
-                    {/if}
-                    {#if event.repo_id && repoMap[event.repo_id]}
-                      <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
-                    {/if}
-                    {#if event.timestamp ?? event.created_at}
-                      <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                    {/if}
-                  </div>
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      </section>
-
-      <!-- ── Repos ─────────────────────────────────────────────────────── -->
+      <!-- ── Zone 4: Repositories (full-width grid) ──────────────────── -->
       <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
         <div class="section-header">
           <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
+          <div class="repo-header-actions">
+            <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
+            <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
+          </div>
         </div>
         <div class="section-body">
           {#if reposLoading}
             <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
           {:else if reposError}
             <div class="error-row" role="alert">
               <p class="error-text">{reposError}</p>
-              <button class="retry-btn" onclick={loadRepos} aria-label={$t('workspace_home.retry_loading_repos')}>{$t('common.retry')}</button>
+              <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
             </div>
           {:else if repos.length === 0}
             <p class="empty-text" data-testid="repos-empty">{$t('workspace_home.repos_empty')}</p>
           {:else}
-            <ul class="repo-list" role="list">
+            <div class="repo-cards-grid">
               {#each repos as repo (repo.id)}
-                {@const health = repoHealth(repo)}
-                {@const repoTaskCount = wsTasks.filter(t => t.repo_id === repo.id).length}
-                {@const repoActiveTaskCount = wsTasks.filter(t => t.repo_id === repo.id && t.status === 'in_progress').length}
-                {@const repoMrCount = wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id).length}
-                {@const repoOpenMrCount = wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m.status === 'open').length}
-                {@const repoMergedMrCount = wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m.status === 'merged').length}
-                {@const repoAgentCount = wsAgents.filter(a => a.repo_id === repo.id).length}
-                {@const repoActiveAgentCount = wsAgents.filter(a => a.repo_id === repo.id && a.status === 'active').length}
-                {@const repoSpecCount = specs.filter(s => s.repo_id === repo.id).length}
-                {@const repoPendingSpecs = specs.filter(s => s.repo_id === repo.id && (s.approval_status === 'pending' || s.status === 'pending')).length}
-                <li class="repo-row" data-testid="repo-row">
-                  <div
-                    class="repo-btn"
-                    onclick={() => onSelectRepo?.(repo)}
-                    role="button"
-                    tabindex="0"
-                    aria-label={$t('workspace_home.open_repo', { values: { name: repo.name } })}
-                    data-testid="repo-link"
-                    onkeydown={(e) => { if (e.key === 'Enter') onSelectRepo?.(repo); }}
-                  >
-                    <div class="repo-btn-top">
-                      <span class="repo-name">{repo.name}</span>
-                      <span class="repo-health health-{health}" aria-label={$t('workspace_home.repo_status', { values: { status: health } })} data-testid="repo-health">
-                        {#if health === 'healthy'}● {$t('workspace_home.repo_health_healthy')}
-                        {:else if health === 'gate'}⚠ {$t('workspace_home.repo_health_gate')}
-                        {:else}○ {$t('workspace_home.repo_health_idle')}
-                        {/if}
-                      </span>
-                    </div>
-                    {#if repo.description}
-                      <span class="repo-description">{repo.description}</span>
-                    {/if}
-                    <div class="repo-stats-row">
-                      {#if repoSpecCount > 0}
-                        <button class="repo-stat-chip repo-stat-clickable" title="{repoSpecCount} specs{repoPendingSpecs > 0 ? `, ${repoPendingSpecs} pending approval` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'specs'); }}>
-                          <span class="repo-stat-icon">📋</span>
-                          <span class="repo-stat-num">{repoSpecCount}</span>
-                          <span class="repo-stat-label">specs</span>
-                          {#if repoPendingSpecs > 0}<span class="repo-stat-alert">{repoPendingSpecs} pending</span>{/if}
-                        </button>
-                      {/if}
-                      {#if repoTaskCount > 0}
-                        <button class="repo-stat-chip repo-stat-clickable" title="{repoTaskCount} tasks{repoActiveTaskCount > 0 ? `, ${repoActiveTaskCount} in progress` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'tasks'); }}>
-                          <span class="repo-stat-icon">☑</span>
-                          <span class="repo-stat-num">{repoTaskCount}</span>
-                          <span class="repo-stat-label">tasks</span>
-                          {#if repoActiveTaskCount > 0}<span class="repo-stat-active">{repoActiveTaskCount} active</span>{/if}
-                        </button>
-                      {/if}
-                      {#if repoAgentCount > 0}
-                        <button class="repo-stat-chip repo-stat-clickable" title="{repoAgentCount} agents{repoActiveAgentCount > 0 ? `, ${repoActiveAgentCount} running` : ''} — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'agents'); }}>
-                          <span class="repo-stat-icon">▶</span>
-                          <span class="repo-stat-num">{repoAgentCount}</span>
-                          <span class="repo-stat-label">agents</span>
-                          {#if repoActiveAgentCount > 0}<span class="repo-stat-active">{repoActiveAgentCount} running</span>{/if}
-                        </button>
-                      {/if}
-                      {#if repoMrCount > 0}
-                        <button class="repo-stat-chip repo-stat-clickable" title="{repoMrCount} MRs: {repoMergedMrCount} merged, {repoOpenMrCount} open — click to view" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repo, 'mrs'); }}>
-                          <span class="repo-stat-icon">🔀</span>
-                          <span class="repo-stat-num">{repoMrCount}</span>
-                          <span class="repo-stat-label">MRs</span>
-                          {#if repoOpenMrCount > 0}<span class="repo-stat-alert">{repoOpenMrCount} open</span>{/if}
-                          {#if repoMergedMrCount > 0}<span class="repo-stat-merged">{repoMergedMrCount} merged</span>{/if}
-                        </button>
-                      {/if}
-                      {#if repoSpecCount === 0 && repoTaskCount === 0 && repoAgentCount === 0 && repoMrCount === 0}
-                        <span class="repo-stat-chip repo-stat-empty">No activity yet</span>
-                      {/if}
-                    </div>
-                  </div>
-                </li>
+                <RepoCard
+                  {repo}
+                  health={repoHealth(repo)}
+                  stats={repoStats(repo)}
+                  onclick={() => onSelectRepo?.(repo)}
+                />
               {/each}
-            </ul>
+            </div>
           {/if}
-          <div class="repo-actions">
-            <button
-              class="section-btn"
-              data-testid="btn-new-repo"
-              onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }}
-              aria-expanded={newRepoOpen}
-            >{$t('workspace_home.new_repo')}</button>
-            <button
-              class="section-btn"
-              data-testid="btn-import-repo"
-              onclick={() => { importOpen = !importOpen; importName = ''; newRepoOpen = false; }}
-              aria-expanded={importOpen}
-            >{$t('workspace_home.import')}</button>
-          </div>
 
           {#if newRepoOpen}
-            <form
-              class="inline-form"
-              data-testid="new-repo-form"
-              onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}
-            >
+            <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
               <div class="inline-form-header">
                 <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
-                <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }} aria-label="{$t('common.cancel')}">✕</button>
+                <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
               </div>
-              <label class="inline-form-label" for="new-repo-name">{$t('workspace_home.new_repo_name_label')} <span class="required" aria-hidden="true">*</span></label>
-              <input
-                id="new-repo-name"
-                class="inline-form-input"
-                data-testid="new-repo-name-input"
-                type="text"
-                placeholder={$t('workspace_home.new_repo_name_placeholder')}
-                bind:value={newRepoName}
-                required
-                disabled={newRepoLoading}
-              />
-              <label class="inline-form-label" for="new-repo-desc">{$t('workspace_home.new_repo_desc_label')}</label>
-              <input
-                id="new-repo-desc"
-                class="inline-form-input"
-                data-testid="new-repo-description-input"
-                type="text"
-                placeholder={$t('workspace_home.new_repo_desc_placeholder')}
-                bind:value={newRepoDescription}
-                disabled={newRepoLoading}
-              />
-              {#if newRepoError}
-                <p class="inline-form-error" role="alert" data-testid="new-repo-error">{newRepoError}</p>
-              {/if}
+              <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
+              <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
+              {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
               <div class="inline-form-actions">
-                <button type="submit" class="section-btn primary" data-testid="new-repo-submit" disabled={newRepoLoading || !newRepoName.trim()}>
-                  {newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}
-                </button>
+                <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
                 <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
               </div>
             </form>
           {/if}
 
           {#if importOpen}
-            <form
-              class="inline-form"
-              data-testid="import-repo-form"
-              onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}
-            >
+            <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
               <div class="inline-form-header">
                 <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
-                <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; importName = ''; }} aria-label="{$t('common.cancel')}">✕</button>
+                <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
               </div>
-              <label class="inline-form-label" for="import-url">{$t('workspace_home.import_url_label')} <span class="required" aria-hidden="true">*</span></label>
-              <input
-                id="import-url"
-                class="inline-form-input"
-                data-testid="import-url-input"
-                type="url"
-                placeholder={$t('workspace_home.import_url_placeholder')}
-                bind:value={importUrl}
-                required
-                disabled={importLoading}
-              />
-              <label class="inline-form-label" for="import-name">{$t('workspace_home.import_name_label')}</label>
-              <input
-                id="import-name"
-                class="inline-form-input"
-                data-testid="import-name-input"
-                type="text"
-                placeholder={$t('workspace_home.import_name_placeholder')}
-                bind:value={importName}
-                disabled={importLoading}
-              />
-              {#if importError}
-                <p class="inline-form-error" role="alert" data-testid="import-error">{importError}</p>
-              {/if}
+              <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
+              <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
+              {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
               <div class="inline-form-actions">
-                <button type="submit" class="section-btn primary" data-testid="import-submit" disabled={importLoading || !importUrl.trim()}>
-                  {importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}
-                </button>
-                <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; importName = ''; }}>{$t('common.cancel')}</button>
+                <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
+                <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
               </div>
             </form>
           {/if}
         </div>
       </section>
 
-      <!-- ── Briefing ──────────────────────────────────────────────────── -->
-      <section class="home-section home-section-briefing" aria-labelledby="section-briefing" data-testid="section-briefing">
-        <div class="section-header">
-          <h2 class="section-title" id="section-briefing">{$t('workspace_home.sections.briefing')}</h2>
-        </div>
-        <div class="section-body section-body-briefing">
-          <Briefing workspaceId={workspace.id} scope="workspace" workspaceName={workspace.name} />
-        </div>
-      </section>
-
-      <!-- ── Specs (§2: cross-repo spec overview) ────────────────────── -->
-      <section class="home-section" aria-labelledby="section-specs" data-testid="section-specs">
-        <div class="section-header">
-          <h2 class="section-title" id="section-specs">{$t('workspace_home.sections.specs')}</h2>
-          <div class="header-controls">
-            <select
-              class="filter-select"
-              value={specsStatusFilter}
-              onchange={(e) => { specsStatusFilter = e.target.value; }}
-              aria-label={$t('workspace_home.filter_specs_by_status')}
-              data-testid="specs-status-filter"
+      <!-- ── Zone 5: Secondary tabbed panel ────────────────────────────── -->
+      <div class="secondary-panel" data-testid="secondary-tabs">
+        <div class="secondary-tab-bar" role="tablist" aria-label="Workspace data">
+          {#each SECONDARY_TABS as tab}
+            <button
+              class="secondary-tab-btn"
+              class:active={secondaryTab === tab.id}
+              role="tab"
+              aria-selected={secondaryTab === tab.id}
+              onclick={() => { secondaryTab = tab.id; }}
             >
+              {tab.label}
+              {#if tab.id === 'specs' && specs.filter(s => (s.approval_status ?? s.status) === 'pending').length > 0}
+                <span class="tab-count tab-count-warn">{specs.filter(s => (s.approval_status ?? s.status) === 'pending').length}</span>
+              {:else if tab.id === 'tasks' && wsTasks.length > 0}
+                <span class="tab-count">{wsTasks.length}</span>
+              {:else if tab.id === 'mrs' && wsMrs.length > 0}
+                <span class="tab-count">{wsMrs.length}</span>
+              {:else if tab.id === 'agents' && wsAgents.filter(a => a.status === 'active').length > 0}
+                <span class="tab-count tab-count-active">{wsAgents.filter(a => a.status === 'active').length}</span>
+              {/if}
+            </button>
+          {/each}
+        </div>
+
+        <div class="secondary-tab-content">
+        {#if secondaryTab === 'specs'}
+          <!-- ── Specs tab ──────────────────────────────────────────────── -->
+          <div class="tab-header-controls">
+            <select class="filter-select" value={specsStatusFilter} onchange={(e) => { specsStatusFilter = e.target.value; }} aria-label={$t('workspace_home.filter_specs_by_status')} data-testid="specs-status-filter">
               <option value="">{$t('workspace_home.all_statuses')}</option>
               <option value="draft">{$t('workspace_home.status_draft')}</option>
               <option value="pending">{$t('workspace_home.status_pending')}</option>
@@ -1700,8 +1325,6 @@
               <option value="implemented">{$t('workspace_home.status_implemented')}</option>
             </select>
           </div>
-        </div>
-        <div class="section-body">
           {#if specsLoading}
             <div class="skeleton-row"></div>
             <div class="skeleton-row"></div>
@@ -1786,65 +1409,10 @@
               </tbody>
             </table>
           {/if}
-        </div>
-      </section>
 
-      <!-- ── Architecture (collapsible) ──────────────────────────────── -->
-      <section class="home-section" aria-labelledby="section-architecture" data-testid="section-architecture">
-        <button
-          class="arch-toggle-header"
-          onclick={toggleArch}
-          aria-expanded={archExpanded}
-          aria-controls="arch-body"
-          data-testid="arch-toggle"
-        >
-          <h2 class="section-title" id="section-architecture">{$t('workspace_home.sections.architecture')}</h2>
-          {#if archGraph}
-            <span class="arch-stats-inline">
-              {archGraph.nodes?.length ?? 0} nodes · {archGraph.edges?.length ?? 0} edges
-            </span>
-          {/if}
-          <span class="arch-toggle-label" aria-hidden="true">
-            {archExpanded ? '▾ ' + $t('workspace_home.hide_workspace_graph') : '▸ ' + $t('workspace_home.show_workspace_graph')}
-          </span>
-        </button>
-        {#if archExpanded}
-          <div class="section-body arch-body" id="arch-body" data-testid="arch-body">
-            {#if archLoading}
-              <div class="skeleton-row"></div>
-              <div class="skeleton-row"></div>
-            {:else if archError}
-              <div class="error-row" role="alert">
-                <p class="error-text">{archError}</p>
-                <button class="retry-btn" onclick={loadArchGraph} aria-label={$t('workspace_home.retry_loading_graph')}>{$t('common.retry')}</button>
-              </div>
-            {:else if archGraph}
-              <div class="arch-canvas-wrap" data-testid="arch-canvas">
-                <ExplorerCanvas
-                  nodes={archGraph.nodes ?? []}
-                  edges={archGraph.edges ?? []}
-                  workspaceId={workspace.id}
-                  scope="workspace"
-                />
-              </div>
-            {/if}
-          </div>
-        {/if}
-      </section>
-
-      <!-- ── Tasks ──────────────────────────────────────────────────────── -->
-      <section class="home-section" aria-labelledby="section-tasks" data-testid="section-tasks">
-        <div class="section-header">
-          <h2 class="section-title" id="section-tasks">Tasks
-            {#if !tasksLoading && wsTasks.length > 0}
-              <span class="section-badge">{wsTasks.length}</span>
-            {/if}
-          </h2>
-          {#if wsTasks.length > 10 && repos.length === 1}
-            <button class="section-action-btn" onclick={() => viewAllForTab('tasks')}>View All</button>
-          {/if}
-        </div>
-        <div class="section-body">
+        {:else if secondaryTab === 'tasks'}
+          <!-- ── Tasks tab ──────────────────────────────────────────────── -->
+        <div class="tab-body" data-testid="section-tasks">
           {#if tasksLoading}
             <div class="skeleton-row"></div>
           {:else if wsTasks.length === 0}
@@ -1896,21 +1464,10 @@
             {/if}
           {/if}
         </div>
-      </section>
 
-      <!-- ── Merge Requests ──────────────────────────────────────────────── -->
-      <section class="home-section" aria-labelledby="section-mrs" data-testid="section-mrs">
-        <div class="section-header">
-          <h2 class="section-title" id="section-mrs">Merge Requests
-            {#if !mrsLoading && wsMrs.length > 0}
-              <span class="section-badge">{wsMrs.length}</span>
-            {/if}
-          </h2>
-          {#if wsMrs.length > 10 && repos.length === 1}
-            <button class="section-action-btn" onclick={() => viewAllForTab('mrs')}>View All</button>
-          {/if}
-        </div>
-        <div class="section-body">
+        {:else if secondaryTab === 'mrs'}
+          <!-- ── MRs tab ────────────────────────────────────────────────── -->
+        <div class="tab-body" data-testid="section-mrs">
           {#if mrsLoading}
             <div class="skeleton-row"></div>
           {:else if wsMrs.length === 0}
@@ -1989,82 +1546,10 @@
             {/if}
           {/if}
         </div>
-      </section>
 
-      <!-- ── Merge Queue ──────────────────────────────────────────────────── -->
-      {#if !mergeQueueLoading && mergeQueueItems.length > 0}
-        <section class="home-section" aria-labelledby="section-merge-queue" data-testid="section-merge-queue">
-          <div class="section-header">
-            <h2 class="section-title" id="section-merge-queue">Merge Queue
-              <span class="section-badge">{mergeQueueItems.length}</span>
-            </h2>
-          </div>
-          <div class="section-body">
-            <div class="merge-queue-pipeline">
-              {#each mergeQueueItems as item, idx}
-                {@const mrId = item.merge_request_id ?? item.mr_id}
-                <div class="mq-item" class:mq-item-first={idx === 0}>
-                  <div class="mq-item-position">#{idx + 1}</div>
-                  <div class="mq-item-content">
-                    <button class="mq-item-title" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">
-                      {item._title}
-                    </button>
-                    <div class="mq-item-meta">
-                      {#if item._branch}
-                        <span class="mq-branch mono">{item._branch}</span>
-                      {/if}
-                      {#if item._agent}
-                        <button class="ws-entity-link mq-agent" onclick={(e) => { e.stopPropagation(); nav('agent', item._agent, { repo_id: item.repository_id ?? item.repo_id }); }} title={item._agent}>
-                          {entityName('agent', item._agent)}
-                        </button>
-                      {/if}
-                      {#if item._spec_ref}
-                        {@const specPath = item._spec_ref.split('@')[0]}
-                        <button class="ws-entity-link mq-spec" onclick={(e) => { e.stopPropagation(); nav('spec', specPath, { path: specPath }); }} title={item._spec_ref}>
-                          {specPath.split('/').pop()}
-                        </button>
-                      {/if}
-                    </div>
-                    {#if item._deps.length > 0 || item._blocks.length > 0}
-                      <div class="mq-deps">
-                        {#if item._deps.length > 0}
-                          <span class="mq-dep-label">waits for</span>
-                          {#each item._deps as depId}
-                            <button class="mq-dep-link" onclick={(e) => { e.stopPropagation(); nav('mr', depId, { repository_id: item.repository_id ?? item.repo_id }); }} title="View dependency">{entityName('mr', depId)}</button>
-                          {/each}
-                        {/if}
-                        {#if item._blocks.length > 0}
-                          <span class="mq-dep-label">blocks</span>
-                          {#each item._blocks as blockId}
-                            <button class="mq-dep-link" onclick={(e) => { e.stopPropagation(); nav('mr', blockId, { repository_id: item.repository_id ?? item.repo_id }); }} title="View dependent">{entityName('mr', blockId)}</button>
-                          {/each}
-                        {/if}
-                      </div>
-                    {/if}
-                  </div>
-                  <div class="mq-item-status">
-                    <span class="mq-status-badge mq-status-{item.status ?? 'waiting'}">{item.status ?? 'waiting'}</span>
-                  </div>
-                  {#if idx < mergeQueueItems.length - 1}
-                    <div class="mq-connector"></div>
-                  {/if}
-                </div>
-              {/each}
-            </div>
-          </div>
-        </section>
-      {/if}
-
-      <!-- ── Agents ──────────────────────────────────────────────────────── -->
-      <section class="home-section" aria-labelledby="section-agents" data-testid="section-agents">
-        <div class="section-header">
-          <h2 class="section-title" id="section-agents">Agents
-            {#if !agentsLoading && wsAgents.length > 0}
-              <span class="section-badge">{wsAgents.length}</span>
-            {/if}
-          </h2>
-        </div>
-        <div class="section-body">
+        {:else if secondaryTab === 'agents'}
+          <!-- ── Agents tab ─────────────────────────────────────────────── -->
+        <div class="tab-body" data-testid="section-agents">
           {#if agentsLoading}
             <div class="skeleton-row"></div>
           {:else if wsAgents.length === 0}
@@ -2106,200 +1591,132 @@
 
           {/if}
         </div>
-      </section>
 
-      <!-- ── Budget & Cost ──────────────────────────────────────────────── -->
-      <section class="home-section" aria-labelledby="section-budget" data-testid="section-budget">
-        <div class="section-header">
-          <h2 class="section-title" id="section-budget">Budget & Cost</h2>
-        </div>
-        <div class="section-body">
-          {#if budgetLoading}
-            <div class="skeleton-row"></div>
-          {:else if budgetData || costData}
-            <div class="budget-overview">
-              {#if budgetData}
-                {@const config = budgetData.config ?? budgetData}
-                {@const usage = budgetData.usage ?? {}}
-                <div class="budget-meters">
-                  {#if config.max_concurrent_agents != null}
-                    {@const activeCount = wsAgents.filter(a => a.status === 'active').length}
-                    {@const pct = config.max_concurrent_agents > 0 ? Math.round((activeCount / config.max_concurrent_agents) * 100) : 0}
-                    <div class="budget-meter">
-                      <div class="budget-meter-header">
-                        <span class="budget-meter-label">Concurrent Agents</span>
-                        <span class="budget-meter-value">{activeCount} of {config.max_concurrent_agents} agent {config.max_concurrent_agents === 1 ? 'slot' : 'slots'} used</span>
-                      </div>
-                      <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
-                        <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
-                      </div>
+        {:else if secondaryTab === 'activity'}
+          <!-- ── Activity tab ───────────────────────────────────────────── -->
+          <div class="tab-body" data-testid="section-activity">
+            {#if activityLoading}
+              <div class="skeleton-row"></div>
+            {:else if activityEvents.length === 0}
+              <p class="empty-text">No recent activity.</p>
+            {:else}
+              <div class="activity-timeline">
+                {#each activityEvents.slice(0, 20) as event, i}
+                  {@const variant = activityVariant(event)}
+                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                  <button
+                    class="activity-item activity-item-clickable"
+                    onclick={() => {
+                      if (primaryType && primaryId) {
+                        const data = event.entity_id ? event : primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : {};
+                        nav(primaryType, primaryId, data);
+                      }
+                    }}
+                  >
+                    <div class="activity-dot activity-dot-{variant}"></div>
+                    {#if i < Math.min(activityEvents.length, 20) - 1}<div class="activity-line"></div>{/if}
+                    <div class="activity-content">
+                      <span class="activity-icon">{activityIcon(event)}</span>
+                      <span class="activity-label">{activityLabel(event)}</span>
+                      {#if event.entity_name ?? event.title ?? event.description}
+                        <span class="activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
+                      {/if}
+                      {#if event.repo_id && repoMap[event.repo_id]}
+                        <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
+                      {/if}
+                      {#if event.timestamp ?? event.created_at}
+                        <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                      {/if}
                     </div>
-                  {/if}
-                  {#if config.max_tokens_per_day != null}
-                    {@const usedTokens = usage.tokens_today ?? 0}
-                    {@const pct = config.max_tokens_per_day > 0 ? Math.round((usedTokens / config.max_tokens_per_day) * 100) : 0}
-                    <div class="budget-meter">
-                      <div class="budget-meter-header">
-                        <span class="budget-meter-label">Tokens Today</span>
-                        <span class="budget-meter-value">{usedTokens.toLocaleString()} of {config.max_tokens_per_day.toLocaleString()} tokens used ({pct}%)</span>
-                      </div>
-                      <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
-                        <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
-                      </div>
-                    </div>
-                  {/if}
-                  {#if config.max_cost_per_day != null}
-                    {@const usedCost = usage.cost_today ?? 0}
-                    {@const pct = config.max_cost_per_day > 0 ? Math.round((usedCost / config.max_cost_per_day) * 100) : 0}
-                    <div class="budget-meter">
-                      <div class="budget-meter-header">
-                        <span class="budget-meter-label">Cost Today</span>
-                        <span class="budget-meter-value">${usedCost.toFixed(2)} of ${config.max_cost_per_day.toFixed(2)} budget used ({pct}%)</span>
-                      </div>
-                      <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
-                        <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
-                      </div>
-                    </div>
-                  {/if}
-                </div>
-              {:else}
-                <p class="empty-text">No budget limits configured for this workspace.</p>
-              {/if}
-              {#if costData}
-                {@const entries = Array.isArray(costData) ? costData : (costData.entries ?? costData.agents ?? [])}
-                {#if entries.length > 0}
-                  <div class="cost-breakdown">
-                    <span class="progress-section-label">Cost by Agent</span>
-                    <table class="entity-table entity-table-compact">
-                      <thead>
-                        <tr>
-                          <th>Agent</th>
-                          <th>Tokens</th>
-                          <th>Cost</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {#each entries.slice(0, 5) as entry}
-                          <tr class="entity-row" onclick={() => nav('agent', entry.agent_id, { repo_id: entry.repo_id })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('agent', entry.agent_id, { repo_id: entry.repo_id }); }}>
-                            <td class="cell-title">{entityName('agent', entry.agent_id)}</td>
-                            <td>{(entry.total_tokens ?? entry.tokens ?? 0).toLocaleString()}</td>
-                            <td>${(entry.total_cost ?? entry.cost ?? 0).toFixed(2)}</td>
-                          </tr>
-                        {/each}
-                      </tbody>
-                    </table>
-                  </div>
-                {/if}
-              {/if}
-            </div>
-          {:else}
-            <p class="empty-text">No budget configured. Set limits in workspace settings to track agent resource usage.</p>
-          {/if}
-        </div>
-      </section>
-
-      <!-- ── Audit Log ──────────────────────────────────────────────────── -->
-      {#if !auditLoading && auditEvents.length > 0}
-        <section class="home-section" aria-labelledby="section-audit" data-testid="section-audit">
-          <div class="section-header">
-            <h2 class="section-title" id="section-audit">Audit Log
-              <span class="section-badge">{auditEvents.length}</span>
-            </h2>
-          </div>
-          <div class="section-body">
-            <div class="activity-timeline">
-              {#each auditEvents.slice(0, 8) as event}
-                {@const eventType = event.event_type ?? event.action ?? event.type ?? 'event'}
-                {@const actor = event.actor ?? event.user_id ?? event.agent_id ?? '—'}
-                {@const target = event.target ?? event.entity_type ?? ''}
-                {@const targetId = event.target_id ?? event.entity_id ?? ''}
-                {@const clickableType = target === 'agent' || target === 'mr' || target === 'task' || target === 'spec' ? target : null}
-                <button
-                  class="activity-item activity-item-clickable"
-                  onclick={() => {
-                    if (clickableType && targetId) {
-                      const data = clickableType === 'spec' ? { path: targetId, repo_id: event.repo_id } : {};
-                      nav(clickableType, targetId, data);
-                    }
-                  }}
-                  disabled={!clickableType || !targetId}
-                >
-                  <div class="activity-dot activity-dot-info"></div>
-                  <div class="activity-content">
-                    <span class="activity-label">{eventType.replace(/_/g, ' ')}</span>
-                    {#if target}
-                      <span class="activity-detail">{target}{#if targetId}: <span class="mono">{entityName(target, targetId)}</span>{/if}</span>
-                    {/if}
-                    <span class="activity-entity-name mono">{actor.length > 12 ? entityName('agent', actor) : actor}</span>
-                    {#if event.timestamp ?? event.created_at}
-                      <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                    {/if}
-                  </div>
-                </button>
-              {/each}
-            </div>
-          </div>
-        </section>
-      {/if}
-
-      <!-- ── Agent Rules ───────────────────────────────────────────────── -->
-      <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
-        <div class="section-header">
-          <h2 class="section-title" id="section-agent-rules">{$t('workspace_home.sections.agent_rules')}</h2>
-          <button
-            class="section-action-btn"
-            data-testid="manage-rules-link"
-            onclick={() => goToAgentRules?.()}
-          >{$t('workspace_home.manage_rules')}</button>
-        </div>
-        <div class="section-body">
-          {#if rulesLoading}
-            <div class="skeleton-row"></div>
-          {:else if rulesError}
-            <div class="error-row" role="alert">
-              <p class="error-text">{rulesError}</p>
-              <button class="retry-btn" onclick={loadRules} aria-label={$t('workspace_home.retry_loading_rules')}>{$t('common.retry')}</button>
-            </div>
-          {:else}
-            <p class="rules-summary" data-testid="rules-summary">
-              {$t('workspace_home.rules_summary', { values: { count: allMetaSpecs.length } })}
-              {#if requiredMetaSpecs.length > 0}
-                {$t('workspace_home.rules_summary_required', { values: { count: requiredMetaSpecs.length } })}
-              {/if}
-            </p>
-
-            {#if recentlyUpdated.length > 0}
-              <div class="reconcile-status" role="status" data-testid="reconcile-status">
-                {$t('workspace_home.rules_reconciling', { values: { count: recentlyUpdated.length } })}
+                  </button>
+                {/each}
               </div>
             {/if}
+          </div>
 
-            {#if requiredMetaSpecs.length > 0}
-              <ul class="rules-list" role="list" data-testid="rules-list">
-                {#each requiredMetaSpecs as ms (ms.id)}
-                  <li class="rule-item" data-testid="rule-item">
-                    <span class="rule-lock" aria-label={$t('workspace_home.rule_required_label')} aria-hidden="true">🔒</span>
-                    <span class="rule-name">{ms.name}</span>
-                    <span class="rule-scope" data-testid="rule-scope">{ms._scope === 'tenant' ? $t('workspace_home.scope_tenant') : $t('workspace_home.scope_workspace')}</span>
-                    {#if ms.kind}
-                      <span class="rule-kind">{ms.kind.replace('meta:', '')}</span>
+        {:else if secondaryTab === 'budget'}
+          <!-- ── Budget tab ─────────────────────────────────────────────── -->
+          <div class="tab-body" data-testid="section-budget">
+            {#if budgetLoading}
+              <div class="skeleton-row"></div>
+            {:else if budgetData || costData}
+              <div class="budget-overview">
+                {#if budgetData}
+                  {@const config = budgetData.config ?? budgetData}
+                  {@const usage = budgetData.usage ?? {}}
+                  <div class="budget-meters">
+                    {#if config.max_concurrent_agents != null}
+                      {@const activeCount = wsAgents.filter(a => a.status === 'active').length}
+                      {@const pct = config.max_concurrent_agents > 0 ? Math.round((activeCount / config.max_concurrent_agents) * 100) : 0}
+                      <div class="budget-meter">
+                        <div class="budget-meter-header">
+                          <span class="budget-meter-label">Concurrent Agents</span>
+                          <span class="budget-meter-value">{activeCount} / {config.max_concurrent_agents}</span>
+                        </div>
+                        <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
+                          <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
+                        </div>
+                      </div>
                     {/if}
-                    {#if ms.version}
-                      <span class="rule-version">v{ms.version}</span>
+                    {#if config.max_tokens_per_day != null}
+                      {@const usedTokens = usage.tokens_today ?? 0}
+                      {@const pct = config.max_tokens_per_day > 0 ? Math.round((usedTokens / config.max_tokens_per_day) * 100) : 0}
+                      <div class="budget-meter">
+                        <div class="budget-meter-header">
+                          <span class="budget-meter-label">Tokens Today</span>
+                          <span class="budget-meter-value">{usedTokens.toLocaleString()} / {config.max_tokens_per_day.toLocaleString()} ({pct}%)</span>
+                        </div>
+                        <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
+                          <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
+                        </div>
+                      </div>
                     {/if}
-                  </li>
-                {/each}
-              </ul>
-            {:else if allMetaSpecs.length === 0}
-              <p class="empty-text">{$t('workspace_home.rules_no_metaspecs')}</p>
+                    {#if config.max_cost_per_day != null}
+                      {@const usedCost = usage.cost_today ?? 0}
+                      {@const pct = config.max_cost_per_day > 0 ? Math.round((usedCost / config.max_cost_per_day) * 100) : 0}
+                      <div class="budget-meter">
+                        <div class="budget-meter-header">
+                          <span class="budget-meter-label">Cost Today</span>
+                          <span class="budget-meter-value">${usedCost.toFixed(2)} / ${config.max_cost_per_day.toFixed(2)} ({pct}%)</span>
+                        </div>
+                        <div class="progress-bar-track" role="progressbar" aria-valuenow={pct} aria-valuemin="0" aria-valuemax="100">
+                          <div class="progress-bar-fill" class:progress-bar-warn={pct > 80} class:progress-bar-danger={pct > 95} style="width: {Math.min(pct, 100)}%"></div>
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                {:else}
+                  <p class="empty-text">No budget limits configured.</p>
+                {/if}
+                {#if costData}
+                  {@const entries = Array.isArray(costData) ? costData : (costData.entries ?? costData.agents ?? [])}
+                  {#if entries.length > 0}
+                    <div class="cost-breakdown">
+                      <span class="progress-section-label">Cost by Agent</span>
+                      <table class="ws-entity-table">
+                        <thead><tr><th>Agent</th><th>Tokens</th><th>Cost</th></tr></thead>
+                        <tbody>
+                          {#each entries.slice(0, 5) as entry}
+                            <tr class="ws-entity-row" onclick={() => nav('agent', entry.agent_id, { repo_id: entry.repo_id })} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') nav('agent', entry.agent_id, { repo_id: entry.repo_id }); }}>
+                              <td class="ws-cell-title">{entityName('agent', entry.agent_id)}</td>
+                              <td>{(entry.total_tokens ?? entry.tokens ?? 0).toLocaleString()}</td>
+                              <td>${(entry.total_cost ?? entry.cost ?? 0).toFixed(2)}</td>
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                  {/if}
+                {/if}
+              </div>
+            {:else}
+              <p class="empty-text">No budget configured. Set limits in workspace settings.</p>
             {/if}
-          {/if}
+          </div>
+        {/if}
         </div>
-      </section>
-
-    </div>
-        </div>
-      </details>
+      </div>
     </div><!-- .focused-dashboard -->
   {/if}
 </div>
@@ -2341,93 +1758,26 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
+    gap: var(--space-5);
     padding: var(--space-4) var(--space-6);
-    max-width: 1100px;
+    max-width: 1400px;
     margin: 0 auto;
     width: 100%;
   }
 
-  .home-main-grid {
-    display: grid;
-    grid-template-columns: 1fr 320px;
-    gap: var(--space-4);
-  }
-
-  @media (max-width: 900px) {
-    .home-main-grid { grid-template-columns: 1fr; }
-  }
-
-  .home-main-left, .home-main-right {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-  }
-
-  .home-compact-section {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .compact-section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .compact-section-title {
-    font-family: var(--font-display);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text);
-    margin: 0;
-  }
-
-  .compact-action-btn {
-    background: transparent;
-    border: 1px solid var(--color-border);
-    color: var(--color-link);
-    padding: var(--space-1) var(--space-2);
-    border-radius: var(--radius-sm);
-    font-size: var(--text-xs);
-    cursor: pointer;
-    font-family: var(--font-body);
-  }
-
-  .compact-action-btn:hover { border-color: var(--color-link); }
-
-  .compact-loading, .compact-empty {
-    font-size: var(--text-sm);
-    color: var(--color-text-muted);
-    font-style: italic;
-    margin: 0;
-  }
-
+  /* ── Repo cards grid (responsive) ──────────────────────────────────── */
   .repo-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: var(--space-3);
+  }
+
+  .repo-header-actions {
     display: flex;
-    flex-direction: column;
     gap: var(--space-2);
   }
 
-  .activity-feed {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .activity-feed-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-1) 0;
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-  }
-
+  /* ── Activity dots ─────────────────────────────────────────────────── */
   .activity-dot {
     width: 6px;
     height: 6px;
@@ -2441,62 +1791,88 @@
   .activity-dot-warning { background: var(--color-warning); }
   .activity-dot-info { background: var(--color-info, #1e90ff); }
 
-  .activity-feed-text {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .activity-feed-time {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
-  .home-details {
+  /* ── Secondary tab bar ─────────────────────────────────────────────── */
+  .secondary-panel {
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     background: var(--color-surface);
+    overflow: hidden;
   }
 
-  .home-details-summary {
+  .secondary-tab-bar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    border-bottom: 1px solid var(--color-border);
+    overflow-x: auto;
+    background: var(--color-surface);
+    padding: 0 var(--space-2);
+  }
+
+  .secondary-tab-btn {
+    padding: var(--space-3) var(--space-4);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+    margin-bottom: -1px;
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-3) var(--space-4);
-    cursor: pointer;
-    font-size: var(--text-sm);
+  }
+
+  .secondary-tab-btn:hover { color: var(--color-text); }
+
+  .secondary-tab-btn.active {
+    color: var(--color-text);
+    border-bottom-color: var(--color-primary);
+    font-weight: 500;
+  }
+
+  .secondary-tab-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  .tab-count {
+    font-size: 10px;
+    background: var(--color-border);
     color: var(--color-text-secondary);
-    font-family: var(--font-body);
-    user-select: none;
-    list-style: none;
+    border-radius: 8px;
+    padding: 0 5px;
+    min-width: 16px;
+    text-align: center;
+    line-height: 16px;
   }
 
-  .home-details-summary::-webkit-details-marker { display: none; }
+  .tab-count-warn { background: var(--color-warning); color: var(--color-text); }
+  .tab-count-active { background: var(--color-success); color: #fff; }
 
-  .home-details-summary:hover { color: var(--color-text); }
-
-  .details-chevron {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    flex-shrink: 0;
+  .secondary-tab-content {
+    padding: var(--space-4);
+    overflow-y: auto;
+    max-height: 600px;
   }
 
-  .home-details-content {
-    padding: 0 var(--space-4) var(--space-4);
-  }
+  .tab-body { min-height: 100px; }
 
-  .sections-collapsed {
-    display: none;
+  .tab-header-controls {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: var(--space-3);
   }
 
   /* ═══ Original styles ══════════════════════════════════════════════════ */
   .workspace-home {
     flex: 1;
     overflow-y: auto;
-    padding: var(--space-6) var(--space-8);
-    max-width: 860px;
+    padding: var(--space-4) var(--space-6);
+    max-width: 1400px;
     margin: 0 auto;
     width: 100%;
   }
