@@ -53,20 +53,40 @@
     return URGENCY[normType(n.notification_type)] ?? { color: 'var(--color-text-muted)', icon: 'i', label: 'Info' };
   }
 
+  function parseBody(n) {
+    try { return typeof n.body === 'string' ? JSON.parse(n.body) : (n.body ?? {}); }
+    catch { return {}; }
+  }
+
   function getTitle(n) {
+    const body = parseBody(n);
+    const nt = normType(n.notification_type);
+    // Provide context-rich titles instead of raw notification text
+    if (nt === 'gate_failure' && body.gate_name) {
+      return `Gate "${body.gate_name}" failed${body.mr_title ? ` on "${body.mr_title}"` : ''}`;
+    }
+    if (nt === 'spec_approval') {
+      const specName = (body.spec_path ?? n.title ?? '').split('/').pop()?.replace(/\.md$/, '') ?? 'spec';
+      return `Spec "${specName}" needs your approval before agents can begin`;
+    }
+    if (nt === 'agent_failed' && body.agent_name) {
+      return `Agent "${body.agent_name}" failed${body.error ? `: ${body.error}` : ''}`;
+    }
     return n.title ?? n.message ?? normType(n.notification_type).replace(/_/g, ' ');
   }
 
   function getEntityType(n) {
-    if (n.spec_path) return 'spec';
-    if (n.mr_id) return 'mr';
-    if (n.agent_id) return 'agent';
-    if (n.task_id) return 'task';
+    const body = parseBody(n);
+    if (body.spec_path ?? n.spec_path) return 'spec';
+    if (body.mr_id ?? n.mr_id) return 'mr';
+    if (body.agent_id ?? n.agent_id) return 'agent';
+    if (body.task_id ?? n.task_id) return 'task';
     return null;
   }
 
   function getEntityId(n) {
-    return n.spec_path ?? n.mr_id ?? n.agent_id ?? n.task_id ?? null;
+    const body = parseBody(n);
+    return body.spec_path ?? n.spec_path ?? body.mr_id ?? n.mr_id ?? body.agent_id ?? n.agent_id ?? body.task_id ?? n.task_id ?? null;
   }
 
   function handleClick(n) {
