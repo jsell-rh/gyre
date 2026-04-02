@@ -15,6 +15,9 @@
   import { api } from '../lib/api.js';
   import { entityName, shortId, seedEntityName } from '../lib/entityNames.svelte.js';
   import { relativeTime, formatDuration } from '../lib/timeFormat.js';
+  import ActionNeeded from './ActionNeeded.svelte';
+  import PipelineOverview from './PipelineOverview.svelte';
+  import RepoCard from './RepoCard.svelte';
   import Briefing from './Briefing.svelte';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import Modal from '../lib/Modal.svelte';
@@ -775,6 +778,52 @@
     }
   }
 
+  // ── Pipeline overview computed stats ────────────────────────────────────
+  let pipelineSpecs = $derived({
+    total: specs.length,
+    pending: specs.filter(s => (s.approval_status ?? s.status) === 'pending').length,
+    approved: specs.filter(s => (s.approval_status ?? s.status) === 'approved').length,
+  });
+  let pipelineTasks = $derived({
+    total: wsTasks.length,
+    in_progress: wsTasks.filter(t => t.status === 'in_progress').length,
+    blocked: wsTasks.filter(t => t.status === 'blocked').length,
+    done: wsTasks.filter(t => t.status === 'done').length,
+  });
+  let pipelineAgents = $derived({
+    total: wsAgents.length,
+    active: wsAgents.filter(a => a.status === 'active').length,
+  });
+  let pipelineMrs = $derived({
+    total: wsMrs.length,
+    open: wsMrs.filter(m => m.status === 'open').length,
+    merged: wsMrs.filter(m => m.status === 'merged').length,
+    failed_gates: 0,
+  });
+
+  // ── Collapsible detail sections ───────────────────────────────────────
+  let detailsExpanded = $state(false);
+
+  // ── Repo card data ────────────────────────────────────────────────────
+  // repoHealth(repo) function already defined above (line ~265)
+
+  function repoStats(repo) {
+    return {
+      specs: specs.filter(s => s.repo_id === repo.id).length,
+      tasks: wsTasks.filter(t => t.repo_id === repo.id).length,
+      agents: wsAgents.filter(a => a.repo_id === repo.id && a.status === 'active').length,
+      mrs: wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id).length,
+      last_activity: null,
+    };
+  }
+
+  function handlePipelineStageClick(stageId) {
+    if (stageId === 'specs') {
+      document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (!detailsExpanded) detailsExpanded = true;
+    }
+  }
+
   // ── Merge Queue state ───────────────────────────────────────────────────
   let mergeQueueLoading = $state(true);
   let mergeQueueItems = $state([]);
@@ -1007,6 +1056,80 @@
       </button>
     </div>
   {:else}
+    <!-- ═══ Focused Dashboard (replaces cluttered section soup) ═══════ -->
+    <div class="focused-dashboard">
+
+      <!-- Zone 1: Action Needed -->
+      <ActionNeeded items={notifications} />
+
+      <!-- Zone 2: Pipeline Overview -->
+      <PipelineOverview
+        specs={pipelineSpecs}
+        tasks={pipelineTasks}
+        agents={pipelineAgents}
+        mrs={pipelineMrs}
+        onStageClick={handlePipelineStageClick}
+      />
+
+      <!-- Zone 3: Main Content — two-column layout -->
+      <div class="home-main-grid">
+        <!-- Left: Activity + Briefing -->
+        <div class="home-main-left">
+          {#if activityEvents.length > 0}
+            <section class="home-compact-section">
+              <h3 class="compact-section-title">Recent Activity</h3>
+              <ul class="activity-feed">
+                {#each activityEvents.slice(0, 8) as event}
+                  <li class="activity-feed-item">
+                    <span class="activity-dot activity-dot-{event._color ?? 'muted'}" aria-hidden="true"></span>
+                    <span class="activity-feed-text">{event._label ?? event.event_type?.replace(/_/g, ' ') ?? 'Event'}</span>
+                    <span class="activity-feed-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                  </li>
+                {/each}
+              </ul>
+            </section>
+          {/if}
+
+          <section class="home-compact-section">
+            <Briefing workspaceId={workspace?.id} scope="workspace" workspaceName={workspace?.name ?? null} trustLevel={workspace?.trust_level ?? null} />
+          </section>
+        </div>
+
+        <!-- Right: Repos -->
+        <div class="home-main-right">
+          <section class="home-compact-section">
+            <div class="compact-section-header">
+              <h3 class="compact-section-title">Repositories ({repos.length})</h3>
+              <button class="compact-action-btn" onclick={() => { newRepoOpen = true; detailsExpanded = true; }}>+ New</button>
+            </div>
+            {#if reposLoading}
+              <p class="compact-loading">Loading...</p>
+            {:else if repos.length === 0}
+              <p class="compact-empty">No repositories yet</p>
+            {:else}
+              <div class="repo-cards-grid">
+                {#each repos as repo}
+                  <RepoCard
+                    {repo}
+                    health={repoHealth(repo)}
+                    stats={repoStats(repo)}
+                    onclick={() => onSelectRepo?.(repo)}
+                  />
+                {/each}
+              </div>
+            {/if}
+          </section>
+        </div>
+      </div>
+
+      <!-- Zone 4: Expandable Details -->
+      <details class="home-details" bind:open={detailsExpanded}>
+        <summary class="home-details-summary">
+          <span class="details-chevron" aria-hidden="true">{detailsExpanded ? '\u25BC' : '\u25B6'}</span>
+          All sections (Specs, Tasks, MRs, Agents, Architecture, Budget, Audit)
+        </summary>
+        <div class="home-details-content">
+
     <div class="sections">
 
       <!-- ── Provenance Pipeline Summary ──────────────────────────────── -->
@@ -2175,6 +2298,9 @@
       </section>
 
     </div>
+        </div>
+      </details>
+    </div><!-- .focused-dashboard -->
   {/if}
 </div>
 
@@ -2211,6 +2337,161 @@
 </Modal>
 
 <style>
+  /* ═══ Focused Dashboard ═══════════════════════════════════════════════ */
+  .focused-dashboard {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-6);
+    max-width: 1100px;
+    margin: 0 auto;
+    width: 100%;
+  }
+
+  .home-main-grid {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: var(--space-4);
+  }
+
+  @media (max-width: 900px) {
+    .home-main-grid { grid-template-columns: 1fr; }
+  }
+
+  .home-main-left, .home-main-right {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .home-compact-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .compact-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .compact-section-title {
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+
+  .compact-action-btn {
+    background: transparent;
+    border: 1px solid var(--color-border);
+    color: var(--color-link);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    font-family: var(--font-body);
+  }
+
+  .compact-action-btn:hover { border-color: var(--color-link); }
+
+  .compact-loading, .compact-empty {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    font-style: italic;
+    margin: 0;
+  }
+
+  .repo-cards-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .activity-feed {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .activity-feed-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .activity-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--color-text-muted);
+  }
+
+  .activity-dot-success { background: var(--color-success); }
+  .activity-dot-danger { background: var(--color-danger); }
+  .activity-dot-warning { background: var(--color-warning); }
+  .activity-dot-info { background: var(--color-info, #1e90ff); }
+
+  .activity-feed-text {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .activity-feed-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .home-details {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+  }
+
+  .home-details-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    user-select: none;
+    list-style: none;
+  }
+
+  .home-details-summary::-webkit-details-marker { display: none; }
+
+  .home-details-summary:hover { color: var(--color-text); }
+
+  .details-chevron {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .home-details-content {
+    padding: 0 var(--space-4) var(--space-4);
+  }
+
+  .sections-collapsed {
+    display: none;
+  }
+
+  /* ═══ Original styles ══════════════════════════════════════════════════ */
   .workspace-home {
     flex: 1;
     overflow-y: auto;
