@@ -6,6 +6,7 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
+  import { shortId } from '../lib/entityNames.svelte.js';
   import { getContext } from 'svelte';
 
   const navigate = getContext('navigate');
@@ -365,7 +366,7 @@
           {#each workspaces as ws}
             <div class="membership-item">
               <div class="membership-info">
-                <span class="membership-name" title={ws.name ?? ws.slug ?? ws.id}>{ws.name ?? ws.slug ?? ws.id}</span>
+                <span class="membership-name" title={ws.name ?? ws.slug ?? ws.id}>{ws.name ?? ws.slug ?? shortId(ws.id)}</span>
                 {#if ws.role}
                   <Badge value={ws.role} variant="muted" />
                 {/if}

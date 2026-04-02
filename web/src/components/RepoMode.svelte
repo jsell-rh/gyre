@@ -737,7 +737,7 @@
                 aria-label={$t('repo_mode.agent_label', { values: { name: agent.name ?? agent.id } })}
               >
                 <div class="agent-row-info">
-                  <span class="agent-row-name">{agent.name ?? agent.id}</span>
+                  <span class="agent-row-name">{agent.name ?? shortId(agent.id)}</span>
                   <span class="agent-row-status agent-status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span>
                 </div>
                 {#if tId}

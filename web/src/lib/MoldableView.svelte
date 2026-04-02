@@ -5,6 +5,7 @@
   import EmptyState from './EmptyState.svelte';
   import { api } from './api.js';
   import { toast as showToast } from './toast.svelte.js';
+  import { entityName, shortId } from './entityNames.svelte.js';
   import { t } from 'svelte-i18n';
 
   let {
@@ -513,7 +514,7 @@
               {#if selectedDelta.agent_id}
                 <div class="delta-row">
                   <span class="delta-label">{$t('moldable_view.delta_agent')}</span>
-                  <span class="delta-value mono">{selectedDelta.agent_id}</span>
+                  <span class="delta-value mono">{entityName('agent', selectedDelta.agent_id)}</span>
                 </div>
               {/if}
               {#if selectedDelta.delta_json}

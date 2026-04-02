@@ -19,7 +19,7 @@
   import { getContext, onDestroy } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
-  import { entityName } from '../lib/entityNames.svelte.js';
+  import { entityName, shortId } from '../lib/entityNames.svelte.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -1005,7 +1005,7 @@
                       <div class="binding-list">
                         {#each blastResult.affected_workspaces as ws}
                           <div class="binding-row">
-                            <span class="mono">{ws.id}</span>
+                            <span class="mono">{ws.name ?? shortId(ws.id)}</span>
                             <Badge value={$t('meta_specs.impact.active')} variant="success" />
                           </div>
                         {/each}
