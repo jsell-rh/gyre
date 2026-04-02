@@ -1851,7 +1851,12 @@
                 {/if}
                 {#if mr.spec_ref}
                   {@const specPath = mr.spec_ref.split('@')[0]}
-                  <dt>Spec</dt><dd><button class="entity-link mono" title={mr.spec_ref} onclick={() => navigateTo('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id })}>{specPath.split('/').pop()}</button></dd>
+                  {@const specSha = mr.spec_ref.includes('@') ? mr.spec_ref.split('@')[1] : null}
+                  <dt>Spec</dt>
+                  <dd>
+                    <button class="entity-link" title={mr.spec_ref} onclick={() => navigateTo('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id })}>{specPath.split('/').pop()?.replace(/\.md$/, '')}</button>
+                    {#if specSha}<code class="sha-badge mono" title="Pinned at spec version {specSha}">@{specSha.slice(0, 7)}</code>{/if}
+                  </dd>
                 {/if}
                 {#if mr.author_agent_id}
                   <dt>Agent</dt><dd><button class="entity-link mono" title={mr.author_agent_id} onclick={() => navigateTo('agent', mr.author_agent_id)}>{entityName('agent', mr.author_agent_id)}</button></dd>
@@ -3689,7 +3694,12 @@
                 {/if}
                 {#if att.spec_ref}
                   {@const attSpecPath = att.spec_ref.split('@')[0]}
-                  <dt>Spec</dt><dd><button class="entity-link mono" title={att.spec_ref} onclick={() => navigateTo('spec', attSpecPath, { path: attSpecPath })}>{attSpecPath.split('/').pop()}</button></dd>
+                  {@const attSpecSha = att.spec_ref.includes('@') ? att.spec_ref.split('@')[1] : null}
+                  <dt>Spec</dt>
+                  <dd>
+                    <button class="entity-link" title={att.spec_ref} onclick={() => navigateTo('spec', attSpecPath, { path: attSpecPath })}>{attSpecPath.split('/').pop()?.replace(/\.md$/, '')}</button>
+                    {#if attSpecSha}<code class="sha-badge mono" title="Pinned at spec version {attSpecSha}">@{attSpecSha.slice(0, 7)}</code>{/if}
+                  </dd>
                 {/if}
                 {#if att.spec_fully_approved !== undefined}
                   <dt>Spec approved</dt><dd><Badge value={att.spec_fully_approved ? 'yes' : 'no'} variant={att.spec_fully_approved ? 'success' : 'warning'} /></dd>

@@ -1080,6 +1080,7 @@
         tasks={pipelineTasks}
         agents={pipelineAgents}
         mrs={pipelineMrs}
+        budget={budgetData}
         onStageClick={handlePipelineStageClick}
       />
 
