@@ -11,6 +11,8 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { entityName, shortId } from '../lib/entityNames.svelte.js';
+  import { relativeTime } from '../lib/timeFormat.js';
   import Badge from '../lib/Badge.svelte';
   import ExplorerView from './ExplorerView.svelte';
   import SpecDashboard from './SpecDashboard.svelte';
@@ -178,48 +180,7 @@
     return () => { aborted = true; };
   });
 
-  // ── Human-friendly entity name cache ──────────────────────────────────
-  let entityNameCache = $state({});
-
-  function queueNameResolution(type, id) {
-    if (!id) return;
-    const key = `${type}:${id}`;
-    if (entityNameCache[key] !== undefined) return;
-    queueMicrotask(() => {
-      if (entityNameCache[key] !== undefined) return;
-      entityNameCache = { ...entityNameCache, [key]: null };
-      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                      type === 'task' ? api.task(id).then(t => t?.title) :
-                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
-                      Promise.resolve(null);
-      fetcher.then(name => {
-        if (name) entityNameCache = { ...entityNameCache, [key]: name };
-      }).catch(() => {});
-    });
-  }
-
-  function entityName(type, id) {
-    if (!id) return '';
-    const cached = entityNameCache[`${type}:${id}`];
-    if (cached) return cached;
-    queueNameResolution(type, id);
-    return shortId(id);
-  }
-
-  function shortId(id) {
-    if (!id) return '';
-    return id.length > 12 ? id.slice(0, 8) + '...' : id;
-  }
-
-  function fmtRelTime(ts) {
-    if (!ts) return '';
-    const now = Date.now() / 1000;
-    const diff = now - ts;
-    if (diff < 60) return 'just now';
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
-  }
+  // Entity name resolution + time formatting imported from shared modules
 
   function taskStatusVariant(s) {
     if (s === 'done') return 'success';
@@ -538,7 +499,7 @@
                   <td class="cell-type">{task.task_type ?? ''}</td>
                   <td class="cell-mono">{#if task.spec_path}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id ?? repo?.id }); }} title={task.spec_path}>{task.spec_path.split('/').pop()}</button>{/if}</td>
                   <td class="cell-mono">{#if task.assigned_to}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', task.assigned_to, {}); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
-                  <td class="cell-time">{fmtRelTime(task.updated_at ?? task.created_at)}</td>
+                  <td class="cell-time">{relativeTime(task.updated_at ?? task.created_at)}</td>
                   <td class="cell-action">
                     {#if TASK_STATUS_TRANSITIONS[task.status]?.length}
                       {#each TASK_STATUS_TRANSITIONS[task.status] as nextStatus}
@@ -649,7 +610,7 @@
                       </span>
                     {/if}
                   </td>
-                  <td class="cell-time">{fmtRelTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
+                  <td class="cell-time">{relativeTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
                   <td class="cell-action">
                     {#if mr.status === 'open' && mr.queue_position == null}
                       <button class="quick-action-btn" onclick={(e) => quickEnqueue(mr, e)} disabled={enqueueingMr === mr.id} title="Add to merge queue">
@@ -697,7 +658,7 @@
                   <td class="cell-mono">{agent.branch ?? ''}</td>
                   <td class="cell-mono">{#if agent.mr_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', agent.mr_id, {}); }} title={agent.mr_id}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
                   <td class="cell-time">{#if dur}{dur < 60 ? dur + 's' : dur < 3600 ? Math.round(dur / 60) + 'm' : Math.round(dur / 3600) + 'h'}{:else if agent.status === 'active' && agent.created_at}{@const elapsed = Math.round((Date.now() / 1000 - agent.created_at) / 60)}{elapsed}m{/if}</td>
-                  <td class="cell-time">{fmtRelTime(agent.created_at)}</td>
+                  <td class="cell-time">{relativeTime(agent.created_at)}</td>
                 </tr>
               {/each}
             </tbody>
@@ -785,7 +746,7 @@
                   <span class="agent-row-branch">{agent.branch}</span>
                 {/if}
                 {#if spawnedAt}
-                  <span class="agent-row-duration">{fmtRelTime(spawnedAt)}</span>
+                  <span class="agent-row-duration">{relativeTime(spawnedAt)}</span>
                 {/if}
               </button>
               <button

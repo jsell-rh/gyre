@@ -41,9 +41,12 @@ vi.mock('../lib/api.js', () => ({
     agent: vi.fn().mockResolvedValue({ name: 'test-agent' }),
     task: vi.fn().mockResolvedValue({ title: 'test-task' }),
     mergeRequest: vi.fn().mockResolvedValue({ title: 'test-mr' }),
+    repo: vi.fn().mockResolvedValue({ name: 'test-repo' }),
+    workspace: vi.fn().mockResolvedValue({ name: 'test-ws' }),
     activity: vi.fn().mockResolvedValue([]),
     mergeQueue: vi.fn().mockResolvedValue([]),
     mergeQueueGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    adminAudit: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -53,6 +56,7 @@ vi.mock('../lib/ExplorerCanvas.svelte', () => ({
 
 vi.mock('../lib/toast.svelte.js', () => ({
   toastInfo: vi.fn(),
+  toastSuccess: vi.fn(),
   toastError: vi.fn(),
 }));
 

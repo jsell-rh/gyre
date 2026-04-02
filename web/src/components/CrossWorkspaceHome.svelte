@@ -11,6 +11,8 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { entityName, shortId } from '../lib/entityNames.svelte.js';
+  import { relativeTime } from '../lib/timeFormat.js';
   import Modal from '../lib/Modal.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
@@ -206,39 +208,12 @@
   });
 
   function relTime(ts) {
-    if (!ts) return '';
-    const diff = Date.now() - new Date(ts).getTime();
-    const m = Math.floor(diff / 60000);
-    if (m < 1) return $t('common.time_just_now');
-    if (m < 60) return $t('common.time_minutes_ago', { values: { count: m } });
-    const h = Math.floor(m / 60);
-    if (h < 24) return $t('common.time_hours_ago', { values: { count: h } });
-    return $t('common.time_days_ago', { values: { count: Math.floor(h / 24) } });
+    return relativeTime(ts);
   }
 
-  // ── Human-friendly entity name resolution ────────────────────────────
-  let entityNameCache = $state({});
-
+  // Entity name resolution uses shared singleton cache
   function resolveEntityName(type, id) {
-    if (!id) return '';
-    const key = `${type}:${id}`;
-    if (entityNameCache[key] !== undefined) return entityNameCache[key] || shortId(id);
-    entityNameCache = { ...entityNameCache, [key]: null };
-    const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                    type === 'task' ? api.task(id).then(t => t?.title) :
-                    type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
-                    type === 'repo' ? api.repo(id).then(r => r?.name) :
-                    type === 'workspace' ? api.workspace(id).then(w => w?.name) :
-                    Promise.resolve(null);
-    fetcher.then(name => {
-      if (name) entityNameCache = { ...entityNameCache, [key]: name };
-    }).catch(() => {});
-    return shortId(id);
-  }
-
-  function shortId(id) {
-    if (!id) return '';
-    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+    return entityName(type, id);
   }
 
   // ── Briefing state ───────────────────────────────────────────────────────
