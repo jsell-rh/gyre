@@ -1158,6 +1158,25 @@
                 </svg>
               </button>
             </div>
+          {:else if mode === 'cross_workspace' && crossWorkspaceTab}
+            <!-- Cross-workspace sub-page: back arrow + All Workspaces / Sub-page -->
+            <div class="ws-name-wrap">
+              <button
+                class="back-btn"
+                onclick={() => goToCrossWorkspace()}
+                aria-label="Back to All Workspaces"
+                data-testid="back-btn"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                  <path d="M19 12H5M12 5l-7 7 7 7"/>
+                </svg>
+              </button>
+              <nav class="breadcrumb" aria-label={$t('topbar.location')}>
+                <button class="breadcrumb-ws" onclick={() => goToCrossWorkspace()}>{$t('topbar.all_workspaces')}</button>
+                <span class="breadcrumb-sep" aria-hidden="true">/</span>
+                <span class="breadcrumb-repo" aria-current="page">{crossWorkspaceTab === 'settings' ? $t('topbar.tenant_settings') : $t('topbar.agent_rules_label')}</span>
+              </nav>
+            </div>
           {:else if mode === 'cross_workspace'}
             <div class="ws-name-wrap">
               <button
