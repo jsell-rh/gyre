@@ -718,13 +718,13 @@
 
   // ── Secondary tab bar ────────────────────────────────────────────────
   // Replaces the old collapsible accordion with a clean tabbed view
-  let secondaryTab = $state('specs');
+  let secondaryTab = $state('activity');
   const SECONDARY_TABS = [
+    { id: 'activity', label: 'Activity' },
     { id: 'specs', label: 'Specs' },
     { id: 'tasks', label: 'Tasks' },
     { id: 'mrs', label: 'Merge Requests' },
     { id: 'agents', label: 'Agents' },
-    { id: 'activity', label: 'Activity' },
     { id: 'budget', label: 'Budget' },
   ];
 
