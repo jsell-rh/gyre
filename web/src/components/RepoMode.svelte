@@ -406,7 +406,7 @@
           data-testid="clone-url-btn"
         >
           <span class="clone-url-text">{cloneUrl}</span>
-          <span class="clone-icon" aria-hidden="true">{cloneCopied ? '✓' : '📋'}</span>
+          <span class="clone-icon" aria-hidden="true">{cloneCopied ? '✓' : 'copy'}</span>
         </button>
       {/if}
     </div>
