@@ -1037,7 +1037,7 @@
         <div class="topbar-left repo-context">
           <button
             class="back-btn"
-            onclick={() => goToWorkspaceHome(currentWorkspace)}
+            onclick={() => window.history.back()}
             aria-label={$t('topbar.back_to_workspace')}
             data-testid="back-btn"
           >
@@ -1102,7 +1102,7 @@
                 class="breadcrumb-ws"
                 onclick={() => window.history.back()}
               >
-                {repoTab === 'mrs' ? 'Merge Requests' : repoTab === 'tasks' ? 'Tasks' : repoTab === 'agents' ? 'Agents' : 'Specs'}
+                {entityDetail.type === 'mr' ? 'Merge Requests' : entityDetail.type === 'task' ? 'Tasks' : entityDetail.type === 'agent' ? 'Agents' : entityDetail.type === 'spec' ? 'Specs' : repoTab === 'mrs' ? 'Merge Requests' : repoTab === 'tasks' ? 'Tasks' : repoTab === 'agents' ? 'Agents' : 'Specs'}
               </button>
               <span class="breadcrumb-sep" aria-hidden="true">/</span>
               <span class="breadcrumb-repo" aria-current="page" title={entityDetail.id}>
