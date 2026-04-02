@@ -498,6 +498,15 @@
             if (sig) mrDetail = { ...mrDetail, _commitSig: sig };
           }).catch(() => {});
         }
+        // Fetch graph nodes for merged MRs (architecture impact)
+        if (d?.status === 'merged' && repoId) {
+          api.repoGraphTypes(repoId).then(nodes => {
+            const arr = Array.isArray(nodes) ? nodes : (nodes?.nodes ?? []);
+            if (arr.length > 0) {
+              mrDetail = { ...mrDetail, _graphNodes: arr.slice(0, 20) };
+            }
+          }).catch(() => {});
+        }
         // Build status story from timeline events, or fall back to MR fields
         if (rawTimeline.length > 0) {
           const events = rawTimeline.slice(-4).map(evt => {
@@ -2015,6 +2024,24 @@
                 {/if}
                 <button class="mr-explore-btn" onclick={() => { activeTab = 'ask-why'; }} title="Explore agent reasoning">Ask Why</button>
               </div>
+
+              <!-- Architecture Impact (merged MRs) -->
+              {#if mr.status === 'merged' && mr._graphNodes?.length > 0}
+                <details class="spec-preview-section">
+                  <summary class="spec-preview-summary">
+                    <span class="progress-section-label">Architecture Impact ({mr._graphNodes.length} types extracted)</span>
+                  </summary>
+                  <div class="graph-impact-list">
+                    {#each mr._graphNodes as node}
+                      <button class="graph-impact-node" onclick={() => { if (goToRepoTab) { goToRepoTab('architecture', { nodeId: node.id ?? node.name }); close(); } }} title="View in architecture explorer">
+                        <span class="graph-impact-type">{node.node_type ?? 'Type'}</span>
+                        <span class="graph-impact-name mono">{node.name ?? node.qualified_name}</span>
+                        {#if node.file_path}<span class="graph-impact-file">{node.file_path}</span>{/if}
+                      </button>
+                    {/each}
+                  </div>
+                </details>
+              {/if}
 
               <!-- MR Actions -->
               {#if mr.status === 'open'}
@@ -6060,6 +6087,56 @@
   .spec-preview-body {
     padding: var(--space-3) var(--space-4);
     border-top: 1px solid var(--color-border);
+  }
+
+  .graph-impact-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-3) var(--space-4);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .graph-impact-node {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .graph-impact-node:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
+  }
+
+  .graph-impact-type {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+    min-width: 48px;
+  }
+
+  .graph-impact-name {
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .graph-impact-file {
+    color: var(--color-text-muted);
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
   }
 
   .spec-preview-content {
