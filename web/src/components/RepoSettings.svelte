@@ -9,6 +9,7 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { toastError } from '../lib/toast.svelte.js';
+  import { shortId, entityName } from '../lib/entityNames.svelte.js';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
@@ -617,7 +618,7 @@
               {#each gates as gate}
                 <div class="gate-card" data-testid="gate-card">
                   <div class="gate-header">
-                    <span class="gate-name">{gate.name ?? gate.id}</span>
+                    <span class="gate-name">{gate.name ?? shortId(gate.id)}</span>
                     {#if gate.gate_type}
                       <span class="gate-kind">{gate.gate_type}</span>
                     {/if}
@@ -1077,7 +1078,7 @@
               </div>
             {/if}
             {#if releaseData.mr_id}
-              <p class="tab-desc">Release MR created: <code class="mono">{releaseData.mr_id}</code></p>
+              <p class="tab-desc">Release MR created: <code class="mono">{entityName('mr', releaseData.mr_id)}</code></p>
             {/if}
             <div class="action-row action-row-left">
               <button class="btn-secondary" onclick={prepareRelease}>Regenerate</button>
