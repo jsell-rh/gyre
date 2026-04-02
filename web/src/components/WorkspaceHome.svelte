@@ -1298,7 +1298,7 @@
                       <span class="sidebar-item-dot sidebar-dot-warn"></span>
                       <span class="sidebar-item-name">{spec.path.split('/').pop()?.replace(/\.md$/, '')}</span>
                       {#if spec.repo_id && repoMap[spec.repo_id]}<span class="sidebar-item-meta">{repoMap[spec.repo_id].name}</span>{/if}
-                      <button class="sidebar-action-btn" onclick={(e) => { e.stopPropagation(); navigateToSpec(spec); }}>Review</button>
+                      <span class="sidebar-action-tag">Review</span>
                     </button>
                   </li>
                 {/each}
@@ -1307,8 +1307,8 @@
           {/if}
 
           <!-- Open MRs -->
-          {@const openMrs = wsMrs.filter(m => m.status === 'open')}
-          {#if openMrs.length > 0}
+          {#if wsMrs.filter(m => m.status === 'open').length > 0}
+            {@const openMrs = wsMrs.filter(m => m.status === 'open')}
             <div class="sidebar-card">
               <h3 class="sidebar-card-title">
                 <Icon name="git-merge" size={14} />
@@ -1333,7 +1333,7 @@
                         </span>
                       {/if}
                       {#if mr.status === 'open' && mr.queue_position == null}
-                        <button class="sidebar-action-btn" onclick={(e) => { e.stopPropagation(); quickEnqueueMr(mr, e); }} disabled={enqueuingMrId === mr.id}>{enqueuingMrId === mr.id ? '...' : 'Enqueue'}</button>
+                        <span class="sidebar-action-tag">Open</span>
                       {:else if mr.queue_position != null}
                         <span class="sidebar-item-meta">#{mr.queue_position + 1}</span>
                       {/if}
@@ -2083,6 +2083,17 @@
 
   .sidebar-action-btn:hover {
     background: color-mix(in srgb, var(--color-primary) 20%, transparent);
+  }
+
+  .sidebar-action-tag {
+    padding: 1px 6px;
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, var(--color-border));
+    border-radius: var(--radius-sm);
+    color: var(--color-primary);
+    font-size: 10px;
+    font-weight: 600;
+    flex-shrink: 0;
   }
 
   .sidebar-more {
