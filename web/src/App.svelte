@@ -11,6 +11,7 @@
   import TenantSettings from './components/TenantSettings.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
+  import { entityName as resolveEntityName, shortId } from './lib/entityNames.svelte.js';
   import Modal from './lib/Modal.svelte';
   import PresenceAvatars from './lib/PresenceAvatars.svelte';
   import DetailPanel from './lib/DetailPanel.svelte';
@@ -1708,7 +1709,7 @@
         {#if tokenInfo.agent_id}
           <div class="token-info-row">
             <span class="token-info-label">{$t('common.token_agent_id')}</span>
-            <span class="token-info-val mono">{tokenInfo.agent_id}</span>
+            <span class="token-info-val mono">{resolveEntityName('agent', tokenInfo.agent_id)}</span>
           </div>
         {/if}
         {#if tokenInfo.exp}

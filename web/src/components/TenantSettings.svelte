@@ -911,7 +911,7 @@
                     <td colspan="4">
                       <div class="audit-detail-content">
                         <dl class="audit-dl">
-                          {#if ev.id}<dt>ID</dt><dd class="mono">{ev.id}</dd>{/if}
+                          {#if ev.id}<dt>ID</dt><dd class="mono">{sharedShortId(ev.id)}</dd>{/if}
                           {#if ev.event_type}<dt>Event</dt><dd>{ev.event_type}</dd>{/if}
                           {#if ev.actor}<dt>Actor</dt><dd>{ev.actor}</dd>{/if}
                           {#if ev.ip_address}<dt>IP</dt><dd class="mono">{ev.ip_address}</dd>{/if}

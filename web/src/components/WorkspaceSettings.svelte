@@ -9,6 +9,7 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { toastError } from '../lib/toast.svelte.js';
+  import { shortId } from '../lib/entityNames.svelte.js';
 
   let {
     workspace = null,
@@ -511,7 +512,7 @@
               >
                 <option value="">{$t('workspace_settings.general.none_tenant_default')}</option>
                 {#each computeTargets as ct}
-                  <option value={ct.id}>{ct.name ?? ct.id}</option>
+                  <option value={ct.id}>{ct.name ?? shortId(ct.id)}</option>
                 {/each}
               </select>
             {/if}
@@ -583,7 +584,7 @@
             <div class="policy-list" data-testid="abac-policy-list">
               {#each abacPolicies as policy}
                 <div class="policy-row">
-                  <span class="policy-name">{policy.name ?? policy.id}</span>
+                  <span class="policy-name">{policy.name ?? shortId(policy.id)}</span>
                   <span class="policy-effect policy-effect-{(policy.effect ?? 'allow').toLowerCase()}">
                     {policy.effect ?? 'allow'}
                   </span>
@@ -594,7 +595,7 @@
                     class="policy-delete-btn"
                     onclick={() => deleteAbacPolicy(policy.id)}
                     disabled={deletingPolicyId === policy.id}
-                    aria-label="{$t('common.delete')} {policy.name ?? policy.id}"
+                    aria-label="{$t('common.delete')} {policy.name ?? shortId(policy.id)}"
                     data-testid="delete-abac-policy-btn"
                   >
                     {deletingPolicyId === policy.id ? '…' : $t('common.delete')}
@@ -803,7 +804,7 @@
             {#each allCompute as ct}
               <div class="compute-card" data-testid="compute-card">
                 <div class="compute-card-header">
-                  <span class="compute-name">{ct.name ?? ct.id}</span>
+                  <span class="compute-name">{ct.name ?? shortId(ct.id)}</span>
                   {#if ct.kind}
                     <span class="compute-kind">{ct.kind}</span>
                   {/if}

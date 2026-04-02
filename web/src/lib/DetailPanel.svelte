@@ -2170,7 +2170,7 @@
               {/if}
 
               <dl class="entity-meta">
-                <dt>Name</dt><dd>{ag.name ?? entity.id}</dd>
+                <dt>Name</dt><dd>{ag.name ?? shortId(entity.id)}</dd>
                 <dt>Status</dt>
                 <dd>
                   <Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} />
