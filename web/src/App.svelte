@@ -1065,11 +1065,11 @@
             class="back-btn"
             onclick={() => {
               if (entityDetail) {
-                // Navigate explicitly to the parent tab instead of relying on
-                // history.back() which may skip steps when the user navigated
-                // through multiple entities (e.g. MR → Agent → Task).
-                const parentTab = entityDetail.type === 'mr' ? 'mrs' : entityDetail.type === 'task' ? 'tasks' : entityDetail.type === 'agent' ? 'agents' : entityDetail.type === 'spec' ? 'specs' : repoTab;
-                goToRepoTab(parentTab);
+                // Use browser back to retrace the user's actual journey.
+                // This correctly handles MR → Agent → Task chains where
+                // the user should go back to the previous entity, not the
+                // parent list tab.
+                window.history.back();
               } else {
                 goToWorkspaceHome(currentWorkspace);
               }
