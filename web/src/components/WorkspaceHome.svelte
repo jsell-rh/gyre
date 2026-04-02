@@ -1083,72 +1083,17 @@
         onStageClick={handlePipelineStageClick}
       />
 
-      <!-- ── Zone 2.5: Merge Queue (visible when items are queued) ───── -->
-      {#if mergeQueueItems.length > 0}
-        <section class="home-section merge-queue-section" aria-labelledby="section-merge-queue">
+      <!-- ── Zone 3: Repos + Merge Queue (two-column when queue active) ── -->
+      <div class="repos-and-queue" class:has-queue={mergeQueueItems.length > 0}>
+        <!-- Repositories -->
+        <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
           <div class="section-header">
-            <h2 class="section-title" id="section-merge-queue">
-              Merge Queue
-              <span class="section-badge">{mergeQueueItems.length}</span>
-            </h2>
-          </div>
-          <div class="section-body">
-            <div class="merge-queue-pipeline">
-              {#each mergeQueueItems.slice(0, 5) as item, i}
-                {@const mrId = item.merge_request_id ?? item.mr_id}
-                <div class="mq-item" class:mq-item-first={i === 0}>
-                  <span class="mq-item-position">#{i + 1}</span>
-                  <div class="mq-item-content">
-                    <button class="mq-item-title" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">{item._title}</button>
-                    <div class="mq-item-meta">
-                      {#if item._branch}<span class="mq-branch">{item._branch}</span>{/if}
-                      {#if item._agent}<button class="ws-entity-link mq-agent" onclick={(e) => { e.stopPropagation(); nav('agent', item._agent, { repo_id: item._mr?.repository_id }); }} title="View agent">{entityName('agent', item._agent)}</button>{/if}
-                      {#if item._spec_ref}
-                        {@const sp = item._spec_ref.split('@')[0]}
-                        <button class="ws-entity-link mq-spec" onclick={(e) => { e.stopPropagation(); nav('spec', sp, { path: sp, repo_id: item._mr?.repository_id }); }} title={item._spec_ref}>{sp.split('/').pop()}</button>
-                      {/if}
-                    </div>
-                    {#if item._deps?.length > 0}
-                      <div class="mq-deps">
-                        <span class="mq-dep-label">Waits for:</span>
-                        {#each item._deps as depId}
-                          <button class="mq-dep-link" onclick={() => nav('mr', depId)}>{entityName('mr', depId)}</button>
-                        {/each}
-                      </div>
-                    {/if}
-                  </div>
-                  <div class="mq-item-status">
-                    <span class="mq-status-badge mq-status-{item._status ?? 'queued'}">{item._status ?? 'queued'}</span>
-                    {#if item._mr?._gates?.total > 0}
-                      <span class="mq-gates-mini" title="{item._mr._gates.passed}/{item._mr._gates.total} gates passed">
-                        {#if item._mr._gates.failed > 0}<span class="gate-fail-inline">✗{item._mr._gates.failed}</span>{/if}
-                        {#if item._mr._gates.passed > 0}<span class="gate-pass-inline">✓{item._mr._gates.passed}</span>{/if}
-                      </span>
-                    {/if}
-                  </div>
-                </div>
-              {/each}
-              {#if mergeQueueItems.length > 5}
-                <p class="show-more-hint">{mergeQueueItems.length - 5} more in queue</p>
-              {/if}
+            <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
+            <div class="repo-header-actions">
+              <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
+              <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
             </div>
           </div>
-        </section>
-      {/if}
-
-      <!-- Decisions are surfaced via ActionNeeded (Zone 1) above.
-           Inline actions (approve/reject/retry) are handled there.
-           No duplicate Decisions section needed — reduces clutter. -->
-
-      <!-- ── Zone 4: Repositories (full-width grid) ──────────────────── -->
-      <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
-        <div class="section-header">
-          <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
-          <div class="repo-header-actions">
-            <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
-            <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
-          </div>
-        </div>
         <div class="section-body">
           {#if reposLoading}
             <div class="skeleton-row"></div>
@@ -1207,6 +1152,41 @@
           {/if}
         </div>
       </section>
+
+        <!-- Merge Queue sidebar (only when items are queued) -->
+        {#if mergeQueueItems.length > 0}
+          <aside class="merge-queue-sidebar" aria-labelledby="section-merge-queue">
+            <h3 class="mq-sidebar-title" id="section-merge-queue">
+              <Icon name="git-merge" size={14} />
+              Merge Queue
+              <span class="mq-sidebar-count">{mergeQueueItems.length}</span>
+            </h3>
+            <div class="mq-sidebar-list">
+              {#each mergeQueueItems.slice(0, 8) as item, i}
+                {@const mrId = item.merge_request_id ?? item.mr_id}
+                <button class="mq-sidebar-item" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">
+                  <span class="mq-item-position">#{i + 1}</span>
+                  <div class="mq-sidebar-item-body">
+                    <span class="mq-sidebar-item-title">{item._title}</span>
+                    <span class="mq-sidebar-item-meta">
+                      {#if item._branch}<span class="mq-branch">{item._branch}</span>{/if}
+                      {#if item._mr?._gates?.total > 0}
+                        <span class="mq-gates-mini">
+                          {#if item._mr._gates.failed > 0}<span class="gate-fail-inline">✗{item._mr._gates.failed}</span>{/if}
+                          {#if item._mr._gates.passed > 0}<span class="gate-pass-inline">✓{item._mr._gates.passed}</span>{/if}
+                        </span>
+                      {/if}
+                    </span>
+                  </div>
+                </button>
+              {/each}
+              {#if mergeQueueItems.length > 8}
+                <p class="show-more-hint">{mergeQueueItems.length - 8} more in queue</p>
+              {/if}
+            </div>
+          </aside>
+        {/if}
+      </div><!-- .repos-and-queue -->
 
       <!-- ── Zone 5: Tabbed workspace panel (replaces separate activity + 4 detail sections) ── -->
       <section class="ws-tabbed-panel" data-testid="ws-tabbed-panel">
@@ -1541,6 +1521,105 @@
     color: var(--color-text-muted);
     margin: calc(-1 * var(--space-3)) 0 0 0;
     line-height: 1.4;
+  }
+
+  /* ── Repos + Merge Queue two-column layout ─────────────────────────── */
+  .repos-and-queue {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: var(--space-4);
+  }
+
+  .repos-and-queue.has-queue {
+    grid-template-columns: 1fr 280px;
+  }
+
+  @media (max-width: 900px) {
+    .repos-and-queue.has-queue {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .merge-queue-sidebar {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    align-self: start;
+  }
+
+  .mq-sidebar-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-3);
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+  }
+
+  .mq-sidebar-count {
+    font-size: var(--text-xs);
+    background: var(--color-primary);
+    color: var(--color-text-inverse);
+    border-radius: 8px;
+    padding: 0 5px;
+    min-width: 16px;
+    text-align: center;
+    line-height: 16px;
+    font-weight: 700;
+  }
+
+  .mq-sidebar-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .mq-sidebar-item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .mq-sidebar-item:last-child { border-bottom: none; }
+  .mq-sidebar-item:hover { background: var(--color-surface-elevated); }
+
+  .mq-sidebar-item-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .mq-sidebar-item-title {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mq-sidebar-item-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 10px;
+    color: var(--color-text-muted);
   }
 
   /* ── Repo cards grid (responsive) ──────────────────────────────────── */
