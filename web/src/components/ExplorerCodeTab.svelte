@@ -11,6 +11,7 @@
 
   const openDetailPanel = getContext('openDetailPanel');
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+  const getScope = getContext('getScope') ?? (() => ({}));
 
   let subTab = $state('files');
   const SUB_TABS = [
@@ -302,11 +303,13 @@
       }
       if (!taskId) {
         // Create a lightweight investigation task
+        const scope = getScope();
         const task = await api.createTask({
           title: `Investigate ${selectedFile}:${line.line_number ?? '?'}`,
           description: `Investigation of code at ${selectedFile} line ${line.line_number ?? '?'}, commit ${sha.slice(0, 7)}`,
           task_type: 'investigation',
           repo_id: repoId,
+          workspace_id: scope.workspaceId,
         });
         taskId = task.id;
       }
@@ -603,6 +606,23 @@
                 </button>
               {/each}
             </div>
+          {/if}
+
+          <!-- Agent color legend (blame view) -->
+          {#if fileViewMode === 'blame' && blameData}
+            {@const legendLines = Array.isArray(blameData) ? blameData : (blameData.lines ?? blameData.blame ?? [])}
+            {@const uniqueAgents = [...new Set(legendLines.map(l => l.agent_id ?? l.agent).filter(Boolean))]}
+            {#if uniqueAgents.length > 0}
+              <div class="agent-legend">
+                <span class="agent-legend-label">Contributors:</span>
+                {#each uniqueAgents as aid}
+                  <button class="agent-legend-item" onclick={() => onRowClick({ id: aid }, 'agent')} title="View agent details">
+                    <span class="agent-legend-color" style="background: {agentColor(aid)}"></span>
+                    <span class="agent-legend-name">{resolveEntityName('agent', aid)}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
           {/if}
 
           {#if blameLoading}
@@ -1533,6 +1553,51 @@
   .routing-count {
     color: var(--color-text-muted);
     font-size: 10px;
+  }
+
+  /* ── Agent legend ───────────────────────────────────────────────────── */
+  .agent-legend {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-surface-elevated);
+    border-bottom: 1px solid var(--color-border);
+    flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+
+  .agent-legend-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-weight: 600;
+  }
+
+  .agent-legend-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 2px var(--space-2);
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    transition: border-color var(--transition-fast);
+  }
+
+  .agent-legend-item:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .agent-legend-color {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
   }
 
   .blame-table {
