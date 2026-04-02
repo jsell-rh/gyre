@@ -93,7 +93,13 @@
     const type = getEntityType(n);
     const id = getEntityId(n);
     if (type && id && goToEntityDetail) {
-      goToEntityDetail(type, id, { repo_id: n.repo_id });
+      const body = parseBody(n);
+      const data = { repo_id: n.repo_id };
+      // Specs need path in data for proper navigation
+      if (type === 'spec') {
+        data.path = body.spec_path ?? n.spec_path ?? id;
+      }
+      goToEntityDetail(type, id, data);
     }
   }
 </script>
