@@ -63,13 +63,24 @@ function queueNameResolution(type, id) {
 /**
  * Get a human-friendly name for an entity.
  * Returns the cached name if available, otherwise triggers async resolution
- * and returns a short ID as fallback.
+ * and returns a loading placeholder followed by short ID.
+ *
+ * For specs: returns last path segment without .md extension.
  */
 export function entityName(type, id) {
   if (!id) return '';
+  // Specs use path-based IDs — render them directly
+  if (type === 'spec') {
+    return id.split('/').pop()?.replace(/\.md$/, '') ?? id;
+  }
   const key = `${type}:${id}`;
   const cached = cache[key];
-  if (cached) return cached;
+  if (cached) {
+    // Truncate long names for display
+    return cached.length > 35 ? cached.slice(0, 32) + '\u2026' : cached;
+  }
+  // null means resolution in progress
+  if (cached === null) return '\u2026';
   queueNameResolution(type, id);
   return shortId(id);
 }
@@ -98,4 +109,30 @@ export function seedEntityName(type, id, name) {
   const key = `${type}:${id}`;
   if (cache[key] && cache[key] !== null) return; // don't overwrite existing
   cache = { ...cache, [key]: name };
+}
+
+/**
+ * Seed names from bulk-loaded entity arrays.
+ * Avoids individual API calls for entities we already have data for.
+ */
+export function seedFromEntities(type, entities) {
+  if (!Array.isArray(entities) || entities.length === 0) return;
+  const updates = {};
+  for (const e of entities) {
+    const id = e.id;
+    if (!id) continue;
+    const key = `${type}:${id}`;
+    if (cache[key] && cache[key] !== null) continue;
+    const name =
+      type === 'agent' ? (e.name ?? null) :
+      type === 'task' ? (e.title ?? null) :
+      type === 'mr' ? (e.title ?? null) :
+      type === 'repo' ? (e.name ?? null) :
+      type === 'workspace' ? (e.name ?? null) :
+      null;
+    if (name) updates[key] = name;
+  }
+  if (Object.keys(updates).length > 0) {
+    cache = { ...cache, ...updates };
+  }
 }
