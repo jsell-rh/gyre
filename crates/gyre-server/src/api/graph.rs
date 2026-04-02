@@ -1191,6 +1191,7 @@ fn _new_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         first_seen_at: now,
         last_seen_at: now,
         deleted_at: None,
+        test_node: false,
     }
 }
 

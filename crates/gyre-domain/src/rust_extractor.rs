@@ -157,6 +157,7 @@ impl ExtractionContext {
             first_seen_at: 0,
             last_seen_at: 0,
             deleted_at: None,
+            test_node: false,
         }
     }
 
@@ -346,7 +347,7 @@ impl ExtractionContext {
             .unwrap_or(&crate_name)
             .to_string();
 
-        let module_node = self.make_node(
+        let mut module_node = self.make_node(
             NodeType::Module,
             &module_short_name,
             &module_qname,
@@ -358,6 +359,10 @@ impl ExtractionContext {
             primary_spec,
             spec_confidence,
         );
+        // Tag modules in tests/ directories or named "tests" as test nodes.
+        if is_test_file_path(&rel_path) || module_short_name == "tests" {
+            module_node.test_node = true;
+        }
         let module_id = module_node.id.clone();
         self.name_to_id
             .insert(module_qname.clone(), module_id.clone());
@@ -1111,15 +1116,19 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                 }
             }
             Item::Fn(f) => {
-                if matches!(f.vis, syn::Visibility::Public(_)) {
+                let is_test_fn = has_test_attr(&f.attrs);
+                let is_in_test_context =
+                    is_test_file_path(self.rel_path) || self.module_qname.contains("::tests");
+                if matches!(f.vis, syn::Visibility::Public(_)) || is_test_fn {
                     let name = f.sig.ident.to_string();
                     let doc = extract_doc_comment(&f.attrs);
                     let sig = format_fn_sig(&f.sig);
-                    let mut node =
-                        self.make_node(NodeType::Function, &name, 0, Visibility::Public, doc);
+                    let vis = syn_vis_to_visibility(&f.vis);
+                    let mut node = self.make_node(NodeType::Function, &name, 0, vis, doc);
                     if node.doc_comment.is_none() {
                         node.doc_comment = Some(sig);
                     }
+                    node.test_node = is_test_fn || is_in_test_context;
                     let node_id = node.id.clone();
                     self.ctx
                         .name_to_id
@@ -1182,6 +1191,29 @@ fn extract_spec_comments(content: &str) -> Vec<String> {
             None
         })
         .collect()
+}
+
+/// Check if a function has a `#[test]` or `#[tokio::test]` attribute.
+fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        let path = attr.path();
+        // #[test]
+        if path.is_ident("test") {
+            return true;
+        }
+        // #[tokio::test], #[async_std::test], etc.
+        let segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segments.last().map(|s| s.as_str()) == Some("test") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a file path indicates a test file (in a `tests/` directory).
+fn is_test_file_path(rel_path: &str) -> bool {
+    let parts: Vec<&str> = rel_path.split('/').collect();
+    parts.iter().any(|&p| p == "tests")
 }
 
 /// Check if an item has a `#[derive(...)]` attribute containing the given trait name.
@@ -1995,6 +2027,83 @@ pub fn make_map() -> u32 {
             call_edges.is_empty(),
             "should not produce Calls edges for external crate functions, got {}",
             call_edges.len()
+        );
+    }
+
+    #[test]
+    fn test_functions_tagged_as_test_nodes() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let code = r#"
+pub fn production_code() -> u32 { 42 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+        assert_eq!(2 + 2, 4);
+    }
+}
+"#;
+        fs::write(src_dir.join("lib.rs"), code).unwrap();
+
+        // Also add a file in tests/ directory.
+        let tests_dir = dir.path().join("tests");
+        fs::create_dir_all(&tests_dir).unwrap();
+        fs::write(
+            tests_dir.join("integration.rs"),
+            "pub fn integration_helper() {}\n",
+        )
+        .unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "test123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // The #[test] function should be tagged as test_node.
+        let test_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "it_works");
+        assert!(test_fn.is_some(), "should extract #[test] fn it_works");
+        assert!(
+            test_fn.unwrap().test_node,
+            "it_works should be tagged as test_node"
+        );
+
+        // The production function should NOT be tagged as test_node.
+        let prod_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "production_code");
+        assert!(prod_fn.is_some(), "should extract production_code");
+        assert!(
+            !prod_fn.unwrap().test_node,
+            "production_code should NOT be tagged as test_node"
+        );
+
+        // Module in tests/ directory should be tagged.
+        let test_module = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Module && n.file_path.contains("tests/"));
+        assert!(
+            test_module.is_some(),
+            "should have module node for tests/ file"
+        );
+        assert!(
+            test_module.unwrap().test_node,
+            "module in tests/ should be tagged as test_node"
         );
     }
 

@@ -135,6 +135,7 @@ impl GoExtractionContext {
             first_seen_at: self.now,
             last_seen_at: self.now,
             deleted_at: None,
+            test_node: false,
         }
     }
 
@@ -404,7 +405,7 @@ impl GoExtractionContext {
         let line = node.start_position().row as u32 + 1;
         let qname = format!("{pkg_qname}.{fn_name}");
 
-        let fn_node = self.make_node(
+        let mut fn_node = self.make_node(
             NodeType::Function,
             &fn_name,
             &qname,
@@ -413,6 +414,13 @@ impl GoExtractionContext {
             line,
             Visibility::Public,
         );
+        // Tag Test* and Benchmark* functions and functions in *_test.go files.
+        if is_go_test_file(rel_path)
+            || fn_name.starts_with("Test")
+            || fn_name.starts_with("Benchmark")
+        {
+            fn_node.test_node = true;
+        }
         let fn_id = fn_node.id.clone();
         self.name_to_id.insert(qname, fn_id.clone());
         self.nodes.push(fn_node);
@@ -446,7 +454,7 @@ impl GoExtractionContext {
             format!("{pkg_qname}.{receiver_type}.{method_name}")
         };
 
-        let fn_node = self.make_node(
+        let mut fn_node = self.make_node(
             NodeType::Function,
             &method_name,
             &qname,
@@ -455,6 +463,10 @@ impl GoExtractionContext {
             line,
             Visibility::Public,
         );
+        // Tag methods in *_test.go files.
+        if is_go_test_file(rel_path) {
+            fn_node.test_node = true;
+        }
         let fn_id = fn_node.id.clone();
         self.name_to_id.insert(qname, fn_id.clone());
         self.nodes.push(fn_node);
@@ -1046,6 +1058,11 @@ fn extract_http_route_call(
     None
 }
 
+/// Check if a file path is a Go test file (`*_test.go`).
+fn is_go_test_file(rel_path: &str) -> bool {
+    rel_path.ends_with("_test.go")
+}
+
 /// Returns true if the identifier starts with an uppercase letter (Go exported).
 fn is_exported(name: &str) -> bool {
     name.chars()
@@ -1514,6 +1531,66 @@ func NewServer() *Server { return nil }
         assert!(
             server_node.is_some(),
             "tree-sitter pass should still extract Server type"
+        );
+    }
+
+    #[test]
+    fn test_functions_tagged_as_test_nodes() {
+        let src = r#"package api
+
+func NewServer() *Server { return nil }
+"#;
+        let test_src = r#"package api
+
+import "testing"
+
+func TestNewServer(t *testing.T) {}
+
+func BenchmarkNewServer(b *testing.B) {}
+"#;
+        let dir = make_repo(
+            GO_MOD,
+            &[("api/server.go", src), ("api/server_test.go", test_src)],
+        );
+        let result = GoExtractor.extract(dir.path(), "abc123");
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // TestNewServer should be tagged as test_node.
+        let test_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "TestNewServer");
+        assert!(test_fn.is_some(), "should extract TestNewServer");
+        assert!(
+            test_fn.unwrap().test_node,
+            "TestNewServer should be tagged as test_node"
+        );
+
+        // BenchmarkNewServer should be tagged as test_node.
+        let bench_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "BenchmarkNewServer");
+        assert!(bench_fn.is_some(), "should extract BenchmarkNewServer");
+        assert!(
+            bench_fn.unwrap().test_node,
+            "BenchmarkNewServer should be tagged as test_node"
+        );
+
+        // NewServer (production) should NOT be tagged.
+        let prod_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "NewServer");
+        assert!(prod_fn.is_some(), "should extract NewServer");
+        assert!(
+            !prod_fn.unwrap().test_node,
+            "NewServer should NOT be tagged as test_node"
         );
     }
 
