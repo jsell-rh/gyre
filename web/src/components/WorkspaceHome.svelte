@@ -1150,16 +1150,21 @@
                     <div class="activity-dot activity-dot-{variant}"></div>
                     {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
                     <div class="activity-content">
-                      <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
-                      <span class="activity-label">{activityLabel(event)}</span>
-                      {#if event.entity_name ?? event.title ?? event.description}
-                        <span class="activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
-                      {/if}
-                      {#if event.repo_id && repoMap[event.repo_id]}
-                        <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
-                      {/if}
-                      {#if event.timestamp ?? event.created_at}
-                        <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                      <div class="activity-main-row">
+                        <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
+                        <span class="activity-label">{activityLabel(event)}</span>
+                        {#if event.entity_name ?? event.title}
+                          <span class="activity-detail">{event.entity_name ?? event.title}</span>
+                        {/if}
+                        {#if event.repo_id && repoMap[event.repo_id]}
+                          <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
+                        {/if}
+                        {#if event.timestamp ?? event.created_at}
+                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                        {/if}
+                      </div>
+                      {#if event.description && event.description !== event.title && event.description !== event.entity_name}
+                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 120) + '...' : event.description}</p>
                       {/if}
                     </div>
                   </button>
@@ -2985,12 +2990,26 @@
 
   .activity-content {
     display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
+    flex-direction: column;
+    gap: 1px;
     padding: 2px 0 var(--space-2) var(--space-2);
     font-size: var(--text-xs);
-    flex-wrap: wrap;
     min-width: 0;
+  }
+
+  .activity-main-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .activity-reason {
+    margin: 0;
+    font-size: 10px;
+    color: var(--color-text-muted);
+    line-height: 1.4;
+    padding-left: calc(16px + var(--space-2));
   }
 
   .activity-icon {
