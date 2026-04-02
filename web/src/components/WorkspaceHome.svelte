@@ -746,14 +746,38 @@
 
   function repoStats(repo) {
     const repoMrs = wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id);
+    const repoAgents = wsAgents.filter(a => a.repo_id === repo.id);
+    const repoTasks = wsTasks.filter(t => t.repo_id === repo.id);
+    // Compute last activity from most recent MR/agent/task
+    const times = [
+      ...repoMrs.map(m => m.created_at ?? m.updated_at),
+      ...repoAgents.map(a => a.created_at ?? a.spawned_at),
+      ...repoTasks.map(t => t.created_at),
+    ].filter(Boolean).sort().reverse();
     return {
       specs: specs.filter(s => s.repo_id === repo.id).length,
-      tasks: wsTasks.filter(t => t.repo_id === repo.id).length,
-      agents: wsAgents.filter(a => a.repo_id === repo.id && a.status === 'active').length,
+      tasks: repoTasks.length,
+      agents: repoAgents.filter(a => a.status === 'active').length,
       mrs: repoMrs.length,
       openMrs: repoMrs.filter(m => m.status === 'open').length,
       failedGates: repoMrs.filter(m => m._gates?.failed > 0).length,
-      last_activity: null,
+      last_activity: times[0] ?? null,
+    };
+  }
+
+  function repoActiveAgentNames(repo) {
+    return wsAgents
+      .filter(a => a.repo_id === repo.id && a.status === 'active')
+      .map(a => a.name ?? shortId(a.id));
+  }
+
+  function repoSpecBreakdown(repo) {
+    const repoSpecs = specs.filter(s => s.repo_id === repo.id);
+    if (repoSpecs.length === 0) return null;
+    return {
+      pending: repoSpecs.filter(s => (s.approval_status ?? s.status) === 'pending').length,
+      approved: repoSpecs.filter(s => (s.approval_status ?? s.status) === 'approved').length,
+      draft: repoSpecs.filter(s => (s.approval_status ?? s.status) === 'draft').length,
     };
   }
 
@@ -1097,6 +1121,8 @@
                   {repo}
                   health={repoHealth(repo)}
                   stats={repoStats(repo)}
+                  activeAgentNames={repoActiveAgentNames(repo)}
+                  specBreakdown={repoSpecBreakdown(repo)}
                   onclick={() => onSelectRepo?.(repo)}
                 />
               {/each}
