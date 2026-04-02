@@ -2,7 +2,7 @@
   /**
    * WorkspaceHome — workspace dashboard (§2 of ui-navigation.md)
    *
-   * Sections: Decisions, Repos, Architecture, Briefing, Specs, Agent Rules.
+   * Zones: ActionNeeded, PipelineOverview, Decisions, Repos grid, Tabbed secondary (Specs/Tasks/MRs/Agents/Activity/Budget).
    * Implements real data loading for all six sections.
    *
    * Spec refs:
@@ -18,11 +18,9 @@
   import ActionNeeded from './ActionNeeded.svelte';
   import PipelineOverview from './PipelineOverview.svelte';
   import RepoCard from './RepoCard.svelte';
-  import Briefing from './Briefing.svelte';
   import Modal from '../lib/Modal.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
-  const goToAgentRules = getContext('goToAgentRules');
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
@@ -192,47 +190,11 @@
   let specs = $state([]);
   let specsStatusFilter = $state('');
 
-  // ── Architecture state ─────────────────────────────────────────────────
-  let archExpanded = $state(true);
-  let archLoading = $state(false);
-  let archError = $state(null);
-  let archGraph = $state(null); // { nodes: [], edges: [] }
-
-  async function loadArchGraph() {
-    if (!workspace?.id) return;
-    archLoading = true;
-    archError = null;
-    try {
-      archGraph = await api.workspaceGraph(workspace.id);
-    } catch (e) {
-      archError = e.message || $t('workspace_home.error_load_graph');
-      archGraph = { nodes: [], edges: [] };
-    } finally {
-      archLoading = false;
-    }
-  }
-
-  function toggleArch() {
-    archExpanded = !archExpanded;
-    if (archExpanded && !archGraph && !archLoading) {
-      loadArchGraph();
-    }
-  }
-
   // ── Budget/Cost state ───────────────────────────────────────────────────
   let budgetLoading = $state(true);
   let budgetData = $state(null); // { config, usage }
   let costData = $state(null);   // cost summary
 
-  // ── Agent Rules state ──────────────────────────────────────────────────
-  let rulesLoading = $state(true);
-  let rulesError = $state(null);
-  let workspaceMetaSpecs = $state([]);
-  let globalMetaSpecs = $state([]);
-
-  // ── Audit Log state ─────────────────────────────────────────────────
-  let auditLoading = $state(false);
-  let auditEvents = $state([]);
 
   // ── Repo lookup map (id → repo) ────────────────────────────────────────
   let repoMap = $state({});
@@ -490,37 +452,6 @@
     }
   }
 
-  // ── Audit Log: load ─────────────────────────────────────────────────
-  async function loadAudit() {
-    auditLoading = true;
-    try {
-      const data = await api.adminAudit({ limit: '10' });
-      auditEvents = Array.isArray(data) ? data : (data?.items ?? []);
-    } catch {
-      auditEvents = [];
-    } finally {
-      auditLoading = false;
-    }
-  }
-
-  // ── Agent Rules: load ──────────────────────────────────────────────────
-  async function loadRules() {
-    if (!workspace?.id) return;
-    rulesLoading = true;
-    rulesError = null;
-    try {
-      const [wsData, globalData] = await Promise.all([
-        api.getMetaSpecs({ scope: 'Workspace', scope_id: workspace.id }),
-        api.getMetaSpecs({ scope: 'Global' }),
-      ]);
-      workspaceMetaSpecs = Array.isArray(wsData) ? wsData : [];
-      globalMetaSpecs = Array.isArray(globalData) ? globalData : [];
-    } catch (e) {
-      rulesError = e.message || 'Failed to load agent rules';
-    } finally {
-      rulesLoading = false;
-    }
-  }
 
   // ── Notification inline actions ────────────────────────────────────────
   async function handleApproveSpec(n) {
@@ -747,21 +678,6 @@
       specActionLoading = null;
     }
   }
-
-  // ── Derived: meta-spec aggregates ─────────────────────────────────────
-  // Tag each meta-spec with its scope for badge display
-  let allMetaSpecs = $derived([
-    ...globalMetaSpecs.map(m => ({ ...m, _scope: 'tenant' })),
-    ...workspaceMetaSpecs.map(m => ({ ...m, _scope: 'workspace' })),
-  ]);
-  let requiredMetaSpecs = $derived(allMetaSpecs.filter(m => m.required));
-  let recentlyUpdated = $derived(
-    allMetaSpecs.filter(m => {
-      if (!m.updated_at) return false;
-      const age = Date.now() - new Date(m.updated_at).getTime();
-      return age < 7 * 24 * 3600 * 1000; // within last 7 days
-    })
-  );
 
   // ── Relative time helper (i18n-aware wrapper around shared module) ──────
   function relTime(ts) {
@@ -1032,7 +948,6 @@
     loadDecisions();
     loadRepos();
     loadSpecs();
-    loadRules();
     loadTasks();
     loadMrs();
     loadAgents();
@@ -2078,7 +1993,7 @@
     gap: var(--space-3);
   }
 
-  /* Briefing section — let Briefing.svelte manage its own padding */
+  /* Briefing section (unused — section removed) */
   .section-body-briefing {
     padding: 0;
   }
