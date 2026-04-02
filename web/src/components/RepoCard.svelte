@@ -53,10 +53,21 @@
           <span>{stats.agents} running</span>
         </span>
       {/if}
-      {#if stats.mrs != null}
+      {#if stats.openMrs != null && stats.openMrs > 0}
+        <span class="stat-chip stat-open-mrs" title="{stats.openMrs} open merge request{stats.openMrs !== 1 ? 's' : ''} awaiting review or merge">
+          <span class="stat-icon" aria-hidden="true">M</span>
+          <span>{stats.openMrs} open</span>
+        </span>
+      {:else if stats.mrs != null}
         <span class="stat-chip" title="Merge requests">
           <span class="stat-icon" aria-hidden="true">M</span>
           <span>{stats.mrs}</span>
+        </span>
+      {/if}
+      {#if stats.failedGates > 0}
+        <span class="stat-chip stat-failed" title="{stats.failedGates} MR{stats.failedGates !== 1 ? 's' : ''} with gate failures">
+          <span class="stat-icon" aria-hidden="true">!</span>
+          <span>{stats.failedGates} failed</span>
         </span>
       {/if}
       <span class="stat-spacer"></span>
@@ -139,6 +150,16 @@
 
   .stat-active {
     color: var(--color-success);
+    font-weight: 600;
+  }
+
+  .stat-open-mrs {
+    color: var(--color-info, #1e90ff);
+    font-weight: 500;
+  }
+
+  .stat-failed {
+    color: var(--color-danger);
     font-weight: 600;
   }
 
