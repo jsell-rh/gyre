@@ -11,6 +11,7 @@
   import { entityName } from '../lib/entityNames.svelte.js';
   import { relativeTime } from '../lib/timeFormat.js';
   import Badge from '../lib/Badge.svelte';
+  import Icon from '../lib/Icon.svelte';
 
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
@@ -31,12 +32,12 @@
   }
 
   const URGENCY = {
-    gate_failure: { color: 'var(--color-danger)', icon: '!', label: 'Gate Failed' },
-    spec_approval: { color: 'var(--color-warning)', icon: '?', label: 'Needs Approval' },
-    agent_clarification: { color: 'var(--color-warning)', icon: '?', label: 'Agent Question' },
-    budget_warning: { color: 'var(--color-warning)', icon: '$', label: 'Budget Alert' },
-    mr_needs_review: { color: 'var(--color-info)', icon: 'R', label: 'Review Needed' },
-    agent_failed: { color: 'var(--color-danger)', icon: '!', label: 'Agent Failed' },
+    gate_failure: { color: 'var(--color-danger)', iconName: 'alert-triangle', label: 'Gate Failed' },
+    spec_approval: { color: 'var(--color-warning)', iconName: 'eye', label: 'Needs Review' },
+    agent_clarification: { color: 'var(--color-warning)', iconName: 'circle-dot', label: 'Agent Question' },
+    budget_warning: { color: 'var(--color-warning)', iconName: 'dollar', label: 'Budget Alert' },
+    mr_needs_review: { color: 'var(--color-info)', iconName: 'eye', label: 'Review Needed' },
+    agent_failed: { color: 'var(--color-danger)', iconName: 'alert-triangle', label: 'Agent Failed' },
   };
 
   let showAll = $state(false);
@@ -50,7 +51,7 @@
   let visible = $derived(showAll ? actionable : actionable.slice(0, maxVisible));
 
   function getUrgency(n) {
-    return URGENCY[normType(n.notification_type)] ?? { color: 'var(--color-text-muted)', icon: 'i', label: 'Info' };
+    return URGENCY[normType(n.notification_type)] ?? { color: 'var(--color-text-muted)', iconName: 'circle', label: 'Info' };
   }
 
   function parseBody(n) {
@@ -121,7 +122,7 @@
           onclick={() => handleClick(item)}
           title={getTitle(item)}
         >
-          <span class="action-icon" style="color: {urgency.color}">{urgency.icon}</span>
+          <span class="action-icon" style="color: {urgency.color}"><Icon name={urgency.iconName} size={14} /></span>
           <div class="action-body">
             <span class="action-label">{urgency.label}</span>
             <span class="action-title">{getTitle(item)}</span>

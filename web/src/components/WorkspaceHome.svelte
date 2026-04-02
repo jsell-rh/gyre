@@ -19,6 +19,7 @@
   import PipelineOverview from './PipelineOverview.svelte';
   import RepoCard from './RepoCard.svelte';
   import Modal from '../lib/Modal.svelte';
+  import Icon from '../lib/Icon.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -66,24 +67,24 @@
   // ── Notification type icons + labels (HSI §8) ─────────────────────────
   const TYPE_ICONS = {
     agent_clarification: '?',
-    spec_approval: '✋',
-    gate_failure: '⚠',
-    cross_workspace_change: '↔',
-    conflicting_interpretations: '⚡',
+    spec_approval: '!',
+    gate_failure: '!',
+    cross_workspace_change: '~',
+    conflicting_interpretations: '!',
     meta_spec_drift: '~',
-    budget_warning: '💰',
-    trust_suggestion: '🔒',
+    budget_warning: '$',
+    trust_suggestion: '*',
     spec_assertion_failure: '✗',
-    suggested_link: '🔗',
+    suggested_link: '~',
     agent_completed: '✓',
     agent_failed: '✗',
-    mr_merged: '🔀',
-    mr_created: '📝',
-    mr_needs_review: '👀',
-    spec_approved: '✅',
-    spec_rejected: '❌',
-    spec_changed: '📝',
-    task_created: '☑',
+    mr_merged: '✓',
+    mr_created: '+',
+    mr_needs_review: '>',
+    spec_approved: '✓',
+    spec_rejected: '✗',
+    spec_changed: '~',
+    task_created: '+',
   };
 
   // Normalize PascalCase notification types from the server
@@ -111,12 +112,12 @@
   }
 
   const SPEC_STATUS_ICONS = {
-    draft: '📝',
-    pending: '⏳',
-    approved: '✅',
-    rejected: '❌',
-    implemented: '✅',
-    merged: '✅',
+    draft: '~',
+    pending: '?',
+    approved: '✓',
+    rejected: '✗',
+    implemented: '✓',
+    merged: '✓',
   };
 
   function specStatusTooltip(status) {
@@ -938,24 +939,24 @@
     catch { return {}; }
   }
 
-  function activityIcon(event) {
+  function activityIconName(event) {
     const t = (event.event_type ?? event.event ?? event.type ?? '').toLowerCase();
-    if (t.includes('spec') && t.includes('approv')) return '✓';
-    if (t.includes('spec') && t.includes('reject')) return '✗';
-    if (t.includes('spec') && t.includes('link')) return '~';
-    if (t.includes('spec') && t.includes('pending')) return '?';
-    if (t.includes('spec')) return 'S';
-    if (t.includes('task')) return 'T';
-    if (t.includes('agent') && t.includes('spawn')) return '>';
-    if (t.includes('agent') && t.includes('complet')) return 'A';
-    if (t.includes('agent') && t.includes('fail')) return '!';
-    if (t.includes('mr') && t.includes('merg')) return 'M';
-    if (t.includes('mr') && t.includes('creat')) return '+';
-    if (t.includes('gate')) return 'G';
-    if (t.includes('push')) return '^';
-    if (t.includes('graph')) return '#';
-    if (t.includes('budget')) return '$';
-    return '*';
+    if (t.includes('spec') && t.includes('approv')) return 'check';
+    if (t.includes('spec') && t.includes('reject')) return 'x';
+    if (t.includes('spec') && t.includes('link')) return 'link';
+    if (t.includes('spec') && t.includes('pending')) return 'clock';
+    if (t.includes('spec')) return 'spec';
+    if (t.includes('task')) return 'task';
+    if (t.includes('agent') && t.includes('spawn')) return 'play';
+    if (t.includes('agent') && t.includes('complet')) return 'agent';
+    if (t.includes('agent') && t.includes('fail')) return 'alert-triangle';
+    if (t.includes('mr') && t.includes('merg')) return 'git-merge';
+    if (t.includes('mr') && t.includes('creat')) return 'plus';
+    if (t.includes('gate')) return 'gate';
+    if (t.includes('push')) return 'code';
+    if (t.includes('graph')) return 'hash';
+    if (t.includes('budget')) return 'dollar';
+    return 'activity';
   }
 
   const ACTIVITY_LABELS = {
@@ -1256,7 +1257,7 @@
                   <div class="activity-dot activity-dot-{variant}"></div>
                   {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
                   <div class="activity-content">
-                    <span class="activity-icon">{activityIcon(event)}</span>
+                    <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
                     <span class="activity-label">{activityLabel(event)}</span>
                     {#if event.entity_name ?? event.title ?? event.description}
                       <span class="activity-detail">{event.entity_name ?? event.title ?? event.description}</span>
@@ -1328,7 +1329,8 @@
                     <td class="spec-repo ws-cell-link">{#if spec.repo_id && repoMap[spec.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }}>{repoMap[spec.repo_id].name}</button>{:else}—{/if}</td>
                     <td class="spec-path" title={spec.path}>{spec.path.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</td>
                     <td class="spec-status" title={specStatusTooltip(spec.approval_status ?? spec.status)}>
-                      <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.approval_status ?? spec.status] ?? '•'}</span>
+                      {@const specIconName = { draft: 'edit', pending: 'clock', approved: 'check', rejected: 'x', implemented: 'check', merged: 'git-merge' }[spec.approval_status ?? spec.status] ?? 'circle'}
+                      <span class="status-icon" aria-hidden="true"><Icon name={specIconName} size={12} /></span>
                       {spec.approval_status ?? spec.status ?? '—'}
                     </td>
                     <td class="spec-progress">

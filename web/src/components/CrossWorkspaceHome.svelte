@@ -63,23 +63,23 @@
   // ── Notification type icons (HSI §8) ────────────────────────────────────
   const TYPE_ICONS = {
     agent_clarification: '?',
-    spec_approval: '✋',
-    gate_failure: '⚠',
-    cross_workspace_change: '↔',
-    conflicting_interpretations: '⚡',
+    spec_approval: '!',
+    gate_failure: '!',
+    cross_workspace_change: '~',
+    conflicting_interpretations: '!',
     meta_spec_drift: '~',
-    budget_warning: '💰',
-    trust_suggestion: '🔒',
+    budget_warning: '$',
+    trust_suggestion: '*',
     spec_assertion_failure: '✗',
-    suggested_link: '🔗',
+    suggested_link: '~',
   };
 
   const SPEC_STATUS_ICONS = {
-    draft: '📝',
-    pending: '⏳',
-    approved: '✅',
-    implemented: '✅',
-    merged: '✅',
+    draft: '~',
+    pending: '?',
+    approved: '✓',
+    implemented: '✓',
+    merged: '✓',
   };
 
   function kindLabel(kind) {
@@ -404,19 +404,21 @@
   }
 
   function activityIcon(event) {
-    const t = event.event_type ?? event.event ?? event.type ?? '';
+    const t = (event.event_type ?? event.event ?? event.type ?? '').toLowerCase();
     if (t.includes('spec') && t.includes('approv')) return '✓';
     if (t.includes('spec') && t.includes('reject')) return '✗';
-    if (t.includes('spec')) return '📋';
-    if (t.includes('task')) return '☑';
-    if (t.includes('agent') && t.includes('spawn')) return '▶';
-    if (t.includes('agent') && t.includes('complet')) return '⬛';
-    if (t.includes('mr') && t.includes('merg')) return '🔀';
-    if (t.includes('mr') && t.includes('creat')) return '📝';
-    if (t.includes('gate')) return '🚦';
-    if (t.includes('push')) return '⬆';
-    if (t.includes('graph')) return '🔗';
-    return '•';
+    if (t.includes('spec')) return 'S';
+    if (t.includes('task')) return 'T';
+    if (t.includes('agent') && t.includes('spawn')) return '>';
+    if (t.includes('agent') && t.includes('complet')) return 'A';
+    if (t.includes('agent') && t.includes('fail')) return '!';
+    if (t.includes('mr') && t.includes('merg')) return 'M';
+    if (t.includes('mr') && t.includes('creat')) return '+';
+    if (t.includes('gate')) return 'G';
+    if (t.includes('push')) return '^';
+    if (t.includes('graph')) return '#';
+    if (t.includes('budget')) return '$';
+    return '*';
   }
 
   const ACTIVITY_LABELS = {
@@ -632,14 +634,14 @@
                 <span class="workspace-name">{ws.name}</span>
                 <div class="workspace-indicators">
                   {#if wsGateFailures.length > 0}
-                    <span class="ws-indicator ws-indicator-danger" title="{wsGateFailures.length} failing gates">⚠ {wsGateFailures.length} gate failures</span>
+                    <span class="ws-indicator ws-indicator-danger" title="{wsGateFailures.length} failing gates">! {wsGateFailures.length} gate failures</span>
                   {/if}
                   {#if wsPendingDecisions.length > 0}
-                    <span class="ws-indicator ws-indicator-warning" title="{wsPendingDecisions.length} pending decisions">⏳ {wsPendingDecisions.length} pending</span>
+                    <span class="ws-indicator ws-indicator-warning" title="{wsPendingDecisions.length} pending decisions">{wsPendingDecisions.length} pending</span>
                   {/if}
                   {#if ws.health}
                     <span class="health-badge" class:health-ok={ws.health === 'healthy'} class:health-warn={ws.health === 'gate_failure'}>
-                      {ws.health === 'healthy' ? '●' : '⚠'} {ws.health}
+                      {ws.health === 'healthy' ? '●' : '!'} {ws.health}
                     </span>
                   {/if}
                 </div>
@@ -649,34 +651,34 @@
               {/if}
               <div class="workspace-stats-row">
                 <span class="ws-stat-chip" title="{wsRepos.length} repos">
-                  📦 {wsRepos.length} {wsRepos.length === 1 ? 'repo' : 'repos'}
+                  {wsRepos.length} {wsRepos.length === 1 ? 'repo' : 'repos'}
                 </span>
                 {#if wsSpecs.length > 0}
                   <span class="ws-stat-chip" title="{wsSpecs.length} specs">
-                    📋 {wsSpecs.length} specs
+                    {wsSpecs.length} specs
                     {#if wsPendingSpecs > 0}<span class="ws-stat-alert">{wsPendingSpecs} pending</span>{/if}
                     {#if wsApprovedSpecs > 0}<span class="ws-stat-active">{wsApprovedSpecs} approved</span>{/if}
                   </span>
                 {/if}
                 {#if wsActiveAgents.length > 0}
                   <span class="ws-stat-chip ws-stat-agents" title="{wsActiveAgents.length} active agents">
-                    ▶ {wsActiveAgents.length} active {wsActiveAgents.length === 1 ? 'agent' : 'agents'}
+                    {wsActiveAgents.length} active {wsActiveAgents.length === 1 ? 'agent' : 'agents'}
                   </span>
                 {:else if ws.agent_count != null && ws.agent_count > 0}
-                  <span class="ws-stat-chip">▶ {ws.agent_count} agents</span>
+                  <span class="ws-stat-chip">{ws.agent_count} agents</span>
                 {/if}
                 {#if wsOpenMrs.length > 0}
                   <span class="ws-stat-chip" title="{wsOpenMrs.length} open MRs">
-                    🔀 {wsOpenMrs.length} open MRs
+                    {wsOpenMrs.length} open MRs
                   </span>
                 {/if}
                 {#if wsNotifs.length > 0}
                   <span class="ws-stat-chip ws-stat-decisions" title="{wsNotifs.length} decisions pending">
-                    ⚡ {wsNotifs.length} decisions
+                    {wsNotifs.length} decisions
                   </span>
                 {/if}
                 {#if ws.budget_pct != null}
-                  <span class="ws-stat-chip">💰 {ws.budget_pct}% budget</span>
+                  <span class="ws-stat-chip">{ws.budget_pct}% budget</span>
                 {/if}
                 {#if wsRepos.length === 0 && wsSpecs.length === 0 && wsNotifs.length === 0 && wsActiveAgents.length === 0 && !ws.agent_count}
                   <span class="ws-stat-chip ws-stat-empty">No activity</span>
@@ -961,7 +963,7 @@
               <li class="rule-row rule-row-clickable" onclick={() => onManageAgentRules?.()} tabindex="0" role="button" title="Click to view and edit this rule" onkeydown={(e) => { if (e.key === 'Enter') onManageAgentRules?.(); }}>
                 <span class="rule-name">{ms.name ?? ms.path ?? '—'}</span>
                 {#if ms.required}
-                  <span class="rule-required" aria-label={$t('cross_workspace.rule_required')} title="Required — agents must follow this rule">🔒</span>
+                  <span class="rule-required" aria-label={$t('cross_workspace.rule_required')} title="Required — agents must follow this rule">required</span>
                 {/if}
                 <span class="rule-version" title="Version {ms.version ?? 1}">v{ms.version ?? 1}</span>
                 <span class="rule-status" class:status-approved={ms.status === 'Approved'} title={ms.status === 'Approved' ? 'This rule is approved and active' : ms.status === 'Pending' ? 'Awaiting approval' : ms.status ?? ''}>
