@@ -230,6 +230,12 @@ impl GoExtractionContext {
             }
         }
 
+        // --- Extract cobra.Command declarations as endpoints ---
+        self.extract_cobra_commands(&root, source, &rel_path, &pkg_qname, &pkg_id);
+
+        // --- Extract http.HandleFunc / mux.HandleFunc and gin/echo/chi routes ---
+        self.extract_http_routes(&root, source, &rel_path, &pkg_qname, &pkg_id);
+
         Ok(())
     }
 
@@ -455,6 +461,124 @@ impl GoExtractionContext {
 
         let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), fn_id);
         self.edges.push(edge);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cobra CLI command detection
+    // -----------------------------------------------------------------------
+
+    /// Detect `var listCmd = &cobra.Command{ Use: "list", Short: "..." }` patterns
+    /// and emit Endpoint nodes for each cobra command.
+    fn extract_cobra_commands(
+        &mut self,
+        root: &tree_sitter::Node,
+        source: &[u8],
+        rel_path: &str,
+        pkg_qname: &str,
+        pkg_id: &Id,
+    ) {
+        // Walk all top-level declarations looking for variable declarations
+        // with cobra.Command composite literals.
+        // In tree-sitter-go, `var x = &cobra.Command{...}` may be parsed
+        // as a `var_declaration` or as a `short_var_declaration`, and the
+        // composite literal can be nested inside a `unary_expression`.
+        for i in 0..root.child_count() {
+            let child = root.child(i).unwrap();
+            // Go tree-sitter: top-level `var x = ...` is a `var_declaration`
+            // containing `var_spec` children.
+            if child.kind() != "var_declaration" {
+                continue;
+            }
+            for j in 0..child.child_count() {
+                let spec = child.child(j).unwrap();
+                if spec.kind() != "var_spec" {
+                    continue;
+                }
+                // Look for a composite_literal whose type is cobra.Command
+                // or a unary_expression (&cobra.Command{...})
+                if let Some((use_val, short_val, line)) = extract_cobra_fields(&spec, source) {
+                    let cmd_name = use_val.trim().to_string();
+                    if cmd_name.is_empty() {
+                        continue;
+                    }
+                    let qname = format!("{pkg_qname}.cmd.{cmd_name}");
+                    let mut node = self.make_node(
+                        NodeType::Endpoint,
+                        &cmd_name,
+                        &qname,
+                        rel_path,
+                        line,
+                        line,
+                        Visibility::Public,
+                    );
+                    if !short_val.is_empty() {
+                        node.doc_comment = Some(short_val);
+                    }
+                    let node_id = node.id.clone();
+                    self.name_to_id.insert(qname, node_id.clone());
+                    self.nodes.push(node);
+
+                    let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), node_id);
+                    self.edges.push(edge);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // HTTP route detection (http.HandleFunc, gin/echo/chi)
+    // -----------------------------------------------------------------------
+
+    /// Detect `http.HandleFunc("/path", handler)` and `r.GET("/path", handler)` patterns.
+    fn extract_http_routes(
+        &mut self,
+        root: &tree_sitter::Node,
+        source: &[u8],
+        rel_path: &str,
+        pkg_qname: &str,
+        pkg_id: &Id,
+    ) {
+        self.walk_for_http_routes(root, source, rel_path, pkg_qname, pkg_id);
+    }
+
+    fn walk_for_http_routes(
+        &mut self,
+        node: &tree_sitter::Node,
+        source: &[u8],
+        rel_path: &str,
+        pkg_qname: &str,
+        pkg_id: &Id,
+    ) {
+        if node.kind() == "call_expression" {
+            if let Some((route_path, method, line)) = extract_http_route_call(node, source) {
+                let endpoint_name = route_path
+                    .replace('/', "_")
+                    .trim_start_matches('_')
+                    .to_string();
+                let qname = format!("{pkg_qname}.endpoint.{endpoint_name}");
+                let mut ep_node = self.make_node(
+                    NodeType::Endpoint,
+                    &endpoint_name,
+                    &qname,
+                    rel_path,
+                    line,
+                    line,
+                    Visibility::Public,
+                );
+                ep_node.doc_comment = Some(format!("{method} {route_path}"));
+                let ep_id = ep_node.id.clone();
+                self.name_to_id.insert(qname, ep_id.clone());
+                self.nodes.push(ep_node);
+
+                let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), ep_id);
+                self.edges.push(edge);
+            }
+        }
+
+        for i in 0..node.child_count() {
+            let child = node.child(i).unwrap();
+            self.walk_for_http_routes(&child, source, rel_path, pkg_qname, pkg_id);
+        }
     }
 
     /// Extract import paths and create DependsOn edges for same-module packages.
@@ -721,6 +845,205 @@ fn extract_field_type_text(field_decl: &tree_sitter::Node, source: &[u8]) -> Str
         }
     }
     "?".to_string()
+}
+
+/// Extract cobra.Command `Use` and `Short` field values from a var_spec node.
+///
+/// Looks for patterns like:
+/// ```text
+/// var listCmd = &cobra.Command{
+///     Use:   "list",
+///     Short: "List all clusters",
+/// }
+/// ```
+///
+/// Returns `Some((use_value, short_value, line))` if found.
+fn extract_cobra_fields(
+    var_spec: &tree_sitter::Node,
+    source: &[u8],
+) -> Option<(String, String, u32)> {
+    // Walk the var_spec looking for a composite_literal or unary_expression(&)
+    // containing cobra.Command.
+    let composite = find_cobra_composite(var_spec, source)?;
+    let line = composite.start_position().row as u32 + 1;
+
+    let mut use_val = String::new();
+    let mut short_val = String::new();
+
+    // Walk the literal_value children looking for keyed_element nodes
+    // with keys "Use" and "Short".
+    // In tree-sitter-go, keyed_element has literal_element children:
+    //   keyed_element → literal_element(identifier) ":" literal_element(string)
+    if let Some(lit_val) = find_child_by_kind(&composite, "literal_value") {
+        for i in 0..lit_val.child_count() {
+            let child = lit_val.child(i).unwrap();
+            if child.kind() != "keyed_element" {
+                continue;
+            }
+            let key = extract_keyed_element_key(&child, source);
+            match key.as_str() {
+                "Use" => {
+                    use_val = extract_string_value_from_keyed_element(&child, source);
+                }
+                "Short" => {
+                    short_val = extract_string_value_from_keyed_element(&child, source);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if use_val.is_empty() {
+        return None;
+    }
+    Some((use_val, short_val, line))
+}
+
+/// Recursively find a composite_literal with type containing "cobra.Command".
+fn find_cobra_composite<'a>(
+    node: &tree_sitter::Node<'a>,
+    source: &[u8],
+) -> Option<tree_sitter::Node<'a>> {
+    if node.kind() == "composite_literal" {
+        // Check if the type contains "cobra.Command"
+        let text = node.utf8_text(source).unwrap_or("");
+        if text.contains("cobra.Command") {
+            return Some(*node);
+        }
+    }
+    for i in 0..node.child_count() {
+        let child = node.child(i).unwrap();
+        if let Some(found) = find_cobra_composite(&child, source) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Extract the key identifier from a keyed_element node.
+///
+/// In tree-sitter-go, keyed_element has:
+///   literal_element(identifier("Use")) ":" literal_element(string("list"))
+fn extract_keyed_element_key(keyed_elem: &tree_sitter::Node, source: &[u8]) -> String {
+    // The first literal_element child contains the key identifier.
+    for i in 0..keyed_elem.child_count() {
+        let child = keyed_elem.child(i).unwrap();
+        if child.kind() == "literal_element" {
+            // Inside literal_element, look for identifier
+            for j in 0..child.child_count() {
+                let inner = child.child(j).unwrap();
+                if inner.kind() == "identifier" {
+                    return inner.utf8_text(source).unwrap_or("").to_string();
+                }
+            }
+            // If no identifier child, the literal_element text itself is the key
+            return child.utf8_text(source).unwrap_or("").to_string();
+        }
+    }
+    String::new()
+}
+
+/// Extract the string value from a keyed_element (strips quotes).
+fn extract_string_value_from_keyed_element(
+    keyed_elem: &tree_sitter::Node,
+    source: &[u8],
+) -> String {
+    // Walk through all children looking for interpreted_string_literal,
+    // which may be nested inside a literal_element.
+    fn find_string_recursive(node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+        if node.kind() == "interpreted_string_literal" {
+            let raw = node.utf8_text(source).unwrap_or("");
+            return Some(raw.trim_matches('"').to_string());
+        }
+        // Also check for interpreted_string_literal_content directly
+        if node.kind() == "interpreted_string_literal_content" {
+            return Some(node.utf8_text(source).unwrap_or("").to_string());
+        }
+        for i in 0..node.child_count() {
+            let child = node.child(i).unwrap();
+            if let Some(val) = find_string_recursive(&child, source) {
+                return Some(val);
+            }
+        }
+        None
+    }
+
+    // Skip the first literal_element (that's the key), find the string in the rest
+    let mut past_colon = false;
+    for i in 0..keyed_elem.child_count() {
+        let child = keyed_elem.child(i).unwrap();
+        if child.kind() == ":" {
+            past_colon = true;
+            continue;
+        }
+        if past_colon {
+            if let Some(val) = find_string_recursive(&child, source) {
+                return val;
+            }
+        }
+    }
+    String::new()
+}
+
+/// Extract HTTP route info from a call_expression node.
+///
+/// Matches patterns like:
+/// - `http.HandleFunc("/health", handler)`
+/// - `mux.HandleFunc("/api/v1/users", handleUsers)`
+/// - `r.GET("/users", getUsers)`
+/// - `router.Handle("/api/v1/tasks", tasksHandler)`
+///
+/// Returns `Some((path, method, line))`.
+fn extract_http_route_call(
+    call_node: &tree_sitter::Node,
+    source: &[u8],
+) -> Option<(String, String, u32)> {
+    // call_expression → function: selector_expression, arguments: argument_list
+    let func_node = find_child_by_kind(call_node, "selector_expression")?;
+    let method_node = find_child_by_kind(&func_node, "field_identifier")?;
+    let method_name = method_node.utf8_text(source).ok()?;
+
+    // Check if this is an HTTP route method
+    let http_methods = [
+        "HandleFunc",
+        "Handle",
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH",
+        "Get",
+        "Post",
+        "Put",
+        "Delete",
+        "Patch",
+        "Head",
+        "Options",
+    ];
+    if !http_methods.contains(&method_name) {
+        return None;
+    }
+
+    // Derive the HTTP method from the function name
+    let http_method = match method_name {
+        "HandleFunc" | "Handle" => "ANY".to_string(),
+        other => other.to_uppercase(),
+    };
+
+    // Extract the path from the first string argument
+    let args = find_child_by_kind(call_node, "argument_list")?;
+    for i in 0..args.child_count() {
+        let arg = args.child(i).unwrap();
+        if arg.kind() == "interpreted_string_literal" {
+            let raw = arg.utf8_text(source).unwrap_or("");
+            let path = raw.trim_matches('"').to_string();
+            if path.starts_with('/') {
+                let line = call_node.start_position().row as u32 + 1;
+                return Some((path, http_method, line));
+            }
+        }
+    }
+    None
 }
 
 /// Returns true if the identifier starts with an uppercase letter (Go exported).
@@ -1192,5 +1515,80 @@ func NewServer() *Server { return nil }
             server_node.is_some(),
             "tree-sitter pass should still extract Server type"
         );
+    }
+
+    #[test]
+    fn extract_cobra_command_as_endpoint() {
+        let src = r#"package cmd
+
+import "github.com/spf13/cobra"
+
+var listCmd = &cobra.Command{
+    Use:   "list",
+    Short: "List all clusters",
+    RunE: func(cmd *cobra.Command, args []string) error {
+        return nil
+    },
+}
+
+func init() {
+    rootCmd.AddCommand(listCmd)
+}
+"#;
+        let dir = make_repo(GO_MOD, &[("cmd/list.go", src)]);
+        let result = GoExtractor.extract(dir.path(), "abc123");
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        let endpoint = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint && n.name == "list");
+        assert!(
+            endpoint.is_some(),
+            "should extract cobra command 'list' as Endpoint node"
+        );
+        let ep = endpoint.unwrap();
+        assert!(
+            ep.qualified_name.contains("cmd.list"),
+            "qualified_name should contain cmd.list, got: {}",
+            ep.qualified_name
+        );
+        assert_eq!(
+            ep.doc_comment.as_deref(),
+            Some("List all clusters"),
+            "doc_comment should be the Short value"
+        );
+    }
+
+    #[test]
+    fn extract_http_handlefunc_as_endpoint() {
+        let src = r#"package main
+
+import "net/http"
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {}
+
+func main() {
+    http.HandleFunc("/health", healthHandler)
+}
+"#;
+        let dir = make_repo(GO_MOD, &[("main.go", src)]);
+        let result = GoExtractor.extract(dir.path(), "abc123");
+
+        let endpoint = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint);
+        assert!(
+            endpoint.is_some(),
+            "should extract http.HandleFunc as Endpoint node"
+        );
+        let ep = endpoint.unwrap();
+        assert_eq!(ep.name, "health");
     }
 }

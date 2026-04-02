@@ -1037,14 +1037,47 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                 let name = e.ident.to_string();
                 let vis = syn_vis_to_visibility(&e.vis);
                 let doc = extract_doc_comment(&e.attrs);
+                let is_subcommand = has_derive_attr(&e.attrs, "Subcommand");
+
                 let node = self.make_node(NodeType::Type, &name, 0, vis, doc);
                 let node_id = node.id.clone();
+                let enum_qname = self.qualified(&name);
                 self.ctx
                     .name_to_id
-                    .insert(self.qualified(&name), node_id.clone());
+                    .insert(enum_qname.clone(), node_id.clone());
                 let edge = self.add_contains_edge(node_id);
                 self.new_nodes.push(node);
                 self.new_edges.push(edge);
+
+                // If this enum derives Subcommand, emit each variant as an Endpoint.
+                if is_subcommand {
+                    for variant in &e.variants {
+                        let variant_name = variant.ident.to_string();
+                        let variant_qname = format!("{}::{}", enum_qname, variant_name);
+                        let variant_doc = extract_doc_comment(&variant.attrs);
+                        // Convert CamelCase variant to kebab-case for the command name
+                        let cmd_name = camel_to_kebab(&variant_name);
+                        let ep_node = self.ctx.make_node(
+                            NodeType::Endpoint,
+                            &cmd_name,
+                            &variant_qname,
+                            self.rel_path,
+                            0,
+                            0,
+                            Visibility::Public,
+                            variant_doc,
+                            None,
+                            SpecConfidence::None,
+                        );
+                        let ep_id = ep_node.id.clone();
+                        self.ctx.name_to_id.insert(variant_qname, ep_id.clone());
+                        let ep_edge =
+                            self.ctx
+                                .make_edge(EdgeType::Contains, self.module_id.clone(), ep_id);
+                        self.new_nodes.push(ep_node);
+                        self.new_edges.push(ep_edge);
+                    }
+                }
             }
             Item::Trait(t) => {
                 let name = t.ident.to_string();
@@ -1149,6 +1182,45 @@ fn extract_spec_comments(content: &str) -> Vec<String> {
             None
         })
         .collect()
+}
+
+/// Check if an item has a `#[derive(...)]` attribute containing the given trait name.
+fn has_derive_attr(attrs: &[syn::Attribute], trait_name: &str) -> bool {
+    for attr in attrs {
+        if attr.path().is_ident("derive") {
+            // Parse the derive list: #[derive(Foo, Bar)]
+            if let syn::Meta::List(list) = &attr.meta {
+                let tokens_str = list.tokens.to_string();
+                // Check each comma-separated token
+                for token in tokens_str.split(',') {
+                    let trimmed = token.trim();
+                    // Handle both `Subcommand` and `clap::Subcommand`
+                    let last_segment = trimmed.rsplit("::").next().unwrap_or(trimmed);
+                    if last_segment == trait_name {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Convert a CamelCase name to kebab-case for CLI command naming.
+/// e.g. `InitProject` → `init-project`, `Clone` → `clone`
+fn camel_to_kebab(name: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('-');
+            }
+            result.push(c.to_lowercase().next().unwrap());
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 /// Extract doc comment text from syn attributes.
@@ -1923,6 +1995,74 @@ pub fn make_map() -> u32 {
             call_edges.is_empty(),
             "should not produce Calls edges for external crate functions, got {}",
             call_edges.len()
+        );
+    }
+
+    #[test]
+    fn extract_clap_subcommand_enum_variants_as_endpoints() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-cli\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let code = r#"
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Initialize a new project
+    Init {
+        path: String,
+    },
+    /// Clone an existing repository
+    Clone {
+        url: String,
+    },
+}
+"#;
+        fs::write(src_dir.join("main.rs"), code).unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "clap123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // Should have Endpoint nodes for each variant.
+        let init_ep = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint && n.name == "init");
+        let clone_ep = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint && n.name == "clone");
+
+        assert!(
+            init_ep.is_some(),
+            "should extract Init variant as Endpoint with name 'init'"
+        );
+        assert!(
+            clone_ep.is_some(),
+            "should extract Clone variant as Endpoint with name 'clone'"
+        );
+
+        // Verify doc comments are preserved.
+        assert_eq!(
+            init_ep.unwrap().doc_comment.as_deref(),
+            Some("Initialize a new project"),
+            "Init endpoint should have doc comment"
         );
     }
 }
