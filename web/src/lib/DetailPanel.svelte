@@ -466,7 +466,7 @@
           const passed = enrichedGates.filter(g => g.status === 'Passed' || g.status === 'passed').length;
           const failed = enrichedGates.filter(g => g.status === 'Failed' || g.status === 'failed').length;
           const total = enrichedGates.length;
-          const gateNames = enrichedGates.map(g => ({ name: g.name ?? 'Gate', status: g.status, required: g.required, gate_type: g.gate_type }));
+          const gateNames = enrichedGates.map(g => ({ name: g.name ?? 'Gate', status: g.status, required: g.required, gate_type: g.gate_type, output: g.output, error: g.error, command: g.command, duration_ms: g.duration_ms, started_at: g.started_at, finished_at: g.finished_at }));
           mrDetail = { ...mrDetail, _gateSummary: { passed, failed, total, gates: gateNames } };
         }
         // Pre-cache enriched gates for the gates tab
@@ -1962,12 +1962,20 @@
                       {#each mr._gateSummary.gates as gate}
                         {@const passed = gate.status === 'Passed' || gate.status === 'passed'}
                         {@const failed = gate.status === 'Failed' || gate.status === 'failed'}
+                        {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
                         <button class="gate-detail-item" class:gate-pass={passed} class:gate-fail={failed} onclick={() => { activeTab = 'gates'; }} title="View gate details">
                           <span class="gate-check">{passed ? '✓' : failed ? '✗' : '○'}</span>
                           <span class="gate-detail-name">{gate.gate_name ?? gate.name ?? ((gate.gate_type ?? '').replace(/_/g, ' ') || 'Quality gate')}</span>
                           {#if gate.gate_type}<span class="gate-type-tag">{gate.gate_type.replace(/_/g, ' ')}</span>{/if}
                           {#if gate.required === false}<span class="gate-advisory-tag">advisory</span>{/if}
+                          {#if duration}<span class="gate-duration-tag">{duration < 1000 ? duration + 'ms' : (duration / 1000).toFixed(1) + 's'}</span>{/if}
+                          {#if gate.command}<span class="gate-cmd-tag mono">{gate.command}</span>{/if}
                         </button>
+                        {#if failed && (gate.error || gate.output)}
+                          <div class="gate-inline-error">
+                            <pre class="gate-inline-error-text">{(gate.error || gate.output || '').slice(0, 300)}{(gate.error || gate.output || '').length > 300 ? '...' : ''}</pre>
+                          </div>
+                        {/if}
                       {/each}
                     </div>
                   {/if}
@@ -7125,6 +7133,41 @@
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.03em;
+  }
+
+  .gate-duration-tag {
+    font-size: 9px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .gate-cmd-tag {
+    font-size: 9px;
+    color: var(--color-text-muted);
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .gate-inline-error {
+    margin: -2px 0 4px 22px;
+    padding: var(--space-1) var(--space-2);
+    background: color-mix(in srgb, var(--color-danger) 6%, var(--color-surface));
+    border: 1px solid color-mix(in srgb, var(--color-danger) 20%, var(--color-border));
+    border-radius: var(--radius-sm);
+  }
+
+  .gate-inline-error-text {
+    margin: 0;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-danger);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 80px;
+    overflow-y: auto;
+    line-height: 1.3;
   }
 
   /* ── Touched paths ─────────────────────────────────────────────────────── */
