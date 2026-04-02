@@ -3441,9 +3441,17 @@
                 </div>
                 {#each mrDiff.files as file, idx}
                   {@const statusLower = (file.status ?? 'modified').toLowerCase()}
+                  {@const treeAdds = file.insertions ?? 0}
+                  {@const treeDels = file.deletions ?? 0}
                   <button class="diff-tree-item diff-tree-clickable" onclick={() => { const el = document.getElementById(`diff-file-${idx}`); if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } }} title="Jump to {file.path}">
                     <span class="diff-tree-status diff-tree-status-{statusLower}">{statusLower === 'added' ? '+' : statusLower === 'deleted' ? '-' : '~'}</span>
                     <span class="diff-tree-path mono">{file.path}</span>
+                    {#if treeAdds > 0 || treeDels > 0}
+                      <span class="diff-tree-stats">
+                        {#if treeAdds > 0}<span class="diff-ins">+{treeAdds}</span>{/if}
+                        {#if treeDels > 0}<span class="diff-del">-{treeDels}</span>{/if}
+                      </span>
+                    {/if}
                   </button>
                 {/each}
               </div>
@@ -3456,6 +3464,7 @@
                     <summary class="diff-file-header">
                       <Badge value={fileStatusLower} variant={fileStatusLower === 'added' ? 'success' : fileStatusLower === 'deleted' ? 'danger' : 'info'} />
                       <span class="diff-file-path mono">{file.path}</span>
+                      <button class="diff-copy-path" onclick={(e) => { e.preventDefault(); e.stopPropagation(); navigator.clipboard.writeText(file.path); e.target.textContent = 'Copied!'; setTimeout(() => { e.target.textContent = 'Copy path'; }, 1500); }} title="Copy file path">Copy path</button>
                       {#if goToRepoTab && fileStatusLower !== 'deleted'}
                         <button class="diff-blame-link" onclick={(e) => { e.preventDefault(); e.stopPropagation(); goToRepoTab('code', { subTab: 'files', file: file.path }); close(); }} title="View blame & agent attribution for {file.path}">Blame</button>
                       {/if}
@@ -5571,11 +5580,36 @@
 
   .diff-tree-path {
     color: var(--color-text-muted);
-    max-width: 140px;
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+
+  .diff-tree-stats {
+    display: flex;
+    gap: 2px;
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+
+  .diff-copy-path {
+    font-size: 10px;
+    padding: 0 4px;
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+  }
+
+  .diff-file-header:hover .diff-copy-path,
+  .diff-copy-path:focus { opacity: 1; }
+  .diff-copy-path:hover { border-color: var(--color-primary); color: var(--color-text); }
 
   .diff-no-patch {
     font-size: var(--text-xs);
