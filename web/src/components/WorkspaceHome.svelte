@@ -717,8 +717,24 @@
   });
 
   // ── Secondary tab bar ────────────────────────────────────────────────
-  // Replaces the old collapsible accordion with a clean tabbed view
-  let secondaryTab = $state('activity');
+  // Auto-selects the most useful tab based on data state:
+  // - If specs are pending approval → Specs tab
+  // - If MRs have gate failures → MRs tab
+  // - If agents are active → Agents tab
+  // - Otherwise → Activity (recent events)
+  let secondaryTabOverride = $state(null);
+  let secondaryTab = $derived.by(() => {
+    if (secondaryTabOverride) return secondaryTabOverride;
+    // Smart defaults based on workspace state
+    const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending').length;
+    if (pendingSpecs > 0) return 'specs';
+    const failedMrs = wsMrs.filter(m => m._gates?.failed > 0).length;
+    if (failedMrs > 0) return 'mrs';
+    const activeAgents = wsAgents.filter(a => a.status === 'active').length;
+    if (activeAgents > 0) return 'agents';
+    return 'activity';
+  });
+  function setSecondaryTab(id) { secondaryTabOverride = id; }
   const SECONDARY_TABS = [
     { id: 'activity', label: 'Activity' },
     { id: 'specs', label: 'Specs' },
@@ -744,7 +760,7 @@
   function handlePipelineStageClick(stageId) {
     const tabMap = { specs: 'specs', tasks: 'tasks', mrs: 'mrs', agents: 'agents' };
     if (tabMap[stageId]) {
-      secondaryTab = tabMap[stageId];
+      setSecondaryTab(tabMap[stageId]);
       document.querySelector('[data-testid="secondary-tabs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }
@@ -981,8 +997,14 @@
     <!-- ═══ Focused Dashboard (replaces cluttered section soup) ═══════ -->
     <div class="focused-dashboard">
 
-      <!-- Zone 1: Action Needed -->
-      <ActionNeeded items={notifications} />
+      <!-- Zone 1: Action Needed (with inline approve/reject/retry/dismiss) -->
+      <ActionNeeded
+        items={notifications}
+        onApproveSpec={handleApproveSpec}
+        onRejectSpec={handleRejectSpec}
+        onRetryGate={handleRetry}
+        onDismiss={handleDismiss}
+      />
 
       <!-- Zone 2: Pipeline Overview -->
       <PipelineOverview
@@ -1040,150 +1062,9 @@
         </section>
       {/if}
 
-      <!-- ── Zone 3: Decisions (promoted — the #1 human touchpoint) ────── -->
-      {#if notifications.length > 0 || decisionsLoading}
-      <section class="home-section" aria-labelledby="section-decisions" data-testid="section-decisions">
-        <div class="section-header">
-          <h2 class="section-title" id="section-decisions">
-            {$t('workspace_home.sections.decisions')}
-            {#if notifications.length > 0}
-              <span class="section-badge" aria-label={$t('workspace_home.decisions_badge_label', { values: { count: notifications.length } })}>{notifications.length}</span>
-            {/if}
-          </h2>
-          {#if notifications.length > 0}
-            <button class="section-action-btn" onclick={() => { showAllDecisions = !showAllDecisions; }}>{showAllDecisions ? $t('workspace_home.show_less') : $t('workspace_home.view_all')}</button>
-          {/if}
-        </div>
-        <div class="section-body">
-          {#if decisionsLoading}
-            <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
-          {:else if decisionsError}
-            <div class="error-row" role="alert">
-              <p class="error-text">{decisionsError}</p>
-              <button class="retry-btn" onclick={loadDecisions} aria-label={$t('workspace_home.retry_loading_decisions')}>{$t('common.retry')}</button>
-            </div>
-          {:else if notifications.length === 0}
-            <p class="empty-text" data-testid="decisions-empty">{$t('workspace_home.decisions_empty')}</p>
-          {:else}
-            <ul class="decision-list" role="list">
-              {#each (showAllDecisions ? notifications : notifications.slice(0, 5)) as n (n.id)}
-                {@const body = getBody(n)}
-                {@const state = actionStates[n.id] ?? {}}
-                {@const titleSpecPath = !body.spec_path && n.title ? n.title.match(/:\s*(.+\.md)\s*$/)?.[1] : null}
-                <li class="decision-item" data-testid="decision-item">
-                  <span class="decision-icon" aria-hidden="true">{TYPE_ICONS[n.notification_type] ?? '•'}</span>
-                  <div class="decision-content">
-                    <span class="decision-type">{typeLabel(n.notification_type)}</span>
-                    <span class="decision-desc">{n.title ?? n.message ?? n.description ?? body.description ?? ''}</span>
-                    <div class="decision-refs">
-                      {#if body.spec_path}
-                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', normalizeSpecPath(body.spec_path), { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id }); }} title="View spec: {body.spec_path}">📋 {normalizeSpecPath(body.spec_path).split('/').pop()?.replace(/\.md$/, '')}</button>
-                      {:else if titleSpecPath}
-                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('spec', normalizeSpecPath(titleSpecPath), { path: normalizeSpecPath(titleSpecPath), repo_id: n.repo_id }); }} title="View spec: {titleSpecPath}">📋 {normalizeSpecPath(titleSpecPath).split('/').pop()?.replace(/\.md$/, '')}</button>
-                      {/if}
-                      {#if body.mr_id}
-                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('mr', body.mr_id, { repository_id: n.repo_id }); }} title="View merge request">🔀 {entityName('mr', body.mr_id)}</button>
-                      {/if}
-                      {#if body.agent_id}
-                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('agent', body.agent_id, { repo_id: n.repo_id }); }} title="View agent">▶ {entityName('agent', body.agent_id)}</button>
-                      {/if}
-                      {#if body.task_id}
-                        <button class="decision-entity-link" onclick={(e) => { e.stopPropagation(); nav('task', body.task_id, { repo_id: n.repo_id }); }} title="View task">☑ {entityName('task', body.task_id)}</button>
-                      {/if}
-                      {#if n.repo_id && repoMap[n.repo_id]}
-                        <button
-                          class="decision-repo-link"
-                          onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[n.repo_id], 'decisions'); }}
-                          aria-label={$t('workspace_home.go_to_repo_decisions', { values: { name: repoMap[n.repo_id].name } })}
-                        >{repoMap[n.repo_id].name}</button>
-                      {/if}
-                    </div>
-                  </div>
-                  <div class="decision-actions">
-                    {#if state.success}
-                      <span class="action-feedback success">{state.message}</span>
-                    {:else if state.loading}
-                      <span class="action-feedback">…</span>
-                    {:else}
-                      {#if n.notification_type === 'spec_approval' && (body.spec_path || n.title?.includes(':'))}
-                        <button
-                          class="inline-btn approve"
-                          onclick={() => handleApproveSpec(n)}
-                          data-testid="btn-approve"
-                          aria-label={$t('common.approve')}
-                        >{$t('common.approve')}</button>
-                        <button
-                          class="inline-btn reject"
-                          onclick={() => handleRejectSpec(n)}
-                          data-testid="btn-reject"
-                          aria-label={$t('common.reject')}
-                        >{$t('common.reject')}</button>
-                      {:else if n.notification_type === 'gate_failure' && body.mr_id}
-                        <button
-                          class="inline-btn"
-                          onclick={() => handleRetry(n)}
-                          data-testid="btn-retry"
-                          aria-label={$t('common.retry')}
-                        >{$t('common.retry')}</button>
-                        <button
-                          class="inline-btn secondary"
-                          onclick={() => nav('mr', body.mr_id, { _openTab: 'gates', repository_id: n.repo_id })}
-                          title="View gate details"
-                        >View Gates</button>
-                      {:else if n.notification_type === 'agent_clarification' && body.agent_id}
-                        <button
-                          class="inline-btn"
-                          onclick={() => nav('agent', body.agent_id, { _openTab: 'chat', repo_id: n.repo_id })}
-                          title="View agent messages"
-                        >Respond</button>
-                      {:else if n.notification_type === 'budget_warning'}
-                        <button
-                          class="inline-btn secondary"
-                          onclick={() => { const el = document.getElementById('section-budget'); if (el) el.scrollIntoView({ behavior: 'smooth' }); }}
-                          title="View budget details"
-                        >View Budget</button>
-                      {:else if (n.notification_type === 'agent_completed' || n.notification_type === 'mr_needs_review') && body.mr_id}
-                        <button
-                          class="inline-btn"
-                          onclick={() => nav('mr', body.mr_id, { repository_id: n.repo_id })}
-                          title="Review merge request"
-                        >Review MR</button>
-                        {#if body.agent_id}
-                          <button
-                            class="inline-btn secondary"
-                            onclick={() => nav('agent', body.agent_id, { repo_id: n.repo_id })}
-                            title="View agent details"
-                          >View Agent</button>
-                        {/if}
-                      {:else if n.notification_type === 'mr_merged' && body.mr_id}
-                        <button
-                          class="inline-btn secondary"
-                          onclick={() => nav('mr', body.mr_id, { repository_id: n.repo_id })}
-                          title="View merged MR"
-                        >View MR</button>
-                      {:else if n.notification_type === 'suggested_link' && body.mr_id}
-                        <button
-                          class="inline-btn secondary"
-                          onclick={() => nav('mr', body.mr_id, { repository_id: n.repo_id })}
-                          title="View merge request"
-                        >View MR</button>
-                      {/if}
-                      <button
-                        class="inline-btn secondary"
-                        onclick={() => handleDismiss(n)}
-                        data-testid="btn-dismiss"
-                        aria-label={$t('common.dismiss')}
-                      >{$t('common.dismiss')}</button>
-                    {/if}
-                  </div>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </div>
-      </section>
-      {/if}
+      <!-- Decisions are surfaced via ActionNeeded (Zone 1) above.
+           Inline actions (approve/reject/retry) are handled there.
+           No duplicate Decisions section needed — reduces clutter. -->
 
       <!-- ── Zone 4: Repositories (full-width grid) ──────────────────── -->
       <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
@@ -1260,7 +1141,7 @@
               class:active={secondaryTab === tab.id}
               role="tab"
               aria-selected={secondaryTab === tab.id}
-              onclick={() => { secondaryTab = tab.id; }}
+              onclick={() => { setSecondaryTab(tab.id); }}
             >
               {tab.label}
               {#if tab.id === 'specs' && specs.filter(s => (s.approval_status ?? s.status) === 'pending').length > 0}
