@@ -9,6 +9,8 @@
   import EditorSplit from './EditorSplit.svelte';
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import { api } from './api.js';
+  import { entityName as sharedEntityName, shortId as sharedShortId, formatSha } from './entityNames.svelte.js';
+  import { relativeTime, absoluteTime, formatDuration, formatDate } from './timeFormat.js';
   import { toastSuccess, toastError } from './toast.svelte.js';
   import { detectLang, highlightLine } from './syntaxHighlight.js';
   import { renderMarkdown } from './markdown.js';
@@ -337,7 +339,7 @@
   let sendingMessage = $state(false);
 
   // Agent/task name cache for cross-references
-  let entityNameCache = $state({});
+  // Entity name cache is now a shared singleton in entityNames.svelte.js
 
   // ── Task entity tab state ─────────────────────────────────────────────────
   let taskDetail = $state(null);
@@ -1281,24 +1283,15 @@
 
   function fmtDate(ts) {
     if (!ts) return '—';
-    const ms = ts > 1e12 ? ts : ts * 1000; // handle both seconds and ms
-    const d = new Date(ms);
-    const now = Date.now();
-    const diff = Math.round((now - ms) / 1000);
-    // Show relative time for recent events, absolute for older ones
-    let rel = '';
-    if (diff < 60) rel = 'just now';
-    else if (diff < 3600) rel = `${Math.floor(diff / 60)}m ago`;
-    else if (diff < 86400) rel = `${Math.floor(diff / 3600)}h ago`;
-    else if (diff < 604800) rel = `${Math.floor(diff / 86400)}d ago`;
-    const abs = d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const rel = relativeTime(ts);
+    const abs = formatDate(ts);
     return rel ? `${rel} (${abs})` : abs;
   }
 
   /** Truncate a UUID/SHA to 8 chars for display. Full value shown in title. */
   function shortId(id) {
     if (!id) return '—';
-    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+    return sharedShortId(id);
   }
 
   /** Copy text to clipboard and show a toast. */
@@ -1319,33 +1312,10 @@
     }
   }
 
-  /** Queue entity name resolution outside of template rendering. */
-  function queueNameResolution(type, id) {
-    if (!id) return;
-    const key = `${type}:${id}`;
-    if (entityNameCache[key] !== undefined) return;
-    // Use queueMicrotask to avoid state mutation during template rendering
-    queueMicrotask(() => {
-      if (entityNameCache[key] !== undefined) return;
-      entityNameCache = { ...entityNameCache, [key]: null };
-      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                      type === 'task' ? api.task(id).then(t => t?.title) :
-                      type === 'repo' ? api.repo(id).then(r => r?.name) :
-                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
-                      type === 'workspace' ? api.workspace(id).then(w => w?.name) :
-                      Promise.resolve(null);
-      fetcher.then(name => {
-        if (name) entityNameCache = { ...entityNameCache, [key]: name };
-      }).catch(() => {});
-    });
-  }
-
+  // Entity name resolution uses shared singleton cache
   function entityName(type, id) {
     if (!id) return shortId(id);
-    const cached = entityNameCache[`${type}:${id}`];
-    if (cached) return cached;
-    queueNameResolution(type, id);
-    return shortId(id);
+    return sharedEntityName(type, id);
   }
 
   async function enqueueMr() {

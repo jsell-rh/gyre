@@ -51,6 +51,11 @@ vi.mock('../lib/api.js', () => ({
     mergeRequest: vi.fn().mockResolvedValue({ title: 'mock MR' }),
     mergeRequests: vi.fn().mockResolvedValue([]),
     notificationCount: vi.fn().mockResolvedValue(0),
+    myNotifications: vi.fn().mockResolvedValue([]),
+    workspace: vi.fn().mockResolvedValue({ name: 'mock workspace' }),
+    mrGates: vi.fn().mockResolvedValue([]),
+    mrDiff: vi.fn().mockResolvedValue({ files_changed: 0, insertions: 0, deletions: 0 }),
+    mergeQueue: vi.fn().mockResolvedValue([]),
   },
   setAuthToken: vi.fn(),
 }));
@@ -323,12 +328,12 @@ describe('Agent panel', () => {
 // ── Tab bar ────────────────────────────────────────────────────────────
 
 describe('Tab bar', () => {
-  it('renders all 7 tabs', () => {
+  it('renders all 8 tabs', () => {
     const { container } = render(RepoMode, {
       props: { workspace: mockWorkspace, repo: mockRepo, activeTab: 'specs' },
     });
     const tabs = container.querySelectorAll('.tab-btn');
-    expect(tabs.length).toBe(7);
+    expect(tabs.length).toBe(8);
   });
 
   it('marks the active tab with aria-selected=true', () => {
