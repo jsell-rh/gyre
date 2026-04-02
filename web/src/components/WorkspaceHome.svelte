@@ -198,6 +198,9 @@
   let budgetData = $state(null); // { config, usage }
   let costData = $state(null);   // cost summary
 
+  // ── Briefing state ─────────────────────────────────────────────────────
+  let briefingLoading = $state(true);
+  let briefingData = $state(null);
 
   // ── Repo lookup map (id → repo) ────────────────────────────────────────
   let repoMap = $state({});
@@ -397,6 +400,19 @@
       wsAgents = [];
     } finally {
       agentsLoading = false;
+    }
+  }
+
+  // ── Briefing: load ─────────────────────────────────────────────────────
+  async function loadBriefing() {
+    if (!workspace?.id) return;
+    briefingLoading = true;
+    try {
+      briefingData = await api.getWorkspaceBriefing(workspace.id);
+    } catch {
+      briefingData = null;
+    } finally {
+      briefingLoading = false;
     }
   }
 
@@ -899,6 +915,7 @@
     loadAgents();
     loadActivity();
     loadBudget();
+    loadBriefing();
     loadMergeQueue();
   });
 </script>
@@ -950,6 +967,40 @@
         budget={budgetData}
         onStageClick={handlePipelineStageClick}
       />
+
+      <!-- Zone 2.5: Workspace Briefing (compact narrative summary) -->
+      {#if briefingData && !briefingLoading}
+        {@const b = briefingData}
+        {@const hasSummary = b.summary || b.narrative || (b.completed?.length > 0) || (b.in_progress?.length > 0) || (b.exceptions?.length > 0)}
+        {#if hasSummary}
+          <section class="briefing-compact" data-testid="section-briefing">
+            <div class="briefing-header">
+              <Icon name="activity" size={14} />
+              <span class="briefing-title">What's happening</span>
+            </div>
+            <div class="briefing-body">
+              {#if b.summary || b.narrative}
+                <p class="briefing-text">{b.summary ?? b.narrative}</p>
+              {/if}
+              {#if b.completed?.length > 0 || b.in_progress?.length > 0 || b.exceptions?.length > 0}
+                <div class="briefing-highlights">
+                  {#if b.exceptions?.length > 0}
+                    {#each b.exceptions.slice(0, 2) as ex}
+                      <span class="briefing-chip briefing-chip-danger">{ex.summary ?? ex.title ?? 'Issue'}</span>
+                    {/each}
+                  {/if}
+                  {#if b.in_progress?.length > 0}
+                    <span class="briefing-chip briefing-chip-active">{b.in_progress.length} in progress</span>
+                  {/if}
+                  {#if b.completed?.length > 0}
+                    <span class="briefing-chip briefing-chip-done">{b.completed.length} completed</span>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          </section>
+        {/if}
+      {/if}
 
       <!-- ── Zone 3: Repos + Merge Queue (two-column when queue active) ── -->
       <div class="repos-and-queue" class:has-queue={mergeQueueItems.length > 0}>
@@ -1338,6 +1389,72 @@
     color: var(--color-text-muted);
     margin: calc(-1 * var(--space-3)) 0 0 0;
     line-height: 1.4;
+  }
+
+  /* ── Briefing compact ────────────────────────────────────────────────── */
+  .briefing-compact {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .briefing-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .briefing-title {
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .briefing-body {
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .briefing-text {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.5;
+  }
+
+  .briefing-highlights {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .briefing-chip {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+  }
+
+  .briefing-chip-danger {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  }
+
+  .briefing-chip-active {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  }
+
+  .briefing-chip-done {
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
   }
 
   /* ── Repos + Merge Queue two-column layout ─────────────────────────── */
