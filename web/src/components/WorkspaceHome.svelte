@@ -13,7 +13,7 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
-  import { entityName, shortId, seedEntityName } from '../lib/entityNames.svelte.js';
+  import { entityName, shortId, seedEntityName, seedFromEntities } from '../lib/entityNames.svelte.js';
   import { relativeTime, formatDuration } from '../lib/timeFormat.js';
   import ActionNeeded from './ActionNeeded.svelte';
   import PipelineOverview from './PipelineOverview.svelte';
@@ -310,6 +310,7 @@
     try {
       const data = await api.tasks({ workspaceId: workspace.id });
       wsTasks = Array.isArray(data) ? data : [];
+      seedFromEntities('task', wsTasks);
     } catch {
       wsTasks = [];
     } finally {
@@ -347,6 +348,7 @@
       const gateResults = await Promise.all(gatePromises);
       const gateMap = Object.fromEntries(gateResults.map(g => [g.id, g]));
       wsMrs = mrList.map(mr => gateMap[mr.id] ? { ...mr, _gates: gateMap[mr.id] } : mr);
+      seedFromEntities('mr', wsMrs);
       // Enrich diff_stats for MRs that lack them (best-effort, parallel)
       const needDiff = wsMrs.filter(mr => !mr.diff_stats).slice(0, 10);
       if (needDiff.length > 0) {
@@ -426,6 +428,7 @@
         }
       }
       wsAgents = agentList;
+      seedFromEntities('agent', wsAgents);
     } catch {
       wsAgents = [];
     } finally {
