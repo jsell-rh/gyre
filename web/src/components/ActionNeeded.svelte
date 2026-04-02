@@ -14,7 +14,7 @@
 
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
-  let { items = [], onAction = undefined, onSelectRepo = undefined } = $props();
+  let { items = [], onAction = undefined, onSelectRepo = undefined, onApproveSpec = undefined, onRejectSpec = undefined, onRetryGate = undefined, onDismiss = undefined } = $props();
 
   // Normalize PascalCase notification types
   const TYPE_NORM = {
@@ -117,6 +117,23 @@
           <div class="action-body">
             <span class="action-label">{urgency.label}</span>
             <span class="action-title">{getTitle(item)}</span>
+          </div>
+          <div class="action-buttons">
+            {@const body = parseBody(item)}
+            {@const nt = normType(item.notification_type)}
+            {#if nt === 'spec_approval' && onApproveSpec}
+              <button class="action-btn action-btn-approve" onclick={(e) => { e.stopPropagation(); onApproveSpec(item); }} title="Approve this spec">Approve</button>
+              {#if onRejectSpec}
+                <button class="action-btn action-btn-reject" onclick={(e) => { e.stopPropagation(); onRejectSpec(item); }} title="Reject this spec">Reject</button>
+              {/if}
+            {:else if nt === 'gate_failure' && onRetryGate && body.mr_id}
+              <button class="action-btn" onclick={(e) => { e.stopPropagation(); onRetryGate(item); }} title="Re-enqueue for merge">Retry</button>
+            {:else if (nt === 'agent_completed' || nt === 'mr_needs_review') && body.mr_id}
+              <button class="action-btn" onclick={(e) => { e.stopPropagation(); handleClick(item); }} title="Review merge request">Review</button>
+            {/if}
+            {#if onDismiss}
+              <button class="action-btn action-btn-dismiss" onclick={(e) => { e.stopPropagation(); onDismiss(item); }} title="Dismiss">✕</button>
+            {/if}
           </div>
           <span class="action-time">{relativeTime(item.created_at)}</span>
         </button>
@@ -248,4 +265,54 @@
   }
 
   .action-show-all:hover { text-decoration: underline; }
+
+  .action-buttons {
+    display: flex;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .action-btn {
+    padding: 2px 8px;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .action-btn:hover {
+    background: var(--color-border);
+    border-color: var(--color-border-strong);
+  }
+
+  .action-btn-approve {
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+    border-color: color-mix(in srgb, var(--color-success) 30%, var(--color-border));
+    color: var(--color-success);
+  }
+
+  .action-btn-approve:hover {
+    background: color-mix(in srgb, var(--color-success) 20%, transparent);
+  }
+
+  .action-btn-reject {
+    color: var(--color-danger);
+  }
+
+  .action-btn-dismiss {
+    padding: 2px 4px;
+    color: var(--color-text-muted);
+    border: none;
+    background: transparent;
+  }
+
+  .action-btn-dismiss:hover {
+    color: var(--color-text);
+    background: var(--color-border);
+  }
 </style>
