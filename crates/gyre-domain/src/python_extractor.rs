@@ -134,6 +134,7 @@ impl ExtractionContext {
             first_seen_at: 0,
             last_seen_at: 0,
             deleted_at: None,
+            test_node: false,
         }
     }
 
@@ -205,8 +206,10 @@ impl ExtractionContext {
         let tree = parse_source(source, language)?;
         let root = tree.root_node();
 
+        let is_test_file = is_python_test_path(&rel_path);
+
         // Create Module node.
-        let module_node = self.make_node(
+        let mut module_node = self.make_node(
             NodeType::Module,
             &module_short,
             &module_qname,
@@ -215,6 +218,7 @@ impl ExtractionContext {
             root.end_position().row as u32 + 1,
             Visibility::Public,
         );
+        module_node.test_node = is_test_file;
         let module_id = module_node.id.clone();
         self.name_to_id
             .insert(module_qname.clone(), module_id.clone());
@@ -281,7 +285,7 @@ impl ExtractionContext {
         let line_start = class_node.start_position().row as u32 + 1;
         let line_end = class_node.end_position().row as u32 + 1;
 
-        let class_node_graph = self.make_node(
+        let mut class_node_graph = self.make_node(
             NodeType::Type,
             &class_name,
             &class_qname,
@@ -290,6 +294,10 @@ impl ExtractionContext {
             line_end,
             Visibility::Public,
         );
+        // Tag Test* classes and classes in test files/directories.
+        if class_name.starts_with("Test") || is_python_test_path(rel_path) {
+            class_node_graph.test_node = true;
+        }
         let class_id = class_node_graph.id.clone();
         self.name_to_id
             .insert(class_qname.clone(), class_id.clone());
@@ -621,7 +629,7 @@ impl ExtractionContext {
         let line_start = fn_node.start_position().row as u32 + 1;
         let line_end = fn_node.end_position().row as u32 + 1;
 
-        let node = self.make_node(
+        let mut node = self.make_node(
             NodeType::Function,
             name,
             &qname,
@@ -630,6 +638,10 @@ impl ExtractionContext {
             line_end,
             Visibility::Public,
         );
+        // Tag test_* functions and functions in test files/directories.
+        if name.starts_with("test_") || is_python_test_path(rel_path) {
+            node.test_node = true;
+        }
         let node_id = node.id.clone();
         self.name_to_id.insert(qname, node_id.clone());
         self.nodes.push(node);
@@ -882,6 +894,24 @@ struct CallEdgeJson {
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/// Check if a file path indicates a Python test file.
+///
+/// Matches `test_*.py` filenames and files in `tests/` directories.
+fn is_python_test_path(rel_path: &str) -> bool {
+    let parts: Vec<&str> = rel_path.split('/').collect();
+    // Check for tests/ directory anywhere in the path.
+    if parts.iter().any(|&p| p == "tests") {
+        return true;
+    }
+    // Check for test_*.py filename.
+    if let Some(filename) = parts.last() {
+        if filename.starts_with("test_") && filename.ends_with(".py") {
+            return true;
+        }
+    }
+    false
+}
 
 /// Derive Python dotted module name from a relative file path.
 /// e.g. `src/api/handlers.py` → `src.api.handlers`
@@ -1447,6 +1477,64 @@ class Handler:
                 "should have Calls edge from Handler.handle -> compute, got {calls_count}"
             );
         }
+    }
+
+    #[test]
+    fn test_functions_tagged_as_test_nodes() {
+        let dir = make_tempdir();
+        write_requirements(&dir);
+
+        // A regular module with a non-test function.
+        fs::write(dir.path().join("app.py"), "def serve():\n    pass\n").unwrap();
+
+        // A test file with test_ functions and a Test class.
+        let tests_dir = dir.path().join("tests");
+        fs::create_dir_all(&tests_dir).unwrap();
+        fs::write(
+            tests_dir.join("test_app.py"),
+            "class TestApp:\n    def test_serve(self):\n        pass\n\ndef test_helper():\n    pass\n",
+        )
+        .unwrap();
+
+        let result = PythonExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // test_helper in tests/ directory should be tagged.
+        let test_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "test_helper");
+        assert!(test_fn.is_some(), "should extract test_helper");
+        assert!(
+            test_fn.unwrap().test_node,
+            "test_helper should be tagged as test_node"
+        );
+
+        // TestApp class should be tagged.
+        let test_class = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Type && n.name == "TestApp");
+        assert!(test_class.is_some(), "should extract TestApp class");
+        assert!(
+            test_class.unwrap().test_node,
+            "TestApp should be tagged as test_node"
+        );
+
+        // Regular function should NOT be tagged.
+        let prod_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "serve");
+        assert!(prod_fn.is_some(), "should extract serve");
+        assert!(
+            !prod_fn.unwrap().test_node,
+            "serve should NOT be tagged as test_node"
+        );
     }
 
     #[test]

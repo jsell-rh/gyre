@@ -85,6 +85,9 @@ pub struct GraphNode {
     pub last_seen_at: u64,
     /// Set when a node is no longer present in extraction (soft-delete). `None` = active.
     pub deleted_at: Option<u64>,
+    /// Whether this node is a test function/class (for structural test coverage analysis).
+    #[serde(default)]
+    pub test_node: bool,
 }
 
 /// A directed edge between two graph nodes.
