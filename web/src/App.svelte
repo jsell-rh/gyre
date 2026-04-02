@@ -1064,11 +1064,11 @@
             class="back-btn"
             onclick={() => {
               if (entityDetail) {
-                // Use browser history.back() so the back button acts as a true
-                // "go back one step" rather than pushing a new state forward.
-                // goToEntityDetail already pushed a history entry, so going back
-                // naturally pops it and the popstate handler restores list view.
-                window.history.back();
+                // Navigate explicitly to the parent tab instead of relying on
+                // history.back() which may skip steps when the user navigated
+                // through multiple entities (e.g. MR → Agent → Task).
+                const parentTab = entityDetail.type === 'mr' ? 'mrs' : entityDetail.type === 'task' ? 'tasks' : entityDetail.type === 'agent' ? 'agents' : entityDetail.type === 'spec' ? 'specs' : repoTab;
+                goToRepoTab(parentTab);
               } else {
                 goToWorkspaceHome(currentWorkspace);
               }
@@ -1090,9 +1090,11 @@
             </button>
             <span class="breadcrumb-sep" aria-hidden="true">/</span>
             {#if entityDetail}
+              {@const parentTab = entityDetail.type === 'mr' ? 'mrs' : entityDetail.type === 'task' ? 'tasks' : entityDetail.type === 'agent' ? 'agents' : entityDetail.type === 'spec' ? 'specs' : repoTab}
+              {@const parentTabLabel = parentTab === 'mrs' ? 'Merge Requests' : parentTab === 'tasks' ? 'Tasks' : parentTab === 'agents' ? 'Agents' : parentTab === 'specs' ? 'Specs' : parentTab}
               <button
                 class="breadcrumb-ws"
-                onclick={() => window.history.back()}
+                onclick={() => goToRepoTab(parentTab)}
                 aria-label="Back to {currentRepo?.name ?? 'repo'}"
               >
                 {currentRepo?.name ?? ''}
@@ -1100,9 +1102,9 @@
               <span class="breadcrumb-sep" aria-hidden="true">/</span>
               <button
                 class="breadcrumb-ws"
-                onclick={() => window.history.back()}
+                onclick={() => goToRepoTab(parentTab)}
               >
-                {entityDetail.type === 'mr' ? 'Merge Requests' : entityDetail.type === 'task' ? 'Tasks' : entityDetail.type === 'agent' ? 'Agents' : entityDetail.type === 'spec' ? 'Specs' : repoTab === 'mrs' ? 'Merge Requests' : repoTab === 'tasks' ? 'Tasks' : repoTab === 'agents' ? 'Agents' : 'Specs'}
+                {parentTabLabel}
               </button>
               <span class="breadcrumb-sep" aria-hidden="true">/</span>
               <span class="breadcrumb-repo" aria-current="page" title={entityDetail.id}>
