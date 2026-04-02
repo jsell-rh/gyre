@@ -1199,9 +1199,8 @@
         </div>
       </section>
 
-      <!-- ── Zone 5: Two-column overview (activity + summary) ─────────── -->
-      <div class="overview-columns" data-testid="overview-columns">
-        <!-- Left: Activity timeline (what's happening) -->
+      <!-- ── Zone 5: Activity timeline (full width) ───────────────────── -->
+      <div class="overview-columns overview-columns-single" data-testid="overview-columns">
         <div class="overview-activity">
           <div class="overview-section-header">
             <h3 class="overview-section-title">Activity</h3>
@@ -1260,101 +1259,8 @@
           {/if}
         </div>
 
-        <!-- Right: Summary cards (quick glances, clickable) -->
-        <div class="overview-summary">
-          <!-- Specs summary -->
-          <button class="summary-card" onclick={() => { if (repos.length === 1) onSelectRepo?.(repos[0], 'specs'); else setSecondaryTab('specs'); }} title="View all specs">
-            <div class="summary-card-header">
-              <span class="summary-card-icon">S</span>
-              <span class="summary-card-title">Specs</span>
-              <span class="summary-card-count">{specs.length}</span>
-            </div>
-            {#if specs.length > 0}
-              <div class="summary-card-breakdown">
-                {#if pipelineSpecs.pending > 0}<span class="summary-stat summary-stat-warn">{pipelineSpecs.pending} pending</span>{/if}
-                {#if pipelineSpecs.approved > 0}<span class="summary-stat summary-stat-ok">{pipelineSpecs.approved} approved</span>{/if}
-                {#if specs.filter(s => (s.approval_status ?? s.status) === 'draft').length > 0}<span class="summary-stat">{specs.filter(s => (s.approval_status ?? s.status) === 'draft').length} draft</span>{/if}
-              </div>
-            {/if}
-          </button>
-
-          <!-- Tasks summary -->
-          <button class="summary-card" onclick={() => { if (repos.length === 1) onSelectRepo?.(repos[0], 'tasks'); else setSecondaryTab('tasks'); }} title="View all tasks">
-            <div class="summary-card-header">
-              <span class="summary-card-icon">T</span>
-              <span class="summary-card-title">Tasks</span>
-              <span class="summary-card-count">{wsTasks.length}</span>
-            </div>
-            {#if wsTasks.length > 0}
-              <div class="summary-card-breakdown">
-                {#if pipelineTasks.in_progress > 0}<span class="summary-stat summary-stat-active">{pipelineTasks.in_progress} active</span>{/if}
-                {#if pipelineTasks.blocked > 0}<span class="summary-stat summary-stat-danger">{pipelineTasks.blocked} blocked</span>{/if}
-                {#if pipelineTasks.done > 0}<span class="summary-stat summary-stat-ok">{pipelineTasks.done} done</span>{/if}
-              </div>
-            {/if}
-          </button>
-
-          <!-- Agents summary -->
-          <button class="summary-card" onclick={() => { if (repos.length === 1) onSelectRepo?.(repos[0], 'agents'); else setSecondaryTab('agents'); }} title="View all agents">
-            <div class="summary-card-header">
-              <span class="summary-card-icon">A</span>
-              <span class="summary-card-title">Agents</span>
-              <span class="summary-card-count">{wsAgents.length}</span>
-            </div>
-            {#if wsAgents.length > 0}
-              <div class="summary-card-breakdown">
-                {#if pipelineAgents.active > 0}<span class="summary-stat summary-stat-active">{pipelineAgents.active} running</span>{/if}
-                {#if wsAgents.filter(a => a.status === 'completed' || a.status === 'idle').length > 0}<span class="summary-stat summary-stat-ok">{wsAgents.filter(a => a.status === 'completed' || a.status === 'idle').length} completed</span>{/if}
-                {#if wsAgents.filter(a => a.status === 'failed' || a.status === 'dead').length > 0}<span class="summary-stat summary-stat-danger">{wsAgents.filter(a => a.status === 'failed' || a.status === 'dead').length} failed</span>{/if}
-              </div>
-            {/if}
-          </button>
-
-          <!-- MRs summary -->
-          <button class="summary-card" onclick={() => { if (repos.length === 1) onSelectRepo?.(repos[0], 'mrs'); else setSecondaryTab('mrs'); }} title="View all merge requests">
-            <div class="summary-card-header">
-              <span class="summary-card-icon">M</span>
-              <span class="summary-card-title">Merge Requests</span>
-              <span class="summary-card-count">{wsMrs.length}</span>
-            </div>
-            {#if wsMrs.length > 0}
-              <div class="summary-card-breakdown">
-                {#if pipelineMrs.open > 0}<span class="summary-stat summary-stat-info">{pipelineMrs.open} open</span>{/if}
-                {#if pipelineMrs.failed_gates > 0}<span class="summary-stat summary-stat-danger">{pipelineMrs.failed_gates} failed gates</span>{/if}
-                {#if pipelineMrs.merged > 0}<span class="summary-stat summary-stat-ok">{pipelineMrs.merged} merged</span>{/if}
-              </div>
-            {/if}
-          </button>
-
-          <!-- Budget summary -->
-          {#if budgetData}
-            {@const config = budgetData.config ?? budgetData}
-            {@const usage = budgetData.usage ?? {}}
-            <div class="summary-card summary-card-budget">
-              <div class="summary-card-header">
-                <span class="summary-card-icon">$</span>
-                <span class="summary-card-title">Budget</span>
-              </div>
-              <div class="summary-card-breakdown">
-                {#if config.max_concurrent_agents != null}
-                  {@const activeCount = wsAgents.filter(a => a.status === 'active').length}
-                  <div class="budget-mini">
-                    <span class="budget-mini-label">Agents</span>
-                    <span class="budget-mini-value">{activeCount}/{config.max_concurrent_agents}</span>
-                  </div>
-                {/if}
-                {#if config.max_tokens_per_day != null}
-                  {@const usedTokens = usage.tokens_today ?? 0}
-                  {@const pct = config.max_tokens_per_day > 0 ? Math.round((usedTokens / config.max_tokens_per_day) * 100) : 0}
-                  <div class="budget-mini">
-                    <span class="budget-mini-label">Tokens</span>
-                    <span class="budget-mini-value" class:budget-warn={pct > 80}>{pct}%</span>
-                  </div>
-                {/if}
-              </div>
-            </div>
-          {/if}
-        </div>
+        <!-- Summary cards removed — pipeline overview + detail tables
+             provide the same information with less visual noise -->
       </div>
 
       <!-- ── Zone 6: Expandable detail tables (on-demand, collapsed by default) ── -->
@@ -1653,11 +1559,15 @@
   .activity-dot-warning { background: var(--color-warning); }
   .activity-dot-info { background: var(--color-info, #1e90ff); }
 
-  /* ── Two-column overview layout ──────────────────────────────────── */
+  /* ── Overview layout ────────────────────────────────────────────── */
   .overview-columns {
     display: grid;
     grid-template-columns: 2fr 1fr;
     gap: var(--space-4);
+  }
+
+  .overview-columns-single {
+    grid-template-columns: 1fr;
   }
 
   @media (max-width: 768px) {
