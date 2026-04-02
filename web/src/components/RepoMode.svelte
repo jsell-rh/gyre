@@ -474,8 +474,8 @@
           <p class="list-loading">Loading tasks...</p>
         {:else if repoTasks.length === 0 && !createTaskOpen}
           <div class="list-empty">
-            <p>No tasks for this repository yet.</p>
-            <p class="list-empty-hint">Tasks are created when specs are approved and work is decomposed, or create one manually above.</p>
+            <p>No tasks yet</p>
+            <p class="list-empty-hint">Tasks are created automatically when specs are approved, or you can create one manually above. The flow: <strong>Push spec</strong> → <strong>Approve</strong> → <strong>Tasks generated</strong> → Agents implement.</p>
           </div>
         {:else}
           <table class="entity-table">
@@ -547,8 +547,8 @@
           <p class="list-loading">Loading merge requests...</p>
         {:else if repoMrs.length === 0}
           <div class="list-empty">
-            <p>No merge requests for this repository yet.</p>
-            <p class="list-empty-hint">MRs are created when agents complete their work.</p>
+            <p>No merge requests yet</p>
+            <p class="list-empty-hint">MRs are created automatically when agents finish implementing a task. The flow: Spec → Task → Agent implements → <strong>MR created</strong> → Gates run → Merged.</p>
           </div>
         {:else}
           <table class="entity-table">
@@ -633,8 +633,8 @@
           <p class="list-loading">Loading agents...</p>
         {:else if allAgents.length === 0}
           <div class="list-empty">
-            <p>No agents for this repository yet.</p>
-            <p class="list-empty-hint">Agents are spawned when tasks are assigned for implementation.</p>
+            <p>No agents yet</p>
+            <p class="list-empty-hint">Agents are spawned automatically when tasks are ready, or manually from a task's detail view. Each agent works on a branch, implements code, and creates an MR when done.</p>
           </div>
         {:else}
           <table class="entity-table">
