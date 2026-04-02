@@ -1329,8 +1329,7 @@
                     <td class="spec-repo ws-cell-link">{#if spec.repo_id && repoMap[spec.repo_id]}<button class="ws-entity-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }}>{repoMap[spec.repo_id].name}</button>{:else}—{/if}</td>
                     <td class="spec-path" title={spec.path}>{spec.path.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</td>
                     <td class="spec-status" title={specStatusTooltip(spec.approval_status ?? spec.status)}>
-                      {@const specIconName = { draft: 'edit', pending: 'clock', approved: 'check', rejected: 'x', implemented: 'check', merged: 'git-merge' }[spec.approval_status ?? spec.status] ?? 'circle'}
-                      <span class="status-icon" aria-hidden="true"><Icon name={specIconName} size={12} /></span>
+                      <span class="status-icon" aria-hidden="true"><Icon name={{ draft: 'edit', pending: 'clock', approved: 'check', rejected: 'x', implemented: 'check', merged: 'git-merge' }[spec.approval_status ?? spec.status] ?? 'circle'} size={12} /></span>
                       {spec.approval_status ?? spec.status ?? '—'}
                     </td>
                     <td class="spec-progress">
