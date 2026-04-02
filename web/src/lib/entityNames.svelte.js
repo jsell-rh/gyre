@@ -75,6 +75,21 @@ export function entityName(type, id) {
 }
 
 /**
+ * Format an entity ID for display with a type prefix.
+ * Used when showing IDs in contexts where the type isn't otherwise visible.
+ * Returns "MR-abc123…" style strings.
+ */
+export function formatId(type, id) {
+  if (!id) return '';
+  const prefixes = { mr: 'MR', task: 'T', agent: 'AG', spec: 'S', repo: 'R' };
+  const prefix = prefixes[type] ?? '';
+  const name = entityName(type, id);
+  // If we got a resolved name (not a short ID), use it directly
+  if (name && !name.includes('\u2026') && name !== id) return name;
+  return prefix ? `${prefix}-${id.slice(0, 6)}` : shortId(id);
+}
+
+/**
  * Pre-seed the cache with a known name (e.g., from data already loaded).
  * Useful when you have entity data and want to avoid a redundant API call.
  */
