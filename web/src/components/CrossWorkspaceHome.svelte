@@ -559,7 +559,7 @@
                 <span class="decision-desc">{notif.message ?? notif.title ?? $t('cross_workspace.decision_pending')}</span>
               </div>
               {#if notif.workspace_id && workspaceNameMap[notif.workspace_id]}
-                <span class="decision-ws-badge">{workspaceNameMap[notif.workspace_id]}</span>
+                <button class="decision-ws-badge decision-ws-link" onclick={(e) => { e.stopPropagation(); const ws = workspaces.find(w => w.id === notif.workspace_id); if (ws) onSelectWorkspace?.(ws); }} title="Go to {workspaceNameMap[notif.workspace_id]}">{workspaceNameMap[notif.workspace_id]}</button>
               {/if}
             </div>
             <div class="decision-actions">
@@ -745,7 +745,7 @@
                 {/if}
               {/if}
               {#if wsName}
-                <span class="cwh-activity-ws-badge">{wsName}</span>
+                <button class="cwh-activity-ws-badge cwh-activity-ws-link" onclick={(e) => { e.stopPropagation(); const ws = workspaces.find(w => w.id === event.workspace_id); if (ws) onSelectWorkspace?.(ws); }} title="Go to {wsName}">{wsName}</button>
               {/if}
               {#if event.timestamp ?? event.created_at}
                 <span class="cwh-activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
@@ -1243,10 +1243,22 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     background: var(--color-border);
+    border: none;
     border-radius: var(--radius-sm);
     padding: 1px var(--space-2);
     white-space: nowrap;
     flex-shrink: 0;
+    font-family: var(--font-body);
+  }
+
+  .decision-ws-link, .cwh-activity-ws-link {
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .decision-ws-link:hover, .cwh-activity-ws-link:hover {
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 10%, var(--color-border));
   }
 
   .decision-actions {
