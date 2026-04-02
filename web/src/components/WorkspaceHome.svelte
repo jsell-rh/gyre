@@ -1041,6 +1041,7 @@
       {/if}
 
       <!-- ── Zone 3: Decisions (promoted — the #1 human touchpoint) ────── -->
+      {#if notifications.length > 0 || decisionsLoading}
       <section class="home-section" aria-labelledby="section-decisions" data-testid="section-decisions">
         <div class="section-header">
           <h2 class="section-title" id="section-decisions">
@@ -1182,6 +1183,7 @@
           {/if}
         </div>
       </section>
+      {/if}
 
       <!-- ── Zone 4: Repositories (full-width grid) ──────────────────── -->
       <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
