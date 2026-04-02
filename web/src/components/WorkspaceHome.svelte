@@ -541,6 +541,27 @@
     }
   }
 
+  // ── Quick MR enqueue from sidebar ──────────────────────────────────────
+  let mrEnqueueStates = $state({});
+
+  async function quickEnqueueMr(mr, e) {
+    e?.stopPropagation();
+    mrEnqueueStates = { ...mrEnqueueStates, [mr.id]: 'loading' };
+    try {
+      await api.enqueue(mr.id);
+      mrEnqueueStates = { ...mrEnqueueStates, [mr.id]: 'queued' };
+      toastSuccess(`MR "${mr.title ?? 'Untitled'}" enqueued for merge`);
+      // Update MR in list
+      const updated = await api.mergeRequest(mr.id).catch(() => null);
+      if (updated) {
+        wsMrs = wsMrs.map(m => m.id === mr.id ? { ...m, ...updated } : m);
+      }
+    } catch (err) {
+      mrEnqueueStates = { ...mrEnqueueStates, [mr.id]: 'error' };
+      toastError('Enqueue failed: ' + (err.message ?? err));
+    }
+  }
+
   // ── Spec navigation ────────────────────────────────────────────────────
   function navigateToSpec(spec) {
     const repo = repoMap[spec.repo_id];
@@ -1288,28 +1309,33 @@
               </h3>
               <ul class="sidebar-list">
                 {#each openMrs.slice(0, 5) as mr}
+                  {@const enqState = mrEnqueueStates[mr.id]}
                   <li>
-                    <button class="sidebar-list-item" onclick={() => nav('mr', mr.id, mr)}>
-                      {#if mr._gates?.failed > 0}
-                        <span class="sidebar-item-dot sidebar-dot-danger"></span>
-                      {:else if mr.queue_position != null}
-                        <span class="sidebar-item-dot sidebar-dot-active"></span>
-                      {:else}
-                        <span class="sidebar-item-dot sidebar-dot-info"></span>
-                      {/if}
-                      <span class="sidebar-item-name">{mr.title ?? 'Untitled'}</span>
+                    <div class="sidebar-list-item sidebar-mr-item">
+                      <button class="sidebar-spec-name" onclick={() => nav('mr', mr.id, mr)} title="View merge request details">
+                        {#if mr._gates?.failed > 0}
+                          <span class="sidebar-item-dot sidebar-dot-danger"></span>
+                        {:else if mr.queue_position != null}
+                          <span class="sidebar-item-dot sidebar-dot-active"></span>
+                        {:else}
+                          <span class="sidebar-item-dot sidebar-dot-info"></span>
+                        {/if}
+                        <span class="sidebar-item-name">{mr.title ?? 'Untitled'}</span>
+                      </button>
                       {#if mr._gates?.total > 0}
                         <span class="sidebar-gates-mini">
                           {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
                           {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
                         </span>
                       {/if}
-                      {#if mr.status === 'open' && mr.queue_position == null}
-                        <span class="sidebar-action-tag">Open</span>
-                      {:else if mr.queue_position != null}
-                        <span class="sidebar-item-meta">#{mr.queue_position + 1}</span>
+                      {#if enqState === 'queued' || mr.queue_position != null}
+                        <span class="sidebar-item-meta">#{mr.queue_position != null ? mr.queue_position + 1 : '?'}</span>
+                      {:else if enqState === 'loading'}
+                        <span class="sidebar-action-done">...</span>
+                      {:else if mr.status === 'open' && mr.queue_position == null}
+                        <button class="sidebar-approve-btn" onclick={(e) => quickEnqueueMr(mr, e)} title="Add to merge queue">Enqueue</button>
                       {/if}
-                    </button>
+                    </div>
                   </li>
                 {/each}
               </ul>
