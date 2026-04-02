@@ -2005,6 +2005,17 @@
                 </div>
               {/if}
 
+              <!-- MR Quick Actions -->
+              <div class="mr-quick-links">
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'diff'; }} title="View code changes">View Diff</button>
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'gates'; }} title="View quality gate results">View Gates</button>
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'timeline'; }} title="View full event timeline">Timeline</button>
+                {#if mr.status === 'merged'}
+                  <button class="mr-explore-btn" onclick={() => { activeTab = 'attestation'; }} title="View signed merge attestation">Attestation</button>
+                {/if}
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'ask-why'; }} title="Explore agent reasoning">Ask Why</button>
+              </div>
+
               <!-- MR Actions -->
               {#if mr.status === 'open'}
                 <div class="mr-actions">
@@ -2305,6 +2316,14 @@
                   </div>
                 </div>
               {/if}
+
+              <!-- Agent Quick Actions -->
+              <div class="mr-quick-links">
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'chat'; }} title="Send messages to this agent">Chat</button>
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'history'; }} title="View execution logs">Logs</button>
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'trace'; }} title="View execution trace">Trace</button>
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'ask-why'; }} title="Explore agent reasoning and decisions">Ask Why</button>
+              </div>
 
               <!-- Conversation provenance link -->
               {#if ag.conversation_sha}
@@ -6770,6 +6789,15 @@
     margin-top: var(--space-2);
     font-size: var(--text-sm);
     flex-wrap: wrap;
+  }
+
+  .mr-quick-links {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    padding: var(--space-3) 0;
+    border-top: 1px solid var(--color-border);
+    margin-top: var(--space-3);
   }
 
   .mr-explore-btn {
