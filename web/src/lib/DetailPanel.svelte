@@ -3557,16 +3557,25 @@
                     </div>
                   {/if}
                   {#if gate.output}
-                    <details class="gate-output-details" open={gateStatus === 'failed'}>
-                      <summary class="gate-output-label">Output</summary>
+                    <details class="gate-output-details" open={gateStatus === 'failed' || gateStatus === 'passed'}>
+                      <summary class="gate-output-label">
+                        Output
+                        <button class="gate-copy-btn" onclick={(e) => { e.stopPropagation(); e.preventDefault(); navigator.clipboard.writeText(gate.output); e.target.textContent = 'Copied!'; setTimeout(() => { e.target.textContent = 'Copy'; }, 1500); }} title="Copy output to clipboard">Copy</button>
+                      </summary>
                       <pre class="gate-output gate-terminal">{gate.output}</pre>
                     </details>
                   {/if}
                   {#if gate.error}
                     <details class="gate-output-details" open>
-                      <summary class="gate-output-label gate-error-label">Error</summary>
+                      <summary class="gate-output-label gate-error-label">
+                        Error
+                        <button class="gate-copy-btn" onclick={(e) => { e.stopPropagation(); e.preventDefault(); navigator.clipboard.writeText(gate.error); e.target.textContent = 'Copied!'; setTimeout(() => { e.target.textContent = 'Copy'; }, 1500); }} title="Copy error to clipboard">Copy</button>
+                      </summary>
                       <pre class="gate-output gate-terminal gate-error">{gate.error}</pre>
                     </details>
+                  {/if}
+                  {#if !gate.output && !gate.error && (gateStatus === 'passed' || gateStatus === 'failed')}
+                    <p class="gate-no-output">No output captured for this gate run.</p>
                   {/if}
                   {#if gate.started_at}
                     <span class="gate-timing">{fmtDate(gate.started_at)}{#if gate.finished_at} — {fmtDate(gate.finished_at)}{/if}</span>
@@ -5765,6 +5774,36 @@
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .gate-copy-btn {
+    font-size: 10px;
+    padding: 1px 6px;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    cursor: pointer;
+    text-transform: none;
+    letter-spacing: normal;
+    margin-left: auto;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .gate-copy-btn:hover {
+    background: var(--color-border);
+    border-color: var(--color-primary);
+  }
+
+  .gate-no-output {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
+    margin: var(--space-1) 0 0 var(--space-4);
   }
 
   .gate-timing {
