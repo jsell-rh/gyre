@@ -177,6 +177,7 @@ impl GraphNodeRow {
             first_seen_at: self.first_seen_at as u64,
             last_seen_at: self.last_seen_at as u64,
             deleted_at: self.deleted_at.map(|t| t as u64),
+            test_node: false,
         })
     }
 }
@@ -684,6 +685,7 @@ mod tests {
             first_seen_at: 1000,
             last_seen_at: 1000,
             deleted_at: None,
+            test_node: false,
         }
     }
 
@@ -1018,6 +1020,7 @@ mod tests {
             first_seen_at: 100,
             last_seen_at: 9999,
             deleted_at: None,
+            test_node: false,
         };
         GraphPort::create_node(&s, node.clone()).await.unwrap();
         let found = GraphPort::get_node(&s, &node.id).await.unwrap().unwrap();

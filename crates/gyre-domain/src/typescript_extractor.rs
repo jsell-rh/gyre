@@ -133,6 +133,7 @@ impl ExtractionContext {
             first_seen_at: 0,
             last_seen_at: 0,
             deleted_at: None,
+            test_node: false,
         }
     }
 
@@ -323,8 +324,10 @@ impl ExtractionContext {
             .unwrap_or("")
             .to_string();
 
+        let is_test_file = is_ts_test_path(&rel_path);
+
         // Emit Module node.
-        let module_node = self.make_node(
+        let mut module_node = self.make_node(
             NodeType::Module,
             &module_name,
             &module_qname,
@@ -333,6 +336,7 @@ impl ExtractionContext {
             0,
             Visibility::Public,
         );
+        module_node.test_node = is_test_file;
         let module_id = module_node.id.clone();
         self.name_to_id
             .insert(module_qname.clone(), module_id.clone());
@@ -461,7 +465,7 @@ impl ExtractionContext {
         let line_start = node.start_position().row as u32 + 1;
         let line_end = node.end_position().row as u32 + 1;
 
-        let graph_node = self.make_node(
+        let mut graph_node = self.make_node(
             NodeType::Type,
             name,
             &qname,
@@ -470,6 +474,7 @@ impl ExtractionContext {
             line_end,
             Visibility::Public,
         );
+        graph_node.test_node = is_ts_test_path(rel_path);
         let node_id = graph_node.id.clone();
         self.name_to_id.insert(qname.clone(), node_id.clone());
         let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id.clone());
@@ -659,6 +664,8 @@ impl ExtractionContext {
         module_qname: &str,
         module_id: &Id,
     ) {
+        let is_test_file = is_ts_test_path(rel_path);
+
         // Walk children of the export_statement to find the exported declaration.
         for i in 0..export_node.child_count() {
             let Some(child) = export_node.child(i) else {
@@ -674,7 +681,7 @@ impl ExtractionContext {
                     let line_start = child.start_position().row as u32 + 1;
                     let line_end = child.end_position().row as u32 + 1;
 
-                    let graph_node = self.make_node(
+                    let mut graph_node = self.make_node(
                         NodeType::Function,
                         name,
                         &qname,
@@ -683,6 +690,7 @@ impl ExtractionContext {
                         line_end,
                         Visibility::Public,
                     );
+                    graph_node.test_node = is_test_file;
                     let node_id = graph_node.id.clone();
                     self.name_to_id.insert(qname, node_id.clone());
                     let edge = self.make_edge(EdgeType::Contains, module_id.clone(), node_id);
@@ -711,7 +719,7 @@ impl ExtractionContext {
                             let line_start = decl.start_position().row as u32 + 1;
                             let line_end = decl.end_position().row as u32 + 1;
 
-                            let graph_node = self.make_node(
+                            let mut graph_node = self.make_node(
                                 NodeType::Function,
                                 name,
                                 &qname,
@@ -720,6 +728,7 @@ impl ExtractionContext {
                                 line_end,
                                 Visibility::Public,
                             );
+                            graph_node.test_node = is_test_file;
                             let node_id = graph_node.id.clone();
                             self.name_to_id.insert(qname, node_id.clone());
                             let edge =
@@ -879,6 +888,30 @@ fn extract_string_literal(content: &str, node: tree_sitter::Node) -> Option<Stri
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+/// Check if a file path indicates a TypeScript/JavaScript test file.
+///
+/// Matches `*.test.ts`, `*.spec.ts` (and `.js`/`.tsx`/`.jsx` variants),
+/// and files in `__tests__/` directories.
+fn is_ts_test_path(rel_path: &str) -> bool {
+    let parts: Vec<&str> = rel_path.split('/').collect();
+    // Check for __tests__/ directory anywhere in the path.
+    if parts.iter().any(|&p| p == "__tests__") {
+        return true;
+    }
+    // Check for *.test.* or *.spec.* filename patterns.
+    if let Some(filename) = parts.last() {
+        // Strip the final extension first, then check for .test or .spec
+        let stem = filename
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(filename);
+        if stem.ends_with(".test") || stem.ends_with(".spec") {
+            return true;
+        }
+    }
+    false
+}
 
 fn is_ts_extension(path: &Path) -> bool {
     matches!(
@@ -1318,6 +1351,91 @@ class UserService {
         assert!(
             func.is_some(),
             "Pass 1 extraction should still work when script is missing"
+        );
+    }
+
+    #[test]
+    fn test_files_tagged_as_test_nodes() {
+        let dir = make_tempdir();
+        fs::write(dir.path().join("package.json"), r#"{"name":"test"}"#).unwrap();
+
+        // Regular source file.
+        fs::write(
+            dir.path().join("app.ts"),
+            "export function serve() { return 'ok'; }\n",
+        )
+        .unwrap();
+
+        // Test file (*.test.ts pattern).
+        fs::write(
+            dir.path().join("app.test.ts"),
+            "export function testServe() { return true; }\n",
+        )
+        .unwrap();
+
+        // Test file in __tests__/ directory.
+        let tests_dir = dir.path().join("__tests__");
+        fs::create_dir_all(&tests_dir).unwrap();
+        fs::write(
+            tests_dir.join("integration.ts"),
+            "export function integrationTest() { return true; }\n",
+        )
+        .unwrap();
+
+        // Spec file (*.spec.ts pattern).
+        fs::write(
+            dir.path().join("app.spec.ts"),
+            "export function specTest() { return true; }\n",
+        )
+        .unwrap();
+
+        let result = TypeScriptExtractor.extract(dir.path(), "abc123");
+
+        // Function in app.test.ts should be tagged.
+        let test_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "testServe");
+        assert!(test_fn.is_some(), "should extract testServe from test file");
+        assert!(
+            test_fn.unwrap().test_node,
+            "testServe in *.test.ts should be tagged as test_node"
+        );
+
+        // Function in __tests__/ should be tagged.
+        let tests_dir_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "integrationTest");
+        assert!(
+            tests_dir_fn.is_some(),
+            "should extract integrationTest from __tests__/"
+        );
+        assert!(
+            tests_dir_fn.unwrap().test_node,
+            "integrationTest in __tests__/ should be tagged as test_node"
+        );
+
+        // Function in app.spec.ts should be tagged.
+        let spec_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "specTest");
+        assert!(spec_fn.is_some(), "should extract specTest from spec file");
+        assert!(
+            spec_fn.unwrap().test_node,
+            "specTest in *.spec.ts should be tagged as test_node"
+        );
+
+        // Regular function should NOT be tagged.
+        let prod_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "serve");
+        assert!(prod_fn.is_some(), "should extract serve");
+        assert!(
+            !prod_fn.unwrap().test_node,
+            "serve should NOT be tagged as test_node"
         );
     }
 
