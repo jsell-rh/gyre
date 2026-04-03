@@ -191,10 +191,13 @@
             {#each expandedSpecs as spec}
               {@const status = spec.approval_status ?? spec.status}
               <div class="expansion-row">
-                <button class="expansion-name" onclick={() => onNavigateSpec?.(spec)} title={specStatusTooltip(status)}>
+                <button class="expansion-name" onclick={() => nav('spec', spec.id, spec)} title={specStatusTooltip(status)}>
                   <span class="expansion-dot expansion-dot-{status === 'pending' ? 'warn' : status === 'approved' ? 'ok' : 'muted'}"></span>
                   <span class="expansion-label">{spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</span>
                   <Badge value={status} variant={status === 'approved' ? 'success' : status === 'pending' ? 'warning' : status === 'rejected' ? 'danger' : 'muted'} />
+                  {#if spec.task_count != null}
+                    <span class="expansion-meta">{spec.task_count} task{spec.task_count !== 1 ? 's' : ''}</span>
+                  {/if}
                 </button>
                 {#if status === 'pending' && onApproveSpec}
                   <span class="expansion-actions">
@@ -222,6 +225,9 @@
                 {#if task.spec_path}
                   <span class="expansion-meta">{task.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>
                 {/if}
+                {#if task.agent_name ?? task.assigned_agent_name}
+                  <span class="expansion-meta">⤷ {task.agent_name ?? task.assigned_agent_name}</span>
+                {/if}
               </button>
             {/each}
           </div>
@@ -237,11 +243,16 @@
               {@const elapsed = spawnedAt ? Math.round((Date.now() / 1000 - spawnedAt) / 60) : 0}
               <button class="expansion-row expansion-clickable" onclick={() => nav('agent', agent.id, agent)} title={agentStatusTooltip(agent.status)}>
                 <span class="expansion-dot expansion-dot-ok"></span>
-                <span class="expansion-label">{agent.name ?? entityName('agent', agent.id)}</span>
+                <span class="expansion-label">{agent.task_title ?? agent.name ?? entityName('agent', agent.id)}</span>
+                {#if agent.task_title && agent.name}
+                  <span class="expansion-meta">{agent.name}</span>
+                {/if}
                 {#if agent.spec_path}
                   <span class="expansion-meta">{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>
                 {/if}
-                <span class="expansion-time">{elapsed < 60 ? `${elapsed}m` : `${Math.floor(elapsed/60)}h`}</span>
+                {#if elapsed > 0}
+                  <span class="expansion-time">{elapsed < 60 ? `${elapsed}m` : `${Math.floor(elapsed/60)}h${elapsed % 60}m`}</span>
+                {/if}
               </button>
             {/each}
           </div>
@@ -263,10 +274,24 @@
                     <span class="expansion-dot expansion-dot-info"></span>
                   {/if}
                   <span class="expansion-label">{mr.title ?? 'Untitled'}</span>
-                  {#if mr._gates?.total > 0}
+                  {#if mr._gateDetails?.length > 0}
+                    <span class="expansion-gates">
+                      {#each mr._gateDetails as gate}
+                        <span class="gate-badge gate-badge-{gate.status === 'passed' ? 'pass' : gate.status === 'failed' ? 'fail' : 'pending'}"
+                          title="{gate.name}: {gate.status}">{gate.status === 'passed' ? '✓' : gate.status === 'failed' ? '✗' : '⋯'}{gate.name}</span>
+                      {/each}
+                    </span>
+                  {:else if mr._gates?.total > 0}
                     <span class="expansion-gates">
                       {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
                       {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
+                    </span>
+                  {/if}
+                  {@const diff = mr._diffStats ?? mr.diff_stats}
+                  {#if diff}
+                    <span class="expansion-diff-stats">
+                      {#if diff.insertions != null}<span class="diff-add">+{diff.insertions}</span>{/if}
+                      {#if diff.deletions != null}<span class="diff-del">-{diff.deletions}</span>{/if}
                     </span>
                   {/if}
                 </button>
@@ -291,6 +316,9 @@
                 <span class="expansion-label">{mr.title ?? 'Untitled'}</span>
                 {#if mr.merge_commit_sha}
                   <code class="expansion-sha">{mr.merge_commit_sha.slice(0, 7)}</code>
+                {/if}
+                {#if mr.spec_ref ?? mr.spec_path}
+                  <span class="expansion-meta">{(mr.spec_ref ?? mr.spec_path).split('/').pop()?.replace(/\.md$/, '')}</span>
                 {/if}
                 {#if mr.merged_at ?? mr.updated_at}
                   <span class="expansion-time">{relativeTime(mr.merged_at ?? mr.updated_at)}</span>
@@ -585,6 +613,43 @@
   .gate-pass-inline {
     color: var(--color-success);
   }
+
+  .gate-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    font-weight: 500;
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .gate-badge-pass {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  }
+
+  .gate-badge-fail {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  }
+
+  .gate-badge-pending {
+    color: var(--color-text-muted);
+    background: color-mix(in srgb, var(--color-text-muted) 10%, transparent);
+  }
+
+  .expansion-diff-stats {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+    font-size: 10px;
+    font-family: var(--font-mono);
+  }
+
+  .diff-add { color: var(--color-success); }
+  .diff-del { color: var(--color-danger); }
 
   @media (max-width: 640px) {
     .pipeline-stage {
