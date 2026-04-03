@@ -1428,7 +1428,7 @@
                       {@const specMrs = wsMrs.filter(m => m.spec_ref?.startsWith(spec.path))}
                       {@const activeAgent = specAgents.find(a => a.status === 'active')}
                       {@const latestMr = specMrs.sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))[0]}
-                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => navigateToSpec(spec)}>
+                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => navigateToSpec(spec)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigateToSpec(spec); }}}>
                         <div class="entity-list-main">
                           <Icon name="spec" size={14} />
                           <div class="entity-list-info">
@@ -1513,7 +1513,7 @@
                       {@const taskStatus = task.status ?? 'backlog'}
                       {@const taskAgent = wsAgents.find(a => (a.task_id ?? a.current_task_id) === task.id)}
                       {@const taskMr = wsMrs.find(m => m.task_id === task.id || (task.spec_path && m.spec_ref?.includes(task.spec_path)))}
-                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })}>
+                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); nav('task', task.id, { repo_id: task.repo_id, title: task.title }); }}}>
                         <div class="entity-list-main">
                           <Icon name="task" size={14} />
                           <div class="entity-list-info">
@@ -1602,7 +1602,7 @@
                       {@const mrStatus = mr.status ?? 'open'}
                       {@const gates = mr._gates}
                       {@const ds = mr.diff_stats}
-                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })}>
+                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title }); }}}>
                         <div class="entity-list-main">
                           <Icon name="git-merge" size={14} />
                           <div class="entity-list-info">
@@ -1696,7 +1696,7 @@
                       {@const startTime = agent.spawned_at ?? agent.created_at}
                       {@const endTime = agent.completed_at ?? (agStatus === 'active' ? null : agent.last_heartbeat)}
                       {@const durationSecs = startTime ? Math.round(((endTime ? new Date(endTime) : new Date()) - new Date(startTime)) / 1000) : null}
-                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
+                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name }); }}}>
                         <div class="entity-list-main">
                           <Icon name="agent" size={14} />
                           <div class="entity-list-info">
@@ -2969,6 +2969,7 @@
 
   .entity-list-item:last-child { border-bottom: none; }
   .entity-list-item:hover { background: color-mix(in srgb, var(--color-primary) 4%, transparent); }
+  .entity-list-item:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }
 
   .entity-list-main {
     display: flex;
