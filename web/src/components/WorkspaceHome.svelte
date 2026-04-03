@@ -1012,32 +1012,31 @@
         onNavigateSpec={navigateToSpec}
       />
 
-      <!-- Zone 2.5: Workspace Briefing — only show when there's a real LLM narrative or exceptions.
-           Chip-only counts ("N in progress", "M completed") duplicate PipelineOverview, so skip those. -->
-      {#if briefingData && !briefingLoading}
-        {@const b = briefingData}
-        {@const hasNarrative = !!(b.summary || b.narrative)}
-        {@const hasExceptions = b.exceptions?.length > 0}
-        {#if hasNarrative || hasExceptions}
-          <section class="briefing-compact" data-testid="section-briefing">
-            <div class="briefing-header">
-              <Icon name="activity" size={14} />
-              <span class="briefing-title">What's happening</span>
-            </div>
-            <div class="briefing-body">
-              {#if hasNarrative}
-                <p class="briefing-text">{b.summary ?? b.narrative}</p>
-              {/if}
-              {#if hasExceptions}
-                <div class="briefing-highlights">
-                  {#each b.exceptions.slice(0, 3) as ex}
-                    <span class="briefing-chip briefing-chip-danger">{ex.summary ?? ex.title ?? 'Issue'}</span>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          </section>
-        {/if}
+      <!-- Provenance summary bar — compact one-liner of workspace state -->
+      {#if provenanceSummary.approved > 0 || provenanceSummary.activeAgentCount > 0 || provenanceSummary.mergedMrs > 0}
+        <div class="provenance-summary-bar">
+          <span class="prov-item">{provenanceSummary.approved} spec{provenanceSummary.approved !== 1 ? 's' : ''} approved</span>
+          <span class="prov-sep" aria-hidden="true">·</span>
+          <span class="prov-item">{provenanceSummary.inProgressTasks} task{provenanceSummary.inProgressTasks !== 1 ? 's' : ''} active</span>
+          <span class="prov-sep" aria-hidden="true">·</span>
+          <span class="prov-item">{provenanceSummary.activeAgentCount} agent{provenanceSummary.activeAgentCount !== 1 ? 's' : ''} running</span>
+          <span class="prov-sep" aria-hidden="true">·</span>
+          <span class="prov-item prov-merged">{provenanceSummary.mergedMrs} merged</span>
+          {#if provenanceSummary.pending > 0}
+            <span class="prov-sep" aria-hidden="true">·</span>
+            <span class="prov-item prov-pending">{provenanceSummary.pending} awaiting approval</span>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- Briefing one-liner — compact summary replacing the full briefing section -->
+      {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative || briefingData.exceptions?.length > 0)}
+        <p class="briefing-oneliner" data-testid="section-briefing">
+          {briefingData.summary ?? briefingData.narrative ?? ''}
+          {#if briefingData.exceptions?.length > 0}
+            <span class="briefing-exception-count"> — {briefingData.exceptions.length} exception{briefingData.exceptions.length !== 1 ? 's' : ''} flagged</span>
+          {/if}
+        </p>
       {/if}
 
       <!-- ── Zone 3: Repos + Merge Queue (two-column when queue active) ── -->
@@ -1301,69 +1300,47 @@
   }
 
   /* ── Briefing compact ────────────────────────────────────────────────── */
-  .briefing-compact {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .briefing-header {
+  /* ── Provenance summary bar ──────────────────────────────────────────── */
+  .provenance-summary-bar {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .briefing-title {
-    font-family: var(--font-display);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text);
-  }
-
-  .briefing-body {
-    padding: var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .briefing-text {
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-    margin: 0;
-    line-height: 1.5;
-  }
-
-  .briefing-highlights {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-  }
-
-  .briefing-chip {
+    padding: var(--space-1) 0;
     font-size: var(--text-xs);
-    font-weight: 500;
-    padding: 2px 8px;
-    border-radius: var(--radius-sm);
-  }
-
-  .briefing-chip-danger {
-    color: var(--color-danger);
-    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
-  }
-
-  .briefing-chip-active {
-    color: var(--color-success);
-    background: color-mix(in srgb, var(--color-success) 10%, transparent);
-  }
-
-  .briefing-chip-done {
     color: var(--color-text-muted);
-    background: var(--color-surface-elevated);
+    flex-wrap: wrap;
+  }
+
+  .prov-sep {
+    color: var(--color-border-strong);
+  }
+
+  .prov-item {
+    white-space: nowrap;
+  }
+
+  .prov-merged {
+    color: var(--color-success);
+    font-weight: 500;
+  }
+
+  .prov-pending {
+    color: var(--color-warning);
+    font-weight: 500;
+  }
+
+  /* ── Compact briefing one-liner ────────────────────────────────────────── */
+  .briefing-oneliner {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
+    line-height: 1.4;
+    padding: 0 var(--space-1);
+  }
+
+  .briefing-exception-count {
+    color: var(--color-warning);
+    font-weight: 500;
   }
 
   /* ── Sidebar spec items with approve/reject ─────────────────────────── */
@@ -1697,7 +1674,7 @@
   }
 
   .feed-body {
-    max-height: 280px;
+    max-height: 400px;
     overflow-y: auto;
   }
 
