@@ -986,7 +986,6 @@
       </button>
     </div>
   {:else}
-    <!-- ═══ Two-column dashboard: content + sidebar ═══════════════════ -->
     <div class="focused-dashboard">
 
       {#if workspace.description}
@@ -1021,11 +1020,19 @@
         </p>
       {/if}
 
-      <!-- ── Two-column: main content + sidebar ───────────────────────── -->
-      <div class="dashboard-columns" class:has-sidebar={actionableNotifications.length > 0 || mergeQueueItems.length > 0}>
+      <!-- Action needed banner (collapses when empty) -->
+      {#if actionableNotifications.length > 0}
+        <ActionNeeded
+          items={notifications}
+          onApproveSpec={handleApproveSpec}
+          onRejectSpec={handleRejectSpec}
+          onRetryGate={handleRetry}
+          onDismiss={handleDismiss}
+        />
+      {/if}
 
-        <!-- ── Main column: Repos → Activity ─────────────────────────── -->
-        <div class="dashboard-main">
+      <!-- ── Single-column layout ─────────────────────────────────────── -->
+      <div class="dashboard-flow">
           <!-- Repositories -->
           <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
             <div class="section-header">
@@ -1047,7 +1054,15 @@
                 <p class="empty-text" data-testid="repos-empty">{$t('workspace_home.repos_empty')}</p>
               {:else}
                 <div class="repo-cards-grid">
-                  {#each repos as repo (repo.id)}
+                  {#each repos.slice().sort((a, b) => {
+                    const aStats = repoStats(a);
+                    const bStats = repoStats(b);
+                    // Active agents first, then most recent activity
+                    if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
+                    const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
+                    const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
+                    return bTime - aTime;
+                  }) as repo (repo.id)}
                     <RepoCard
                       {repo}
                       health={repoHealth(repo)}
@@ -1122,6 +1137,11 @@
                 <Icon name="agent" size={12} />
                 Agents
                 {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
+              </button>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; }}>
+                <Icon name="git-merge" size={12} />
+                Queue
+                {#if mergeQueueItems.length > 0}<span class="ws-tab-badge">{mergeQueueItems.length}</span>{/if}
               </button>
             </nav>
 
@@ -1510,58 +1530,56 @@
                   </table>
                 {/if}
               </div>
-            {/if}
-          </section>
-        </div><!-- .dashboard-main -->
-
-        <!-- ── Sidebar: Action needed + Merge queue ──────────────────── -->
-        {#if actionableNotifications.length > 0 || mergeQueueItems.length > 0}
-          <aside class="dashboard-sidebar">
-            <!-- Action needed -->
-            <ActionNeeded
-              items={notifications}
-              onApproveSpec={handleApproveSpec}
-              onRejectSpec={handleRejectSpec}
-              onRetryGate={handleRetry}
-              onDismiss={handleDismiss}
-            />
-
-            <!-- Merge Queue -->
-            {#if mergeQueueItems.length > 0}
-              <div class="merge-queue-sidebar" aria-labelledby="section-merge-queue">
-                <h3 class="mq-sidebar-title" id="section-merge-queue">
-                  <Icon name="git-merge" size={14} />
-                  Merge Queue
-                  <span class="mq-sidebar-count">{mergeQueueItems.length}</span>
-                </h3>
-                <div class="mq-sidebar-list">
-                  {#each mergeQueueItems.slice(0, 8) as item, i}
-                    {@const mrId = item.merge_request_id ?? item.mr_id}
-                    <button class="mq-sidebar-item" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">
-                      <span class="mq-item-position">#{i + 1}</span>
-                      <div class="mq-sidebar-item-body">
-                        <span class="mq-sidebar-item-title">{item._title}</span>
-                        <span class="mq-sidebar-item-meta">
-                          {#if item._branch}<span class="mq-branch">{item._branch}</span>{/if}
-                          {#if item._mr?._gates?.total > 0}
-                            <span class="mq-gates-mini">
-                              {#if item._mr._gates.failed > 0}<span class="gate-fail-inline">✗{item._mr._gates.failed}</span>{/if}
-                              {#if item._mr._gates.passed > 0}<span class="gate-pass-inline">✓{item._mr._gates.passed}</span>{/if}
-                            </span>
-                          {/if}
-                        </span>
-                      </div>
-                    </button>
-                  {/each}
-                  {#if mergeQueueItems.length > 8}
-                    <p class="show-more-hint">{mergeQueueItems.length - 8} more in queue</p>
-                  {/if}
-                </div>
+            <!-- ── Queue tab ──────────────────────────────────────────── -->
+            {:else if wsTab === 'queue'}
+              <div class="feed-body">
+                {#if mergeQueueLoading}
+                  <div class="skeleton-row"></div>
+                {:else if mergeQueueItems.length === 0}
+                  <p class="empty-text">Merge queue is empty. Enqueue MRs to run quality gates and merge automatically.</p>
+                {:else}
+                  <div class="mq-list">
+                    {#each mergeQueueItems as item, i}
+                      {@const mrId = item.merge_request_id ?? item.mr_id}
+                      <button class="mq-list-item" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">
+                        <span class="mq-item-position">#{i + 1}</span>
+                        <div class="mq-list-item-body">
+                          <span class="mq-list-item-title">{item._title}</span>
+                          <span class="mq-list-item-meta">
+                            {#if item._branch}<span class="mq-branch">{item._branch}</span>{/if}
+                            {#if item._agent}
+                              <button class="entity-agent-chip" onclick={(e) => { e.stopPropagation(); nav('agent', item._agent, { repo_id: item._mr?.repository_id }); }} title="View agent">
+                                {entityName('agent', item._agent)}
+                              </button>
+                            {/if}
+                            {#if item._spec_ref}
+                              {@const specRefPath = item._spec_ref.split('@')[0]}
+                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', specRefPath, { path: specRefPath, repo_id: item._mr?.repository_id }); }}>
+                                {specRefPath.split('/').pop()?.replace(/\.md$/, '')}
+                              </button>
+                            {/if}
+                          </span>
+                          <span class="mq-list-item-gates">
+                            {#if item._mr?._gates?.total > 0}
+                              {#if item._mr._gates.failed > 0}<span class="gate-fail-count">&#10007;{item._mr._gates.failed}</span>{/if}
+                              {#if item._mr._gates.passed > 0}<span class="gate-pass-count">&#10003;{item._mr._gates.passed}</span>{/if}
+                              <span class="gate-total-count">/{item._mr._gates.total}</span>
+                            {/if}
+                            {#if item._deps?.length > 0}
+                              <span class="mq-dep-badge" title="Depends on {item._deps.length} other MR(s)">
+                                {item._deps.length} dep{item._deps.length !== 1 ? 's' : ''}
+                              </span>
+                            {/if}
+                          </span>
+                        </div>
+                      </button>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             {/if}
-          </aside>
-        {/if}
-      </div><!-- .dashboard-columns -->
+          </section>
+      </div><!-- .dashboard-flow -->
 
     </div><!-- .focused-dashboard -->
   {/if}
@@ -1610,9 +1628,9 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-4);
-    max-width: 1200px;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    max-width: 960px;
     margin: 0 auto;
     width: 100%;
   }
@@ -1705,86 +1723,25 @@
     color: var(--color-text-muted);
   }
 
-  /* ── Two-column dashboard layout ─────────────────────────────────── */
-  .dashboard-columns {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: var(--space-4);
-  }
-
-  .dashboard-columns.has-sidebar {
-    grid-template-columns: 1fr 300px;
-  }
-
-  .dashboard-main {
+  /* ── Single-column dashboard flow ─────────────────────────────────── */
+  .dashboard-flow {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
     min-width: 0;
   }
 
-  .dashboard-sidebar {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    align-self: start;
-    position: sticky;
-    top: var(--space-3);
-  }
-
-  @media (max-width: 900px) {
-    .dashboard-columns.has-sidebar {
-      grid-template-columns: 1fr;
-    }
-    .dashboard-sidebar {
-      position: static;
-    }
-  }
-
-  .merge-queue-sidebar {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    overflow: hidden;
-    align-self: start;
-  }
-
-  .mq-sidebar-title {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-3) var(--space-3);
-    margin: 0;
-    font-family: var(--font-display);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text);
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
-  }
-
-  .mq-sidebar-count {
-    font-size: var(--text-xs);
-    background: var(--color-primary);
-    color: var(--color-text-inverse);
-    border-radius: 8px;
-    padding: 0 5px;
-    min-width: 16px;
-    text-align: center;
-    line-height: 16px;
-    font-weight: 700;
-  }
-
-  .mq-sidebar-list {
+  /* ── Queue list (inline in entity panel tab) ──────────────────────── */
+  .mq-list {
     display: flex;
     flex-direction: column;
   }
 
-  .mq-sidebar-item {
+  .mq-list-item {
     display: flex;
     align-items: flex-start;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
     background: transparent;
     border: none;
     border-bottom: 1px solid var(--color-border);
@@ -1795,19 +1752,19 @@
     transition: background var(--transition-fast);
   }
 
-  .mq-sidebar-item:last-child { border-bottom: none; }
-  .mq-sidebar-item:hover { background: var(--color-surface-elevated); }
+  .mq-list-item:last-child { border-bottom: none; }
+  .mq-list-item:hover { background: var(--color-surface-elevated); }
 
-  .mq-sidebar-item-body {
+  .mq-list-item-body {
     flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: 2px;
   }
 
-  .mq-sidebar-item-title {
-    font-size: var(--text-xs);
+  .mq-list-item-title {
+    font-size: var(--text-sm);
     font-weight: 500;
     color: var(--color-text);
     overflow: hidden;
@@ -1815,12 +1772,28 @@
     white-space: nowrap;
   }
 
-  .mq-sidebar-item-meta {
+  .mq-list-item-meta {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    font-size: 10px;
+    font-size: var(--text-xs);
     color: var(--color-text-muted);
+    flex-wrap: wrap;
+  }
+
+  .mq-list-item-gates {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+  }
+
+  .mq-dep-badge {
+    font-size: 10px;
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
   }
 
   /* ── Repo cards grid (responsive) ──────────────────────────────────── */
