@@ -1569,10 +1569,12 @@
                                 {#if agStatus === 'active'}<span class="status-pulse"></span>{/if}
                                 {agStatus}
                               </span>
-                              {#if agStatus === 'idle'}
+                              {#if agStatus === 'idle' || agStatus === 'completed'}
                                 {@const agentMr = wsMrs.find(m => m.author_agent_id === agent.id)}
                                 {#if agentMr}
-                                  <span class="status-context">MR: {agentMr.status}</span>
+                                  <button class="status-context status-context-link" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title }); }}>
+                                    MR: {agentMr.title ?? agentMr.status}
+                                  </button>
                                 {:else}
                                   <span class="status-context">Work complete</span>
                                 {/if}
