@@ -1624,6 +1624,12 @@
                                   {/if}
                                 </button>
                               {/if}
+                              {#if gates?.failed > 0}
+                                {@const failedGate = (gates.details ?? []).find(g => g.status === 'failed')}
+                                {#if failedGate?.output}
+                                  <span class="gate-error-preview">{failedGate.output.split('\n')[0]?.slice(0, 80)}{failedGate.output.length > 80 ? '...' : ''}</span>
+                                {/if}
+                              {/if}
                               {#if mr.author_agent_id}
                                 <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', mr.author_agent_id, { repo_id: mr.repository_id ?? mr.repo_id }); }}>
                                   {entityName('agent', mr.author_agent_id)}
