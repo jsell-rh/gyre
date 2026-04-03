@@ -1137,7 +1137,7 @@
         </section>
 
         <!-- Right: Activity feed (always visible, not collapsed) -->
-        <section class="ws-column-activity">
+        <section class="ws-column-activity" data-testid="ws-tabbed-panel">
           <div class="section-header">
             <h2 class="section-title">
               <Icon name="activity" size={14} />
