@@ -1051,6 +1051,9 @@
       if (specs.length === 0 && repos.length === 0) return 'Get started by creating a repo and pushing specs.';
       if (specs.length === 0) return 'Push specs to your repo to start the autonomous pipeline.';
       if (s.approved > 0 && s.totalTasks === 0) return 'Specs approved — waiting for task creation.';
+      if (s.mergedMrs > 0 && s.activeAgentCount === 0 && s.openMrs === 0 && s.pending === 0) {
+        return `Pipeline complete: ${s.approved} spec${s.approved !== 1 ? 's' : ''} approved, ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with attestation.`;
+      }
       return 'System idle — no active work.';
     }
     return statusItems.map(i => i.text).join('. ') + '.';
