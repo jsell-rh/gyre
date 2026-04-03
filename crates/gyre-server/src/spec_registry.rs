@@ -613,7 +613,7 @@ async fn resolve_repo_by_name(
 }
 
 /// Read a file from a specific git commit using `git show <sha>:<path>`.
-async fn read_git_file(
+pub(crate) async fn read_git_file(
     git_bin: &str,
     repo_path: &str,
     sha: &str,
