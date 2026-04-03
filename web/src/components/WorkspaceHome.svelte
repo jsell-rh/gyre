@@ -1610,7 +1610,15 @@
                               {:else if mrStatus === 'open' && mr.queue_position != null}
                                 <span class="status-context">Queue #{mr.queue_position + 1} — waiting for gates</span>
                               {:else if mrStatus === 'merged' && mr.merged_at}
-                                <span class="status-context status-context-success">merged {relTime(mr.merged_at)}{#if mr.merge_commit_sha} <code class="sha-inline mono">{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</span>
+                                <span class="status-context status-context-success">merged {relTime(mr.merged_at)}</span>
+                                {#if mr.merge_commit_sha}
+                                  <span class="merged-provenance">
+                                    {#if mr.spec_ref}<span class="prov-step">spec</span><span class="prov-arrow">→</span>{/if}
+                                    {#if mr.author_agent_id}<span class="prov-step">agent</span><span class="prov-arrow">→</span>{/if}
+                                    {#if gates?.passed > 0}<span class="prov-step">{gates.passed} gates</span><span class="prov-arrow">→</span>{/if}
+                                    <code class="sha-inline mono">{mr.merge_commit_sha.slice(0, 7)}</code>
+                                  </span>
+                                {/if}
                               {:else if mrStatus === 'open' && gates?.passed === gates?.total && gates?.total > 0}
                                 <span class="status-context status-context-success">All gates passed — ready to enqueue</span>
                               {:else if mrStatus === 'open' && (!gates || gates.total === 0)}
@@ -3379,6 +3387,24 @@
 
   .status-context-link:hover {
     text-decoration: underline;
+  }
+
+  .merged-provenance {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 9px;
+    color: var(--color-text-muted);
+  }
+
+  .prov-step {
+    color: var(--color-success);
+    font-weight: 500;
+  }
+
+  .prov-arrow {
+    opacity: 0.4;
+    font-size: 8px;
   }
 
   /* Sidebar styles removed — entity summaries moved to PipelineOverview expansion */
