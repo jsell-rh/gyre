@@ -1120,7 +1120,8 @@
         </div>
       </header>
 
-      <!-- ── Pipeline progress: the primary status summary ────────── -->
+      <!-- ── Pipeline progress: only show when there's real data ────── -->
+      {#if !specsLoading && !tasksLoading && (pipelineSpecs.total > 0 || pipelineTasks.total > 0 || pipelineMrs.total > 0 || pipelineAgents.total > 0)}
         <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
           <!-- Workspace health indicator -->
           {#if pipelineMrs.failed_gates > 0}
@@ -1192,6 +1193,7 @@
             </span>
           {/if}
         </div>
+      {/if}
 
       <!-- ── Briefing — only show when LLM summary available ─────── -->
       {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
