@@ -605,7 +605,21 @@
   });
 
   // ── Workspace-level entity tab ──────────────────────────────────────
+  // Default to activity feed — the unified cross-repo stream
   let wsTab = $state('activity');
+  // Whether the "Browse all" entity section is expanded
+  let browseExpanded = $state(false);
+
+  function toggleBrowse() {
+    browseExpanded = !browseExpanded;
+    if (browseExpanded) {
+      // Default to the most actionable tab
+      if (pipelineSpecs.pending > 0) wsTab = 'specs';
+      else if (pipelineMrs.open > 0 || pipelineMrs.failed_gates > 0) wsTab = 'mrs';
+      else if (pipelineTasks.in_progress > 0) wsTab = 'tasks';
+      else wsTab = 'specs';
+    }
+  }
 
   // ── Activity filter + pagination ──────────────────────────────────────
   let activityFilter = $state('');
@@ -1110,44 +1124,44 @@
             </div>
           </section>
 
-          <!-- Tabbed entity panel: Activity | Specs | Tasks | MRs | Agents -->
-          <section class="ws-feed-panel" data-testid="ws-tabbed-panel">
-            <nav class="ws-tab-bar" aria-label="Workspace sections">
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; }}>
-                <Icon name="activity" size={12} />
-                Activity
-              </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; }}>
-                <Icon name="spec" size={12} />
-                Specs
-                {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
-              </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; }}>
-                <Icon name="task" size={12} />
-                Tasks
-                {#if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
-              </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; }}>
-                <Icon name="git-merge" size={12} />
-                MRs
-                {#if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>
-                {:else if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>{/if}
-              </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; }}>
-                <Icon name="agent" size={12} />
-                Agents
-                {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
-              </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; }}>
-                <Icon name="git-merge" size={12} />
-                Queue
-                {#if mergeQueueItems.length > 0}<span class="ws-tab-badge">{mergeQueueItems.length}</span>{/if}
-              </button>
-            </nav>
+          <!-- Merge queue (promoted — visible when items are queued) -->
+          {#if mergeQueueItems.length > 0}
+            <section class="merge-queue-banner" data-testid="merge-queue-banner">
+              <div class="mq-banner-header">
+                <Icon name="git-merge" size={14} />
+                <span class="mq-banner-title">Merge Queue</span>
+                <span class="mq-banner-count">{mergeQueueItems.length} item{mergeQueueItems.length !== 1 ? 's' : ''}</span>
+              </div>
+              <div class="mq-banner-list">
+                {#each mergeQueueItems.slice(0, 5) as item, i}
+                  {@const mrId = item.merge_request_id ?? item.mr_id}
+                  <button class="mq-banner-item" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">
+                    <span class="mq-item-position">#{i + 1}</span>
+                    <span class="mq-banner-item-title">{item._title}</span>
+                    {#if item._mr?._gates?.total > 0}
+                      <span class="mq-banner-gates">
+                        {#if item._mr._gates.failed > 0}<span class="gate-fail-count">&#10007;{item._mr._gates.failed}</span>{/if}
+                        {#if item._mr._gates.passed > 0}<span class="gate-pass-count">&#10003;{item._mr._gates.passed}</span>{/if}
+                        <span class="gate-total-count">/{item._mr._gates.total}</span>
+                      </span>
+                    {/if}
+                  </button>
+                {/each}
+                {#if mergeQueueItems.length > 5}
+                  <span class="mq-banner-overflow">+{mergeQueueItems.length - 5} more</span>
+                {/if}
+              </div>
+            </section>
+          {/if}
 
-            <!-- ── Activity tab ──────────────────────────────────────── -->
-            {#if wsTab === 'activity'}
-              <div class="ws-tab-toolbar">
+          <!-- Activity feed — the primary cross-repo stream -->
+          <section class="ws-feed-panel" data-testid="ws-tabbed-panel">
+            <div class="feed-header-bar">
+              <span class="feed-header-title">
+                <Icon name="activity" size={14} />
+                Activity
+              </span>
+              <div class="feed-header-controls">
                 <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity">
                   <option value="">All</option>
                   <option value="spec">Specs</option>
@@ -1156,7 +1170,16 @@
                   <option value="mr">MRs</option>
                   <option value="gate">Gates</option>
                 </select>
+                <button class="browse-toggle" class:browse-toggle-active={browseExpanded} onclick={toggleBrowse} title="Browse all specs, tasks, MRs, and agents across repos">
+                  Browse all
+                  {#if pipelineSpecs.pending > 0 || pipelineMrs.failed_gates > 0}
+                    <span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending + pipelineMrs.failed_gates}</span>
+                  {/if}
+                </button>
               </div>
+            </div>
+
+            <!-- ── Activity feed (always visible) ──────────────────── -->
               <div class="feed-body">
                 {#if activityLoading}
                   <div class="skeleton-row"></div>
@@ -1233,8 +1256,37 @@
                 {/if}
               </div>
 
+          </section>
+
+          <!-- ── Browse All (collapsible entity tables) ──────────── -->
+          {#if browseExpanded}
+          <section class="ws-feed-panel browse-panel" data-testid="browse-panel">
+            <nav class="ws-tab-bar" aria-label="Browse entities">
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; }}>
+                <Icon name="spec" size={12} />
+                Specs
+                {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
+              </button>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; }}>
+                <Icon name="task" size={12} />
+                Tasks
+                {#if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
+              </button>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; }}>
+                <Icon name="git-merge" size={12} />
+                MRs
+                {#if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>
+                {:else if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>{/if}
+              </button>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; }}>
+                <Icon name="agent" size={12} />
+                Agents
+                {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
+              </button>
+            </nav>
+
             <!-- ── Specs tab ──────────────────────────────────────────── -->
-            {:else if wsTab === 'specs'}
+            {#if wsTab === 'specs'}
               <div class="feed-body">
                 {#if specsLoading}
                   <div class="skeleton-row"></div>
@@ -1530,55 +1582,9 @@
                   </table>
                 {/if}
               </div>
-            <!-- ── Queue tab ──────────────────────────────────────────── -->
-            {:else if wsTab === 'queue'}
-              <div class="feed-body">
-                {#if mergeQueueLoading}
-                  <div class="skeleton-row"></div>
-                {:else if mergeQueueItems.length === 0}
-                  <p class="empty-text">Merge queue is empty. Enqueue MRs to run quality gates and merge automatically.</p>
-                {:else}
-                  <div class="mq-list">
-                    {#each mergeQueueItems as item, i}
-                      {@const mrId = item.merge_request_id ?? item.mr_id}
-                      <button class="mq-list-item" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">
-                        <span class="mq-item-position">#{i + 1}</span>
-                        <div class="mq-list-item-body">
-                          <span class="mq-list-item-title">{item._title}</span>
-                          <span class="mq-list-item-meta">
-                            {#if item._branch}<span class="mq-branch">{item._branch}</span>{/if}
-                            {#if item._agent}
-                              <button class="entity-agent-chip" onclick={(e) => { e.stopPropagation(); nav('agent', item._agent, { repo_id: item._mr?.repository_id }); }} title="View agent">
-                                {entityName('agent', item._agent)}
-                              </button>
-                            {/if}
-                            {#if item._spec_ref}
-                              {@const specRefPath = item._spec_ref.split('@')[0]}
-                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', specRefPath, { path: specRefPath, repo_id: item._mr?.repository_id }); }}>
-                                {specRefPath.split('/').pop()?.replace(/\.md$/, '')}
-                              </button>
-                            {/if}
-                          </span>
-                          <span class="mq-list-item-gates">
-                            {#if item._mr?._gates?.total > 0}
-                              {#if item._mr._gates.failed > 0}<span class="gate-fail-count">&#10007;{item._mr._gates.failed}</span>{/if}
-                              {#if item._mr._gates.passed > 0}<span class="gate-pass-count">&#10003;{item._mr._gates.passed}</span>{/if}
-                              <span class="gate-total-count">/{item._mr._gates.total}</span>
-                            {/if}
-                            {#if item._deps?.length > 0}
-                              <span class="mq-dep-badge" title="Depends on {item._deps.length} other MR(s)">
-                                {item._deps.length} dep{item._deps.length !== 1 ? 's' : ''}
-                              </span>
-                            {/if}
-                          </span>
-                        </div>
-                      </button>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
             {/if}
           </section>
+          {/if}
       </div><!-- .dashboard-flow -->
 
     </div><!-- .focused-dashboard -->
@@ -1931,6 +1937,142 @@
   .budget-mini-label { color: var(--color-text-muted); }
   .budget-mini-value { font-weight: 600; font-family: var(--font-mono); color: var(--color-text); }
   .budget-mini-value.budget-warn { color: var(--color-warning); }
+
+  /* ── Merge queue banner (promoted) ───────────────── */
+  .merge-queue-banner {
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-warning);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .mq-banner-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-warning) 4%, var(--color-surface-elevated));
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-warning);
+  }
+
+  .mq-banner-title {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .mq-banner-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: auto;
+  }
+
+  .mq-banner-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .mq-banner-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .mq-banner-item:last-child { border-bottom: none; }
+  .mq-banner-item:hover { background: var(--color-surface-elevated); }
+
+  .mq-banner-item-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text);
+  }
+
+  .mq-banner-gates {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+  }
+
+  .mq-banner-overflow {
+    padding: var(--space-1) var(--space-3);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    text-align: center;
+  }
+
+  /* ── Feed header bar ──────────────────────────────── */
+  .feed-header-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .feed-header-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .feed-header-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .browse-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    transition: all var(--transition-fast);
+  }
+
+  .browse-toggle:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .browse-toggle-active {
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .browse-panel {
+    border-color: var(--color-primary);
+    border-top: 2px solid var(--color-primary);
+  }
 
   /* ── Activity feed (full-width) ──────────────────── */
   .ws-feed-panel {
