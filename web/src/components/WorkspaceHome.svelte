@@ -630,18 +630,17 @@
   // Entity browse section starts collapsed — opens when user clicks pipeline stage or tab
   let browseExpanded = $state(false);
 
-  // Auto-select the most actionable tab once data loads
+  // Auto-select the most relevant tab for when the user opens the browse section,
+  // but do NOT auto-expand — the pipeline + decisions already surface actionable items,
+  // and auto-expanding pushes repos (the most important content) off-screen.
   $effect(() => {
     if (userSelectedTab) return;
-    // Wait until at least specs+tasks are loaded
     if (specsLoading || tasksLoading) return;
-    // If there are actionable items, jump to the relevant tab and expand
-    if (pipelineSpecs.pending > 0) { wsTab = 'specs'; browseExpanded = true; }
-    else if (pipelineMrs.failed_gates > 0) { wsTab = 'mrs'; browseExpanded = true; }
-    else if (pipelineAgents.active > 0) { wsTab = 'agents'; browseExpanded = true; }
-    else if (pipelineMrs.open > 0) { wsTab = 'mrs'; browseExpanded = true; }
-    else if (pipelineTasks.in_progress > 0 || pipelineTasks.blocked > 0) { wsTab = 'tasks'; browseExpanded = true; }
-    // else stay collapsed — repos are the primary content
+    if (pipelineSpecs.pending > 0) { wsTab = 'specs'; }
+    else if (pipelineMrs.failed_gates > 0) { wsTab = 'mrs'; }
+    else if (pipelineAgents.active > 0) { wsTab = 'agents'; }
+    else if (pipelineMrs.open > 0) { wsTab = 'mrs'; }
+    else if (pipelineTasks.in_progress > 0 || pipelineTasks.blocked > 0) { wsTab = 'tasks'; }
   });
 
   // ── Entity table search ──────────────────────────────────────────────
