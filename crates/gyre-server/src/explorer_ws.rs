@@ -174,6 +174,12 @@ async fn handle_explorer_session(
 
                 // Session message limit: prevent unbounded history growth.
                 message_count += 1;
+
+                // Invalidate graph cache periodically to pick up changes.
+                if message_count % 10 == 0 {
+                    cached_nodes = None;
+                    cached_edges = None;
+                }
                 if message_count > MAX_SESSION_MESSAGES {
                     let err = ExplorerServerMessage::Error {
                         message:
@@ -183,7 +189,8 @@ async fn handle_explorer_session(
                     let _ = sender
                         .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
                         .await;
-                    continue;
+                    let _ = sender.close().await;
+                    break;
                 }
 
                 // Send thinking status
@@ -241,18 +248,44 @@ async fn handle_explorer_session(
                     is_system: false,
                 };
                 match state.saved_views.create(view).await {
-                    Ok(v) => {
-                        let msg = ExplorerServerMessage::Views {
-                            views: vec![SavedViewSummary {
-                                id: v.id.to_string(),
-                                name: v.name,
-                                description: v.description,
-                                created_at: v.created_at,
-                            }],
-                        };
-                        let _ = sender
-                            .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
-                            .await;
+                    Ok(_v) => {
+                        // Re-fetch the full view list so the client gets all views, not just the new one.
+                        match state.saved_views.list_by_repo(&rid).await {
+                            Ok(all_views) => {
+                                let summaries: Vec<SavedViewSummary> = all_views
+                                    .into_iter()
+                                    .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
+                                    .map(|v| SavedViewSummary {
+                                        id: v.id.to_string(),
+                                        name: v.name,
+                                        description: v.description,
+                                        created_at: v.created_at,
+                                    })
+                                    .collect();
+                                let msg = ExplorerServerMessage::Views { views: summaries };
+                                let _ = sender
+                                    .send(Message::Text(
+                                        serde_json::to_string(&msg).unwrap().into(),
+                                    ))
+                                    .await;
+                            }
+                            Err(_) => {
+                                // Fall back to just the new view
+                                let msg = ExplorerServerMessage::Views {
+                                    views: vec![SavedViewSummary {
+                                        id: _v.id.to_string(),
+                                        name: _v.name,
+                                        description: _v.description,
+                                        created_at: _v.created_at,
+                                    }],
+                                };
+                                let _ = sender
+                                    .send(Message::Text(
+                                        serde_json::to_string(&msg).unwrap().into(),
+                                    ))
+                                    .await;
+                            }
+                        }
                     }
                     Err(e) => {
                         let err = ExplorerServerMessage::Error {
@@ -585,9 +618,9 @@ async fn run_explorer_agent(
     if conversation_history.len() > MAX_CONVERSATION_HISTORY {
         let keep_recent = MAX_CONVERSATION_HISTORY - 2;
         let summary_msg = ConversationMessage {
-            role: "user".to_string(),
+            role: "assistant".to_string(),
             content: ConversationContent::Text(
-                "[Earlier conversation messages were summarized to save context. The conversation continues below.]".to_string(),
+                "[Earlier conversation context was summarized. I'll continue based on what follows.]".to_string(),
             ),
         };
         let recent: Vec<ConversationMessage> =
@@ -974,6 +1007,11 @@ User messages may include a [Canvas: ...] prefix showing what's currently select
 - "Selected node: X" means the user clicked on X — $selected resolves to it
 - "Visible groups: A, B" means those tree groups are expanded on screen
 - "Active lens: structural|evaluative|trace" shows the current analysis mode
+
+## $clicked vs $selected
+- $selected = the node currently highlighted in the UI (set when user message is sent)
+- $clicked = alias for an interactive mode — use in "focus" scope to create click-to-explore views where each click re-runs the query from the clicked node
+- In practice, both resolve to the same node ID at query time. The difference is intent: $clicked implies the query should be re-evaluated on future clicks.
 
 ## Workflow
 1. Call graph_summary to understand the codebase structure

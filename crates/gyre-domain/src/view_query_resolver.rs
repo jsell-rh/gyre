@@ -52,6 +52,15 @@ pub struct DryRunResult {
     /// Edges filtered to connections between matched nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub matched_edges: Vec<MatchedEdge>,
+    /// Resolved annotation with template variables replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_annotation: Option<ResolvedAnnotation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedAnnotation {
+    pub title: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -627,7 +636,12 @@ fn resolve_computed_expression(
         return active_nodes
             .iter()
             .filter(|n| !reachable.contains(&n.id.to_string()))
-            .filter(|n| n.node_type == NodeType::Function)
+            .filter(|n| {
+                matches!(
+                    n.node_type,
+                    NodeType::Function | NodeType::Endpoint | NodeType::Type
+                )
+            })
             .map(|n| n.id.to_string())
             .collect();
     }
@@ -1245,7 +1259,7 @@ pub fn dry_run(
         .collect();
 
     // Compute group_count as distinct parent modules (spec semantics)
-    let _group_count = count_distinct_parent_modules(&result_set, nodes, edges);
+    let group_count = count_distinct_parent_modules(&result_set, nodes, edges);
 
     // Resolve annotation templates with proper $name handling
     if let Some(ref title) = query.annotation.title {
@@ -1256,6 +1270,33 @@ pub fn dry_run(
             );
         }
     }
+
+    // Resolve annotation template variables server-side
+    let resolved_annotation =
+        if query.annotation.title.is_some() || query.annotation.description.is_some() {
+            let resolved_title = query.annotation.title.as_ref().map(|t| {
+                resolve_annotation_template(
+                    t,
+                    focused_node_name.as_deref(),
+                    result_set.len(),
+                    group_count,
+                )
+            });
+            let resolved_desc = query.annotation.description.as_ref().map(|d| {
+                resolve_annotation_template(
+                    d,
+                    focused_node_name.as_deref(),
+                    result_set.len(),
+                    group_count,
+                )
+            });
+            Some(ResolvedAnnotation {
+                title: resolved_title,
+                description: resolved_desc,
+            })
+        } else {
+            None
+        };
 
     // Resolve groups
     let mut groups_resolved = Vec::new();
@@ -1374,6 +1415,7 @@ pub fn dry_run(
         node_depths,
         node_metrics,
         matched_edges,
+        resolved_annotation,
     }
 }
 
