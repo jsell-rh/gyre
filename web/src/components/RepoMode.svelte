@@ -564,7 +564,7 @@
               <p>No tasks match filter "{taskStatusFilter}"</p>
             {:else}
               <p>No tasks yet</p>
-              <p class="list-empty-hint">Tasks are created automatically when specs are approved, or you can create one manually above. The flow: <strong>Push spec</strong> → <strong>Approve</strong> → <strong>Tasks generated</strong> → Agents implement.</p>
+              <p class="list-empty-hint">Push spec → Approve → <strong>Tasks generated</strong> → Agent implements → MR → Merge</p>
             {/if}
           </div>
         {:else}
@@ -647,7 +647,7 @@
         {:else if repoMrs.length === 0}
           <div class="list-empty">
             <p>No merge requests yet</p>
-            <p class="list-empty-hint">MRs are created automatically when agents finish implementing a task. The flow: Spec → Task → Agent implements → <strong>MR created</strong> → Gates run → Merged.</p>
+            <p class="list-empty-hint">Spec → Task → Agent implements → <strong>MR created</strong> → Gates run → Merged</p>
           </div>
         {:else}
           <table class="entity-table">
@@ -740,7 +740,7 @@
         {:else if allAgents.length === 0}
           <div class="list-empty">
             <p>No agents yet</p>
-            <p class="list-empty-hint">Agents are spawned automatically when tasks are ready, or manually from a task's detail view. Each agent works on a branch, implements code, and creates an MR when done.</p>
+            <p class="list-empty-hint">Spec → Task → <strong>Agent spawned</strong> → implements on branch → creates MR when done</p>
           </div>
         {:else}
           <table class="entity-table">
