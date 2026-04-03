@@ -1051,8 +1051,12 @@
     <div class="focused-dashboard">
 
       <!-- ── Status sentence: one-line summary of workspace state ── -->
-      {#if statusSentence && !specsLoading && !tasksLoading}
-        <div class="ws-status-sentence">{statusSentence}</div>
+      {#if !specsLoading && !tasksLoading}
+        {#if statusSentence}
+          <div class="ws-status-sentence">{statusSentence}</div>
+        {:else if !decisionsLoading && actionableNotifications.length === 0 && (specs.length > 0 || wsTasks.length > 0)}
+          <div class="ws-status-sentence ws-status-clear">All clear — no items need your attention</div>
+        {/if}
       {/if}
 
       <!-- ── Pipeline progress: visual flow showing autonomous dev lifecycle ── -->
@@ -1092,9 +1096,6 @@
       {/if}
 
       <!-- ── Decisions / Action Needed (top — most important) ──────── -->
-      {#if !decisionsLoading && actionableNotifications.length === 0 && !specsLoading && (specs.length > 0 || wsTasks.length > 0)}
-        <div class="ws-all-clear" data-testid="all-clear">All clear — no items need your attention</div>
-      {/if}
       {#if !decisionsLoading && actionableNotifications.length > 0}
         <section class="ws-decisions-section" data-testid="section-decisions">
           <div class="decisions-header">
@@ -1199,10 +1200,6 @@
             <!-- ── Overview tab ──────────────────────────────────────── -->
             {#if wsTab === 'overview'}
               <div class="feed-body overview-body">
-                {#if !decisionsLoading && actionableNotifications.length === 0 && !specsLoading && (specs.length > 0 || wsTasks.length > 0)}
-                  <div class="ws-all-clear" data-testid="all-clear">All clear — no items need your attention</div>
-                {/if}
-
                 {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
                   <section class="ws-briefing-section">
                     <div class="ws-briefing-body">
@@ -1957,19 +1954,17 @@
   .ws-status-sentence {
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
-    padding: 0 var(--space-1);
+    padding: var(--space-1) var(--space-2);
     line-height: 1.4;
+    border-radius: var(--radius);
   }
 
-  /* ── All clear indicator ─────────────────────────────────────── */
-  .ws-all-clear {
-    font-size: var(--text-xs);
+  .ws-status-clear {
     color: var(--color-success);
     background: color-mix(in srgb, var(--color-success) 6%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-success) 20%, transparent);
-    border-radius: var(--radius);
-    padding: var(--space-1) var(--space-3);
     text-align: center;
+    font-size: var(--text-xs);
   }
 
   /* ── Pipeline progress bar ─────────────────────────────────────── */
