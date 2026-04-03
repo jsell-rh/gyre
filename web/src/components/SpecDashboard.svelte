@@ -23,6 +23,7 @@
   import Button from '../lib/Button.svelte';
   import Modal from '../lib/Modal.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
+  import { specStatusTooltip } from '../lib/statusTooltips.js';
 
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
@@ -542,6 +543,7 @@
                 <Badge
                   value={spec.approval_status ?? 'unknown'}
                   variant={statusColor(spec.approval_status)}
+                  title={specStatusTooltip(spec.approval_status)}
                 />
               </td>
               <td class="col-kind">{spec.kind || '—'}</td>
@@ -619,6 +621,7 @@
                 <Badge
                   value={spec.approval_status ?? 'unknown'}
                   variant={statusColor(spec.approval_status)}
+                  title={specStatusTooltip(spec.approval_status)}
                 />
               </td>
               <td class="col-kind">{spec.kind || '—'}</td>
