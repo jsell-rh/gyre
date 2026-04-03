@@ -77,11 +77,11 @@
 
     <!-- Compact stats — clickable to navigate to repo tab -->
     <div class="repo-card-stats">
-      {#if stats.specs > 0}<button class="repo-stat repo-stat-btn" onclick={(e) => handleStatClick('specs', e)} title="View specs">{stats.specs} spec{stats.specs !== 1 ? 's' : ''}</button>{/if}
-      {#if stats.tasks > 0}<button class="repo-stat repo-stat-btn" onclick={(e) => handleStatClick('tasks', e)} title="View tasks">{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}</button>{/if}
-      {#if stats.agents > 0}<button class="repo-stat repo-stat-btn repo-stat-active" onclick={(e) => handleStatClick('agents', e)} title="View agents">{stats.agents} agent{stats.agents !== 1 ? 's' : ''}</button>{/if}
-      {#if stats.mrs > 0}<button class="repo-stat repo-stat-btn" onclick={(e) => handleStatClick('mrs', e)} title="View merge requests">{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{#if stats.openMrs > 0} ({stats.openMrs} open){/if}</button>{/if}
-      {#if stats.failedGates > 0}<button class="repo-stat repo-stat-btn repo-stat-danger" onclick={(e) => handleStatClick('mrs', e)} title="View failed gates">{stats.failedGates} failed gate{stats.failedGates !== 1 ? 's' : ''}</button>{/if}
+      {#if stats.specs > 0}<span class="repo-stat repo-stat-btn" role="link" tabindex="0" onclick={(e) => handleStatClick('specs', e)} onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('specs', e); }} title="View specs">{stats.specs} spec{stats.specs !== 1 ? 's' : ''}</span>{/if}
+      {#if stats.tasks > 0}<span class="repo-stat repo-stat-btn" role="link" tabindex="0" onclick={(e) => handleStatClick('tasks', e)} onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('tasks', e); }} title="View tasks">{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}</span>{/if}
+      {#if stats.agents > 0}<span class="repo-stat repo-stat-btn repo-stat-active" role="link" tabindex="0" onclick={(e) => handleStatClick('agents', e)} onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('agents', e); }} title="View agents">{stats.agents} agent{stats.agents !== 1 ? 's' : ''}</span>{/if}
+      {#if stats.mrs > 0}<span class="repo-stat repo-stat-btn" role="link" tabindex="0" onclick={(e) => handleStatClick('mrs', e)} onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('mrs', e); }} title="View merge requests">{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{#if stats.openMrs > 0} ({stats.openMrs} open){/if}</span>{/if}
+      {#if stats.failedGates > 0}<span class="repo-stat repo-stat-btn repo-stat-danger" role="link" tabindex="0" onclick={(e) => handleStatClick('mrs', e)} onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('mrs', e); }} title="View failed gates">{stats.failedGates} failed gate{stats.failedGates !== 1 ? 's' : ''}</span>{/if}
     </div>
   </button>
 {/if}
