@@ -600,7 +600,7 @@
 
   // ── Activity filter + pagination ──────────────────────────────────────
   let activityFilter = $state('');
-  let activityLimit = $state(20);
+  let activityLimit = $state(10);
 
   let filteredActivity = $derived.by(() => {
     if (!activityFilter) return activityEvents;
@@ -1262,9 +1262,9 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-5);
-    max-width: 1400px;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    max-width: 1200px;
     margin: 0 auto;
     width: 100%;
   }
@@ -1673,21 +1673,13 @@
   }
 
   .feed-body {
-    max-height: 360px;
+    max-height: 280px;
     overflow-y: auto;
   }
 
   /* Sidebar styles removed — entity summaries moved to PipelineOverview expansion */
 
   /* ═══ Original styles ══════════════════════════════════════════════════ */
-  .workspace-home {
-    flex: 1;
-    overflow-y: auto;
-    padding: var(--space-4) var(--space-6);
-    max-width: 1400px;
-    margin: 0 auto;
-    width: 100%;
-  }
 
   /* ── No workspace selected ──────────────────────────────────────────── */
   .no-workspace {
