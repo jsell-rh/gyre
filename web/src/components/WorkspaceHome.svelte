@@ -1192,15 +1192,39 @@
                       {#if event.entity_name ?? event.title}
                         <span class="activity-detail">{event.entity_name ?? event.title}</span>
                       {/if}
+                      <span class="activity-entity-badges">
+                        {#if event.agent_id}
+                          <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }} title="View agent">
+                            <Icon name="agent" size={10} /> {event.entity_name && event.entity_type === 'agent' ? event.entity_name : event.agent_id.slice(0, 8)}
+                          </button>
+                        {/if}
+                        {#if event.mr_id}
+                          <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }} title="View merge request">
+                            <Icon name="git-merge" size={10} /> {event.entity_name && event.entity_type === 'mr' ? event.entity_name : 'MR'}
+                          </button>
+                        {/if}
+                        {#if event.task_id}
+                          <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('task', event.task_id, { repo_id: event.repo_id }); }} title="View task">
+                            <Icon name="task" size={10} /> {event.entity_name && event.entity_type === 'task' ? event.entity_name : event.task_id.slice(0, 8)}
+                          </button>
+                        {/if}
+                        {#if event.spec_path}
+                          <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }} title="View spec">
+                            <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                          </button>
+                        {/if}
+                      </span>
                       {#if event.repo_id && repoMap[event.repo_id]}
-                        <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
+                        <button class="activity-repo-tag activity-repo-tag-clickable" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[event.repo_id]); }} title="Go to repo">
+                          {repoMap[event.repo_id].name}
+                        </button>
                       {/if}
                       {#if event.timestamp ?? event.created_at}
                         <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                       {/if}
                     </div>
                     {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                      <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 120) + '...' : event.description}</p>
+                      <p class="activity-reason">{event.description.length > 140 ? event.description.slice(0, 140) + '...' : event.description}</p>
                     {/if}
                   </div>
                 </button>
@@ -2746,6 +2770,36 @@
     white-space: nowrap;
   }
 
+  .activity-entity-badges {
+    display: inline-flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .activity-entity-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 25%, transparent);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    white-space: nowrap;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.6;
+  }
+
+  .activity-entity-badge:hover {
+    background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+    border-color: var(--color-accent);
+  }
+
   .activity-entity-link {
     font-size: var(--text-xs);
   }
@@ -2766,6 +2820,16 @@
     border-radius: var(--radius-sm);
     border: 1px solid var(--color-border);
     white-space: nowrap;
+  }
+
+  .activity-repo-tag-clickable {
+    cursor: pointer;
+  }
+
+  .activity-repo-tag-clickable:hover {
+    color: var(--color-text);
+    border-color: var(--color-text-muted);
+    background: var(--color-surface-hover);
   }
 
   /* ── Budget & Cost ──────────────────────────────────────────────────── */
