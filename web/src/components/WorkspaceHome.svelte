@@ -1659,6 +1659,9 @@
                           {:else if mrEnqueueStates[mr.id] === 'queued'}
                             <span class="inline-action-done">Queued</span>
                           {/if}
+                          {#if gates?.failed > 0}
+                            <button class="inline-action-btn inline-action-danger" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }}>Gates</button>
+                          {/if}
                           {#if ds}
                             <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'diff' }); }}>Diff</button>
                           {/if}
@@ -3862,6 +3865,12 @@
     background: color-mix(in srgb, var(--color-link) 8%, transparent);
   }
   .inline-action-view:hover { background: color-mix(in srgb, var(--color-link) 18%, transparent); }
+
+  .inline-action-danger {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+  }
+  .inline-action-danger:hover { background: color-mix(in srgb, var(--color-danger) 18%, transparent); }
 
   .td-actions-mr {
     display: flex;
