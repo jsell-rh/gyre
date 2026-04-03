@@ -716,6 +716,34 @@ fn run_all_extractors(
         all_edges.extend(edges);
     }
 
+    // --- Pass 2: LSP-powered call graph extraction (Rust only) ---------------
+    // Runs rust-analyzer to find references for function/method definitions,
+    // resolving cross-module calls, trait dispatch, and generic instantiations.
+    if repo_root.join("Cargo.toml").is_file() {
+        let lsp_result = gyre_domain::lsp_call_graph::extract_call_graph(
+            repo_root,
+            &all_nodes,
+            &all_edges,
+            &repo_id,
+            commit_sha,
+        );
+
+        if !lsp_result.errors.is_empty() {
+            for err in &lsp_result.errors {
+                tracing::info!("LSP call graph: {err}");
+            }
+        }
+
+        if lsp_result.new_edges_found > 0 {
+            tracing::info!(
+                definitions = lsp_result.definitions_queried,
+                new_edges = lsp_result.new_edges_found,
+                "LSP call graph extraction complete"
+            );
+            all_edges.extend(lsp_result.edges);
+        }
+    }
+
     (all_nodes, all_edges)
 }
 
