@@ -66,6 +66,9 @@
         <span class="repo-card-time">{relativeTime(stats.last_activity)}</span>
       {/if}
     </div>
+    {#if repo.description}
+      <p class="repo-card-desc">{repo.description}</p>
+    {/if}
 
     <!-- What's happening now — one line of context -->
     {#if statusSummary}
@@ -184,6 +187,16 @@
     color: var(--color-text-muted);
     flex-shrink: 0;
     white-space: nowrap;
+  }
+
+  .repo-card-desc {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.3;
   }
 
   /* Activity summary */
