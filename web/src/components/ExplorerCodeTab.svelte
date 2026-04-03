@@ -2,6 +2,7 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { entityName, shortId } from '../lib/entityNames.svelte.js';
   import { detectLang, highlightLine } from '../lib/syntaxHighlight.js';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -287,31 +288,9 @@
     }
   }
 
-  // Lightweight entity name cache for human-friendly display
-  let nameCache = $state({});
-
+  // Use shared entity name resolution (global singleton cache)
   function resolveEntityName(type, id) {
-    if (!id) return '';
-    const key = `${type}:${id}`;
-    if (nameCache[key] !== undefined) return nameCache[key] || shortName(id);
-    // Defer state mutation to avoid state_unsafe_mutation inside $derived / template expressions
-    queueMicrotask(() => {
-      if (nameCache[key] !== undefined) return; // already queued
-      nameCache = { ...nameCache, [key]: null };
-      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                      type === 'task' ? api.task(id).then(t => t?.title) :
-                      type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
-                      Promise.resolve(null);
-      fetcher.then(name => {
-        if (name) nameCache = { ...nameCache, [key]: name };
-      }).catch(() => {});
-    });
-    return shortName(id);
-  }
-
-  function shortName(id) {
-    if (!id) return '';
-    return id.length > 12 ? id.slice(0, 8) : id;
+    return entityName(type, id);
   }
 
   async function investigateLine(line) {
