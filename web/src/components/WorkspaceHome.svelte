@@ -1102,7 +1102,9 @@
       <header class="ws-header">
         <div class="ws-header-main">
           <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
-          {#if workspace.description}
+          {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
+            <p class="ws-header-status">{statusSentence}</p>
+          {:else if workspace.description}
             <p class="ws-header-desc">{workspace.description}</p>
           {/if}
         </div>
@@ -1912,6 +1914,14 @@
     font-size: var(--text-sm);
     color: var(--color-text-muted);
     max-width: 600px;
+    line-height: 1.4;
+  }
+
+  .ws-header-status {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    max-width: 700px;
     line-height: 1.4;
   }
 
