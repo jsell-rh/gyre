@@ -84,7 +84,21 @@
       </div>
     {:else if latestMr}
       <div class="repo-card-activity">
-        <button class="repo-activity-link repo-activity-{latestMr.status === 'merged' ? 'success' : 'info'}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', latestMr.id, { repo_id: repo.id, title: latestMr.title }); }}>{latestMr.status === 'merged' ? 'Last merged' : 'Latest MR'}: {latestMr.title ?? 'Untitled'}</button>
+        <button class="repo-activity-link repo-activity-{latestMr.status === 'merged' ? 'success' : 'info'}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', latestMr.id, { repo_id: repo.id, title: latestMr.title }); }}>
+          {latestMr.status === 'merged' ? 'Last merged' : 'Latest MR'}: {latestMr.title ?? 'Untitled'}
+        </button>
+        {#if latestMr.diff_stats}
+          <span class="repo-activity-diff">
+            <span class="diff-ins-tiny">+{latestMr.diff_stats.insertions ?? 0}</span>
+            <span class="diff-del-tiny">-{latestMr.diff_stats.deletions ?? 0}</span>
+          </span>
+        {/if}
+        {#if latestMr._gates}
+          <span class="repo-mr-gates">
+            {#if latestMr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{latestMr._gates.passed}</span>{/if}
+            {#if latestMr._gates.failed > 0}<span class="gate-mini gate-mini-fail">✗{latestMr._gates.failed}</span>{/if}
+          </span>
+        {/if}
       </div>
     {/if}
 
@@ -240,6 +254,32 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+
+  .repo-activity-diff {
+    display: inline-flex;
+    gap: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .diff-ins-tiny { color: var(--color-success); font-weight: 600; }
+  .diff-del-tiny { color: var(--color-danger); font-weight: 600; }
+
+  .repo-mr-gates {
+    display: inline-flex;
+    gap: 3px;
+    font-size: 10px;
+  }
+
+  .gate-mini {
+    font-weight: 600;
+    padding: 0 3px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+  }
+
+  .gate-mini-pass { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .gate-mini-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
 
   /* Mini pipeline flow in repo card */
   .repo-card-pipeline {
