@@ -1969,7 +1969,7 @@
     display: flex;
     align-items: center;
     gap: 0;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-1) var(--space-2);
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
@@ -1997,15 +1997,15 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 2px;
-    padding: var(--space-1) var(--space-3);
+    gap: 1px;
+    padding: 2px var(--space-2);
     background: transparent;
     border: 1px solid transparent;
     border-radius: var(--radius);
     cursor: pointer;
     font-family: var(--font-body);
     transition: all var(--transition-fast);
-    min-width: 60px;
+    min-width: 48px;
     position: relative;
   }
 
@@ -2024,7 +2024,7 @@
   }
 
   .pipeline-stage-count {
-    font-size: var(--text-lg);
+    font-size: var(--text-base);
     font-weight: 700;
     color: var(--color-text-muted);
     font-family: var(--font-mono);
