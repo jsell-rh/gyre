@@ -11,7 +11,7 @@
   import TenantSettings from './components/TenantSettings.svelte';
   import Toast from './lib/Toast.svelte';
   import SearchBar from './lib/SearchBar.svelte';
-  import { entityName as sharedEntityName, shortId } from './lib/entityNames.svelte.js';
+  import { entityName as sharedEntityName, shortId, seedEntityName } from './lib/entityNames.svelte.js';
   import Modal from './lib/Modal.svelte';
   import PresenceAvatars from './lib/PresenceAvatars.svelte';
   import DetailPanel from './lib/DetailPanel.svelte';
@@ -345,7 +345,7 @@
     // Pre-cache entity name for breadcrumb from provided data
     const name = d.title ?? d.name;
     if (name && entityType !== 'spec') {
-      breadcrumbNameCache = { ...breadcrumbNameCache, [`${entityType}:${entityId}`]: name };
+      seedEntityName(entityType, entityId, name);
     }
     fadeContent();
     const parsed = {
@@ -903,7 +903,7 @@
         // Restore entity detail state from history, including cached title for breadcrumbs
         entityDetail = (et && eid) ? { type: et, id: eid, data: {} } : null;
         if (et && eid && eTitle) {
-          breadcrumbNameCache = { ...breadcrumbNameCache, [`${et}:${eid}`]: eTitle };
+          seedEntityName(et, eid, eTitle);
         }
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
