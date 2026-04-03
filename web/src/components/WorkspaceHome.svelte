@@ -4549,11 +4549,13 @@
     display: inline-block;
     margin-left: var(--space-1);
     font-size: var(--text-xs);
+    font-family: var(--font-mono);
     color: var(--color-text-muted);
     background: var(--color-surface-elevated);
     padding: 1px var(--space-1);
     border-radius: var(--radius-sm);
     vertical-align: middle;
+    user-select: all;
   }
 
   .branch-arrow {
