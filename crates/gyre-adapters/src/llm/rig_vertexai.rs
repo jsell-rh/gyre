@@ -356,7 +356,10 @@ impl RigVertexAiAdapter {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let input = block.get("input").cloned().unwrap_or(Value::Object(Default::default()));
+                    let input = block
+                        .get("input")
+                        .cloned()
+                        .unwrap_or(Value::Object(Default::default()));
                     tool_calls.push(ToolCall { id, name, input });
                 }
                 _ => {}

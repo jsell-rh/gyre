@@ -721,11 +721,7 @@ fn run_all_extractors(
     // resolving cross-module calls, trait dispatch, and generic instantiations.
     if repo_root.join("Cargo.toml").is_file() {
         let lsp_result = gyre_domain::lsp_call_graph::extract_call_graph(
-            repo_root,
-            &all_nodes,
-            &all_edges,
-            &repo_id,
-            commit_sha,
+            repo_root, &all_nodes, &all_edges, &repo_id, commit_sha,
         );
 
         if !lsp_result.errors.is_empty() {

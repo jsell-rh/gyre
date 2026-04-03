@@ -36,6 +36,7 @@ pub(crate) mod spa;
 pub mod spec_registry;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
+pub(crate) mod explorer_ws;
 pub mod notifications;
 pub mod otlp_receiver;
 pub mod policy_engine;
@@ -46,7 +47,6 @@ pub mod trust_suggestion;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
-pub(crate) mod explorer_ws;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};

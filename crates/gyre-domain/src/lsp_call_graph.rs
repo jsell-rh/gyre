@@ -75,8 +75,7 @@ pub fn extract_call_graph(
     let function_nodes: Vec<&GraphNode> = nodes
         .iter()
         .filter(|n| {
-            n.deleted_at.is_none()
-                && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
+            n.deleted_at.is_none() && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
         })
         .collect();
 
@@ -183,11 +182,7 @@ pub fn extract_call_graph(
     for (idx, func_node) in nodes_to_query.iter().enumerate() {
         result.definitions_queried += 1;
 
-        let file_uri = format!(
-            "file://{}/{}",
-            repo_root.display(),
-            func_node.file_path
-        );
+        let file_uri = format!("file://{}/{}", repo_root.display(), func_node.file_path);
 
         let refs_msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -204,10 +199,9 @@ pub fn extract_call_graph(
         });
 
         if let Err(e) = send_lsp_message(stdin, &refs_msg) {
-            result.errors.push(format!(
-                "Failed to query refs for {}: {e}",
-                func_node.name
-            ));
+            result
+                .errors
+                .push(format!("Failed to query refs for {}: {e}", func_node.name));
             continue;
         }
 
@@ -242,17 +236,14 @@ pub fn extract_call_graph(
                                 if caller != target
                                     && !existing_pairs.contains(&(caller.clone(), target.clone()))
                                 {
-                                    existing_pairs
-                                        .insert((caller.clone(), target.clone()));
+                                    existing_pairs.insert((caller.clone(), target.clone()));
                                     result.edges.push(GraphEdge {
                                         id: Id::new(Uuid::new_v4().to_string()),
                                         repo_id: repo_id.clone(),
                                         source_id: Id::new(caller),
                                         target_id: func_node.id.clone(),
                                         edge_type: EdgeType::Calls,
-                                        metadata: Some(
-                                            r#"{"source":"lsp"}"#.to_string(),
-                                        ),
+                                        metadata: Some(r#"{"source":"lsp"}"#.to_string()),
                                         first_seen_at: now,
                                         last_seen_at: now,
                                         deleted_at: None,
@@ -266,10 +257,9 @@ pub fn extract_call_graph(
             }
             Ok(None) => {} // No references found
             Err(e) => {
-                result.errors.push(format!(
-                    "Failed to read refs for {}: {e}",
-                    func_node.name
-                ));
+                result
+                    .errors
+                    .push(format!("Failed to read refs for {}: {e}", func_node.name));
             }
         }
     }

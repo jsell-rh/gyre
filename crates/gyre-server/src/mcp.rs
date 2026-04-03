@@ -1220,8 +1220,7 @@ async fn handle_graph_summary(state: &AppState, args: &Value) -> Value {
         Ok(e) => e,
         Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
     };
-    let summary =
-        gyre_domain::view_query_resolver::compute_graph_summary(&repo_id, &nodes, &edges);
+    let summary = gyre_domain::view_query_resolver::compute_graph_summary(&repo_id, &nodes, &edges);
     tool_result(serde_json::to_string_pretty(&summary).unwrap_or_default())
 }
 
@@ -1274,8 +1273,8 @@ async fn handle_graph_nodes(state: &AppState, args: &Value) -> Value {
     }
 
     // Filter by type
-    let node_type_filter = get_str(args, "node_type").and_then(|s| {
-        match s.to_lowercase().as_str() {
+    let node_type_filter =
+        get_str(args, "node_type").and_then(|s| match s.to_lowercase().as_str() {
             "package" => Some(gyre_common::NodeType::Package),
             "module" => Some(gyre_common::NodeType::Module),
             "type" => Some(gyre_common::NodeType::Type),
@@ -1287,8 +1286,7 @@ async fn handle_graph_nodes(state: &AppState, args: &Value) -> Value {
             "constant" => Some(gyre_common::NodeType::Constant),
             "field" => Some(gyre_common::NodeType::Field),
             _ => None,
-        }
-    });
+        });
 
     let nodes = match state.graph_store.list_nodes(&rid, node_type_filter).await {
         Ok(n) => n,
@@ -1300,14 +1298,11 @@ async fn handle_graph_nodes(state: &AppState, args: &Value) -> Value {
     let filtered: Vec<_> = nodes
         .into_iter()
         .filter(|n| n.deleted_at.is_none())
-        .filter(|n| {
-            match &name_pattern {
-                Some(pat) => {
-                    n.name.to_lowercase().contains(pat)
-                        || n.qualified_name.to_lowercase().contains(pat)
-                }
-                None => true,
+        .filter(|n| match &name_pattern {
+            Some(pat) => {
+                n.name.to_lowercase().contains(pat) || n.qualified_name.to_lowercase().contains(pat)
             }
+            None => true,
         })
         .take(50)
         .collect();
@@ -1332,7 +1327,11 @@ async fn handle_graph_nodes(state: &AppState, args: &Value) -> Value {
         })
         .collect();
 
-    tool_result(format!("{} nodes:\n{}", items.len(), serde_json::to_string_pretty(&items).unwrap_or_default()))
+    tool_result(format!(
+        "{} nodes:\n{}",
+        items.len(),
+        serde_json::to_string_pretty(&items).unwrap_or_default()
+    ))
 }
 
 async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
@@ -1360,15 +1359,19 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
                         })
                     })
                     .collect();
-                return tool_result(format!("{} edges:\n{}", items.len(), serde_json::to_string_pretty(&items).unwrap_or_default()));
+                return tool_result(format!(
+                    "{} edges:\n{}",
+                    items.len(),
+                    serde_json::to_string_pretty(&items).unwrap_or_default()
+                ));
             }
             Err(e) => return tool_error(format!("Failed: {e}")),
         }
     }
 
     // Filter by edge type
-    let edge_type_filter = get_str(args, "edge_type").and_then(|s| {
-        match s.to_lowercase().as_str() {
+    let edge_type_filter =
+        get_str(args, "edge_type").and_then(|s| match s.to_lowercase().as_str() {
             "contains" => Some(gyre_common::EdgeType::Contains),
             "implements" => Some(gyre_common::EdgeType::Implements),
             "depends_on" => Some(gyre_common::EdgeType::DependsOn),
@@ -1378,8 +1381,7 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
             "routes_to" => Some(gyre_common::EdgeType::RoutesTo),
             "governed_by" => Some(gyre_common::EdgeType::GovernedBy),
             _ => None,
-        }
-    });
+        });
 
     let edges = match state.graph_store.list_edges(&rid, edge_type_filter).await {
         Ok(e) => e,
@@ -1407,7 +1409,11 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
         })
         .collect();
 
-    tool_result(format!("{} edges:\n{}", items.len(), serde_json::to_string_pretty(&items).unwrap_or_default()))
+    tool_result(format!(
+        "{} edges:\n{}",
+        items.len(),
+        serde_json::to_string_pretty(&items).unwrap_or_default()
+    ))
 }
 
 // ── MCP Resources ─────────────────────────────────────────────────────────────
