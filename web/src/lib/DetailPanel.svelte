@@ -9,7 +9,7 @@
   import EditorSplit from './EditorSplit.svelte';
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import { api } from './api.js';
-  import { entityName as sharedEntityName, shortId as sharedShortId, formatSha } from './entityNames.svelte.js';
+  import { entityName as sharedEntityName, shortId as sharedShortId, formatSha, formatId as sharedFormatId } from './entityNames.svelte.js';
   import { relativeTime, absoluteTime, formatDuration, formatDate } from './timeFormat.js';
   import { toastSuccess, toastError } from './toast.svelte.js';
   import { detectLang, highlightLine } from './syntaxHighlight.js';
@@ -1856,7 +1856,7 @@
                   <Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
                   <span class="status-explain">{mrStatusExplain(mr)}</span>
                 </dd>
-                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
+                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('mr', entity.id)}</dd>
                 {#if mr.description}
                   <dt>Description</dt><dd class="task-description">{mr.description}</dd>
                 {/if}
@@ -2179,7 +2179,7 @@
                     <span class="provenance-node provenance-agent provenance-current">
                       <span class="provenance-icon prov-icon-agent"></span>
                       <span class="provenance-type">Agent</span>
-                      <span class="provenance-name">{ag.name ?? shortId(entity.id)}</span>
+                      <span class="provenance-name">{ag.name ?? sharedFormatId('agent', entity.id)}</span>
                     </span>
                     {#if ag.mr_id}
                       <span class="provenance-arrow">&#x2192;</span>
@@ -2216,13 +2216,13 @@
               {/if}
 
               <dl class="entity-meta">
-                <dt>Name</dt><dd>{ag.name ?? shortId(entity.id)}</dd>
+                <dt>Name</dt><dd>{ag.name ?? sharedFormatId('agent', entity.id)}</dd>
                 <dt>Status</dt>
                 <dd>
                   <Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} />
                   <span class="status-explain">{agentStatusExplain(ag)}</span>
                 </dd>
-                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
+                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('agent', entity.id)}</dd>
                 {#if ag.agent_type}
                   <dt>Type</dt><dd>{ag.agent_type}</dd>
                 {/if}
@@ -2498,7 +2498,7 @@
                   <Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} />
                   <span class="status-explain">{taskStatusExplain(tk)}</span>
                 </dd>
-                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
+                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('task', entity.id)}</dd>
                 {#if tk.priority}
                   <dt>Priority</dt>
                   <dd>
@@ -2644,7 +2644,7 @@
                     {#each taskAgents.slice(0, 3) as agent}
                       <li class="task-item clickable-row" onclick={() => navigateTo('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('agent', agent.id, agent); }}>
                         <Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : agent.status === 'failed' ? 'danger' : 'muted'} />
-                        <span class="task-title">{agent.name ?? shortId(agent.id)}</span>
+                        <span class="task-title">{agent.name ?? sharedFormatId('agent', agent.id)}</span>
                         {#if agent.branch}<span class="task-agent mono">{agent.branch}</span>{/if}
                       </li>
                     {/each}
@@ -2661,7 +2661,7 @@
                     {#each taskMrs.slice(0, 3) as mr}
                       <li class="task-item clickable-row" onclick={() => navigateTo('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', mr.id, mr); }}>
                         <Badge value={mr.status ?? 'open'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
-                        <span class="task-title">{mr.title ?? shortId(mr.id)}</span>
+                        <span class="task-title">{mr.title ?? sharedFormatId('mr', mr.id)}</span>
                         {#if mr.diff_stats}
                           <span class="diff-stat-compact">
                             <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
@@ -2763,7 +2763,7 @@
           {:else}
             <dl class="entity-meta">
               <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
-              <dt>{$t('detail_panel.id')}</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+              <dt>{$t('detail_panel.id')}</dt><dd class="mono" title={entity.id}>{sharedFormatId(entity.type, entity.id)}</dd>
               {#if entity.data?.status}
                 <dt>{$t('detail_panel.status')}</dt><dd>{entity.data.status}</dd>
               {/if}
@@ -4333,7 +4333,7 @@
                   {@const dur = agNorm.completed_at && agNorm.created_at ? Math.round(agNorm.completed_at - agNorm.created_at) : null}
                   <li class="task-item clickable-row" onclick={() => navigateTo('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('agent', agent.id, agent); }}>
                     <Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : agent.status === 'failed' ? 'danger' : 'muted'} />
-                    <span class="task-title">{agent.name ?? shortId(agent.id)}</span>
+                    <span class="task-title">{agent.name ?? sharedFormatId('agent', agent.id)}</span>
                     {#if agent.branch}
                       <span class="task-agent mono">{agent.branch}</span>
                     {/if}
@@ -4353,7 +4353,7 @@
                 {#each taskMrs as mr}
                   <li class="task-item clickable-row" onclick={() => navigateTo('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', mr.id, mr); }}>
                     <Badge value={mr.status ?? 'open'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
-                    <span class="task-title">{mr.title ?? shortId(mr.id)}</span>
+                    <span class="task-title">{mr.title ?? sharedFormatId('mr', mr.id)}</span>
                     {#if mr.source_branch}
                       <span class="task-agent mono">{mr.source_branch}</span>
                     {/if}
