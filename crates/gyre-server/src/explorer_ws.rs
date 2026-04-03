@@ -593,17 +593,20 @@ async fn run_explorer_agent(
 
     let selected_node_id = canvas_state.selected_node.as_ref().map(|n| n.id.as_str());
 
-    // Multi-turn agent loop with self-check
+    // Multi-turn agent loop with self-check.
+    // Separate budgets: tool_turns (max 6) for tool use, refinements (max 3) for view query fixes.
     let mut refinement_count = 0;
-    for turn in 0..MAX_AGENT_TURNS + 3 {
-        // Allow 3 refinements + 3 tool-use turns
+    let max_total_turns = MAX_AGENT_TURNS * 2 + 3; // 9 total iterations max
+    for turn in 0..max_total_turns {
         let response = llm_port
             .complete_with_tools(&system_prompt, conversation_history, &tools, Some(4096))
             .await?;
 
         // If the LLM returned text, stream it to the client
         if !response.text.is_empty() {
-            let is_final = response.tool_calls.is_empty() && response.stop_reason != "tool_use";
+            let has_tool_calls =
+                !response.tool_calls.is_empty() && response.stop_reason == "tool_use";
+            let is_final = !has_tool_calls;
 
             // Check for view_query blocks in the text
             let (clean_text, view_query) = parse_view_query_from_text(&response.text);
@@ -637,13 +640,11 @@ async fn run_explorer_agent(
                         refinement_count += 1;
                         send_status(sender, "refining").await;
 
-                        // Add the assistant response to history
                         conversation_history.push(ConversationMessage {
                             role: "assistant".to_string(),
                             content: ConversationContent::Text(response.text.clone()),
                         });
 
-                        // Inject dry-run feedback as a user message
                         let feedback = format!(
                             "The view query had issues during dry-run. Please refine it.\n\nDry-run result:\n- matched_nodes: {}\n- warnings: {:?}\n- matched names (sample): {:?}\n\nPlease fix the warnings and generate an improved <view_query>.",
                             dr.matched_nodes,
@@ -658,6 +659,23 @@ async fn run_explorer_agent(
                     }
                 }
 
+                // Send finalized text done before view_query to avoid race
+                if !clean_text.is_empty() {
+                    let done_msg = ExplorerServerMessage::Text {
+                        content: String::new(),
+                        done: true,
+                    };
+                    if sender
+                        .send(Message::Text(
+                            serde_json::to_string(&done_msg).unwrap().into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+
                 // Send the view query to the frontend
                 let view_msg = ExplorerServerMessage::ViewQuery {
                     query: query_json.clone(),
@@ -669,35 +687,31 @@ async fn run_explorer_agent(
                     .await
                     .is_err()
                 {
-                    // Client disconnected — stop the agent loop
                     break;
-                }
-
-                // Send final done=true text if we streamed partial text earlier
-                if !clean_text.is_empty() {
-                    let done_msg = ExplorerServerMessage::Text {
-                        content: String::new(),
-                        done: true,
-                    };
-                    let _ = sender
-                        .send(Message::Text(
-                            serde_json::to_string(&done_msg).unwrap().into(),
-                        ))
-                        .await;
                 }
             }
         }
 
-        // If no tool calls or stop_reason indicates end, we're done
-        if response.tool_calls.is_empty()
-            || response.stop_reason == "end_turn"
-            || response.stop_reason == "max_tokens"
-        {
+        // If no tool calls or stop_reason indicates completion, we're done
+        if response.tool_calls.is_empty() || response.stop_reason != "tool_use" {
             // Add final assistant response to conversation history
             conversation_history.push(ConversationMessage {
                 role: "assistant".to_string(),
                 content: ConversationContent::Text(response.text.clone()),
             });
+
+            // If max_tokens, send a truncation warning
+            if response.stop_reason == "max_tokens" && !response.text.is_empty() {
+                let done_msg = ExplorerServerMessage::Text {
+                    content: "\n\n*(Response truncated due to length)*".to_string(),
+                    done: true,
+                };
+                let _ = sender
+                    .send(Message::Text(
+                        serde_json::to_string(&done_msg).unwrap().into(),
+                    ))
+                    .await;
+            }
             break;
         }
 
@@ -741,8 +755,8 @@ async fn run_explorer_agent(
         });
 
         // Safety: prevent runaway loops
-        if turn >= MAX_AGENT_TURNS + 2 {
-            info!("Explorer agent hit max turns, forcing response");
+        if turn >= max_total_turns - 1 {
+            info!("Explorer agent hit max turns, forcing final response");
         }
     }
 
