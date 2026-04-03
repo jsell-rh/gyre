@@ -1042,13 +1042,21 @@
                 <div class="decision-icon decision-icon-{nt === 'gate_failure' || nt === 'agent_failed' ? 'danger' : nt === 'spec_approval' || nt === 'mr_needs_review' ? 'action' : 'warn'}">
                   {TYPE_ICONS[nt] ?? '?'}
                 </div>
-                <div class="decision-body">
+                <button class="decision-body" onclick={() => {
+                  if (body.mr_id) nav('mr', body.mr_id, { repo_id: n.repo_id });
+                  else if (body.agent_id) nav('agent', body.agent_id, { repo_id: n.repo_id });
+                  else if (body.task_id) nav('task', body.task_id, { repo_id: n.repo_id });
+                  else if (body.spec_path) {
+                    const sp = normalizeSpecPath(body.spec_path);
+                    nav('spec', sp, { path: sp, repo_id: n.repo_id });
+                  }
+                }}>
                   <span class="decision-type">{typeLabel(nt)}</span>
                   <span class="decision-title">{n.title ?? n.message ?? ''}</span>
                   {#if n.created_at}
                     <span class="decision-time">{relTime(n.created_at)}</span>
                   {/if}
-                </div>
+                </button>
                 <div class="decision-actions">
                   {#if aState?.success}
                     <span class="decision-done">{aState.message}</span>
@@ -3179,6 +3187,17 @@
     gap: var(--space-2);
     min-width: 0;
     flex-wrap: wrap;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    text-align: left;
+    padding: 0;
+  }
+
+  .decision-body:hover .decision-title {
+    color: var(--color-primary);
+    text-decoration: underline;
   }
 
   .decision-type {
