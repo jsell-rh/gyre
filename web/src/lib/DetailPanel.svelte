@@ -2433,6 +2433,20 @@
                 <button class="mr-explore-btn" onclick={() => { activeTab = 'history'; }} title="View execution logs">Logs</button>
                 <button class="mr-explore-btn" onclick={() => { activeTab = 'trace'; }} title="View execution trace">Trace</button>
                 <button class="mr-explore-btn" onclick={() => { activeTab = 'ask-why'; }} title="Explore agent reasoning and decisions">Ask Why</button>
+                {#if ag.status === 'active' || ag.status === 'running' || ag.status === 'spawning'}
+                  <button class="mr-explore-btn agent-kill-btn" onclick={async () => {
+                    if (!confirm('Kill this agent? This will terminate the process and mark it as dead.')) return;
+                    try {
+                      await api.adminKillAgent(entity.id);
+                      toastSuccess('Agent killed');
+                      // Reload agent detail
+                      const updated = await api.agent(entity.id).catch(() => null);
+                      if (updated) agentDetail = updated;
+                    } catch (err) {
+                      toastError('Kill failed: ' + (err?.message ?? err));
+                    }
+                  }} title="Force-terminate this agent process">Kill Agent</button>
+                {/if}
               </div>
 
               <!-- Conversation provenance link -->
@@ -3724,6 +3738,16 @@
                   All {totalGates} gate{totalGates !== 1 ? 's' : ''} passed
                 {/if}
               </span>
+              {#if failedGates > 0 && (entity?.data?.status === 'open')}
+                <button class="gate-retry-btn" onclick={async () => {
+                  try {
+                    await api.enqueue(entity.id);
+                    toastSuccess('MR re-enqueued — gates will re-run');
+                  } catch (err) {
+                    toastError('Re-enqueue failed: ' + (err?.message ?? err));
+                  }
+                }}>Re-run gates</button>
+              {/if}
             </div>
             <ul class="gates-list">
               {#each mrGates as gate}
@@ -6298,6 +6322,32 @@
     font-weight: 700;
     flex-shrink: 0;
     color: var(--color-text-muted);
+  }
+
+  .gate-retry-btn {
+    margin-left: auto;
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-primary);
+    color: white;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: opacity var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .gate-retry-btn:hover { opacity: 0.85; }
+
+  .agent-kill-btn {
+    color: var(--color-danger) !important;
+    border-color: var(--color-danger) !important;
+  }
+
+  .agent-kill-btn:hover {
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent) !important;
   }
 
   .gates-tab-summary-text {
