@@ -1115,11 +1115,47 @@
             </div>
           </div>
 
-          <!-- Status line: concise sentence summarizing workspace state -->
+          <!-- Status: clickable items showing where attention is needed -->
           {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-            <p class="ws-header-status">{statusSentence}</p>
+            {#if statusItems.length > 0}
+              <div class="ws-header-status-items">
+                {#each statusItems as item}
+                  <button class="ws-header-status-chip ws-header-status-chip-{item.variant}" onclick={() => { wsTab = item.tab; userSelectedTab = true; }}>
+                    <span class="ws-header-status-icon">{item.icon}</span>
+                    {item.text}
+                  </button>
+                {/each}
+              </div>
+            {:else}
+              <p class="ws-header-status">{statusSentence}</p>
+            {/if}
           {:else if workspace.description}
             <p class="ws-header-desc">{workspace.description}</p>
+          {/if}
+
+          <!-- Compact provenance flow: shows pipeline stage counts -->
+          {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
+            <div class="ws-header-flow">
+              <button class="ws-flow-stage" class:ws-flow-active={pipelineSpecs.pending > 0} class:ws-flow-done={specs.length > 0 && pipelineSpecs.pending === 0} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }} title="{specs.length} specs ({pipelineSpecs.pending} pending, {pipelineSpecs.approved} approved)">
+                <span class="ws-flow-count">{specs.length}</span>
+                <span class="ws-flow-label">Specs</span>
+              </button>
+              <span class="ws-flow-arrow">→</span>
+              <button class="ws-flow-stage" class:ws-flow-active={pipelineTasks.in_progress > 0} class:ws-flow-done={pipelineTasks.done > 0 && pipelineTasks.in_progress === 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }} title="{wsTasks.length} tasks ({pipelineTasks.in_progress} active, {pipelineTasks.done} done)">
+                <span class="ws-flow-count">{wsTasks.length}</span>
+                <span class="ws-flow-label">Tasks</span>
+              </button>
+              <span class="ws-flow-arrow">→</span>
+              <button class="ws-flow-stage" class:ws-flow-active={pipelineAgents.active > 0} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }} title="{wsAgents.length} agents ({pipelineAgents.active} active)">
+                <span class="ws-flow-count">{wsAgents.length}</span>
+                <span class="ws-flow-label">Agents</span>
+              </button>
+              <span class="ws-flow-arrow">→</span>
+              <button class="ws-flow-stage" class:ws-flow-active={pipelineMrs.open > 0} class:ws-flow-warn={pipelineMrs.failed_gates > 0} class:ws-flow-done={pipelineMrs.merged > 0 && pipelineMrs.open === 0} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }} title="{wsMrs.length} MRs ({pipelineMrs.open} open, {pipelineMrs.merged} merged)">
+                <span class="ws-flow-count">{wsMrs.length}</span>
+                <span class="ws-flow-label">MRs</span>
+              </button>
+            </div>
           {/if}
         </div>
       </header>
@@ -1883,6 +1919,85 @@
     color: var(--color-text-secondary);
     max-width: 700px;
     line-height: 1.4;
+  }
+
+  /* ── Clickable status items in header ── */
+  .ws-header-status-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 2px;
+  }
+
+  .ws-header-status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    font-family: var(--font-body);
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all var(--transition-fast);
+    line-height: 1.3;
+  }
+
+  .ws-header-status-chip:hover { filter: brightness(1.15); transform: translateY(-1px); }
+  .ws-header-status-icon { font-size: 10px; }
+
+  .ws-header-status-chip-danger { background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 25%, transparent); }
+  .ws-header-status-chip-warning { background: color-mix(in srgb, var(--color-warning) 12%, transparent); color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 25%, transparent); }
+  .ws-header-status-chip-success { background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 25%, transparent); }
+  .ws-header-status-chip-info { background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent); color: var(--color-info, #1e90ff); border-color: color-mix(in srgb, var(--color-info, #1e90ff) 25%, transparent); }
+  .ws-header-status-chip-muted { background: var(--color-surface-elevated); color: var(--color-text-muted); border-color: var(--color-border); }
+
+  /* ── Compact provenance flow in header ── */
+  .ws-header-flow {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-top: 4px;
+  }
+
+  .ws-flow-stage {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: all var(--transition-fast);
+  }
+
+  .ws-flow-stage:hover { background: var(--color-surface-elevated); border-color: var(--color-border); }
+
+  .ws-flow-count {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    line-height: 1;
+  }
+
+  .ws-flow-label {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+  }
+
+  .ws-flow-active .ws-flow-count { color: var(--color-primary); }
+  .ws-flow-done .ws-flow-count { color: var(--color-success); }
+  .ws-flow-warn .ws-flow-count { color: var(--color-danger); }
+
+  .ws-flow-arrow {
+    color: var(--color-text-muted);
+    font-size: 9px;
+    opacity: 0.4;
   }
 
   /* ── Integrated status chips (replacing pipeline progress bar) ── */
