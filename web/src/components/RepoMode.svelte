@@ -584,7 +584,16 @@
             <tbody>
               {#each sortedFilteredTasks as task}
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('task', task.id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('task', task.id, task); }}>
-                  <td title={taskStatusTooltip(task)}><Badge value={task.status ?? 'backlog'} variant={taskStatusVariant(task.status)} /></td>
+                  <td title={taskStatusTooltip(task)}>
+                    <Badge value={task.status ?? 'backlog'} variant={taskStatusVariant(task.status)} />
+                    {#if task.status === 'in_progress' && task.assigned_to}
+                      <span class="status-why">{entityName('agent', task.assigned_to)}</span>
+                    {:else if task.status === 'blocked'}
+                      <span class="status-why status-why-danger">blocked</span>
+                    {:else if task.status === 'done'}
+                      <span class="status-why status-why-ok">complete</span>
+                    {/if}
+                  </td>
                   <td class="cell-title">{task.title ?? 'Untitled task'}</td>
                   <td>{#if task.priority}<Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />{/if}</td>
                   <td class="cell-type">{task.task_type ?? ''}</td>
@@ -658,7 +667,16 @@
             <tbody>
               {#each repoMrs as mr}
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('mr', mr.id, mr); }}>
-                  <td title={mrStatusTooltip(mr)}><Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} />{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
+                  <td title={mrStatusTooltip(mr)}>
+                    <Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} />
+                    {#if mr.status === 'merged' && mr.merge_commit_sha}
+                      <code class="sha-inline mono" title="Click to copy {mr.merge_commit_sha}" style="cursor: pointer; user-select: all;">{mr.merge_commit_sha.slice(0, 7)}</code>
+                    {:else if mr.status === 'open' && mr._gates?.failed > 0}
+                      <span class="status-why status-why-danger">{mr._gates.failed} gate{mr._gates.failed !== 1 ? 's' : ''} failed</span>
+                    {:else if mr.status === 'open' && mr._gates?.passed === mr._gates?.total && mr._gates?.total > 0}
+                      <span class="status-why status-why-ok">gates passed</span>
+                    {/if}
+                  </td>
                   <td class="cell-title">{mr.title ?? 'Untitled MR'}</td>
                   <td class="cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}{#if mr._has_conflicts}<span class="conflict-badge" title="Speculative merge detected conflicts with main branch">conflicts</span>{/if}</td>
                   <td class="cell-mono">{#if mr.author_agent_id}<EntityLink type="agent" id={mr.author_agent_id} />{:else}{''}{/if}</td>
@@ -747,7 +765,7 @@
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('agent', agent.id, agent); }}>
                   <td title={agentStatusTooltip(agent)}>
                     <Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : (agent.status === 'failed' || agent.status === 'dead') ? 'danger' : 'muted'} />
-                    <span class="agent-status-explain">{#if agent.status === 'active' && elapsedSec != null}Running for {humanDuration(elapsedSec)}{:else if (agent.status === 'completed' || agent.status === 'idle') && completedDur != null}Completed in {humanDuration(completedDur)}{:else if agent.status === 'failed' && completedDur != null}Failed after {humanDuration(completedDur)}{/if}</span>
+                    <span class="agent-status-explain">{#if agent.status === 'active' && elapsedSec != null}running {humanDuration(elapsedSec)}{:else if (agent.status === 'completed' || agent.status === 'idle') && completedDur != null}done in {humanDuration(completedDur)}{:else if agent.status === 'failed' && completedDur != null}failed after {humanDuration(completedDur)}{:else if agent.status === 'failed'}click for logs{/if}</span>
                   </td>
                   <td class="cell-title"><button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', agent.id, agent); }}>{agent.name ?? entityName('agent', agent.id)}</button></td>
                   <td class="cell-mono">{#if taskId}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('task', taskId, {}); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
@@ -1432,6 +1450,17 @@
     margin-top: 2px;
     white-space: nowrap;
   }
+
+  .status-why {
+    display: block;
+    font-size: 10px;
+    color: var(--color-text-muted);
+    margin-top: 2px;
+    white-space: nowrap;
+  }
+
+  .status-why-danger { color: var(--color-danger); }
+  .status-why-ok { color: var(--color-success); }
 
   .token-count {
     font-size: var(--text-xs);
