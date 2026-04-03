@@ -156,7 +156,7 @@
       "agents": "Agents",
       "architecture": "Architecture",
       "decisions": "Decisions",
-      "code": "Code",
+      "code": "Code & Blame",
       "settings": "⚙"
     },
     "agents_active": "{count} agent{count, plural, one {} other {s}} active",
