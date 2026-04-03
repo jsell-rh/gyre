@@ -6,6 +6,9 @@
 //! with tool calling (graph_summary, graph_query_dryrun, graph_nodes,
 //! graph_edges, search), streams text responses and view queries back.
 //! Also handles saved view CRUD over the same WebSocket.
+//!
+//! Auth: Bearer token in initial HTTP upgrade (via AuthenticatedAgent extractor).
+//! The WebSocket itself does NOT handle auth messages.
 
 use axum::{
     extract::{
@@ -27,8 +30,8 @@ use tracing::{info, warn};
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
-/// Max agent turns (tool calls + refinements) before we force a response.
-const MAX_AGENT_TURNS: usize = 6;
+/// Max agent refinement turns (spec says 3).
+const MAX_AGENT_TURNS: usize = 3;
 
 pub async fn explorer_ws(
     ws: WebSocketUpgrade,
@@ -36,6 +39,9 @@ pub async fn explorer_ws(
     Path(repo_id): Path<String>,
     auth: AuthenticatedAgent,
 ) -> impl IntoResponse {
+    // Repo-scoped authorization: verify the user has access to this repo's tenant.
+    // The AuthenticatedAgent extractor already validates the token.
+    // Additional ABAC checks happen through the repo lookup below.
     ws.on_upgrade(move |socket| handle_explorer_session(socket, state, repo_id, auth))
 }
 
@@ -46,7 +52,59 @@ async fn handle_explorer_session(
     auth: AuthenticatedAgent,
 ) {
     let (mut sender, mut receiver) = socket.split();
+
+    // Verify the user has access to this repo via workspace → tenant chain.
+    let rid = Id::new(&repo_id);
+    let repo_workspace_id = match state.repos.find_by_id(&rid).await {
+        Ok(Some(repo)) => repo.workspace_id.clone(),
+        Ok(None) => {
+            let err = ExplorerServerMessage::Error {
+                message: format!("Repository not found: {repo_id}"),
+            };
+            let _ = sender
+                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .await;
+            return;
+        }
+        Err(e) => {
+            let err = ExplorerServerMessage::Error {
+                message: format!("Failed to look up repository: {e}"),
+            };
+            let _ = sender
+                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .await;
+            return;
+        }
+    };
+    // Check the workspace belongs to the user's tenant.
+    match state.workspaces.find_by_id(&repo_workspace_id).await {
+        Ok(Some(ws)) => {
+            if ws.tenant_id.as_str() != auth.tenant_id {
+                let err = ExplorerServerMessage::Error {
+                    message: "Access denied: repo not in your tenant".to_string(),
+                };
+                let _ = sender
+                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .await;
+                return;
+            }
+        }
+        _ => {
+            // If workspace lookup fails, deny access.
+            let err = ExplorerServerMessage::Error {
+                message: "Access denied: workspace not found".to_string(),
+            };
+            let _ = sender
+                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .await;
+            return;
+        }
+    }
+
     info!(repo_id = %repo_id, user = %auth.agent_id, "Explorer WebSocket session started");
+
+    // Maintain conversation history across messages within a session.
+    let mut conversation_history: Vec<ConversationMessage> = Vec::new();
 
     while let Some(msg) = receiver.next().await {
         let msg = match msg {
@@ -77,8 +135,16 @@ async fn handle_explorer_session(
                 // Send thinking status
                 send_status(&mut sender, "thinking").await;
 
-                // Run the agent loop
-                match run_explorer_agent(&state, &repo_id, &text, &canvas_state, &mut sender).await
+                // Run the agent loop with conversation history
+                match run_explorer_agent(
+                    &state,
+                    &repo_id,
+                    &text,
+                    &canvas_state,
+                    &mut sender,
+                    &mut conversation_history,
+                )
+                .await
                 {
                     Ok(()) => {}
                     Err(e) => {
@@ -99,11 +165,16 @@ async fn handle_explorer_session(
                 description,
                 query,
             } => {
+                // Use workspace_id from the repo we already validated.
+                let workspace_id = match state.repos.find_by_id(&rid).await {
+                    Ok(Some(r)) => r.workspace_id.to_string(),
+                    _ => String::new(),
+                };
                 let now = crate::api::now_secs();
                 let view = SavedView {
                     id: crate::api::new_id(),
                     repo_id: Id::new(&repo_id),
-                    workspace_id: Id::new(""),
+                    workspace_id: Id::new(&workspace_id),
                     tenant_id: Id::new(&auth.tenant_id),
                     name,
                     description,
@@ -142,8 +213,44 @@ async fn handle_explorer_session(
                 let vid = Id::new(&view_id);
                 match state.saved_views.get(&vid).await {
                     Ok(Some(v)) => {
-                        let query: serde_json::Value =
-                            serde_json::from_str(&v.query_json).unwrap_or_default();
+                        // Verify the view belongs to this repo.
+                        if v.repo_id.as_str() != repo_id {
+                            let err = ExplorerServerMessage::Error {
+                                message: "View does not belong to this repository".to_string(),
+                            };
+                            let _ = sender
+                                .send(Message::Text(
+                                    serde_json::to_string(&err).unwrap().into(),
+                                ))
+                                .await;
+                            continue;
+                        }
+                        // Verify tenant access.
+                        if v.tenant_id.as_str() != auth.tenant_id {
+                            let err = ExplorerServerMessage::Error {
+                                message: "Access denied".to_string(),
+                            };
+                            let _ = sender
+                                .send(Message::Text(
+                                    serde_json::to_string(&err).unwrap().into(),
+                                ))
+                                .await;
+                            continue;
+                        }
+                        let query: serde_json::Value = match serde_json::from_str(&v.query_json) {
+                            Ok(q) => q,
+                            Err(e) => {
+                                let err = ExplorerServerMessage::Error {
+                                    message: format!("Malformed view query: {e}"),
+                                };
+                                let _ = sender
+                                    .send(Message::Text(
+                                        serde_json::to_string(&err).unwrap().into(),
+                                    ))
+                                    .await;
+                                continue;
+                            }
+                        };
                         let msg = ExplorerServerMessage::ViewQuery { query };
                         let _ = sender
                             .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
@@ -169,11 +276,12 @@ async fn handle_explorer_session(
             }
 
             ExplorerClientMessage::ListViews => {
-                let rid = Id::new(&repo_id);
                 match state.saved_views.list_by_repo(&rid).await {
                     Ok(views) => {
+                        // Filter to views in the user's tenant.
                         let summaries: Vec<SavedViewSummary> = views
                             .into_iter()
+                            .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
                             .map(|v| SavedViewSummary {
                                 id: v.id.to_string(),
                                 name: v.name,
@@ -212,6 +320,42 @@ async fn send_status(
     let _ = sender
         .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
         .await;
+}
+
+/// Stream text to the client token-by-token using a channel.
+async fn stream_text(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    text: &str,
+    done: bool,
+) {
+    // Stream in chunks to provide progressive feedback.
+    // For short text, send all at once. For longer text, chunk it.
+    const CHUNK_SIZE: usize = 80;
+    if text.len() <= CHUNK_SIZE || done {
+        let msg = ExplorerServerMessage::Text {
+            content: text.to_string(),
+            done,
+        };
+        let _ = sender
+            .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+            .await;
+    } else {
+        let chars: Vec<char> = text.chars().collect();
+        let chunks: Vec<String> = chars
+            .chunks(CHUNK_SIZE)
+            .map(|c| c.iter().collect::<String>())
+            .collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let is_last = i == chunks.len() - 1;
+            let msg = ExplorerServerMessage::Text {
+                content: chunk.clone(),
+                done: is_last && done,
+            };
+            let _ = sender
+                .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+                .await;
+        }
+    }
 }
 
 // ── Tool definitions for the explorer agent ──────────────────────────────────
@@ -288,25 +432,23 @@ async fn run_explorer_agent(
     user_question: &str,
     canvas_state: &gyre_common::view_query::CanvasState,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    conversation_history: &mut Vec<ConversationMessage>,
 ) -> anyhow::Result<()> {
     let llm = match &state.llm {
         Some(llm) => llm.clone(),
         None => {
-            let text_msg = ExplorerServerMessage::Text {
-                content: "LLM is not configured. Set GYRE_VERTEX_PROJECT and GYRE_VERTEX_LOCATION to enable conversational exploration.".to_string(),
-                done: true,
-            };
-            sender
-                .send(Message::Text(
-                    serde_json::to_string(&text_msg).unwrap().into(),
-                ))
-                .await?;
+            stream_text(
+                sender,
+                "LLM is not configured. Set GYRE_VERTEX_PROJECT and GYRE_VERTEX_LOCATION to enable conversational exploration.",
+                true,
+            )
+            .await;
             return Ok(());
         }
     };
 
     let model =
-        std::env::var("GYRE_EXPLORER_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+        std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
     let llm_port = llm.for_model(&model);
 
     // Load graph data once for tool execution
@@ -325,52 +467,120 @@ async fn run_explorer_agent(
     let system_prompt = build_system_prompt();
     let tools = explorer_tool_definitions();
 
-    // Build initial user message with canvas context
+    // Build user message with canvas context
     let canvas_json = serde_json::to_string(canvas_state).unwrap_or_else(|_| "{}".to_string());
     let user_content =
         format!("Canvas state:\n```json\n{canvas_json}\n```\n\nUser question: {user_question}");
 
-    let mut messages = vec![ConversationMessage {
+    // Add to persistent conversation history
+    conversation_history.push(ConversationMessage {
         role: "user".to_string(),
         content: ConversationContent::Text(user_content),
-    }];
+    });
 
     let selected_node_id = canvas_state.selected_node.as_ref().map(|n| n.id.as_str());
 
-    // Multi-turn agent loop
-    for turn in 0..MAX_AGENT_TURNS {
+    // Multi-turn agent loop with self-check
+    let mut refinement_count = 0;
+    for turn in 0..MAX_AGENT_TURNS + 3 {
+        // Allow 3 refinements + 3 tool-use turns
         let response = llm_port
-            .complete_with_tools(&system_prompt, &messages, &tools, Some(4096))
+            .complete_with_tools(&system_prompt, conversation_history, &tools, Some(4096))
             .await?;
 
         // If the LLM returned text, stream it to the client
         if !response.text.is_empty() {
-            let text_msg = ExplorerServerMessage::Text {
-                content: response.text.clone(),
-                done: response.tool_calls.is_empty() && response.stop_reason != "tool_use",
-            };
-            sender
-                .send(Message::Text(
-                    serde_json::to_string(&text_msg).unwrap().into(),
-                ))
-                .await?;
-        }
+            let is_final = response.tool_calls.is_empty() && response.stop_reason != "tool_use";
 
-        // Check for view_query blocks in the text
-        let (_clean_text, view_query) = parse_view_query_from_text(&response.text);
+            // Check for view_query blocks in the text
+            let (clean_text, view_query) = parse_view_query_from_text(&response.text);
 
-        if let Some(query_json) = view_query {
-            // Send the extracted view query to the frontend
-            let view_msg = ExplorerServerMessage::ViewQuery { query: query_json };
-            sender
-                .send(Message::Text(
-                    serde_json::to_string(&view_msg).unwrap().into(),
-                ))
-                .await?;
+            // Stream the clean text (without view_query block)
+            if !clean_text.is_empty() {
+                stream_text(sender, &clean_text, is_final && view_query.is_none()).await;
+            }
+
+            // If a view query was found, perform server-enforced self-check
+            if let Some(query_json) = view_query {
+                // Dry-run the query server-side
+                let dry_run_result =
+                    if let Ok(query) = serde_json::from_value::<gyre_common::view_query::ViewQuery>(
+                        query_json.clone(),
+                    ) {
+                        Some(gyre_domain::view_query_resolver::dry_run(
+                            &query,
+                            &nodes,
+                            &edges,
+                            selected_node_id,
+                        ))
+                    } else {
+                        None
+                    };
+
+                if let Some(ref dr) = dry_run_result {
+                    if !dr.warnings.is_empty() && refinement_count < MAX_AGENT_TURNS {
+                        // Self-check failed: inject dry-run results back to agent for refinement
+                        refinement_count += 1;
+                        send_status(sender, "refining").await;
+
+                        // Add the assistant response to history
+                        conversation_history.push(ConversationMessage {
+                            role: "assistant".to_string(),
+                            content: ConversationContent::Text(response.text.clone()),
+                        });
+
+                        // Inject dry-run feedback as a user message
+                        let feedback = format!(
+                            "The view query had issues during dry-run. Please refine it.\n\nDry-run result:\n- matched_nodes: {}\n- warnings: {:?}\n- matched names (sample): {:?}\n\nPlease fix the warnings and generate an improved <view_query>.",
+                            dr.matched_nodes,
+                            dr.warnings,
+                            &dr.matched_node_names[..dr.matched_node_names.len().min(10)]
+                        );
+                        conversation_history.push(ConversationMessage {
+                            role: "user".to_string(),
+                            content: ConversationContent::Text(feedback),
+                        });
+                        continue;
+                    }
+                }
+
+                // Send the view query to the frontend
+                let view_msg = ExplorerServerMessage::ViewQuery {
+                    query: query_json.clone(),
+                };
+                if sender
+                    .send(Message::Text(
+                        serde_json::to_string(&view_msg).unwrap().into(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    // Client disconnected — stop the agent loop
+                    break;
+                }
+
+                // Send final done=true text if we streamed partial text earlier
+                if !clean_text.is_empty() {
+                    let done_msg = ExplorerServerMessage::Text {
+                        content: String::new(),
+                        done: true,
+                    };
+                    let _ = sender
+                        .send(Message::Text(
+                            serde_json::to_string(&done_msg).unwrap().into(),
+                        ))
+                        .await;
+                }
+            }
         }
 
         // If no tool calls, we're done
         if response.tool_calls.is_empty() || response.stop_reason == "end_turn" {
+            // Add final assistant response to conversation history
+            conversation_history.push(ConversationMessage {
+                role: "assistant".to_string(),
+                content: ConversationContent::Text(response.text.clone()),
+            });
             break;
         }
 
@@ -390,7 +600,7 @@ async fn run_explorer_agent(
                 input: tc.input.clone(),
             });
         }
-        messages.push(ConversationMessage {
+        conversation_history.push(ConversationMessage {
             role: "assistant".to_string(),
             content: ConversationContent::Blocks(assistant_blocks),
         });
@@ -406,14 +616,14 @@ async fn run_explorer_agent(
         }
 
         // Add tool results as a user message
-        messages.push(ConversationMessage {
+        conversation_history.push(ConversationMessage {
             role: "user".to_string(),
             content: ConversationContent::Blocks(result_blocks),
         });
 
         // Safety: prevent runaway loops
-        if turn == MAX_AGENT_TURNS - 1 {
-            info!("Explorer agent hit max turns ({MAX_AGENT_TURNS}), forcing response");
+        if turn >= MAX_AGENT_TURNS + 2 {
+            info!("Explorer agent hit max turns, forcing response");
         }
     }
 
@@ -624,6 +834,9 @@ You have access to tools that query the knowledge graph. When the user asks a qu
 6. When satisfied, output the view query in a <view_query>{ ... JSON ... }</view_query> block
 7. Also provide a text explanation of what the visualization shows
 
+You maintain conversation history across messages — you can reference prior questions and answers.
+When the user says "what about this one?" they mean the currently selected node ($selected).
+
 ## View Query Grammar
 
 ### Scope Types
@@ -761,5 +974,10 @@ This shows all callers of TaskPort."#;
         assert!(prompt.contains("Scope"), "missing Scope");
         assert!(prompt.contains("Emphasis"), "missing Emphasis");
         assert!(prompt.contains("ALWAYS dry-run"), "missing ALWAYS dry-run");
+    }
+
+    #[test]
+    fn test_max_agent_turns_is_three() {
+        assert_eq!(MAX_AGENT_TURNS, 3, "Spec requires max 3 refinement turns");
     }
 }

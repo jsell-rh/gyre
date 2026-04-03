@@ -64,6 +64,15 @@ impl From<SavedView> for ViewResponse {
     }
 }
 
+/// Resolve the workspace_id for a repo. Returns empty string if not found.
+async fn resolve_workspace_id(state: &AppState, repo_id: &str) -> String {
+    let rid = Id::new(repo_id);
+    match state.repos.find_by_id(&rid).await {
+        Ok(Some(r)) => r.workspace_id.to_string(),
+        _ => String::new(),
+    }
+}
+
 pub async fn list_views(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -80,11 +89,12 @@ pub async fn list_views(
     // Seed system default views on first access (lazy initialization).
     if !views.iter().any(|v| v.is_system) {
         let now = now_secs();
-        for default in system_default_views(&repo_id, &auth.tenant_id) {
+        let workspace_id = resolve_workspace_id(&state, &repo_id).await;
+        for default in system_default_views() {
             let view = SavedView {
                 id: new_id(),
                 repo_id: Id::new(&repo_id),
-                workspace_id: Id::new(""),
+                workspace_id: Id::new(&workspace_id),
                 tenant_id: Id::new(&auth.tenant_id),
                 name: default.0.to_string(),
                 description: Some(default.1.to_string()),
@@ -104,18 +114,25 @@ pub async fn list_views(
             )
         })?;
         return Ok(Json(
-            refreshed.into_iter().map(ViewResponse::from).collect(),
+            refreshed
+                .into_iter()
+                .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
+                .map(ViewResponse::from)
+                .collect(),
         ));
     }
 
-    Ok(Json(views.into_iter().map(ViewResponse::from).collect()))
+    Ok(Json(
+        views
+            .into_iter()
+            .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
+            .map(ViewResponse::from)
+            .collect(),
+    ))
 }
 
 /// System default views per the explorer-implementation.md spec.
-fn system_default_views(
-    _repo_id: &str,
-    _tenant_id: &str,
-) -> Vec<(&'static str, &'static str, &'static str)> {
+fn system_default_views() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
         (
             "Architecture Overview",
@@ -154,10 +171,12 @@ pub async fn create_view(
         )
     })?;
 
+    let workspace_id = resolve_workspace_id(&state, &repo_id).await;
+
     let view = SavedView {
         id: new_id(),
         repo_id: Id::new(&repo_id),
-        workspace_id: Id::new(""), // Will be filled from repo lookup
+        workspace_id: Id::new(&workspace_id),
         tenant_id: Id::new(&auth.tenant_id),
         name: req.name,
         description: req.description,
@@ -179,12 +198,27 @@ pub async fn create_view(
 
 pub async fn get_view(
     State(state): State<Arc<AppState>>,
-    Path((_repo_id, view_id)): Path<(String, String)>,
-    _auth: AuthenticatedAgent,
+    Path((repo_id, view_id)): Path<(String, String)>,
+    auth: AuthenticatedAgent,
 ) -> Result<Json<ViewResponse>, (axum::http::StatusCode, String)> {
     let vid = Id::new(&view_id);
     match state.saved_views.get(&vid).await {
-        Ok(Some(v)) => Ok(Json(ViewResponse::from(v))),
+        Ok(Some(v)) => {
+            // Verify repo_id matches and tenant access.
+            if v.repo_id.as_str() != repo_id {
+                return Err((
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("View not found: {view_id}"),
+                ));
+            }
+            if v.tenant_id.as_str() != auth.tenant_id {
+                return Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    "Access denied".to_string(),
+                ));
+            }
+            Ok(Json(ViewResponse::from(v)))
+        }
         Ok(None) => Err((
             axum::http::StatusCode::NOT_FOUND,
             format!("View not found: {view_id}"),
@@ -198,8 +232,8 @@ pub async fn get_view(
 
 pub async fn update_view(
     State(state): State<Arc<AppState>>,
-    Path((_repo_id, view_id)): Path<(String, String)>,
-    _auth: AuthenticatedAgent,
+    Path((repo_id, view_id)): Path<(String, String)>,
+    auth: AuthenticatedAgent,
     Json(req): Json<UpdateViewRequest>,
 ) -> Result<Json<ViewResponse>, (axum::http::StatusCode, String)> {
     let vid = Id::new(&view_id);
@@ -218,6 +252,20 @@ pub async fn update_view(
             ))
         }
     };
+
+    // Verify repo_id matches and tenant access.
+    if existing.repo_id.as_str() != repo_id {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("View not found: {view_id}"),
+        ));
+    }
+    if existing.tenant_id.as_str() != auth.tenant_id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Access denied".to_string(),
+        ));
+    }
 
     let query_json = if let Some(q) = req.query {
         serde_json::to_string(&q).map_err(|e| {
@@ -249,10 +297,40 @@ pub async fn update_view(
 
 pub async fn delete_view(
     State(state): State<Arc<AppState>>,
-    Path((_repo_id, view_id)): Path<(String, String)>,
-    _auth: AuthenticatedAgent,
+    Path((repo_id, view_id)): Path<(String, String)>,
+    auth: AuthenticatedAgent,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
     let vid = Id::new(&view_id);
+    // Verify ownership before deleting.
+    match state.saved_views.get(&vid).await {
+        Ok(Some(v)) => {
+            if v.repo_id.as_str() != repo_id {
+                return Err((
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("View not found: {view_id}"),
+                ));
+            }
+            if v.tenant_id.as_str() != auth.tenant_id {
+                return Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    "Access denied".to_string(),
+                ));
+            }
+        }
+        Ok(None) => {
+            return Err((
+                axum::http::StatusCode::NOT_FOUND,
+                format!("View not found: {view_id}"),
+            ))
+        }
+        Err(e) => {
+            return Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get view: {e}"),
+            ))
+        }
+    }
+
     match state.saved_views.delete(&vid).await {
         Ok(()) => Ok(axum::http::StatusCode::NO_CONTENT),
         Err(e) => Err((

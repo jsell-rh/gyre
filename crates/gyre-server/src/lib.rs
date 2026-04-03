@@ -609,7 +609,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/.well-known/jwks.json", get(oidc::jwks))
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
-        // Explorer WebSocket (explorer-implementation.md)
+        // Explorer WebSocket (explorer-implementation.md).
+        // WebSocket upgrades cannot go through body-reading ABAC middleware,
+        // so auth + repo-scoped tenant checks are enforced inside the handler.
         .route(
             "/api/v1/repos/:repo_id/explorer",
             get(explorer_ws::explorer_ws),
