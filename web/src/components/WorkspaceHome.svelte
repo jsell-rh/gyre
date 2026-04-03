@@ -1214,6 +1214,20 @@
         {/if}
       </section>
 
+      <!-- Workspace briefing (AI-generated summary) — shown above entity tables for visibility -->
+      {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
+        <section class="ws-briefing-section">
+          <div class="ws-briefing-body">
+            {#if briefingData.summary}
+              <p class="ws-briefing-text">{briefingData.summary}</p>
+            {/if}
+            {#if briefingData.narrative && briefingData.narrative !== briefingData.summary}
+              <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
+            {/if}
+          </div>
+        </section>
+      {/if}
+
       <!-- ── Entity tables + Activity + Merge Queue (collapsible) ── -->
       <div class="dashboard-flow">
           <details class="ws-feed-details" data-testid="browse-panel" open={repos.length === 0 || actionableNotifications.length > 0 || pipelineAgents.active > 0 || pipelineMrs.failed_gates > 0}>
@@ -1814,20 +1828,6 @@
 
         </details>
       </div><!-- .dashboard-flow -->
-
-      <!-- Workspace briefing (AI-generated summary) — shown inline when available -->
-      {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
-        <section class="ws-briefing-section">
-          <div class="ws-briefing-body">
-            {#if briefingData.summary}
-              <p class="ws-briefing-text">{briefingData.summary}</p>
-            {/if}
-            {#if briefingData.narrative && briefingData.narrative !== briefingData.summary}
-              <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
-            {/if}
-          </div>
-        </section>
-      {/if}
 
     </div><!-- .focused-dashboard -->
   {/if}
