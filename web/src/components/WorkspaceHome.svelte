@@ -1271,7 +1271,10 @@
                 {#if specsLoading}
                   <div class="skeleton-row"></div>
                 {:else if specs.length === 0}
-                  <p class="empty-text">No specs yet. Push a spec manifest to define what agents should build.</p>
+                  <div class="empty-state-guided">
+                    <p class="empty-text">No specs yet.</p>
+                    <p class="empty-guide">Create a <code>specs/manifest.yaml</code> in your repo and <code>git push</code>. Specs define what agents should build — they're the starting point of the autonomous development pipeline.</p>
+                  </div>
                 {:else}
                   <table class="ws-entity-table">
                     <thead>
@@ -1374,7 +1377,10 @@
                 {#if tasksLoading}
                   <div class="skeleton-row"></div>
                 {:else if wsTasks.length === 0}
-                  <p class="empty-text">No tasks yet. Approve specs to auto-generate implementation tasks.</p>
+                  <div class="empty-state-guided">
+                    <p class="empty-text">No tasks yet.</p>
+                    <p class="empty-guide">Tasks are created automatically when you approve specs. Each approved spec generates implementation tasks for agents to work on.</p>
+                  </div>
                 {:else}
                   <table class="ws-entity-table">
                     <thead>
@@ -1460,7 +1466,10 @@
                 {#if mrsLoading}
                   <div class="skeleton-row"></div>
                 {:else if wsMrs.length === 0}
-                  <p class="empty-text">No merge requests yet. Agents create MRs when they complete implementation.</p>
+                  <div class="empty-state-guided">
+                    <p class="empty-text">No merge requests yet.</p>
+                    <p class="empty-guide">MRs are created when agents complete their implementation. Each MR runs through quality gates before merging and produces a signed attestation bundle.</p>
+                  </div>
                 {:else}
                   <table class="ws-entity-table">
                     <thead>
@@ -1579,7 +1588,10 @@
                 {#if agentsLoading}
                   <div class="skeleton-row"></div>
                 {:else if wsAgents.length === 0}
-                  <p class="empty-text">No agents yet. Create tasks and spawn agents to start autonomous development.</p>
+                  <div class="empty-state-guided">
+                    <p class="empty-text">No agents yet.</p>
+                    <p class="empty-guide">Agents are spawned to work on tasks. Each agent gets its own branch, writes code, runs tests, and creates a merge request when done.</p>
+                  </div>
                 {:else}
                   <table class="ws-entity-table">
                     <thead>
@@ -2648,6 +2660,32 @@
     border-radius: 50%;
     background: var(--color-success);
     animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  /* ── Guided empty states ───────────────────────────────────────────── */
+  .empty-state-guided {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .empty-state-guided .empty-text {
+    padding: 0;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+  }
+
+  .empty-guide {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: var(--space-1) 0 0 0;
+    line-height: 1.5;
+  }
+
+  .empty-guide code {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 1px 4px;
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius-sm);
   }
 
   /* ── Inline action buttons ─────────────────────────────────────────── */
