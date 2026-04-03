@@ -1337,17 +1337,18 @@
     const factor = e.deltaY > 0 ? 0.88 : 1.14;
     const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * factor));
 
-    // Zoom toward mouse position
+    // Zoom toward mouse position — compute in targetCam space so lerp converges correctly
     const rect = canvasEl?.getBoundingClientRect();
     if (rect) {
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
-      const worldBefore = screenToWorld(sx, sy);
+      // World point under mouse using TARGET camera (not current lerped cam)
+      const worldX = (sx - W / 2) / targetCam.zoom + targetCam.x;
+      const worldY = (sy - H / 2) / targetCam.zoom + targetCam.y;
+      // After zoom change, adjust camera so the same world point stays under mouse
+      targetCam.x = worldX - (sx - W / 2) / newZoom;
+      targetCam.y = worldY - (sy - H / 2) / newZoom;
       targetCam.zoom = newZoom;
-      // Adjust camera so point under mouse stays fixed
-      const worldAfter = { x: (sx - W / 2) / newZoom + targetCam.x, y: (sy - H / 2) / newZoom + targetCam.y };
-      targetCam.x += worldBefore.x - worldAfter.x;
-      targetCam.y += worldBefore.y - worldAfter.y;
     } else {
       targetCam.zoom = newZoom;
     }
@@ -1556,7 +1557,6 @@
       <canvas
         bind:this={canvasEl}
         class="treemap-canvas"
-        style="width: {W}px; height: {H}px"
         onmousedown={onMouseDown}
         onmousemove={onMouseMove}
         onmouseup={onMouseUp}

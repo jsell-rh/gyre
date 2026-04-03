@@ -1202,6 +1202,28 @@
     "spec_detail_label": "Spec detail for {name}",
     "context_menu_label": "Node context menu"
   },
+  "explorer_chat": {
+    "title": "Explorer",
+    "saved_views": "Saved Views",
+    "welcome_title": "Ask about your codebase",
+    "welcome_desc": "Ask questions and I'll visualize the answer on the canvas.",
+    "input_placeholder": "Ask a question about this codebase...",
+    "thinking": "Thinking...",
+    "refining": "Refining query...",
+    "connecting": "Connecting...",
+    "disconnected": "Disconnected",
+    "error": "Connection error",
+    "save_view": "Save this view",
+    "send": "Send"
+  },
+  "explorer_treemap": {
+    "filter_presets": "Filter presets",
+    "lens_toggle": "Lens toggle",
+    "canvas_label": "Architecture explorer canvas",
+    "empty_title": "No graph data",
+    "empty_desc": "Push code or sync a mirror to extract the knowledge graph.",
+    "empty_filtered": "No nodes match the current filter."
+  },
   "explorer_filter": {
     "title": "Filters",
     "categories": "Categories",
