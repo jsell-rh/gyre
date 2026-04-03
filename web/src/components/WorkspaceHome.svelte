@@ -1302,6 +1302,7 @@
                       <tr>
                         <th>Spec</th>
                         <th>Status</th>
+                        <th>Progress</th>
                         <th>Repo</th>
                         <th>Updated</th>
                         <th class="th-actions"></th>
@@ -1312,6 +1313,10 @@
                         {@const status = spec.approval_status ?? spec.status ?? 'pending'}
                         {@const specName = spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}
                         {@const specDir = spec.path?.includes('/') ? spec.path.split('/').slice(0, -1).join('/') : ''}
+                        {@const specTasks = wsTasks.filter(t => t.spec_path === spec.path)}
+                        {@const doneTasks = specTasks.filter(t => t.status === 'done').length}
+                        {@const inProgressTasks = specTasks.filter(t => t.status === 'in_progress').length}
+                        {@const totalTasks = specTasks.length}
                         <tr class="ws-entity-row" onclick={() => navigateToSpec(spec)}>
                           <td class="entity-name-cell">
                             <Icon name="spec" size={12} />
@@ -1322,6 +1327,20 @@
                             <span class="status-pill status-pill-{status}" title={specStatusTooltip(status)}>
                               {SPEC_STATUS_ICONS[status] ?? ''} {status}
                             </span>
+                          </td>
+                          <td class="progress-cell">
+                            {#if totalTasks > 0}
+                              <div class="progress-mini" title="{doneTasks}/{totalTasks} tasks done{inProgressTasks > 0 ? `, ${inProgressTasks} in progress` : ''}">
+                                <div class="progress-mini-bar">
+                                  <div class="progress-mini-fill" class:progress-complete={doneTasks === totalTasks} style="width: {Math.round((doneTasks / totalTasks) * 100)}%"></div>
+                                </div>
+                                <span class="progress-text">{doneTasks}/{totalTasks}</span>
+                              </div>
+                            {:else if status === 'approved'}
+                              <span class="text-muted">awaiting tasks</span>
+                            {:else}
+                              <span class="text-muted">-</span>
+                            {/if}
                           </td>
                           <td>
                             {#if spec.repo_id && repoMap[spec.repo_id]}
@@ -3017,10 +3036,13 @@
   }
 
   .progress-cell {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
     min-width: 50px;
+  }
+
+  .progress-mini {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
   }
 
   .progress-text {
