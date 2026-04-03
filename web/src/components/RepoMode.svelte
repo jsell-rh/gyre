@@ -173,14 +173,14 @@
             const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
             const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
             const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
-            const details = arr.map(g => {
+            const details = arr.map((g, idx) => {
               const gateType = g.gate_type ?? '';
               const gateTypeLabel = gateType ? gateType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '';
               const gateCommand = g.command ?? '';
               return {
-                name: g.gate_name ?? g.name ?? (gateTypeLabel
+                name: g.gate_name ?? g.name ?? gateTypeLabel
                   || (gateCommand ? gateCommand.split(' ')[0].split('/').pop() : '')
-                  || 'Gate'),
+                  || `Check #${idx + 1}`,
                 status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
                 gate_type: g.gate_type,
                 required: g.required,
@@ -691,9 +691,9 @@
                       {@const overflowCount = sortedGates.length - 3}
                       <span class="gate-names-repo">
                         {#each visibleGates as g}
-                          <button class="gate-badge gate-badge-{g.status}" title="{g.name}{g.required === false ? ' (advisory)' : ''}{g.command ? '\nCommand: ' + g.command : ''}{g.output ? '\nOutput: ' + g.output.slice(0, 200) : ''}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
+                          <button class="gate-badge gate-badge-{g.status}" title="{g.name}{g.required === false ? ' (advisory)' : ''}{g.command ? '\nCommand: ' + g.command : ''}{g.duration_ms ? '\nDuration: ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}{g.output ? '\nOutput: ' + g.output.slice(0, 200) : ''}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
                             <span class="gate-badge-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
-                            <span class="gate-badge-name">{g.name ?? (g.gate_type ? g.gate_type.replace(/_/g, ' ') : 'gate')}</span>
+                            <span class="gate-badge-name">{g.name ?? (g.gate_type ? g.gate_type.replace(/_/g, ' ') : 'check')}</span>
                             {#if g.required === false}<span class="gate-advisory-inline">(adv)</span>{/if}
                           </button>
                         {/each}
