@@ -389,6 +389,7 @@
       entityType,
       entityId,
       entityTitle: name ?? null,
+      entityRepoId: currentRepo?.id ?? entityRepoId ?? null,
       previousMode: mode === 'workspace_home' ? 'workspace_home' : null,
     };
     window.history.pushState(stateObj, '', urlFor(parsed));
@@ -920,13 +921,13 @@
         return;
       }
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle } = e.state;
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle, entityRepoId: eRepoId } = e.state;
         mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules')
           ? m : 'workspace_home';
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
-        // Restore entity detail state from history, including cached title for breadcrumbs
-        entityDetail = (et && eid) ? { type: et, id: eid, data: {} } : null;
+        // Restore entity detail state from history with repo_id for data loading
+        entityDetail = (et && eid) ? { type: et, id: eid, data: eRepoId ? { repo_id: eRepoId } : {} } : null;
         if (et && eid && eTitle) {
           seedEntityName(et, eid, eTitle);
         }
@@ -995,7 +996,7 @@
             currentRepo = null;
           }
           repoTab = p.tab ?? 'specs';
-          entityDetail = (p.entityType && p.entityId) ? { type: p.entityType, id: p.entityId, data: {} } : null;
+          entityDetail = (p.entityType && p.entityId) ? { type: p.entityType, id: p.entityId, data: currentRepo?.id ? { repo_id: currentRepo.id } : {} } : null;
         }
         fadeContent();
       }
