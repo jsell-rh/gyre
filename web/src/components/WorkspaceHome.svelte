@@ -1102,24 +1102,24 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Workspace header with integrated status ──────── -->
+      <!-- ── Workspace header ──────── -->
       <header class="ws-header">
         <div class="ws-header-main">
           <div class="ws-header-top-row">
             <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
             <div class="ws-header-actions">
               <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings (g s)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M6.5 1.5h3l.5 2 1.5.9 2-.5 1.5 2.6-1.5 1.5v1.5l1.5 1.5-1.5 2.6-2-.5-1.5.9-.5 2h-3l-.5-2L4.5 11l-2 .5L1 8.9l1.5-1.5V6L1 4.5l1.5-2.6 2 .5L6 1.5z"/><circle cx="8" cy="8" r="2"/></svg>
+                <Icon name="settings" size={14} />
                 Settings
               </button>
               <button class="ws-header-link" onclick={() => goToAgentRules?.()} title="Agent rules (g a)">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M4 2h8v12H4zM7 5h2M7 7h2M7 9h1"/></svg>
+                <Icon name="spec" size={14} />
                 Agent Rules
               </button>
             </div>
           </div>
 
-          <!-- Status: clickable items showing where attention is needed -->
+          <!-- Status: one-line summary + clickable chips for attention items -->
           {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
             {#if statusItems.length > 0}
               <div class="ws-header-status-items">
@@ -1136,8 +1136,6 @@
           {:else if workspace.description}
             <p class="ws-header-desc">{workspace.description}</p>
           {/if}
-
-          <!-- Pipeline flow removed: tab badges already show counts + status -->
         </div>
       </header>
 
@@ -1591,7 +1589,14 @@
                             <div class="entity-list-meta">
                               <span class="status-pill status-pill-{mrStatus}" title={mrStatusTooltip(mr)}>{mrStatus}</span>
                               {#if mrStatus === 'open' && gates?.failed > 0}
-                                <span class="entity-list-context entity-list-context-danger">{gates.failed} gate{gates.failed !== 1 ? 's' : ''} failed — merge blocked</span>
+                                {@const failedNames = (gates.details ?? []).filter(g => g.status === 'failed').map(g => g.name).slice(0, 3)}
+                                <span class="entity-list-context entity-list-context-danger">
+                                  {#if failedNames.length > 0}
+                                    {failedNames.join(', ')} failed — merge blocked
+                                  {:else}
+                                    {gates.failed} gate{gates.failed !== 1 ? 's' : ''} failed — merge blocked
+                                  {/if}
+                                </span>
                               {:else if mrStatus === 'merged'}
                                 <span class="entity-list-context entity-list-context-success">
                                   {#if gates?.passed > 0}{gates.passed} gates passed · {/if}merged{#if mr.merge_commit_sha}
@@ -1666,6 +1671,7 @@
                       {@const startTime = agent.spawned_at ?? agent.created_at}
                       {@const endTime = agent.completed_at ?? (agStatus === 'active' ? null : agent.last_heartbeat)}
                       {@const durationSecs = startTime ? Math.round(((endTime ? new Date(endTime) : new Date()) - new Date(startTime)) / 1000) : null}
+                      {@const totalTokens = (agent.input_tokens ?? 0) + (agent.output_tokens ?? 0) + (agent.tokens_used ?? 0)}
                       <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name }); }}}>
                         <div class="entity-list-main">
                           <Icon name="agent" size={14} />
@@ -1700,6 +1706,9 @@
                                 <button class="entity-list-chip entity-list-chip-{agentMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title }); }}>
                                   <Icon name="git-merge" size={10} /> {agentMr.title ?? entityName('mr', agentMr.id)}
                                 </button>
+                              {/if}
+                              {#if totalTokens > 0}
+                                <span class="entity-list-tokens" title="{totalTokens.toLocaleString()} tokens used">{totalTokens > 1000000 ? (totalTokens / 1000000).toFixed(1) + 'M' : totalTokens > 1000 ? (totalTokens / 1000).toFixed(0) + 'k' : totalTokens} tokens</span>
                               {/if}
                               {#if durationSecs != null}
                                 <span class="entity-list-time" class:duration-running={agStatus === 'active'}>{formatDuration(durationSecs)}</span>
@@ -3297,6 +3306,14 @@
     color: var(--color-text-muted);
     white-space: nowrap;
     margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .entity-list-tokens {
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    white-space: nowrap;
     flex-shrink: 0;
   }
 
