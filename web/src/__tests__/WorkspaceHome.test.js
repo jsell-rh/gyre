@@ -52,17 +52,9 @@ describe('WorkspaceHome', () => {
   it('shows key sections when workspace is provided', () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    // Streamlined layout: PipelineOverview, Repos, Entity/Activity tabs
-    expect(container.querySelector('[data-testid="pipeline-overview"]')).toBeTruthy();
+    // Streamlined layout: Repos, Entity/Activity tabs (PipelineOverview removed for cleaner UX)
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="browse-panel"]')).toBeTruthy();
-  });
-
-  it('renders pipeline overview with stage buttons', () => {
-    const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
-    const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    const stages = container.querySelectorAll('.pipeline-stage');
-    expect(stages.length).toBe(5); // Specs, Tasks, Agents, MRs, Merged
   });
 
   it('each section has correct aria-labelledby', () => {
