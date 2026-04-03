@@ -899,8 +899,58 @@ fn resolve_computed_expression(
         return HashSet::new();
     }
 
-    // Fallback: empty set
+    // Fallback: unrecognized expression.
+    // validate_computed_expression() will catch this during dry-run and produce a warning.
     HashSet::new()
+}
+
+/// Validate a computed expression string and return any syntax errors.
+/// Returns None if the expression is valid, Some(error) if not.
+pub fn validate_computed_expression(expr: &str) -> Option<String> {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return Some("Empty expression".to_string());
+    }
+
+    // Known top-level expressions
+    let known_prefixes = [
+        "$clicked",
+        "$selected",
+        "$test_unreachable",
+        "$test_reachable",
+        "$where(",
+        "$intersect(",
+        "$union(",
+        "$diff(",
+        "$callers(",
+        "$callees(",
+        "$implementors(",
+        "$fields(",
+        "$descendants(",
+        "$ancestors(",
+        "$governed_by(",
+        "$test_fragility(",
+        "$reachable(",
+    ];
+
+    if !known_prefixes.iter().any(|p| trimmed.starts_with(p)) {
+        return Some(format!(
+            "Unrecognized expression: '{trimmed}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $intersect, $union, $diff, $test_unreachable, $test_reachable, $clicked, $selected"
+        ));
+    }
+
+    // Check balanced parentheses
+    if trimmed.contains('(') {
+        let open = trimmed.chars().filter(|c| *c == '(').count();
+        let close = trimmed.chars().filter(|c| *c == ')').count();
+        if open != close {
+            return Some(format!(
+                "Unbalanced parentheses in '{trimmed}': {open} open, {close} close"
+            ));
+        }
+    }
+
+    None
 }
 
 /// Resolve $clicked/$selected references to the actual node ID.
@@ -959,6 +1009,7 @@ fn find_balanced_comma(s: &str) -> Option<usize> {
 }
 
 /// Resolve annotation template variables server-side.
+/// `group_count` should be the number of distinct parent modules among matched nodes.
 pub fn resolve_annotation_template(
     template: &str,
     focused_node_name: Option<&str>,
@@ -974,6 +1025,30 @@ pub fn resolve_annotation_template(
     result
 }
 
+/// Count distinct parent modules among a set of matched node IDs.
+pub fn count_distinct_parent_modules(
+    matched_ids: &HashSet<String>,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+) -> usize {
+    let mut parents = HashSet::new();
+    for edge in edges.iter().filter(|e| e.deleted_at.is_none()) {
+        if edge.edge_type == EdgeType::Contains && matched_ids.contains(&edge.target_id.to_string())
+        {
+            parents.insert(edge.source_id.to_string());
+        }
+    }
+    // Fall back to counting distinct file_path prefixes if no Contains edges found
+    if parents.is_empty() {
+        for node in nodes.iter().filter(|n| matched_ids.contains(&n.id.to_string())) {
+            if let Some(last_sep) = node.file_path.rfind('/') {
+                parents.insert(node.file_path[..last_sep].to_string());
+            }
+        }
+    }
+    parents.len()
+}
+
 // ── Dry-run ──────────────────────────────────────────────────────────────────
 
 /// Run a complete dry-run of a view query, producing match counts and warnings.
@@ -984,6 +1059,17 @@ pub fn dry_run(
     selected_node_id: Option<&str>,
 ) -> DryRunResult {
     let mut warnings = Vec::new();
+
+    // Validate computed expressions before resolving (catch syntax errors)
+    if let Scope::Filter {
+        computed: Some(ref expr),
+        ..
+    } = &query.scope
+    {
+        if let Some(err) = validate_computed_expression(expr) {
+            warnings.push(format!("Computed expression error: {err}"));
+        }
+    }
 
     // Resolve scope
     let result_set = resolve_scope(&query.scope, nodes, edges, selected_node_id);
@@ -1009,7 +1095,7 @@ pub fn dry_run(
         .collect();
 
     // Resolve the focused node name for annotation templates
-    let focused_node_name = match &query.scope {
+    let _focused_node_name = match &query.scope {
         Scope::Focus { node, .. } => {
             if node == "$clicked" || node == "$selected" {
                 selected_node_id.and_then(|id| node_map.get(id).map(|n| n.name.clone()))
@@ -1121,11 +1207,11 @@ pub fn compute_graph_summary(
             .or_default() += 1;
     }
 
-    // Top types by field count
+    // Top types by field count (FieldOf: source=field, target=parent_type)
     let mut field_counts: HashMap<String, usize> = HashMap::new();
     for e in &active_edges {
         if e.edge_type == EdgeType::FieldOf {
-            *field_counts.entry(e.source_id.to_string()).or_default() += 1;
+            *field_counts.entry(e.target_id.to_string()).or_default() += 1;
         }
     }
     let node_map: HashMap<String, &GraphNode> = active_nodes

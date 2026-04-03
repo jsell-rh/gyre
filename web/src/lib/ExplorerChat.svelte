@@ -115,6 +115,11 @@
       }
       case 'view_query': {
         const query = msg.query ?? msg.view_query ?? msg;
+        // Finalize any in-flight streaming text before clearing
+        if (streamingText.trim()) {
+          messages = [...messages, { role: 'assistant', content: streamingText, timestamp: Date.now() }];
+        }
+        streamingText = '';
         // Add as assistant message with view query
         messages = [...messages, {
           role: 'assistant',
@@ -122,7 +127,6 @@
           viewQuery: query,
           timestamp: Date.now(),
         }];
-        streamingText = '';
         status = 'ready';
         onViewQuery(query);
         scrollToBottom();
@@ -312,7 +316,7 @@
       <button
         class="save-view-btn"
         onclick={saveCurrentView}
-        disabled={!canvasState?.selectedNode && status !== 'ready'}
+        disabled={!canvasState?.selected_node && status !== 'ready'}
         title={$t('explorer_chat.save_this_view')}
         aria-label={$t('explorer_chat.save_this_view')}
         type="button"
@@ -339,12 +343,16 @@
         <p class="welcome-title">{$t('explorer_chat.welcome_title')}</p>
         <p class="welcome-desc">{$t('explorer_chat.welcome_desc')}</p>
         <div class="welcome-suggestions">
-          {#each ['What are the main API endpoints?', 'Show me the dependency graph', 'Which types are most complex?'] as suggestion}
+          {#each [
+            { key: 'explorer_chat.suggestion_endpoints', fallback: 'What are the main API endpoints?' },
+            { key: 'explorer_chat.suggestion_dependencies', fallback: 'Show me the dependency graph' },
+            { key: 'explorer_chat.suggestion_complexity', fallback: 'Which types are most complex?' },
+          ] as suggestion}
             <button
               class="suggestion-btn"
-              onclick={() => { inputText = suggestion; inputEl?.focus(); }}
+              onclick={() => { inputText = $t(suggestion.key, { default: suggestion.fallback }); inputEl?.focus(); }}
               type="button"
-            >{suggestion}</button>
+            >{$t(suggestion.key, { default: suggestion.fallback })}</button>
           {/each}
         </div>
       </div>
