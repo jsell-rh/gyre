@@ -1465,10 +1465,20 @@
                           </td>
                           <td>
                             {#if gates && gates.total > 0}
-                              <button class="gates-mini gates-mini-clickable" title="View gate details" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }}>
-                                {#if gates.failed > 0}<span class="gate-fail-count">&#10007;{gates.failed}</span>{/if}
-                                {#if gates.passed > 0}<span class="gate-pass-count">&#10003;{gates.passed}</span>{/if}
-                                <span class="gate-total-count">/{gates.total}</span>
+                              <button class="gates-inline" title="View gate details" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }}>
+                                {#each (gates.details ?? []).slice(0, 3) as g}
+                                  <span class="gate-chip gate-chip-{g.status}" title="{g.name}: {g.status}{g.required === false ? ' (advisory)' : ''}">
+                                    {g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}
+                                  </span>
+                                {/each}
+                                {#if (gates.details ?? []).length > 3}
+                                  <span class="gate-chip-more">+{gates.details.length - 3}</span>
+                                {/if}
+                                {#if (gates.details ?? []).length === 0}
+                                  {#if gates.failed > 0}<span class="gate-fail-count">✗{gates.failed}</span>{/if}
+                                  {#if gates.passed > 0}<span class="gate-pass-count">✓{gates.passed}</span>{/if}
+                                  <span class="gate-total-count">/{gates.total}</span>
+                                {/if}
                               </button>
                             {:else}
                               <span class="text-muted">-</span>
@@ -2463,6 +2473,41 @@
   .priority-low { color: var(--color-text-muted); background: var(--color-surface-elevated); }
 
   /* ── Gates mini display ────────────────────────────────────────────── */
+  .gates-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    font-family: var(--font-body);
+    flex-wrap: wrap;
+  }
+
+  .gates-inline:hover .gate-chip { text-decoration: underline; }
+
+  .gate-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    font-weight: 500;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .gate-chip-passed { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .gate-chip-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .gate-chip-pending { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+
+  .gate-chip-more {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    padding: 1px 4px;
+  }
+
   .gates-mini {
     display: inline-flex;
     align-items: center;
