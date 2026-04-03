@@ -1285,33 +1285,33 @@
       <!-- ── Main workspace content: tabbed view (repos + entity browse) ── -->
       <div class="dashboard-flow" data-testid="browse-panel">
         <nav class="ws-tab-bar" aria-label="Workspace navigation" data-testid="section-repos">
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'repos'} onclick={() => { wsTab = 'repos'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'repos'} onclick={() => { wsTab = 'repos'; userSelectedTab = true; }} title="{repos.length} repositories">
             Repos
             {#if !reposLoading}<span class="ws-tab-count">{repos.length}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }} title="{specs.length} specs: {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending">
             Specs
             {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
             {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }} title="{wsTasks.length} tasks: {pipelineTasks.done} done, {pipelineTasks.in_progress} active, {pipelineTasks.blocked} blocked">
             Tasks
             {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
             {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
             {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }} title="{wsMrs.length} MRs: {pipelineMrs.open} open, {pipelineMrs.merged} merged{pipelineMrs.failed_gates > 0 ? ', ' + pipelineMrs.failed_gates + ' with failed gates' : ''}">
             MRs
             {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
             {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
             {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }} title="{wsAgents.length} agents: {pipelineAgents.active} active">
             Agents
             {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
             {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }} title="Recent workspace activity feed">
             Activity
           </button>
           <span class="ws-tab-spacer"></span>
