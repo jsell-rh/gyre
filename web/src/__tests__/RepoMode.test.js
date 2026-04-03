@@ -36,7 +36,7 @@ describe('RepoMode', () => {
     expect(labels).toContain('Agents');
     expect(labels).toContain('Architecture');
     expect(labels).toContain('Decisions');
-    expect(labels).toContain('Code');
+    expect(labels).toContain('Code & Blame');
   });
 
   it('marks active tab with aria-selected=true', () => {
