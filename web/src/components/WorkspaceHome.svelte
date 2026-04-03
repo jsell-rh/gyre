@@ -1415,113 +1415,80 @@
                 {:else if filteredSpecs.length === 0}
                   <p class="empty-text">No specs matching "{entitySearch}"</p>
                 {:else}
-                  <table class="ws-entity-table">
-                    <thead>
-                      <tr>
-                        <th>Spec</th>
-                        <th>Status</th>
-                        <th>Progress</th>
-                        <th>Downstream</th>
-                        <th>Repo</th>
-                        <th>Updated</th>
-                        <th class="th-actions"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {#each filteredSpecs as spec}
-                        {@const status = spec.approval_status ?? spec.status ?? 'pending'}
-                        {@const specName = spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}
-                        {@const specDir = spec.path?.includes('/') ? spec.path.split('/').slice(0, -1).join('/') : ''}
-                        {@const specTasks = wsTasks.filter(t => t.spec_path === spec.path)}
-                        {@const doneTasks = specTasks.filter(t => t.status === 'done').length}
-                        {@const inProgressTasks = specTasks.filter(t => t.status === 'in_progress').length}
-                        {@const totalTasks = specTasks.length}
-                        {@const specAgents = wsAgents.filter(a => a.spec_path === spec.path)}
-                        {@const specMrs = wsMrs.filter(m => m.spec_ref?.startsWith(spec.path))}
-                        <tr class="ws-entity-row" onclick={() => navigateToSpec(spec)}>
-                          <td class="entity-name-cell">
-                            <Icon name="spec" size={12} />
-                            <span class="entity-primary-name">{specName}</span>
-                            {#if specDir}<span class="entity-secondary-path">{specDir}/</span>{/if}
-                          </td>
-                          <td>
-                            <div class="status-with-context">
+                  <div class="entity-list">
+                    {#each filteredSpecs as spec}
+                      {@const status = spec.approval_status ?? spec.status ?? 'pending'}
+                      {@const specName = spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}
+                      {@const specDir = spec.path?.includes('/') ? spec.path.split('/').slice(0, -1).join('/') : ''}
+                      {@const specTasks = wsTasks.filter(t => t.spec_path === spec.path)}
+                      {@const doneTasks = specTasks.filter(t => t.status === 'done').length}
+                      {@const inProgressTasks = specTasks.filter(t => t.status === 'in_progress').length}
+                      {@const totalTasks = specTasks.length}
+                      {@const specAgents = wsAgents.filter(a => a.spec_path === spec.path)}
+                      {@const specMrs = wsMrs.filter(m => m.spec_ref?.startsWith(spec.path))}
+                      {@const activeAgent = specAgents.find(a => a.status === 'active')}
+                      {@const latestMr = specMrs.sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))[0]}
+                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => navigateToSpec(spec)}>
+                        <div class="entity-list-main">
+                          <Icon name="spec" size={14} />
+                          <div class="entity-list-info">
+                            <div class="entity-list-title-row">
+                              <span class="entity-list-name">{specName}</span>
+                              {#if specDir}<span class="entity-list-path">{specDir}/</span>{/if}
+                              {#if spec.repo_id && repoMap[spec.repo_id]}
+                                <span class="entity-list-repo">{repoMap[spec.repo_id].name}</span>
+                              {/if}
+                            </div>
+                            <div class="entity-list-meta">
                               <span class="status-pill status-pill-{status}" title={specStatusTooltip(status)}>
                                 {SPEC_STATUS_ICONS[status] ?? ''} {status}
                               </span>
                               {#if status === 'pending'}
-                                <span class="status-context status-context-action">needs review</span>
-                              {:else if status === 'approved' && totalTasks === 0}
-                                <span class="status-context">awaiting task creation</span>
-                              {:else if status === 'approved' && specAgents.length === 0 && doneTasks < totalTasks}
-                                <span class="status-context">awaiting agent</span>
-                              {:else if status === 'approved' && specAgents.some(a => a.status === 'active')}
-                                <span class="status-context status-context-success">agent working</span>
+                                <span class="entity-list-context entity-list-context-action">needs review</span>
+                              {:else if status === 'approved' && activeAgent}
+                                <span class="entity-list-context entity-list-context-success">agent working</span>
                               {:else if status === 'approved' && doneTasks === totalTasks && totalTasks > 0}
-                                <span class="status-context status-context-success">fully implemented</span>
+                                <span class="entity-list-context entity-list-context-success">fully implemented</span>
+                              {:else if status === 'approved' && totalTasks === 0}
+                                <span class="entity-list-context">awaiting tasks</span>
                               {:else if status === 'rejected'}
-                                <span class="status-context status-context-danger">blocked</span>
+                                <span class="entity-list-context entity-list-context-danger">blocked</span>
                               {/if}
-                            </div>
-                          </td>
-                          <td class="progress-cell">
-                            {#if totalTasks > 0}
-                              <div class="progress-mini" title="{doneTasks}/{totalTasks} tasks done{inProgressTasks > 0 ? `, ${inProgressTasks} in progress` : ''}">
-                                <div class="progress-mini-bar">
-                                  <div class="progress-mini-fill" class:progress-complete={doneTasks === totalTasks} style="width: {Math.round((doneTasks / totalTasks) * 100)}%"></div>
-                                </div>
-                                <span class="progress-text">{doneTasks}/{totalTasks}</span>
-                              </div>
-                            {:else if status === 'approved'}
-                              <span class="text-muted">awaiting tasks</span>
-                            {:else}
-                              <span class="text-muted">-</span>
-                            {/if}
-                          </td>
-                          <td>
-                            <div class="spec-downstream">
-                              {#if specAgents.length > 0}
-                                {@const activeAgent = specAgents.find(a => a.status === 'active')}
-                                {#if activeAgent}
-                                  <button class="downstream-chip downstream-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', activeAgent.id, { repo_id: activeAgent.repo_id, name: activeAgent.name }); }} title="Agent running">
-                                    <span class="status-pulse-tiny"></span> {activeAgent.name ?? formatId('agent', activeAgent.id)}
-                                  </button>
-                                {/if}
+                              {#if totalTasks > 0}
+                                <span class="entity-list-progress" title="{doneTasks}/{totalTasks} tasks done">
+                                  <span class="progress-mini-bar"><span class="progress-mini-fill" class:progress-complete={doneTasks === totalTasks} style="width: {Math.round((doneTasks / totalTasks) * 100)}%"></span></span>
+                                  {doneTasks}/{totalTasks}
+                                </span>
                               {/if}
-                              {#if specMrs.length > 0}
-                                {@const latestMr = specMrs.sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))[0]}
-                                <button class="downstream-chip downstream-chip-{latestMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', latestMr.id, { repo_id: latestMr.repository_id ?? latestMr.repo_id, title: latestMr.title }); }} title="MR: {latestMr.title ?? ''}">
+                              {#if activeAgent}
+                                <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', activeAgent.id, { repo_id: activeAgent.repo_id, name: activeAgent.name }); }}>
+                                  <span class="status-pulse-tiny"></span> {activeAgent.name ?? formatId('agent', activeAgent.id)}
+                                </button>
+                              {/if}
+                              {#if latestMr}
+                                <button class="entity-list-chip entity-list-chip-{latestMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', latestMr.id, { repo_id: latestMr.repository_id ?? latestMr.repo_id, title: latestMr.title }); }}>
                                   <Icon name="git-merge" size={10} /> {latestMr.status}
                                 </button>
-                              {:else if specAgents.length === 0 && totalTasks === 0 && status === 'pending'}
-                                <span class="text-muted">needs approval</span>
-                              {:else if totalTasks > 0 && specAgents.length === 0}
-                                <span class="text-muted">awaiting agent</span>
+                              {/if}
+                              {#if spec.updated_at ?? spec.created_at}
+                                <span class="entity-list-time" title={absTime(spec.updated_at ?? spec.created_at)}>{relTime(spec.updated_at ?? spec.created_at)}</span>
                               {/if}
                             </div>
-                          </td>
-                          <td>
-                            {#if spec.repo_id && repoMap[spec.repo_id]}
-                              <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }}>
-                                {repoMap[spec.repo_id].name}
-                              </button>
-                            {/if}
-                          </td>
-                          <td class="entity-time" title={absTime(spec.updated_at ?? spec.created_at)}>{relTime(spec.updated_at ?? spec.created_at)}</td>
-                          <td class="td-actions">
-                            {#if status === 'pending' && specActionStates[spec.path] !== 'approved'}
-                              <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'} title="Approve this spec">Approve</button>
-                              <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'} title="Reject this spec">Reject</button>
-                            {:else if specActionStates[spec.path] === 'approved'}
-                              <span class="inline-action-done">Approved</span>
-                            {:else if specActionStates[spec.path] === 'rejected'}
-                              <span class="inline-action-done inline-action-rejected">Rejected</span>
-                            {/if}
-                          </td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
+                          </div>
+                        </div>
+                        <div class="entity-list-actions">
+                          {#if status === 'pending' && specActionStates[spec.path] !== 'approved'}
+                            <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'}>Approve</button>
+                            <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'}>Reject</button>
+                          {:else if specActionStates[spec.path] === 'approved'}
+                            <span class="inline-action-done">Approved</span>
+                          {:else if specActionStates[spec.path] === 'rejected'}
+                            <span class="inline-action-done inline-action-rejected">Rejected</span>
+                          {/if}
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
                 {/if}
               </div>
 
@@ -1538,81 +1505,55 @@
                 {:else if filteredTasks.length === 0}
                   <p class="empty-text">No tasks matching "{entitySearch}"</p>
                 {:else}
-                  <table class="ws-entity-table">
-                    <thead>
-                      <tr>
-                        <th>Task</th>
-                        <th>Status</th>
-                        <th>Priority</th>
-                        <th>Spec</th>
-                        <th>Output</th>
-                        <th>Repo</th>
-                        <th>Updated</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {#each filteredTasks.sort((a, b) => {
-                        const order = { blocked: 0, in_progress: 1, review: 2, backlog: 3, done: 4, cancelled: 5 };
-                        return (order[a.status] ?? 3) - (order[b.status] ?? 3);
-                      }) as task}
-                        {@const taskStatus = task.status ?? 'backlog'}
-                        {@const taskAgent = wsAgents.find(a => (a.task_id ?? a.current_task_id) === task.id)}
-                        {@const taskMr = wsMrs.find(m => m.task_id === task.id || (task.spec_path && m.spec_ref?.includes(task.spec_path)))}
-                        <tr class="ws-entity-row" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })}>
-                          <td class="entity-name-cell">
-                            <Icon name="task" size={12} />
-                            <span class="entity-primary-name">{task.title ?? 'Untitled'}</span>
-                          </td>
-                          <td>
-                            <div class="status-with-context">
-                              <span class="status-pill status-pill-{taskStatus}" title={taskStatusTooltip(task)}>
-                                {taskStatus}
-                              </span>
-                              {#if taskStatus === 'in_progress' && taskAgent}
-                                <button class="status-context status-context-link" onclick={(e) => { e.stopPropagation(); nav('agent', taskAgent.id, { repo_id: task.repo_id, name: taskAgent.name }); }}>
-                                  {taskAgent.name ?? formatId('agent', taskAgent.id)}
-                                </button>
-                              {:else if taskStatus === 'blocked'}
-                                <span class="status-context">Waiting for dependency</span>
+                  <div class="entity-list">
+                    {#each filteredTasks.sort((a, b) => {
+                      const order = { blocked: 0, in_progress: 1, review: 2, backlog: 3, done: 4, cancelled: 5 };
+                      return (order[a.status] ?? 3) - (order[b.status] ?? 3);
+                    }) as task}
+                      {@const taskStatus = task.status ?? 'backlog'}
+                      {@const taskAgent = wsAgents.find(a => (a.task_id ?? a.current_task_id) === task.id)}
+                      {@const taskMr = wsMrs.find(m => m.task_id === task.id || (task.spec_path && m.spec_ref?.includes(task.spec_path)))}
+                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })}>
+                        <div class="entity-list-main">
+                          <Icon name="task" size={14} />
+                          <div class="entity-list-info">
+                            <div class="entity-list-title-row">
+                              <span class="entity-list-name">{task.title ?? 'Untitled'}</span>
+                              {#if task.repo_id && repoMap[task.repo_id]}
+                                <span class="entity-list-repo">{repoMap[task.repo_id].name}</span>
                               {/if}
                             </div>
-                          </td>
-                          <td>
-                            {#if task.priority}
-                              <span class="priority-pill priority-{task.priority}">{task.priority}</span>
-                            {/if}
-                          </td>
-                          <td>
-                            {#if task.spec_path}
-                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }}>
-                                {task.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                              </button>
-                            {/if}
-                          </td>
-                          <td>
-                            {#if taskMr}
-                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('mr', taskMr.id, { repo_id: taskMr.repository_id ?? taskMr.repo_id, title: taskMr.title }); }}>
-                                <span class="status-pill status-pill-{taskMr.status}" style="font-size: 9px; padding: 0 4px;">{taskMr.status}</span>
-                                {taskMr.title ?? entityName('mr', taskMr.id)}
-                              </button>
-                            {:else if taskStatus === 'backlog'}
-                              <span class="text-muted">-</span>
-                            {:else if taskStatus === 'in_progress'}
-                              <span class="text-muted">in progress</span>
-                            {/if}
-                          </td>
-                          <td>
-                            {#if task.repo_id && repoMap[task.repo_id]}
-                              <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[task.repo_id]); }}>
-                                {repoMap[task.repo_id].name}
-                              </button>
-                            {/if}
-                          </td>
-                          <td class="entity-time" title={absTime(task.updated_at ?? task.created_at)}>{relTime(task.updated_at ?? task.created_at)}</td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
+                            <div class="entity-list-meta">
+                              <span class="status-pill status-pill-{taskStatus}" title={taskStatusTooltip(task)}>{taskStatus}</span>
+                              {#if task.priority}
+                                <span class="priority-pill priority-{task.priority}">{task.priority}</span>
+                              {/if}
+                              {#if taskStatus === 'in_progress' && taskAgent}
+                                <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', taskAgent.id, { repo_id: task.repo_id, name: taskAgent.name }); }}>
+                                  <span class="status-pulse-tiny"></span> {taskAgent.name ?? formatId('agent', taskAgent.id)}
+                                </button>
+                              {:else if taskStatus === 'blocked'}
+                                <span class="entity-list-context entity-list-context-danger">waiting for dependency</span>
+                              {/if}
+                              {#if task.spec_path}
+                                <button class="entity-list-chip" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }}>
+                                  <Icon name="spec" size={10} /> {task.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                                </button>
+                              {/if}
+                              {#if taskMr}
+                                <button class="entity-list-chip entity-list-chip-{taskMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', taskMr.id, { repo_id: taskMr.repository_id ?? taskMr.repo_id, title: taskMr.title }); }}>
+                                  <Icon name="git-merge" size={10} /> {taskMr.title ?? entityName('mr', taskMr.id)}
+                                </button>
+                              {/if}
+                              {#if task.updated_at ?? task.created_at}
+                                <span class="entity-list-time" title={absTime(task.updated_at ?? task.created_at)}>{relTime(task.updated_at ?? task.created_at)}</span>
+                              {/if}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
                 {/if}
               </div>
 
@@ -1653,139 +1594,82 @@
                 {:else if filteredMrs.length === 0}
                   <p class="empty-text">No MRs matching "{entitySearch}"</p>
                 {:else}
-                  <table class="ws-entity-table">
-                    <thead>
-                      <tr>
-                        <th>Merge Request</th>
-                        <th>Status</th>
-                        <th>Spec</th>
-                        <th>Gates</th>
-                        <th>Diff</th>
-                        <th>Repo</th>
-                        <th>Updated</th>
-                        <th class="th-actions"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {#each filteredMrs.sort((a, b) => {
-                        const order = { open: 0, queued: 1, merged: 2, closed: 3 };
-                        return (order[a.status] ?? 2) - (order[b.status] ?? 2);
-                      }) as mr}
-                        {@const mrStatus = mr.status ?? 'open'}
-                        {@const gates = mr._gates}
-                        {@const ds = mr.diff_stats}
-                        <tr class="ws-entity-row" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })} title="Click to view diff, gates, attestation, and agent reasoning">
-                          <td class="entity-name-cell">
-                            <Icon name="git-merge" size={12} />
-                            <span class="entity-primary-name">{mr.title ?? 'Untitled MR'}</span>
-                            {#if mr.author_agent_id}
-                              <button class="entity-agent-chip" onclick={(e) => { e.stopPropagation(); nav('agent', mr.author_agent_id, { repo_id: mr.repository_id ?? mr.repo_id }); }} title="Created by agent">
-                                {entityName('agent', mr.author_agent_id)}
-                              </button>
-                            {/if}
-                            {#if mr.source_branch}
-                              <span class="entity-branch-tag">{mr.source_branch}</span>
-                            {/if}
-                          </td>
-                          <td>
-                            <div class="status-with-context">
-                              <span class="status-pill status-pill-{mrStatus}" title={mrStatusTooltip(mr)}>
-                                {mrStatus}
-                              </span>
-                              {#if mrStatus === 'open' && gates?.failed > 0}
-                                <span class="status-context status-context-danger">{gates.failed} gate{gates.failed !== 1 ? 's' : ''} failed — merge blocked</span>
-                              {:else if mrStatus === 'open' && mr.queue_position != null}
-                                <span class="status-context">Queue #{mr.queue_position + 1} — waiting for gates</span>
-                              {:else if mrStatus === 'merged' && mr.merged_at}
-                                <span class="status-context status-context-success">merged {relTime(mr.merged_at)}</span>
-                                {#if mr.merge_commit_sha}
-                                  <span class="merged-provenance">
-                                    {#if mr.spec_ref}<span class="prov-step">spec</span><span class="prov-arrow">→</span>{/if}
-                                    {#if mr.author_agent_id}<span class="prov-step">agent</span><span class="prov-arrow">→</span>{/if}
-                                    {#if gates?.passed > 0}<span class="prov-step">{gates.passed} gates</span><span class="prov-arrow">→</span>{/if}
-                                    <code class="sha-inline mono">{mr.merge_commit_sha.slice(0, 7)}</code>
-                                  </span>
-                                {/if}
-                              {:else if mrStatus === 'open' && gates?.passed === gates?.total && gates?.total > 0}
-                                <span class="status-context status-context-success">All gates passed — ready to enqueue</span>
-                              {:else if mrStatus === 'open' && (!gates || gates.total === 0)}
-                                <span class="status-context">Awaiting enqueue</span>
-                              {:else if mrStatus === 'closed'}
-                                <span class="status-context status-context-danger">Changes not merged</span>
+                  <div class="entity-list">
+                    {#each filteredMrs.sort((a, b) => {
+                      const order = { open: 0, queued: 1, merged: 2, closed: 3 };
+                      return (order[a.status] ?? 2) - (order[b.status] ?? 2);
+                    }) as mr}
+                      {@const mrStatus = mr.status ?? 'open'}
+                      {@const gates = mr._gates}
+                      {@const ds = mr.diff_stats}
+                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })}>
+                        <div class="entity-list-main">
+                          <Icon name="git-merge" size={14} />
+                          <div class="entity-list-info">
+                            <div class="entity-list-title-row">
+                              <span class="entity-list-name">{mr.title ?? 'Untitled MR'}</span>
+                              {#if mr.source_branch}
+                                <span class="entity-branch-tag">{mr.source_branch}</span>
+                              {/if}
+                              {#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}
+                                <span class="entity-list-repo">{repoMap[mr.repository_id ?? mr.repo_id].name}</span>
                               {/if}
                             </div>
-                          </td>
-                          <td>
-                            {#if mr.spec_ref}
-                              {@const mrSpecPath = mr.spec_ref.split('@')[0]}
-                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', mrSpecPath, { path: mrSpecPath, repo_id: mr.repository_id ?? mr.repo_id }); }} title={mr.spec_ref}>
-                                {mrSpecPath.split('/').pop()?.replace(/\.md$/, '')}
-                              </button>
-                            {:else}
-                              <span class="text-muted">-</span>
-                            {/if}
-                          </td>
-                          <td>
-                            {#if gates && gates.total > 0}
-                              <button class="gates-inline" title="View gate details" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }}>
-                                {#each (gates.details ?? []).slice(0, 3) as g}
-                                  <span class="gate-chip gate-chip-{g.status}" title="{g.name}: {g.status}{g.required === false ? ' (advisory)' : ''}{g.gate_type ? '\nType: ' + g.gate_type.replace(/_/g, ' ') : ''}{g.command ? '\nCommand: ' + g.command : ''}">
-                                    {g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}
-                                  </span>
-                                {/each}
-                                {#if (gates.details ?? []).length > 3}
-                                  <span class="gate-chip-more">+{gates.details.length - 3}</span>
-                                {/if}
-                                {#if (gates.details ?? []).length === 0}
-                                  {#if gates.failed > 0}<span class="gate-chip gate-chip-failed">✗ {gates.failed} failed</span>{/if}
-                                  {#if gates.passed > 0}<span class="gate-chip gate-chip-passed">✓ {gates.passed} passed</span>{/if}
-                                  {#if gates.total > gates.passed + gates.failed}<span class="gate-chip gate-chip-pending">○ {gates.total - gates.passed - gates.failed} pending</span>{/if}
-                                {/if}
-                              </button>
-                              {#if gates.failed > 0}
-                                {@const failedGate = (gates.details ?? []).find(g => g.status === 'failed')}
-                                {#if failedGate?.output || failedGate?.error}
-                                  <span class="gate-error-preview" title="Click MR to see full gate details">{(failedGate.error ?? failedGate.output ?? '').split('\n')[0]?.slice(0, 80)}</span>
-                                {/if}
+                            <div class="entity-list-meta">
+                              <span class="status-pill status-pill-{mrStatus}" title={mrStatusTooltip(mr)}>{mrStatus}</span>
+                              {#if mrStatus === 'open' && gates?.failed > 0}
+                                <span class="entity-list-context entity-list-context-danger">{gates.failed} gate{gates.failed !== 1 ? 's' : ''} failed</span>
+                              {:else if mrStatus === 'merged' && mr.merge_commit_sha}
+                                <span class="entity-list-provenance">
+                                  {#if mr.spec_ref}<span class="prov-step">spec</span><span class="prov-arrow">→</span>{/if}
+                                  {#if mr.author_agent_id}<span class="prov-step">agent</span><span class="prov-arrow">→</span>{/if}
+                                  {#if gates?.passed > 0}<span class="prov-step">{gates.passed} gates</span><span class="prov-arrow">→</span>{/if}
+                                  <code class="sha-inline mono">{mr.merge_commit_sha.slice(0, 7)}</code>
+                                </span>
+                              {:else if mrStatus === 'open' && gates?.passed === gates?.total && gates?.total > 0}
+                                <span class="entity-list-context entity-list-context-success">all gates passed</span>
                               {/if}
-                            {:else}
-                              <span class="text-muted">-</span>
-                            {/if}
-                          </td>
-                          <td>
-                            {#if ds}
-                              <button class="diff-stats-mini diff-stats-link" title="View code diff" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'diff' }); }}>
-                                {#if ds.files_changed}<span class="diff-files-mini">{ds.files_changed} file{ds.files_changed !== 1 ? 's' : ''}</span>{/if}
-                                <span class="diff-ins-mini">+{ds.insertions ?? 0}</span>
-                                <span class="diff-del-mini">-{ds.deletions ?? 0}</span>
-                              </button>
-                            {/if}
-                          </td>
-                          <td>
-                            {#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}
-                              <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id ?? mr.repo_id]); }}>
-                                {repoMap[mr.repository_id ?? mr.repo_id].name}
-                              </button>
-                            {/if}
-                          </td>
-                          <td class="entity-time" title={absTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}>{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
-                          <td class="td-actions td-actions-mr">
-                            {#if ds}
-                              <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'diff' }); }} title="View code changes">Diff</button>
-                            {/if}
-                            {#if gates?.total > 0}
-                              <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }} title="View gate results and logs">Gates</button>
-                            {/if}
-                            {#if mrStatus === 'open' && mr.queue_position == null && mrEnqueueStates[mr.id] !== 'queued'}
-                              <button class="inline-action-btn inline-action-approve" onclick={(e) => quickEnqueueMr(mr, e)} disabled={mrEnqueueStates[mr.id] === 'loading'} title="Enqueue for merge">Enqueue</button>
-                            {:else if mrEnqueueStates[mr.id] === 'queued'}
-                              <span class="inline-action-done">Queued</span>
-                            {/if}
-                          </td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
+                              {#if gates && gates.total > 0}
+                                <button class="entity-list-chip" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }}>
+                                  {#each (gates.details ?? []).slice(0, 3) as g}
+                                    <span class="gate-chip gate-chip-{g.status}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}</span>
+                                  {/each}
+                                  {#if (gates.details ?? []).length === 0}
+                                    {#if gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{gates.passed}</span>{/if}
+                                    {#if gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{gates.failed}</span>{/if}
+                                  {/if}
+                                </button>
+                              {/if}
+                              {#if mr.author_agent_id}
+                                <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', mr.author_agent_id, { repo_id: mr.repository_id ?? mr.repo_id }); }}>
+                                  {entityName('agent', mr.author_agent_id)}
+                                </button>
+                              {/if}
+                              {#if ds}
+                                <span class="diff-stats-mini">
+                                  <span class="diff-ins-mini">+{ds.insertions ?? 0}</span>
+                                  <span class="diff-del-mini">-{ds.deletions ?? 0}</span>
+                                </span>
+                              {/if}
+                              {#if mr.merged_at ?? mr.updated_at ?? mr.created_at}
+                                <span class="entity-list-time" title={absTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}>{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</span>
+                              {/if}
+                            </div>
+                          </div>
+                        </div>
+                        <div class="entity-list-actions">
+                          {#if mrStatus === 'open' && mr.queue_position == null && mrEnqueueStates[mr.id] !== 'queued'}
+                            <button class="inline-action-btn inline-action-approve" onclick={(e) => { e.stopPropagation(); quickEnqueueMr(mr, e); }}>Enqueue</button>
+                          {:else if mrEnqueueStates[mr.id] === 'queued'}
+                            <span class="inline-action-done">Queued</span>
+                          {/if}
+                          {#if ds}
+                            <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'diff' }); }}>Diff</button>
+                          {/if}
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
                 {/if}
               </div>
 
@@ -1802,102 +1686,66 @@
                 {:else if filteredAgents.length === 0}
                   <p class="empty-text">No agents matching "{entitySearch}"</p>
                 {:else}
-                  <table class="ws-entity-table">
-                    <thead>
-                      <tr>
-                        <th>Agent</th>
-                        <th>Status</th>
-                        <th>Task</th>
-                        <th>Output</th>
-                        <th>Duration</th>
-                        <th>Repo</th>
-                        <th class="th-actions"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {#each filteredAgents.sort((a, b) => {
-                        const order = { active: 0, spawning: 1, idle: 2, completed: 3, failed: 4, dead: 5 };
-                        return (order[a.status] ?? 3) - (order[b.status] ?? 3);
-                      }) as agent}
-                        {@const agStatus = agent.status ?? 'idle'}
-                        {@const agentMr = wsMrs.find(m => m.author_agent_id === agent.id)}
-                        {@const startTime = agent.spawned_at ?? agent.created_at}
-                        {@const endTime = agent.completed_at ?? (agStatus === 'active' ? null : agent.last_heartbeat)}
-                        {@const durationSecs = startTime ? Math.round(((endTime ? new Date(endTime) : new Date()) - new Date(startTime)) / 1000) : null}
-                        <tr class="ws-entity-row" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
-                          <td class="entity-name-cell">
-                            <Icon name="agent" size={12} />
-                            <span class="entity-primary-name">{agent.name ?? formatId('agent', agent.id)}</span>
-                            {#if agent.branch}
-                              <span class="entity-branch-tag">{agent.branch}</span>
-                            {/if}
-                          </td>
-                          <td>
-                            <div class="status-with-context">
+                  <div class="entity-list">
+                    {#each filteredAgents.sort((a, b) => {
+                      const order = { active: 0, spawning: 1, idle: 2, completed: 3, failed: 4, dead: 5 };
+                      return (order[a.status] ?? 3) - (order[b.status] ?? 3);
+                    }) as agent}
+                      {@const agStatus = agent.status ?? 'idle'}
+                      {@const agentMr = wsMrs.find(m => m.author_agent_id === agent.id)}
+                      {@const startTime = agent.spawned_at ?? agent.created_at}
+                      {@const endTime = agent.completed_at ?? (agStatus === 'active' ? null : agent.last_heartbeat)}
+                      {@const durationSecs = startTime ? Math.round(((endTime ? new Date(endTime) : new Date()) - new Date(startTime)) / 1000) : null}
+                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
+                        <div class="entity-list-main">
+                          <Icon name="agent" size={14} />
+                          <div class="entity-list-info">
+                            <div class="entity-list-title-row">
+                              <span class="entity-list-name">{agent.name ?? formatId('agent', agent.id)}</span>
+                              {#if agent.branch}
+                                <span class="entity-branch-tag">{agent.branch}</span>
+                              {/if}
+                              {#if agent.repo_id && repoMap[agent.repo_id]}
+                                <span class="entity-list-repo">{repoMap[agent.repo_id].name}</span>
+                              {/if}
+                            </div>
+                            <div class="entity-list-meta">
                               <span class="status-pill status-pill-{agStatus}" title={agentStatusTooltip(agent)}>
                                 {#if agStatus === 'active'}<span class="status-pulse"></span>{/if}
                                 {agStatus}
                               </span>
                               {#if agStatus === 'active'}
-                                <span class="status-context status-context-success">{agent.spec_path ? `implementing ${agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}` : 'implementing code'}</span>
-                              {:else if agStatus === 'idle' || agStatus === 'completed'}
-                                <span class="status-context">work complete{agent.spec_path ? ` (${agent.spec_path.split('/').pop()?.replace(/\.md$/, '')})` : ''}</span>
+                                <span class="entity-list-context entity-list-context-success">{agent.spec_path ? `implementing ${agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}` : 'implementing code'}</span>
                               {:else if agStatus === 'failed'}
-                                <span class="status-context status-context-danger">failed — click for logs</span>
-                              {:else if agStatus === 'dead'}
-                                <span class="status-context status-context-danger">process terminated</span>
-                              {:else if agStatus === 'spawning'}
-                                <span class="status-context">starting up</span>
+                                <span class="entity-list-context entity-list-context-danger">failed — click for logs</span>
+                              {:else if agStatus === 'idle' || agStatus === 'completed'}
+                                <span class="entity-list-context">work complete</span>
+                              {/if}
+                              {#if agent.task_id ?? agent.current_task_id}
+                                <button class="entity-list-chip" onclick={(e) => { e.stopPropagation(); nav('task', agent.task_id ?? agent.current_task_id, { repo_id: agent.repo_id }); }}>
+                                  <Icon name="task" size={10} /> {entityName('task', agent.task_id ?? agent.current_task_id)}
+                                </button>
+                              {/if}
+                              {#if agentMr}
+                                <button class="entity-list-chip entity-list-chip-{agentMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title }); }}>
+                                  <Icon name="git-merge" size={10} /> {agentMr.title ?? entityName('mr', agentMr.id)}
+                                </button>
+                              {/if}
+                              {#if durationSecs != null}
+                                <span class="entity-list-time" class:duration-running={agStatus === 'active'}>{formatDuration(durationSecs)}</span>
                               {/if}
                             </div>
-                          </td>
-                          <td>
-                            {#if agent.task_id ?? agent.current_task_id}
-                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('task', agent.task_id ?? agent.current_task_id, { repo_id: agent.repo_id }); }}>
-                                {entityName('task', agent.task_id ?? agent.current_task_id)}
-                              </button>
-                            {/if}
-                          </td>
-                          <td>
-                            {#if agentMr}
-                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title }); }}>
-                                <span class="status-pill status-pill-{agentMr.status}" style="font-size: 9px; padding: 0 4px;">{agentMr.status}</span>
-                                {agentMr.title ?? entityName('mr', agentMr.id)}
-                              </button>
-                            {:else if agStatus === 'active'}
-                              <span class="text-muted">in progress</span>
-                            {:else if agStatus === 'idle' || agStatus === 'completed'}
-                              <span class="text-muted">no MR</span>
-                            {:else}
-                              <span class="text-muted">-</span>
-                            {/if}
-                          </td>
-                          <td class="entity-time">
-                            {#if durationSecs != null}
-                              {#if agStatus === 'active'}
-                                <span class="duration-running">{formatDuration(durationSecs)}</span>
-                              {:else}
-                                {formatDuration(durationSecs)}
-                              {/if}
-                            {/if}
-                          </td>
-                          <td>
-                            {#if agent.repo_id && repoMap[agent.repo_id]}
-                              <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id]); }}>
-                                {repoMap[agent.repo_id].name}
-                              </button>
-                            {/if}
-                          </td>
-                          <td class="td-actions">
-                            <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name, _openTab: 'history' }); }} title="View agent execution logs">Logs</button>
-                            {#if agentMr}
-                              <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title, _openTab: 'diff' }); }} title="View MR diff">Diff</button>
-                            {/if}
-                          </td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
+                          </div>
+                        </div>
+                        <div class="entity-list-actions">
+                          <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name, _openTab: 'history' }); }}>Logs</button>
+                          {#if agentMr}
+                            <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title, _openTab: 'diff' }); }}>Diff</button>
+                          {/if}
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
                 {/if}
               </div>
 
@@ -3096,7 +2944,150 @@
     border-bottom: 1px solid var(--color-border);
   }
 
-  /* ── Entity tables ─────────────────────────────────────────────────── */
+  /* ── Entity list (compact list layout replacing wide tables) ─────── */
+  .entity-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .entity-list-item {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    text-align: left;
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .entity-list-item:last-child { border-bottom: none; }
+  .entity-list-item:hover { background: color-mix(in srgb, var(--color-primary) 4%, transparent); }
+
+  .entity-list-main {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    flex: 1;
+    min-width: 0;
+  }
+
+  .entity-list-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .entity-list-title-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+
+  .entity-list-name {
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .entity-list-path {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .entity-list-repo {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .entity-list-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+    font-size: 10px;
+  }
+
+  .entity-list-context {
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .entity-list-context-action { color: var(--color-warning); font-weight: 500; font-style: normal; }
+  .entity-list-context-success { color: var(--color-success); }
+  .entity-list-context-danger { color: var(--color-danger); }
+
+  .entity-list-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    white-space: nowrap;
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .entity-list-chip:hover { text-decoration: underline; color: var(--color-primary); }
+  .entity-list-chip-active { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .entity-list-chip-merged { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .entity-list-chip-open { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 8%, transparent); }
+
+  .entity-list-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+  }
+
+  .entity-list-time {
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .entity-list-provenance {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+  }
+
+  .entity-list-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  /* ── Legacy entity tables (kept for compat) ─────────────────────────── */
   .ws-entity-table {
     width: 100%;
     border-collapse: collapse;
