@@ -94,6 +94,60 @@
 
   // Trace path numbering state (BFS order badges for "Trace from here")
   let tracePathOrder = $state(new Map()); // nodeId → step number (1-based)
+  let tracePathEdges = $state([]); // [{fromId, toId, edgeType}] in BFS order
+
+  // Anomaly detection state (evaluative lens)
+  let anomalies = $derived.by(() => {
+    if (lens !== 'evaluative') return [];
+    const results = [];
+    for (const n of nodes) {
+      if (n.node_type === 'tree-group' || n.deleted_at) continue;
+      // High complexity + low test coverage
+      if ((n.complexity ?? 0) > 15 && (n.test_coverage ?? 0) < 0.3) {
+        results.push({
+          nodeId: n.id,
+          nodeName: n.name ?? n.qualified_name ?? '?',
+          message: `High complexity (${n.complexity}) but low test coverage (${Math.round((n.test_coverage ?? 0) * 100)}%)`,
+          severity: 'high',
+        });
+      }
+      // Heavily depended on with no spec
+      const incomingCalls = edges.filter(e => {
+        const tgt = e.target_id ?? e.to_node_id ?? e.to;
+        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+        return tgt === n.id && et === 'calls';
+      }).length;
+      if (incomingCalls > 5 && !n.spec_path) {
+        results.push({
+          nodeId: n.id,
+          nodeName: n.name ?? n.qualified_name ?? '?',
+          message: `Heavily depended on (${incomingCalls} callers) with no spec`,
+          severity: 'medium',
+        });
+      }
+      // Orphan module — no callers
+      if (n.node_type === 'function' && !n.test_node) {
+        const hasCallers = edges.some(e => {
+          const tgt = e.target_id ?? e.to_node_id ?? e.to;
+          const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+          return tgt === n.id && et === 'calls';
+        });
+        if (!hasCallers) {
+          results.push({
+            nodeId: n.id,
+            nodeName: n.name ?? n.qualified_name ?? '?',
+            message: 'Orphan module \u2014 no callers',
+            severity: 'low',
+          });
+        }
+      }
+    }
+    // Sort by severity (high first), then take top 5
+    const order = { high: 0, medium: 1, low: 2 };
+    results.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
+    return results.slice(0, 5);
+  });
+  let anomalyPanelOpen = $state(true);
 
   // Timeline scrubber state
   let timelineEnabled = $state(false);
@@ -108,11 +162,36 @@
     const fromT = minT + (maxT - minT) * (timelineRange[0] / 100);
     const toT = minT + (maxT - minT) * (timelineRange[1] / 100);
     const visibleIds = new Set();
+    const ghostIds = new Set(); // Nodes outside range shown as ghosts
+    const totalWithTime = nodes.filter(n => n.first_seen_at && !n.deleted_at).length;
     for (const n of nodes) {
+      if (n.deleted_at) continue;
       const t = n.first_seen_at || 0;
-      if (t >= fromT && t <= toT && !n.deleted_at) visibleIds.add(n.id);
+      if (t >= fromT && t <= toT) {
+        visibleIds.add(n.id);
+      } else if (n.first_seen_at) {
+        ghostIds.add(n.id);
+      }
     }
-    return { visibleIds, minT, maxT, fromT, toT };
+    // Collect key moment markers (spec approvals, milestone-like events)
+    const markers = [];
+    for (const n of nodes) {
+      if (n.spec_approved_at && n.spec_approved_at >= minT && n.spec_approved_at <= maxT) {
+        markers.push({ time: n.spec_approved_at, label: `Spec: ${n.name ?? '?'}`, pct: ((n.spec_approved_at - minT) / (maxT - minT)) * 100 });
+      }
+      if (n.milestone_completed_at && n.milestone_completed_at >= minT && n.milestone_completed_at <= maxT) {
+        markers.push({ time: n.milestone_completed_at, label: `Milestone: ${n.name ?? '?'}`, pct: ((n.milestone_completed_at - minT) / (maxT - minT)) * 100 });
+      }
+    }
+    // Deduplicate markers that are very close together
+    markers.sort((a, b) => a.time - b.time);
+    const dedupedMarkers = [];
+    for (const m of markers) {
+      if (dedupedMarkers.length === 0 || Math.abs(m.pct - dedupedMarkers[dedupedMarkers.length - 1].pct) > 2) {
+        dedupedMarkers.push(m);
+      }
+    }
+    return { visibleIds, ghostIds, minT, maxT, fromT, toT, totalWithTime, markers: dedupedMarkers.slice(0, 10) };
   });
 
   // Canvas-scoped search state
@@ -1263,6 +1342,28 @@
       drawNodeRecursive(root);
     }
 
+    // Draw timeline ghost outlines (dotted borders for filtered-out nodes)
+    if (timelineNodes && timelineNodes.ghostIds.size > 0) {
+      for (const ghostId of timelineNodes.ghostIds) {
+        const ln = layoutNodeMap.get(ghostId);
+        if (!ln || ln.kind === 'tree-group') continue;
+        if (!isVisible(ln)) continue;
+        const sw = ln.w * cam.zoom;
+        const sh = ln.h * cam.zoom;
+        if (sw < 6 || sh < 4) continue;
+        const s = worldToScreen(ln.x, ln.y);
+        ctx.save();
+        ctx.globalAlpha = 0.2;
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 3]);
+        roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, 3);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
+
     // Draw callout labels
     for (const [nodeId, label] of queryCallouts) {
       const ln = layoutNodeMap.get(nodeId);
@@ -1279,7 +1380,49 @@
       ctx.restore();
     }
 
-    // Trace path numbered badges (BFS order from trace source)
+    // Trace path connecting arrows with edge type labels
+    if (tracePathEdges.length > 0) {
+      for (const te of tracePathEdges) {
+        const sln = layoutNodeMap.get(te.fromId);
+        const tln = layoutNodeMap.get(te.toId);
+        if (!sln || !tln) continue;
+        if (!isVisible(sln) || !isVisible(tln)) continue;
+        const ss = worldToScreen(sln.x, sln.y);
+        const ts = worldToScreen(tln.x, tln.y);
+        // Draw red connecting arrow
+        drawArrow(ctx, ss.x, ss.y, ts.x, ts.y, '#ef4444', 0.7, 2.0);
+        // Draw edge type label at midpoint
+        const dx = ts.x - ss.x, dy = ts.y - ss.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len > 40) {
+          const mx = (ss.x + ts.x) / 2, my = (ss.y + ts.y) / 2;
+          ctx.save();
+          ctx.globalAlpha = 0.85;
+          const labelFont = "9px 'SF Mono', Menlo, monospace";
+          const labelText = (te.edgeType ?? '').replace('_', ' ');
+          const ltw = measureText(ctx, labelText, labelFont);
+          let angle = Math.atan2(dy, dx);
+          if (angle > Math.PI / 2) angle -= Math.PI;
+          if (angle < -Math.PI / 2) angle += Math.PI;
+          ctx.translate(mx, my);
+          ctx.rotate(angle);
+          ctx.font = labelFont;
+          roundRect(ctx, -ltw / 2 - 4, -8, ltw + 8, 16, 3);
+          ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(239, 68, 68, 0.4)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          ctx.fillStyle = '#fca5a5';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(labelText, 0, 0);
+          ctx.restore();
+        }
+      }
+    }
+
+    // Trace path numbered badges (BFS order from trace source) — RED circles
     if (tracePathOrder.size > 0) {
       for (const [nodeId, stepNum] of tracePathOrder) {
         const ln = layoutNodeMap.get(nodeId);
@@ -1291,17 +1434,22 @@
         const sw = ln.w * cam.zoom;
         const sh = ln.h * cam.zoom;
         if (sw < 20 || sh < 14) continue;
-        const badgeR = Math.max(7, Math.min(12, sw * 0.08));
-        const bx = s.x - sw / 2 + badgeR + 2;
-        const by = s.y - sh / 2 + badgeR + 2;
+        const badgeR = Math.max(8, Math.min(14, sw * 0.09));
+        const bx = s.x - sw / 2 + badgeR + 3;
+        const by = s.y - sh / 2 + badgeR + 3;
         ctx.save();
-        ctx.globalAlpha = 0.92;
-        ctx.fillStyle = '#7c3aed';
+        // Red circle with white border
+        ctx.globalAlpha = 0.95;
+        ctx.fillStyle = '#dc2626';
         ctx.beginPath();
         ctx.arc(bx, by, badgeR, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // Step number in white
         ctx.fillStyle = '#ffffff';
-        ctx.font = `bold ${Math.max(7, badgeR)}px system-ui`;
+        ctx.font = `bold ${Math.max(8, badgeR)}px system-ui`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(String(stepNum), bx, by);
@@ -2444,10 +2592,11 @@
     scheduleRedraw();
   });
 
-  // Compute trace path BFS ordering when a trace query is active
+  // Compute trace path BFS ordering and connecting edges when a trace query is active
   $effect(() => {
     if (!activeQuery?.annotation?.title?.startsWith('Trace from:') || !queryMatchedWithDepth) {
       tracePathOrder = new Map();
+      tracePathEdges = [];
       return;
     }
     // Sort matched nodes by BFS depth, then assign step numbers
@@ -2457,6 +2606,24 @@
       ordered.set(entries[i][0], i + 1);
     }
     tracePathOrder = ordered;
+
+    // Build ordered edge list connecting consecutive BFS layers
+    const traceEdges = [];
+    const matchedSet = new Set(ordered.keys());
+    for (const e of edges) {
+      const srcId = e.source_id ?? e.from_node_id ?? e.from;
+      const tgtId = e.target_id ?? e.to_node_id ?? e.to;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (matchedSet.has(srcId) && matchedSet.has(tgtId)) {
+        const srcStep = ordered.get(srcId);
+        const tgtStep = ordered.get(tgtId);
+        if (srcStep < tgtStep) {
+          traceEdges.push({ fromId: srcId, toId: tgtId, edgeType: et, fromStep: srcStep, toStep: tgtStep });
+        }
+      }
+    }
+    traceEdges.sort((a, b) => a.fromStep - b.fromStep || a.toStep - b.toStep);
+    tracePathEdges = traceEdges;
   });
 
   // Sync canvasState zoom
@@ -2758,24 +2925,41 @@
           Timeline
         {/if}
       </span>
-      <input
-        type="range"
-        class="timeline-slider"
-        min="0" max="100"
-        value={timelineRange[0]}
-        oninput={(e) => { timelineRange = [Number(e.target.value), timelineRange[1]]; scheduleRedraw(); }}
-        aria-label="Timeline start"
-      />
-      <input
-        type="range"
-        class="timeline-slider"
-        min="0" max="100"
-        value={timelineRange[1]}
-        oninput={(e) => { timelineRange = [timelineRange[0], Number(e.target.value)]; scheduleRedraw(); }}
-        aria-label="Timeline end"
-      />
+      <div class="timeline-slider-track">
+        <input
+          type="range"
+          class="timeline-slider"
+          min="0" max="100"
+          value={timelineRange[0]}
+          oninput={(e) => { timelineRange = [Number(e.target.value), timelineRange[1]]; scheduleRedraw(); }}
+          aria-label="Timeline start"
+        />
+        <input
+          type="range"
+          class="timeline-slider"
+          min="0" max="100"
+          value={timelineRange[1]}
+          oninput={(e) => { timelineRange = [timelineRange[0], Number(e.target.value)]; scheduleRedraw(); }}
+          aria-label="Timeline end"
+        />
+        {#if timelineNodes?.markers?.length}
+          <div class="timeline-markers" aria-hidden="true">
+            {#each timelineNodes.markers as marker}
+              <div class="timeline-marker" style="left: {marker.pct}%" title={marker.label}>
+                <div class="timeline-marker-line"></div>
+                <div class="timeline-marker-label">{marker.label}</div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
       {#if timelineNodes}
-        <span class="timeline-count">{timelineNodes.visibleIds.size} nodes visible</span>
+        <span class="timeline-count">
+          Showing {timelineNodes.visibleIds.size} of {timelineNodes.totalWithTime} nodes
+          {#if timelineNodes.ghostIds.size > 0}
+            ({timelineNodes.ghostIds.size} ghosted)
+          {/if}
+        </span>
       {/if}
     </div>
   {/if}
@@ -2793,10 +2977,40 @@
       {/each}
     </div>
   {/if}
+
+  <!-- Anomaly panel (evaluative lens) -->
+  {#if lens === 'evaluative' && anomalies.length > 0 && anomalyPanelOpen}
+    <div class="anomaly-panel" role="complementary" aria-label="Detected anomalies">
+      <div class="anomaly-header">
+        <span class="anomaly-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" style="vertical-align: -1px">
+            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          Anomalies ({anomalies.length})
+        </span>
+        <button class="anomaly-close" onclick={() => { anomalyPanelOpen = false; }} title="Dismiss" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      {#each anomalies as anomaly}
+        <button
+          class="anomaly-item anomaly-{anomaly.severity}"
+          onclick={() => {
+            const n = nodes.find(nd => nd.id === anomaly.nodeId);
+            if (n) { selectedNodeId = n.id; onNodeDetail(n); }
+          }}
+          type="button"
+        >
+          <span class="anomaly-node-name">{anomaly.nodeName}</span>
+          <span class="anomaly-message">{anomaly.message}</span>
+        </button>
+      {/each}
+    </div>
+  {/if}
 </div>
 
 <style>
-  .treemap-container { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: #0f0f1a; }
+  .treemap-container { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: #0f0f1a; position: relative; }
 
   .treemap-toolbar {
     display: flex; align-items: center; gap: 4px;
@@ -2978,14 +3192,80 @@
     font-size: 11px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace;
     min-width: 180px;
   }
+  .timeline-slider-track {
+    flex: 1; position: relative; display: flex; flex-direction: column; gap: 2px;
+  }
   .timeline-slider {
-    flex: 1; height: 4px; accent-color: #ef4444;
+    width: 100%; height: 4px; accent-color: #ef4444;
     appearance: auto; cursor: pointer;
+  }
+  .timeline-markers {
+    position: absolute; top: -14px; left: 0; right: 0; height: 12px;
+    pointer-events: none;
+  }
+  .timeline-marker {
+    position: absolute; top: 0; transform: translateX(-50%);
+  }
+  .timeline-marker-line {
+    width: 2px; height: 30px; background: #fbbf24; opacity: 0.6;
+    margin: 0 auto;
+  }
+  .timeline-marker-label {
+    font-size: 8px; color: #fbbf24; font-family: 'SF Mono', Menlo, monospace;
+    white-space: nowrap; text-align: center; opacity: 0.8;
+    max-width: 80px; overflow: hidden; text-overflow: ellipsis;
+    pointer-events: auto;
   }
   .timeline-count {
     font-size: 10px; color: #64748b; font-family: 'SF Mono', Menlo, monospace;
-    white-space: nowrap;
+    white-space: nowrap; min-width: 160px; text-align: right;
   }
+
+  /* Anomaly panel */
+  .anomaly-panel {
+    position: absolute; bottom: 12px; right: 12px; z-index: 40;
+    width: 320px; max-height: 260px; overflow-y: auto;
+    background: rgba(15, 15, 26, 0.95); border: 1px solid #334155;
+    border-radius: 8px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(16px);
+  }
+  .anomaly-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; border-bottom: 1px solid #1e293b;
+  }
+  .anomaly-title {
+    font-size: 11px; font-weight: 700; color: #fbbf24;
+    font-family: system-ui, -apple-system, sans-serif;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .anomaly-close {
+    display: flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; background: transparent; border: none;
+    border-radius: 4px; color: #64748b; cursor: pointer;
+  }
+  .anomaly-close:hover { background: #1e293b; color: #e2e8f0; }
+  .anomaly-item {
+    display: flex; flex-direction: column; gap: 2px; width: 100%;
+    padding: 8px 12px; border: none; background: transparent;
+    cursor: pointer; text-align: left; border-bottom: 1px solid #1e293b;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  .anomaly-item:last-child { border-bottom: none; }
+  .anomaly-item:hover { background: #1e293b; }
+  .anomaly-node-name {
+    font-size: 11px; font-weight: 600; color: #e2e8f0;
+    font-family: 'SF Mono', Menlo, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .anomaly-message {
+    font-size: 10px; color: #94a3b8;
+  }
+  .anomaly-high .anomaly-node-name { color: #fca5a5; }
+  .anomaly-high .anomaly-message { color: #ef4444; }
+  .anomaly-medium .anomaly-node-name { color: #fde68a; }
+  .anomaly-medium .anomaly-message { color: #eab308; }
+  .anomaly-low .anomaly-node-name { color: #cbd5e1; }
+  .anomaly-low .anomaly-message { color: #64748b; }
 
   /* Preview mode bar (ghost overlays) */
   .preview-mode-bar {
