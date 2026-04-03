@@ -278,14 +278,14 @@
           const arr = Array.isArray(gates) ? gates : (gates?.gates ?? []);
           const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
           const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
-          const details = arr.map(g => {
+          const details = arr.map((g, idx) => {
             const gateType = g.gate_type ?? '';
             const gateTypeLabel = gateType ? gateType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '';
             const gateCommand = g.command ?? '';
             // Build a descriptive name: prefer gate_name, then formatted gate_type, then extract from command
-            const name = g.gate_name ?? g.name ?? (gateTypeLabel
+            const name = g.gate_name ?? g.name ?? gateTypeLabel
               || (gateCommand ? gateCommand.split(' ')[0].split('/').pop() : '')
-              || 'Gate');
+              || `Check #${idx + 1}`;
             return {
               name,
               status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
