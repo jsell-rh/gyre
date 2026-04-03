@@ -654,7 +654,7 @@
                 {@const dur = (agent.completed_at && agent.created_at) ? Math.round(agent.completed_at - agent.created_at) : null}
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('agent', agent.id, agent); }}>
                   <td title={agent.status === 'active' ? 'Currently working' : agent.status === 'idle' || agent.status === 'completed' ? 'Work complete' : agent.status === 'failed' ? 'Agent failed' : agent.status === 'dead' ? 'Agent died (killed or crashed)' : ''}><Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : (agent.status === 'failed' || agent.status === 'dead') ? 'danger' : 'muted'} /></td>
-                  <td class="cell-title">{agent.name ?? shortId(agent.id)}</td>
+                  <td class="cell-title">{agent.name ?? entityName('agent', agent.id)}</td>
                   <td class="cell-mono">{#if agent.task_id ?? agent.current_task_id}<EntityLink type="task" id={agent.task_id ?? agent.current_task_id} />{/if}</td>
                   <td class="cell-mono">{agent.branch ?? ''}</td>
                   <td class="cell-mono">{#if agent.mr_id}<EntityLink type="mr" id={agent.mr_id} />{/if}</td>
@@ -737,7 +737,7 @@
                 aria-label={$t('repo_mode.agent_label', { values: { name: agent.name ?? agent.id } })}
               >
                 <div class="agent-row-info">
-                  <span class="agent-row-name">{agent.name ?? shortId(agent.id)}</span>
+                  <span class="agent-row-name">{agent.name ?? entityName('agent', agent.id)}</span>
                   <span class="agent-row-status agent-status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span>
                 </div>
                 {#if tId}
