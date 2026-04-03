@@ -1603,37 +1603,24 @@
                             <div class="entity-list-meta">
                               <span class="status-pill status-pill-{mrStatus}" title={mrStatusTooltip(mr)}>{mrStatus}</span>
                               {#if mrStatus === 'open' && gates?.failed > 0}
-                                <span class="entity-list-context entity-list-context-danger">{gates.failed} gate{gates.failed !== 1 ? 's' : ''} failed</span>
-                              {:else if mrStatus === 'merged' && mr.merge_commit_sha}
-                                <span class="entity-list-provenance">
-                                  {#if mr.spec_ref}<span class="prov-step">spec</span><span class="prov-arrow">→</span>{/if}
-                                  {#if mr.author_agent_id}<span class="prov-step">agent</span><span class="prov-arrow">→</span>{/if}
-                                  {#if gates?.passed > 0}<span class="prov-step">{gates.passed} gates</span><span class="prov-arrow">→</span>{/if}
-                                  <code class="sha-inline mono sha-copyable" title="Click to copy {mr.merge_commit_sha}" onclick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); toastSuccess('SHA copied'); }} role="button" tabindex="0">{mr.merge_commit_sha.slice(0, 7)}</code>
+                                <span class="entity-list-context entity-list-context-danger">{gates.failed} gate{gates.failed !== 1 ? 's' : ''} failed — merge blocked</span>
+                              {:else if mrStatus === 'merged'}
+                                <span class="entity-list-context entity-list-context-success">
+                                  {#if gates?.passed > 0}{gates.passed} gates passed · {/if}merged{#if mr.merge_commit_sha}
+                                  <code class="sha-inline mono sha-copyable" title="Click to copy {mr.merge_commit_sha}" onclick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); toastSuccess('SHA copied'); }} role="button" tabindex="0">{mr.merge_commit_sha.slice(0, 7)}</code>{/if}
                                 </span>
                               {:else if mrStatus === 'open' && gates?.passed === gates?.total && gates?.total > 0}
-                                <span class="entity-list-context entity-list-context-success">all gates passed</span>
+                                <span class="entity-list-context entity-list-context-success">all {gates.total} gates passed — ready to merge</span>
+                              {:else if mrStatus === 'open'}
+                                <span class="entity-list-context">ready for review</span>
                               {/if}
                               {#if gates && gates.total > 0}
-                                <button class="entity-list-chip entity-list-chip-gates" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }} title="Click to view full gate details">
-                                  {#each (gates.details ?? []).slice(0, 4) as g}
-                                    {@const gateTitle = `${g.name}${g.gate_type ? ' (' + g.gate_type.replace(/_/g, ' ') + ')' : ''}${g.command ? '\n$ ' + g.command : ''}${g.required === false ? '\nAdvisory — does not block merge' : ''}${g.output ? '\n' + g.output.split('\n')[0]?.slice(0, 100) : ''}`}
-                                    <span class="gate-chip gate-chip-{g.status}" title={gateTitle}>{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}{#if g.required === false} <span class="gate-adv-tag">adv</span>{/if}</span>
-                                  {/each}
-                                  {#if (gates.details ?? []).length > 4}
-                                    <span class="gate-chip gate-chip-more">+{(gates.details ?? []).length - 4}</span>
-                                  {/if}
-                                  {#if (gates.details ?? []).length === 0}
-                                    {#if gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{gates.passed}</span>{/if}
-                                    {#if gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{gates.failed}</span>{/if}
-                                  {/if}
+                                {@const gateTooltip = (gates.details ?? []).map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') || `${gates.passed}/${gates.total} passed`}
+                                <button class="entity-list-chip entity-list-chip-gates" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }} title={gateTooltip + '\nClick for full gate details'}>
+                                  {#if gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{gates.failed}</span>{/if}
+                                  {#if gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{gates.passed}</span>{/if}
+                                  {#if gates.total - gates.passed - gates.failed > 0}<span class="gate-chip gate-chip-pending">○{gates.total - gates.passed - gates.failed}</span>{/if}
                                 </button>
-                              {/if}
-                              {#if gates?.failed > 0}
-                                {@const failedGate = (gates.details ?? []).find(g => g.status === 'failed')}
-                                {#if failedGate}
-                                  <span class="gate-error-preview" title="Click MR to see full gate output">{#if failedGate.command}<code class="gate-cmd-inline">$ {failedGate.command}</code> → {/if}{failedGate.output ? failedGate.output.split('\n')[0]?.slice(0, 80) : failedGate.error?.split('\n')[0]?.slice(0, 80) ?? 'failed'}{(failedGate.output?.length ?? 0) > 80 ? '...' : ''}</span>
-                                {/if}
                               {/if}
                               {#if mr.author_agent_id}
                                 <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', mr.author_agent_id, { repo_id: mr.repository_id ?? mr.repo_id }); }}>
