@@ -548,13 +548,18 @@ export const api = {
     request(`/policies/${policyId}`, { method: 'DELETE' }),
   simulateAbacPolicy: (id, data) =>
     request('/policies/evaluate', { method: 'POST', body: JSON.stringify(data) }),
-  // Explorer saved views (HSI §3)
+  // Explorer saved views — repo-scoped (canonical, via WS or REST)
+  savedViews: (repoId) => request(`/repos/${repoId}/views`),
+  createSavedView: (repoId, data) =>
+    request(`/repos/${repoId}/views`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteSavedView: (repoId, viewId) =>
+    request(`/repos/${repoId}/views/${viewId}`, { method: 'DELETE' }),
+  // Deprecated: workspace-scoped explorer views (legacy KV-based, use savedViews instead)
   explorerViews: (workspaceId) => request(`/workspaces/${workspaceId}/explorer-views`),
   saveExplorerView: (workspaceId, data) =>
     request(`/workspaces/${workspaceId}/explorer-views`, { method: 'POST', body: JSON.stringify(data) }),
   deleteExplorerView: (workspaceId, id) =>
     request(`/workspaces/${workspaceId}/explorer-views/${id}`, { method: 'DELETE' }),
-  // LLM view generation (SSE — returns raw Response, not parsed JSON)
   generateExplorerView: (workspaceId, body) =>
     fetch(`${API_BASE}/workspaces/${workspaceId}/explorer-views/generate`, {
       method: 'POST',
