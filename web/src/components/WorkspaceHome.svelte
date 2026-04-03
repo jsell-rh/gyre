@@ -1098,25 +1098,25 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Workspace header ──────────────────────────────────────── -->
+      <!-- ── Workspace header (compact, merged with pipeline) ──────── -->
       <header class="ws-header">
         <div class="ws-header-main">
-          <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
+          <div class="ws-header-top-row">
+            <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
+            <div class="ws-header-actions">
+              <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings (g s)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M6.5 1.5h3l.5 2 1.5.9 2-.5 1.5 2.6-1.5 1.5v1.5l1.5 1.5-1.5 2.6-2-.5-1.5.9-.5 2h-3l-.5-2L4.5 11l-2 .5L1 8.9l1.5-1.5V6L1 4.5l1.5-2.6 2 .5L6 1.5z"/><circle cx="8" cy="8" r="2"/></svg>
+              </button>
+              <button class="ws-header-link" onclick={() => goToAgentRules?.()} title="Agent rules (g a)">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M4 2h8v12H4zM7 5h2M7 7h2M7 9h1"/></svg>
+              </button>
+            </div>
+          </div>
           {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
             <p class="ws-header-status">{statusSentence}</p>
           {:else if workspace.description}
             <p class="ws-header-desc">{workspace.description}</p>
           {/if}
-        </div>
-        <div class="ws-header-actions">
-          <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M6.5 1.5h3l.5 2 1.5.9 2-.5 1.5 2.6-1.5 1.5v1.5l1.5 1.5-1.5 2.6-2-.5-1.5.9-.5 2h-3l-.5-2L4.5 11l-2 .5L1 8.9l1.5-1.5V6L1 4.5l1.5-2.6 2 .5L6 1.5z"/><circle cx="8" cy="8" r="2"/></svg>
-            Settings
-          </button>
-          <button class="ws-header-link" onclick={() => goToAgentRules?.()} title="Agent rules and meta-specs">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M4 2h8v12H4zM7 5h2M7 7h2M7 9h1"/></svg>
-            Agent Rules
-          </button>
         </div>
       </header>
 
@@ -1202,7 +1202,13 @@
         <p class="ws-briefing-inline ws-briefing-idle" data-testid="briefing-inline">Get started by creating a repo and pushing specs.</p>
       {/if}
 
-      <!-- ── Decisions / Action Needed (compact, inline) ────────────── -->
+      <!-- ── Two-column layout: main content + sidebar ─────────────── -->
+      <div class="ws-two-col">
+
+      <!-- ── Main content column ──────────────────────────────────── -->
+      <div class="ws-main-col">
+
+      <!-- ── Decisions / Action Needed (compact banner) ──────────── -->
       {#if !decisionsLoading && actionableNotifications.length > 0}
         {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
         <section class="ws-decisions-section" class:decisions-danger={hasDangerDecision} data-testid="section-decisions">
@@ -1832,6 +1838,66 @@
         {/if}
       </div><!-- .dashboard-flow -->
 
+      </div><!-- .ws-main-col -->
+
+      <!-- ── Sidebar: activity feed ────────────────────────────────── -->
+      <aside class="ws-sidebar">
+        <div class="sidebar-section">
+          <h3 class="sidebar-heading">Recent Activity</h3>
+          {#if activityLoading}
+            <p class="sidebar-loading">Loading...</p>
+          {:else if activityEvents.length === 0}
+            <p class="sidebar-empty">No recent activity</p>
+          {:else}
+            <div class="sidebar-activity-list">
+              {#each activityEvents.slice(0, 8) as event}
+                {@const variant = activityVariant(event)}
+                {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                <button
+                  class="sidebar-activity-item"
+                  onclick={() => {
+                    if (primaryType && primaryId) {
+                      const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                      nav(primaryType, primaryId, data);
+                    }
+                  }}
+                >
+                  <span class="sidebar-activity-dot sidebar-dot-{variant}"></span>
+                  <div class="sidebar-activity-content">
+                    <span class="sidebar-activity-label">{activityLabel(event)}</span>
+                    {#if event.entity_name ?? event.title}
+                      <span class="sidebar-activity-detail">{event.entity_name ?? event.title}</span>
+                    {/if}
+                    {#if event.timestamp ?? event.created_at}
+                      <span class="sidebar-activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                    {/if}
+                  </div>
+                </button>
+              {/each}
+            </div>
+            {#if activityEvents.length > 8}
+              <button class="sidebar-show-more" onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
+                View all activity ({activityEvents.length})
+              </button>
+            {/if}
+          {/if}
+        </div>
+
+        {#if budgetData?.config?.monthly_limit_usd}
+          {@const budgetPct = budgetData.usage?.total_cost_usd ? Math.round((budgetData.usage.total_cost_usd / budgetData.config.monthly_limit_usd) * 100) : 0}
+          <div class="sidebar-section sidebar-budget">
+            <h3 class="sidebar-heading">Budget</h3>
+            <div class="sidebar-budget-bar">
+              <div class="sidebar-budget-fill" class:budget-warn={budgetPct > 75} class:budget-danger={budgetPct > 90} style="width: {Math.min(budgetPct, 100)}%"></div>
+            </div>
+            <span class="sidebar-budget-label">${budgetData.usage?.total_cost_usd?.toFixed(2) ?? '0'} / ${budgetData.config.monthly_limit_usd} ({budgetPct}%)</span>
+          </div>
+        {/if}
+      </aside>
+
+      </div><!-- .ws-two-col -->
+
     </div><!-- .focused-dashboard -->
   {/if}
 </div>
@@ -1879,21 +1945,183 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
-    padding: var(--space-4) var(--space-5);
-    max-width: 1100px;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-5);
+    max-width: 1200px;
     margin: 0 auto;
     width: 100%;
+  }
+
+  /* ── Two-column layout ────────────────────────────────────────── */
+  .ws-two-col {
+    display: grid;
+    grid-template-columns: 1fr 260px;
+    gap: var(--space-4);
+    min-height: 0;
+  }
+
+  .ws-main-col {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+    min-height: 0;
+  }
+
+  /* ── Sidebar ──────────────────────────────────────────────────── */
+  .ws-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .sidebar-section {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+  }
+
+  .sidebar-heading {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0 0 var(--space-2) 0;
+  }
+
+  .sidebar-loading, .sidebar-empty {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
+    margin: 0;
+  }
+
+  .sidebar-activity-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .sidebar-activity-item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    color: var(--color-text);
+    width: 100%;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+  }
+
+  .sidebar-activity-item:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .sidebar-activity-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-top: 5px;
+    flex-shrink: 0;
+  }
+
+  .sidebar-dot-success { background: var(--color-success); }
+  .sidebar-dot-danger { background: var(--color-danger); }
+  .sidebar-dot-warning { background: var(--color-warning); }
+  .sidebar-dot-info { background: var(--color-info, #1e90ff); }
+
+  .sidebar-activity-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    min-width: 0;
+  }
+
+  .sidebar-activity-label {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .sidebar-activity-detail {
+    font-size: 11px;
+    color: var(--color-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sidebar-activity-time {
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .sidebar-show-more {
+    display: block;
+    width: 100%;
+    padding: var(--space-1);
+    background: none;
+    border: none;
+    color: var(--color-link, var(--color-primary));
+    font-size: var(--text-xs);
+    cursor: pointer;
+    text-align: center;
+    margin-top: var(--space-1);
+    border-radius: var(--radius-sm);
+  }
+
+  .sidebar-show-more:hover { text-decoration: underline; }
+
+  .sidebar-budget {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .sidebar-budget-bar {
+    height: 4px;
+    background: var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    margin-bottom: var(--space-1);
+  }
+
+  .sidebar-budget-fill {
+    height: 100%;
+    background: var(--color-success);
+    border-radius: var(--radius-sm);
+    transition: width var(--transition-normal);
+  }
+
+  .sidebar-budget-fill.budget-warn { background: var(--color-warning); }
+  .sidebar-budget-fill.budget-danger { background: var(--color-danger); }
+
+  .sidebar-budget-label {
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  @media (max-width: 900px) {
+    .ws-two-col {
+      grid-template-columns: 1fr;
+    }
+    .ws-sidebar {
+      order: -1;
+    }
   }
 
   /* ── Workspace header ────────────────────────────────────────────── */
   .ws-header {
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-3);
-    padding-bottom: var(--space-2);
-    border-bottom: 1px solid var(--color-border);
+    flex-direction: column;
+    gap: 2px;
   }
 
   .ws-header-main {
@@ -1903,9 +2131,16 @@
     min-width: 0;
   }
 
+  .ws-header-top-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
   .ws-header-name {
     margin: 0;
-    font-size: var(--text-xl);
+    font-size: var(--text-lg);
     font-weight: 700;
     color: var(--color-text);
     font-family: var(--font-display);
@@ -1929,8 +2164,9 @@
 
   .ws-header-actions {
     display: flex;
-    gap: var(--space-2);
+    gap: var(--space-1);
     flex-shrink: 0;
+    align-items: center;
   }
 
   .ws-header-link {
