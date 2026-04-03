@@ -1080,10 +1080,45 @@
         </section>
       {/if}
 
-      <!-- Workspace pulse: compact one-line summary (hidden when decisions section is showing) -->
-      {#if statusSentence && actionableNotifications.length === 0}
-        <div class="ws-pulse" data-testid="ws-pulse">
-          <span class="ws-pulse-text">{statusSentence}</span>
+      <!-- Workspace summary stats: compact overview of pipeline health -->
+      {#if !specsLoading && !tasksLoading && !agentsLoading && !mrsLoading}
+        <div class="ws-stats-row" data-testid="ws-stats-row">
+          <div class="ws-stat" title="{repos.length} repositories in this workspace">
+            <span class="ws-stat-value">{repos.length}</span>
+            <span class="ws-stat-label">Repos</span>
+          </div>
+          <div class="ws-stat" title="{pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending approval">
+            <span class="ws-stat-value">{specs.length}</span>
+            <span class="ws-stat-label">Specs</span>
+            {#if pipelineSpecs.pending > 0}<span class="ws-stat-alert">{pipelineSpecs.pending} pending</span>{/if}
+          </div>
+          <div class="ws-stat" title="{pipelineTasks.in_progress} in progress, {pipelineTasks.done} done of {wsTasks.length} total">
+            <span class="ws-stat-value">{wsTasks.length}</span>
+            <span class="ws-stat-label">Tasks</span>
+            {#if pipelineTasks.blocked > 0}<span class="ws-stat-danger">{pipelineTasks.blocked} blocked</span>{/if}
+          </div>
+          <div class="ws-stat" title="{pipelineAgents.active} active agents">
+            <span class="ws-stat-value">{wsAgents.length}</span>
+            <span class="ws-stat-label">Agents</span>
+            {#if pipelineAgents.active > 0}<span class="ws-stat-success">{pipelineAgents.active} running</span>{/if}
+          </div>
+          <div class="ws-stat" title="{pipelineMrs.merged} merged, {pipelineMrs.open} open">
+            <span class="ws-stat-value">{wsMrs.length}</span>
+            <span class="ws-stat-label">MRs</span>
+            {#if pipelineMrs.failed_gates > 0}<span class="ws-stat-danger">{pipelineMrs.failed_gates} failed gates</span>
+            {:else if pipelineMrs.merged > 0}<span class="ws-stat-success">{pipelineMrs.merged} merged</span>{/if}
+          </div>
+          {#if budgetData}
+            {@const budgetPct = budgetData.total_credits ? Math.round((budgetData.used_credits ?? 0) / budgetData.total_credits * 100) : null}
+            {#if budgetPct !== null}
+              <div class="ws-stat" title="Budget: {budgetPct}% used ({budgetData.used_credits} of {budgetData.total_credits} credits)">
+                <span class="ws-stat-value">{budgetPct}%</span>
+                <span class="ws-stat-label">Budget</span>
+                {#if budgetPct > 90}<span class="ws-stat-danger">critical</span>
+                {:else if budgetPct > 70}<span class="ws-stat-alert">high</span>{/if}
+              </div>
+            {/if}
+          {/if}
         </div>
       {/if}
 
@@ -1809,18 +1844,58 @@
     width: 100%;
   }
 
-  /* ── Workspace pulse ────────────────────────────────────────────── */
-  .ws-pulse {
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
+  /* ── Workspace stats row ────────────────────────────────────────── */
+  .ws-stats-row {
+    display: flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .ws-stat {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
+    font-size: var(--text-xs);
+    flex: 1;
+    min-width: 80px;
+    white-space: nowrap;
+  }
+
+  .ws-stat-value {
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--color-text);
     font-size: var(--text-sm);
   }
 
-  .ws-pulse-text {
+  .ws-stat-label {
+    color: var(--color-text-muted);
     font-weight: 500;
-    color: var(--color-text-secondary);
+  }
+
+  .ws-stat-alert {
+    color: var(--color-warning);
+    font-weight: 600;
+    font-size: 10px;
+    margin-left: auto;
+  }
+
+  .ws-stat-danger {
+    color: var(--color-danger);
+    font-weight: 600;
+    font-size: 10px;
+    margin-left: auto;
+  }
+
+  .ws-stat-success {
+    color: var(--color-success);
+    font-weight: 600;
+    font-size: 10px;
+    margin-left: auto;
   }
 
   /* ── Workspace briefing (collapsible) ────────────────────────────── */
