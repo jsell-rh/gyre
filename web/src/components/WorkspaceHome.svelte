@@ -1608,7 +1608,7 @@
                                   {#if mr.spec_ref}<span class="prov-step">spec</span><span class="prov-arrow">→</span>{/if}
                                   {#if mr.author_agent_id}<span class="prov-step">agent</span><span class="prov-arrow">→</span>{/if}
                                   {#if gates?.passed > 0}<span class="prov-step">{gates.passed} gates</span><span class="prov-arrow">→</span>{/if}
-                                  <code class="sha-inline mono">{mr.merge_commit_sha.slice(0, 7)}</code>
+                                  <code class="sha-inline mono sha-copyable" title="Click to copy {mr.merge_commit_sha}" onclick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); toastSuccess('SHA copied'); }} role="button" tabindex="0">{mr.merge_commit_sha.slice(0, 7)}</code>
                                 </span>
                               {:else if mrStatus === 'open' && gates?.passed === gates?.total && gates?.total > 0}
                                 <span class="entity-list-context entity-list-context-success">all gates passed</span>
@@ -4728,6 +4728,16 @@
     border-radius: var(--radius-sm);
     vertical-align: middle;
     user-select: all;
+  }
+
+  .sha-copyable {
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .sha-copyable:hover {
+    color: var(--color-text);
+    background: var(--color-border);
   }
 
   .branch-arrow {
