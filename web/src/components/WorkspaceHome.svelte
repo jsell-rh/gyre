@@ -279,14 +279,21 @@
           const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
           const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
           const details = arr.map(g => {
-            const gateType = (g.gate_type ?? '').replace(/_/g, ' ');
+            const gateType = g.gate_type ?? '';
+            const gateTypeLabel = gateType ? gateType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '';
+            const gateCommand = g.command ?? '';
+            // Build a descriptive name: prefer gate_name, then formatted gate_type, then extract from command
+            const name = g.gate_name ?? g.name ?? gateTypeLabel
+              || (gateCommand ? gateCommand.split(' ')[0].split('/').pop() : '')
+              || 'Gate';
             return {
-              name: g.gate_name ?? g.name ?? (gateType || 'Quality gate'),
+              name,
               status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
               gate_type: g.gate_type,
               required: g.required,
               output: g.output,
               error: g.error,
+              command: g.command,
             };
           });
           return { id: mr.id, passed, failed, total: arr.length, details };
@@ -1686,7 +1693,7 @@
                             {#if gates && gates.total > 0}
                               <button class="gates-inline" title="View gate details" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }}>
                                 {#each (gates.details ?? []).slice(0, 3) as g}
-                                  <span class="gate-chip gate-chip-{g.status}" title="{g.name}: {g.status}{g.required === false ? ' (advisory)' : ''}{g.gate_type ? '\nType: ' + g.gate_type.replace(/_/g, ' ') : ''}">
+                                  <span class="gate-chip gate-chip-{g.status}" title="{g.name}: {g.status}{g.required === false ? ' (advisory)' : ''}{g.gate_type ? '\nType: ' + g.gate_type.replace(/_/g, ' ') : ''}{g.command ? '\nCommand: ' + g.command : ''}">
                                     {g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}
                                   </span>
                                 {/each}
