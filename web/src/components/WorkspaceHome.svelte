@@ -1253,11 +1253,11 @@
 
           <!-- ── Repos ────────────────────────────────────────────────── -->
           <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
-            <div class="section-header">
-              <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
+            <div class="section-header section-header-repos">
+              <h2 class="section-title section-title-sm" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
               <div class="repo-header-actions">
-                <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
-                <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
+                <button class="section-btn section-btn-compact" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">+ New</button>
+                <button class="section-btn section-btn-compact" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">Import</button>
               </div>
             </div>
             {#if reposLoading}
@@ -1865,7 +1865,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-4);
+    padding: var(--space-3) var(--space-4);
     max-width: 1100px;
     margin: 0 auto;
     width: 100%;
@@ -3724,6 +3724,10 @@
     flex-wrap: wrap;
   }
 
+  .section-header-repos {
+    padding: 0;
+  }
+
   .section-title {
     font-family: var(--font-display);
     font-size: var(--text-xs);
@@ -3735,6 +3739,10 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+
+  .section-title-sm {
+    font-size: 10px;
   }
 
   .section-badge {
@@ -4487,6 +4495,11 @@
   .section-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  .section-btn-compact {
+    padding: 2px var(--space-2);
+    font-size: var(--text-xs);
   }
 
   .section-btn-subtle {
