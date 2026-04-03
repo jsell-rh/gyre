@@ -1050,6 +1050,11 @@
   {:else}
     <div class="focused-dashboard">
 
+      <!-- ── Status sentence: one-line summary of workspace state ── -->
+      {#if statusSentence && !specsLoading && !tasksLoading}
+        <div class="ws-status-sentence">{statusSentence}</div>
+      {/if}
+
       <!-- ── Pipeline progress: visual flow showing autonomous dev lifecycle ── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
         <div class="pipeline-progress" data-testid="pipeline-progress">
@@ -1946,6 +1951,14 @@
     max-width: 1200px;
     margin: 0 auto;
     width: 100%;
+  }
+
+  /* ── Status sentence ──────────────────────────────────────────── */
+  .ws-status-sentence {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    padding: 0 var(--space-1);
+    line-height: 1.4;
   }
 
   /* ── All clear indicator ─────────────────────────────────────── */
