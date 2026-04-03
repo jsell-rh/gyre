@@ -53,27 +53,25 @@
       {/if}
     </div>
 
-    <!-- What's happening now -->
+    <!-- What's happening now — one line of context -->
     {#if statusSummary}
       <div class="repo-card-activity">
         <span class="repo-activity-text repo-activity-{statusSummary.variant}">{statusSummary.text}</span>
-        {#if activeAgentNames.length > 0}
-          <span class="repo-activity-detail">{activeAgentNames.slice(0, 2).join(', ')}{activeAgentNames.length > 2 ? ` +${activeAgentNames.length - 2}` : ''}</span>
-        {/if}
-        {#if latestMr && latestMr.status === 'open'}
-          <span class="repo-activity-detail">MR: {latestMr.title ?? 'Untitled'}</span>
-        {/if}
+        <span class="repo-activity-why">{statusSummary.why}</span>
+      </div>
+    {:else if latestMr}
+      <div class="repo-card-activity">
+        <span class="repo-activity-text repo-activity-{latestMr.status === 'merged' ? 'success' : 'info'}">{latestMr.status === 'merged' ? 'Last merged' : 'Latest MR'}: {latestMr.title ?? 'Untitled'}</span>
       </div>
     {/if}
 
-    <!-- Compact stats -->
+    <!-- Compact stats — only show non-zero, meaningful counts -->
     <div class="repo-card-stats">
-      {#if stats.specs > 0}<span class="repo-stat"><Icon name="spec" size={10} /> {stats.specs}</span>{/if}
-      {#if stats.tasks > 0}<span class="repo-stat"><Icon name="task" size={10} /> {stats.tasks}</span>{/if}
-      {#if stats.agents > 0}<span class="repo-stat repo-stat-active"><Icon name="agent" size={10} /> {stats.agents}</span>{/if}
-      {#if stats.openMrs > 0}<span class="repo-stat"><Icon name="git-merge" size={10} /> {stats.openMrs}</span>{/if}
-      {#if stats.mrs > 0 && stats.openMrs === 0}<span class="repo-stat"><Icon name="git-merge" size={10} /> {stats.mrs} merged</span>{/if}
-      {#if stats.failedGates > 0}<span class="repo-stat repo-stat-danger">&#10007; {stats.failedGates} gate{stats.failedGates !== 1 ? 's' : ''}</span>{/if}
+      {#if stats.specs > 0}<span class="repo-stat">{stats.specs} spec{stats.specs !== 1 ? 's' : ''}</span>{/if}
+      {#if stats.tasks > 0}<span class="repo-stat">{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}</span>{/if}
+      {#if stats.agents > 0}<span class="repo-stat repo-stat-active">{stats.agents} agent{stats.agents !== 1 ? 's' : ''}</span>{/if}
+      {#if stats.mrs > 0}<span class="repo-stat">{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{#if stats.openMrs > 0} ({stats.openMrs} open){/if}</span>{/if}
+      {#if stats.failedGates > 0}<span class="repo-stat repo-stat-danger">{stats.failedGates} failed gate{stats.failedGates !== 1 ? 's' : ''}</span>{/if}
     </div>
   </button>
 {/if}
@@ -164,8 +162,10 @@
   .repo-activity-warning { color: var(--color-warning); }
   .repo-activity-info { color: var(--color-info, #1e90ff); }
 
-  .repo-activity-detail {
+  .repo-activity-why {
     color: var(--color-text-muted);
+    font-weight: 400;
+    font-style: italic;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
