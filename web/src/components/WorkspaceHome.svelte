@@ -1101,6 +1101,24 @@
       <!-- ── Pipeline progress: the primary status summary ────────── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
         <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
+          <!-- Workspace health indicator -->
+          {#if pipelineMrs.failed_gates > 0}
+            <span class="ws-health-indicator ws-health-danger" title="{pipelineMrs.failed_gates} MR(s) with failed gates">
+              <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM7.25 5a.75.75 0 011.5 0v3a.75.75 0 01-1.5 0V5zM8 10.5A.75.75 0 118 12a.75.75 0 010-1.5z"/></svg>
+            </span>
+          {:else if pipelineAgents.active > 0}
+            <span class="ws-health-indicator ws-health-active" title="{pipelineAgents.active} agent(s) running">
+              <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><circle cx="8" cy="8" r="4"/></svg>
+            </span>
+          {:else if pipelineMrs.merged > 0}
+            <span class="ws-health-indicator ws-health-healthy" title="{pipelineMrs.merged} merged — all gates passed">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="8" cy="8" r="5.5"/><path d="M5.5 8l2 2 3-3.5"/></svg>
+            </span>
+          {:else}
+            <span class="ws-health-indicator ws-health-idle" title="No active work">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" width="14" height="14"><circle cx="8" cy="8" r="5.5"/></svg>
+            </span>
+          {/if}
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} title="{pipelineSpecs.total} total: {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending{pipelineSpecs.pending > 0 ? ' — click to review' : ''}" onclick={() => {
             const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
             if (pendingSpecs.length === 1) { navigateToSpec(pendingSpecs[0]); return; }
@@ -2117,6 +2135,23 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     overflow-x: auto;
+  }
+
+  .ws-health-indicator {
+    display: flex;
+    align-items: center;
+    padding: 0 var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .ws-health-danger { color: var(--color-danger); }
+  .ws-health-active { color: var(--color-warning); animation: pulse-health 2s ease-in-out infinite; }
+  .ws-health-healthy { color: var(--color-success); }
+  .ws-health-idle { color: var(--color-text-muted); opacity: 0.5; }
+
+  @keyframes pulse-health {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
   }
 
   .pipeline-stage {
