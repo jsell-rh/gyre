@@ -1315,9 +1315,6 @@
             {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
           </button>
           <span class="ws-tab-spacer"></span>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
-            Activity
-          </button>
           {#if wsTab !== 'activity' && wsTab !== 'queue' && wsTab !== 'repos'}
             <input
               class="entity-search-input"
@@ -2298,7 +2295,7 @@
     display: flex;
     align-items: center;
     gap: 0;
-    padding: var(--space-1) var(--space-2);
+    padding: 2px var(--space-2);
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
@@ -2326,15 +2323,15 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 1px;
-    padding: 2px var(--space-2);
+    gap: 0;
+    padding: 1px var(--space-2);
     background: transparent;
     border: 1px solid transparent;
     border-radius: var(--radius);
     cursor: pointer;
     font-family: var(--font-body);
     transition: all var(--transition-fast);
-    min-width: 48px;
+    min-width: 40px;
     position: relative;
   }
 
@@ -2353,7 +2350,7 @@
   }
 
   .pipeline-stage-count {
-    font-size: var(--text-base);
+    font-size: var(--text-sm);
     font-weight: 700;
     color: var(--color-text-muted);
     font-family: var(--font-mono);
