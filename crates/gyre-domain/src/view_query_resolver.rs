@@ -42,6 +42,23 @@ pub struct DryRunResult {
     pub callouts_unresolved: Vec<String>,
     pub narrative_resolved: usize,
     pub warnings: Vec<String>,
+    /// Per-node BFS depth from focus node (for tiered_colors emphasis).
+    /// Only populated when scope is Focus or Concept.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub node_depths: HashMap<String, u32>,
+    /// Per-node metric values (for heat emphasis).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub node_metrics: HashMap<String, f64>,
+    /// Edges filtered to connections between matched nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_edges: Vec<MatchedEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatchedEdge {
+    pub source_id: String,
+    pub target_id: String,
+    pub edge_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,9 +181,23 @@ fn bfs_traverse(
     outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
     incoming: &HashMap<String, Vec<(String, EdgeType)>>,
 ) -> HashSet<String> {
-    let mut visited = HashSet::new();
+    bfs_traverse_with_depths(start_id, edge_types, direction, depth, outgoing, incoming)
+        .into_keys()
+        .collect()
+}
+
+/// BFS traversal that returns a map of node_id → BFS depth.
+fn bfs_traverse_with_depths(
+    start_id: &str,
+    edge_types: &[EdgeType],
+    direction: &str,
+    depth: u32,
+    outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
+    incoming: &HashMap<String, Vec<(String, EdgeType)>>,
+) -> HashMap<String, u32> {
+    let mut visited: HashMap<String, u32> = HashMap::new();
     let mut queue = VecDeque::new();
-    visited.insert(start_id.to_string());
+    visited.insert(start_id.to_string(), 0);
     queue.push_back((start_id.to_string(), 0u32));
 
     while let Some((current, d)) = queue.pop_front() {
@@ -197,7 +228,8 @@ fn bfs_traverse(
 
         for (neighbor_id, et) in neighbors {
             if edge_types.is_empty() || edge_types.contains(et) {
-                if visited.insert(neighbor_id.clone()) {
+                if !visited.contains_key(neighbor_id) {
+                    visited.insert(neighbor_id.clone(), d + 1);
                     queue.push_back((neighbor_id.clone(), d + 1));
                 }
             }
@@ -348,6 +380,12 @@ fn count_fields(node_id: &str, incoming: &HashMap<String, Vec<(String, EdgeType)
 
 // ── Core resolver ────────────────────────────────────────────────────────────
 
+/// Result of scope resolution including optional depth information.
+pub struct ScopeResult {
+    pub matched: HashSet<String>,
+    pub depths: HashMap<String, u32>,
+}
+
 /// Resolve a view query scope against the graph, returning the set of matched node IDs.
 pub fn resolve_scope(
     scope: &Scope,
@@ -355,12 +393,24 @@ pub fn resolve_scope(
     edges: &[GraphEdge],
     selected_node_id: Option<&str>,
 ) -> HashSet<String> {
+    resolve_scope_with_depths(scope, nodes, edges, selected_node_id).matched
+}
+
+/// Resolve a scope and also return per-node BFS depths (for tiered_colors).
+pub fn resolve_scope_with_depths(
+    scope: &Scope,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    selected_node_id: Option<&str>,
+) -> ScopeResult {
     let active_nodes: Vec<&GraphNode> = nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
     let all_ids: HashSet<String> = active_nodes.iter().map(|n| n.id.to_string()).collect();
     let (outgoing, incoming) = build_adjacency(edges);
 
-    match scope {
-        Scope::All => all_ids,
+    let no_depths = || HashMap::new();
+
+    let (matched, depths) = match scope {
+        Scope::All => (all_ids, no_depths()),
 
         Scope::Focus {
             node,
@@ -377,7 +427,6 @@ pub fn resolve_scope(
             let start_node = if resolved_name.is_empty() {
                 None
             } else {
-                // Try direct ID match first, then name match.
                 active_nodes
                     .iter()
                     .find(|n| n.id.to_string() == resolved_name)
@@ -399,16 +448,18 @@ pub fn resolve_scope(
                         .iter()
                         .filter_map(|s| parse_edge_type(s))
                         .collect();
-                    bfs_traverse(
+                    let depth_map = bfs_traverse_with_depths(
                         &sn.id.to_string(),
                         &edge_types,
                         direction,
                         *depth,
                         &outgoing,
                         &incoming,
-                    )
+                    );
+                    let ids = depth_map.keys().cloned().collect();
+                    (ids, depth_map)
                 }
-                None => HashSet::new(),
+                None => (HashSet::new(), no_depths()),
             }
         }
 
@@ -417,23 +468,23 @@ pub fn resolve_scope(
             computed,
             name_pattern,
         } => {
-            // If computed expression, try to evaluate it.
             if let Some(expr) = computed {
-                resolve_computed_expression(
+                let result = resolve_computed_expression(
                     expr,
                     &active_nodes,
                     edges,
                     &outgoing,
                     &incoming,
                     selected_node_id,
-                )
+                );
+                (result, no_depths())
             } else {
                 let types: Vec<NodeType> = node_types
                     .iter()
                     .filter_map(|s| parse_node_type(s))
                     .collect();
                 let pattern = name_pattern.as_ref().map(|p| p.to_lowercase());
-                active_nodes
+                let result = active_nodes
                     .iter()
                     .filter(|n| {
                         let type_match = types.is_empty() || types.contains(&n.node_type);
@@ -444,7 +495,8 @@ pub fn resolve_scope(
                         type_match && name_match
                     })
                     .map(|n| n.id.to_string())
-                    .collect()
+                    .collect();
+                (result, no_depths())
             }
         }
 
@@ -456,29 +508,33 @@ pub fn resolve_scope(
                     .collect::<Vec<_>>(),
                 &outgoing,
             );
-            active_nodes
+            // Include Functions, Endpoints, and Types — not just Functions.
+            // Endpoints and Types without test coverage are high-risk gaps.
+            let result = active_nodes
                 .iter()
                 .filter(|n| !reachable.contains(&n.id.to_string()))
-                .filter(|n| n.node_type == NodeType::Function)
+                .filter(|n| {
+                    matches!(
+                        n.node_type,
+                        NodeType::Function | NodeType::Endpoint | NodeType::Type
+                    )
+                })
                 .map(|n| n.id.to_string())
-                .collect()
+                .collect();
+            (result, no_depths())
         }
 
         Scope::Diff {
             from_commit,
             to_commit,
         } => {
-            // Filter to nodes whose last_modified_sha matches the to_commit
-            // but NOT the from_commit (i.e., changed between the two).
             let from_lower = from_commit.to_lowercase();
             let to_lower = to_commit.to_lowercase();
-            active_nodes
+            let result = active_nodes
                 .iter()
                 .filter(|n| {
                     let created = n.created_sha.to_lowercase();
                     let modified = n.last_modified_sha.to_lowercase();
-                    // Changed between commits: modified matches to_commit but not from_commit.
-                    // Also include nodes created in the to_commit range.
                     let changed_to = if to_lower.len() >= 7 {
                         modified.starts_with(&to_lower) || created.starts_with(&to_lower)
                     } else {
@@ -489,11 +545,11 @@ pub fn resolve_scope(
                     } else {
                         created == from_lower
                     };
-                    // Include if changed in to_commit but not merely existing at from_commit
                     changed_to && !existed_at_from
                 })
                 .map(|n| n.id.to_string())
-                .collect()
+                .collect();
+            (result, no_depths())
         }
 
         Scope::Concept {
@@ -513,10 +569,11 @@ pub fn resolve_scope(
                 expand_direction.as_str()
             };
             let mut result = HashSet::new();
+            let mut all_depths = HashMap::new();
 
             for seed_name in seed_nodes {
                 if let Some(seed) = find_node_by_name(&all_nodes_vec, seed_name) {
-                    let reached = bfs_traverse(
+                    let depth_map = bfs_traverse_with_depths(
                         &seed.id.to_string(),
                         &edge_types,
                         direction,
@@ -524,12 +581,20 @@ pub fn resolve_scope(
                         &outgoing,
                         &incoming,
                     );
-                    result.extend(reached);
+                    for (id, d) in &depth_map {
+                        let entry = all_depths.entry(id.clone()).or_insert(*d);
+                        if *d < *entry {
+                            *entry = *d;
+                        }
+                    }
+                    result.extend(depth_map.into_keys());
                 }
             }
-            result
+            (result, all_depths)
         }
-    }
+    };
+
+    ScopeResult { matched, depths }
 }
 
 /// Attempt to resolve computed expressions.
@@ -1064,6 +1129,11 @@ pub fn resolve_annotation_template(
     let mut result = template.to_string();
     if let Some(name) = focused_node_name {
         result = result.replace("$name", name);
+    } else {
+        // Remove unreplaceable $name rather than leaving literal "$name"
+        result = result.replace("$name", "");
+        // Clean up artifacts like "Blast radius: " (trailing colon+space after empty replacement)
+        result = result.replace(":  ", ": ");
     }
     result = result.replace("{{count}}", &matched_count.to_string());
     result = result.replace("{{group_count}}", &group_count.to_string());
@@ -1116,11 +1186,12 @@ pub fn dry_run(
         }
     }
 
-    // Resolve scope
-    let result_set = resolve_scope(&query.scope, nodes, edges, selected_node_id);
+    // Resolve scope with depth info
+    let scope_result = resolve_scope_with_depths(&query.scope, nodes, edges, selected_node_id);
+    let result_set = scope_result.matched;
+    let node_depths = scope_result.depths;
 
     if result_set.is_empty() {
-        // Only warn if the query wasn't using interactive binding
         let is_interactive = matches!(&query.scope, Scope::Focus { node, .. } if node == "$clicked" || node == "$selected");
         if !is_interactive {
             warnings.push("Scope matched 0 nodes".to_string());
@@ -1140,12 +1211,27 @@ pub fn dry_run(
         .collect();
 
     // Resolve the focused node name for annotation templates
-    let _focused_node_name = match &query.scope {
+    let focused_node_name: Option<String> = match &query.scope {
         Scope::Focus { node, .. } => {
             if node == "$clicked" || node == "$selected" {
                 selected_node_id.and_then(|id| node_map.get(id).map(|n| n.name.clone()))
             } else {
-                Some(node.clone())
+                // Try to find the actual node name
+                let all_nodes: Vec<GraphNode> = nodes
+                    .iter()
+                    .filter(|n| n.deleted_at.is_none())
+                    .cloned()
+                    .collect();
+                find_node_by_name(&all_nodes, node)
+                    .map(|n| n.name.clone())
+                    .or_else(|| Some(node.clone()))
+            }
+        }
+        Scope::Concept { seed_nodes, .. } => {
+            if seed_nodes.len() == 1 {
+                Some(seed_nodes[0].clone())
+            } else {
+                None
             }
         }
         _ => None,
@@ -1154,8 +1240,21 @@ pub fn dry_run(
     let matched_node_names: Vec<String> = result_set
         .iter()
         .filter_map(|id| node_map.get(id).map(|n| n.qualified_name.clone()))
-        .take(50) // Cap for readability
+        .take(50)
         .collect();
+
+    // Compute group_count as distinct parent modules (spec semantics)
+    let _group_count = count_distinct_parent_modules(&result_set, nodes, edges);
+
+    // Resolve annotation templates with proper $name handling
+    if let Some(ref title) = query.annotation.title {
+        if title.contains("$name") && focused_node_name.is_none() {
+            warnings.push(
+                "Annotation uses $name but scope has no focused node — $name won't be resolved"
+                    .to_string(),
+            );
+        }
+    }
 
     // Resolve groups
     let mut groups_resolved = Vec::new();
@@ -1215,6 +1314,52 @@ pub fn dry_run(
         }
     }
 
+    // Apply edge filtering: restrict edges to connections between matched nodes
+    let edge_type_filters: Vec<EdgeType> = query
+        .edges
+        .filter
+        .iter()
+        .filter_map(|s| parse_edge_type(s))
+        .collect();
+    let matched_edges: Vec<MatchedEdge> = edges
+        .iter()
+        .filter(|e| e.deleted_at.is_none())
+        .filter(|e| {
+            result_set.contains(&e.source_id.to_string())
+                && result_set.contains(&e.target_id.to_string())
+        })
+        .filter(|e| edge_type_filters.is_empty() || edge_type_filters.contains(&e.edge_type))
+        .map(|e| MatchedEdge {
+            source_id: e.source_id.to_string(),
+            target_id: e.target_id.to_string(),
+            edge_type: edge_type_str(&e.edge_type).to_string(),
+        })
+        .collect();
+
+    // Compute per-node metric values for heat emphasis
+    let node_metrics = if let Some(ref heat) = query.emphasis.heat {
+        let (outgoing, incoming) = build_adjacency(edges);
+        result_set
+            .iter()
+            .filter_map(|id| {
+                let val = match heat.metric.as_str() {
+                    "complexity" => node_map.get(id).and_then(|n| n.complexity.map(|c| c as f64)),
+                    "churn" | "churn_count_30d" => {
+                        node_map.get(id).map(|n| n.churn_count_30d as f64)
+                    }
+                    "incoming_calls" => Some(count_incoming_calls(id, &incoming) as f64),
+                    "outgoing_calls" => Some(count_outgoing_calls(id, &outgoing) as f64),
+                    "test_coverage" => node_map.get(id).and_then(|n| n.test_coverage),
+                    "field_count" => Some(count_fields(id, &incoming) as f64),
+                    _ => None,
+                };
+                val.map(|v| (id.clone(), v))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
     DryRunResult {
         matched_nodes: result_set.len(),
         matched_node_names,
@@ -1223,6 +1368,9 @@ pub fn dry_run(
         callouts_unresolved,
         narrative_resolved,
         warnings,
+        node_depths,
+        node_metrics,
+        matched_edges,
     }
 }
 
@@ -1514,6 +1662,22 @@ mod tests {
         let result = resolve_scope(&Scope::TestGaps, &nodes, &edges, None);
         assert!(result.contains("n2"));
         assert!(!result.contains("n1"));
+    }
+
+    #[test]
+    fn test_scope_test_gaps_includes_endpoints_and_types() {
+        let nodes = vec![
+            make_node("n1", "tested_fn", NodeType::Function),
+            make_node("n2", "untested_endpoint", NodeType::Endpoint),
+            make_node("n3", "untested_type", NodeType::Type),
+            make_node("n4", "untested_module", NodeType::Module), // Modules excluded
+            make_test_node("t1", "test_something"),
+        ];
+        let edges = vec![make_edge("e1", "t1", "n1", EdgeType::Calls)];
+        let result = resolve_scope(&Scope::TestGaps, &nodes, &edges, None);
+        assert!(result.contains("n2"), "Endpoints should appear in test gaps");
+        assert!(result.contains("n3"), "Types should appear in test gaps");
+        assert!(!result.contains("n4"), "Modules should NOT appear in test gaps");
     }
 
     #[test]
@@ -2048,6 +2212,101 @@ mod tests {
             3,
         );
         assert_eq!(resolved, "Blast radius: TaskPort (14 nodes, 3 groups)");
+    }
+
+    #[test]
+    fn test_annotation_template_no_focus_node() {
+        // When there's no focused node, $name should be removed (not left as literal "$name")
+        let resolved = resolve_annotation_template(
+            "Test gaps: $name ({{count}} nodes)",
+            None,
+            42,
+            5,
+        );
+        assert!(!resolved.contains("$name"), "Literal $name should not remain");
+        assert!(resolved.contains("42 nodes"));
+    }
+
+    #[test]
+    fn test_focus_scope_returns_depths() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+            make_node("n3", "C", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Calls),
+        ];
+        let result = resolve_scope_with_depths(
+            &Scope::Focus {
+                node: "A".to_string(),
+                edges: vec!["calls".to_string()],
+                direction: "outgoing".to_string(),
+                depth: 5,
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        assert_eq!(*result.depths.get("n1").unwrap(), 0);
+        assert_eq!(*result.depths.get("n2").unwrap(), 1);
+        assert_eq!(*result.depths.get("n3").unwrap(), 2);
+    }
+
+    #[test]
+    fn test_dry_run_edge_filtering() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Calls),
+            make_edge("e2", "n1", "n2", EdgeType::Contains),
+        ];
+        let query = ViewQuery {
+            scope: Scope::All,
+            emphasis: Default::default(),
+            edges: gyre_common::view_query::EdgeFilter {
+                filter: vec!["calls".to_string()],
+            },
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert_eq!(result.matched_edges.len(), 1);
+        assert_eq!(result.matched_edges[0].edge_type, "calls");
+    }
+
+    #[test]
+    fn test_dry_run_node_depths_for_focus() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+        ];
+        let edges = vec![make_edge("e1", "n1", "n2", EdgeType::Calls)];
+        let query = ViewQuery {
+            scope: Scope::Focus {
+                node: "A".to_string(),
+                edges: vec!["calls".to_string()],
+                direction: "outgoing".to_string(),
+                depth: 5,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert!(!result.node_depths.is_empty(), "Focus scope should return depths");
+        assert_eq!(*result.node_depths.get("n1").unwrap(), 0);
+        assert_eq!(*result.node_depths.get("n2").unwrap(), 1);
     }
 
     #[test]
