@@ -63,7 +63,7 @@ describe('NodeDetailPanel', () => {
     const { container } = render(NodeDetailPanel, {
       props: { node: TYPE_NODE, nodes: NODES, edges: EDGES },
     });
-    const spec = container.querySelector('.detail-spec');
+    const spec = container.querySelector('.detail-spec-button') ?? container.querySelector('.detail-spec');
     expect(spec?.textContent).toContain('specs/platform-model.md');
   });
 

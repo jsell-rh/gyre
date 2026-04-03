@@ -153,11 +153,161 @@
     let parts = [];
     if (created) parts.push(`Created ${created.toLocaleDateString()}`);
     if (node.created_sha) parts.push(`in commit ${node.created_sha.slice(0, 7)}`);
+    if (node.last_modified_sha && node.last_modified_sha !== node.created_sha) parts.push(`last modified in ${node.last_modified_sha.slice(0, 7)}`);
+    if (modified) parts.push(`modified ${timeAgo(modified)}`);
     if (fieldCount > 0) parts.push(`${fieldCount} field${fieldCount !== 1 ? 's' : ''}`);
     if (modCount > 0) parts.push(`${modCount} change${modCount !== 1 ? 's' : ''} in last 30 days`);
     if (relatedEdges.length > 0) parts.push(`${relatedEdges.length} relationship${relatedEdges.length !== 1 ? 's' : ''}`);
 
     return parts.length > 0 ? parts.join('. ') + '.' : null;
+  });
+
+  // Relative time helper
+  function timeAgo(date) {
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMins = Math.floor(diffMs / 60000);
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    const diffDays = Math.floor(diffHours / 24);
+    if (diffDays < 30) return `${diffDays}d ago`;
+    return date.toLocaleDateString();
+  }
+
+  // Compute "used by" for type view: callers + incoming FieldOf edges
+  let typeUsedBy = $derived.by(() => {
+    if (!node || (node.node_type !== 'type' && node.node_type !== 'table' && node.node_type !== 'component')) return [];
+    const usedBySet = new Map();
+    // Callers
+    for (const c of relationships.calledBy) {
+      usedBySet.set(c.id, c);
+    }
+    // Incoming FieldOf: types that have a field of this type
+    for (const e of edges) {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (et === 'field_of' && tgt === node.id) {
+        const srcNode = nodes.find(n => n.id === src);
+        if (srcNode) usedBySet.set(srcNode.id, srcNode);
+      }
+    }
+    return [...usedBySet.values()];
+  });
+
+  // Compute risk summary for type view
+  let typeRisk = $derived.by(() => {
+    if (!node || (node.node_type !== 'type' && node.node_type !== 'table' && node.node_type !== 'component')) return null;
+    const churn = node.churn_count_30d ?? 0;
+    const incomingCalls = relationships.calledBy.length;
+    const outgoingCalls = relationships.calls.length;
+    const coupling = incomingCalls + outgoingCalls;
+    const couplingLabel = coupling > 20 ? 'high' : coupling > 8 ? 'medium' : 'low';
+    const specCoverage = node.spec_path || relationships.governedBy ? 'high' : 'none';
+    const testCoverage = node.test_coverage != null ? `${Math.round(node.test_coverage * 100)}%` : 'unknown';
+    return { churn, coupling, couplingLabel, specCoverage, testCoverage };
+  });
+
+  // For endpoint view: compute call flow chain (depth 3) from handler
+  let endpointFlow = $derived.by(() => {
+    if (!node || node.node_type !== 'endpoint') return [];
+    // Find handler(s) via RoutesTo
+    const handlerIds = new Set();
+    for (const e of edges) {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (et === 'routes_to' && src === node.id) {
+        handlerIds.add(e.target_id ?? e.to_node_id ?? e.to);
+      }
+    }
+    if (handlerIds.size === 0) return [];
+
+    // BFS from handlers, depth 3, following Calls edges
+    const visited = new Set();
+    const chain = []; // array of { node, depth }
+    let frontier = [...handlerIds];
+    for (const hid of frontier) visited.add(hid);
+
+    for (let depth = 1; depth <= 3; depth++) {
+      const nextFrontier = [];
+      for (const currentId of frontier) {
+        for (const e of edges) {
+          const src = e.source_id ?? e.from_node_id ?? e.from;
+          const tgt = e.target_id ?? e.to_node_id ?? e.to;
+          const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+          if (et === 'calls' && src === currentId && !visited.has(tgt)) {
+            visited.add(tgt);
+            const targetNode = nodes.find(n => n.id === tgt);
+            if (targetNode) {
+              chain.push({ node: targetNode, depth });
+              nextFrontier.push(tgt);
+            }
+          }
+        }
+      }
+      frontier = nextFrontier;
+    }
+    return chain;
+  });
+
+  // For endpoint view: count test functions that can reach this endpoint transitively
+  let endpointTestCount = $derived.by(() => {
+    if (!node || node.node_type !== 'endpoint') return 0;
+    // Direct tests
+    let count = relationships.testedBy.length;
+    if (count > 0) return count;
+    // Check if any test node can reach the handler(s) via Calls/RoutesTo
+    const handlerIds = new Set();
+    for (const e of edges) {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (et === 'routes_to' && src === node.id) {
+        handlerIds.add(e.target_id ?? e.to_node_id ?? e.to);
+      }
+    }
+    // Find test nodes that call handlers directly
+    const testNodes = nodes.filter(n => n.test_node);
+    for (const tn of testNodes) {
+      for (const e of edges) {
+        const src = e.source_id ?? e.from_node_id ?? e.from;
+        const tgt = e.target_id ?? e.to_node_id ?? e.to;
+        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+        if ((et === 'calls' || et === 'routes_to') && src === tn.id && (handlerIds.has(tgt) || tgt === node.id)) {
+          count++;
+          break;
+        }
+      }
+    }
+    return count;
+  });
+
+  // For endpoint view: extract gate metadata
+  let endpointGates = $derived.by(() => {
+    if (!node || node.node_type !== 'endpoint') return [];
+    const gates = [];
+    // Check metadata fields
+    if (node.metadata) {
+      try {
+        const meta = typeof node.metadata === 'string' ? JSON.parse(node.metadata) : node.metadata;
+        if (meta.gates) gates.push(...(Array.isArray(meta.gates) ? meta.gates : [meta.gates]));
+        if (meta.gate) gates.push(meta.gate);
+        if (meta.role_required) gates.push(`Role: ${meta.role_required}`);
+        if (meta.auth_required !== undefined) gates.push(meta.auth_required ? 'Auth required' : 'Public');
+      } catch (e) {}
+    }
+    // Check doc_comment for gate hints
+    if (node.doc_comment) {
+      const gateMatch = node.doc_comment.match(/\[(.*?)\]/g);
+      if (gateMatch) {
+        for (const g of gateMatch) {
+          const inner = g.slice(1, -1);
+          if (/admin|auth|role|gate|guard|require/i.test(inner)) gates.push(inner);
+        }
+      }
+    }
+    return gates;
   });
 
   // For endpoint nodes: extract request/response info from metadata
@@ -236,6 +386,25 @@
       <!-- TYPE VIEW: fields / implements / used-by / story / risk -->
       <!-- ============================================ -->
       {#if node.node_type === 'type' || node.node_type === 'table' || node.node_type === 'component'}
+        <!-- Spec link (clickable) -->
+        {#if node.spec_path || relationships.governedBy}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Spec</h4>
+            <button class="detail-spec-button" onclick={() => onNavigate({ id: node.spec_path ?? relationships.governedBy, name: node.spec_path ?? relationships.governedBy, node_type: 'spec' })} type="button">
+              {node.spec_path ?? relationships.governedBy}
+            </button>
+          </div>
+        {/if}
+
+        <!-- Last modified summary -->
+        {#if node.last_modified_by || node.last_modified_at}
+          <div class="detail-section">
+            <p class="detail-modified-summary">
+              {#if node.last_modified_by}Last modified by <code>{node.last_modified_by}</code>{/if}{#if node.last_modified_at}{node.last_modified_by ? ', ' : 'Last modified '}{timeAgo(new Date(node.last_modified_at * 1000))}{/if}
+            </p>
+          </div>
+        {/if}
+
         <!-- Fields -->
         {#if relationships.fields.length > 0}
           <details class="detail-collapsible" open>
@@ -244,7 +413,11 @@
               {#each relationships.fields as f}
                 <li>
                   <button class="detail-ref-link" onclick={() => handleNodeClick(f)} type="button">
-                    <span class="ref-type">{f.node_type}</span> {f.name}
+                    <span class="ref-type">{f.node_type}</span>
+                    <span class="field-name">{f.name}</span>
+                    {#if f.qualified_name && f.qualified_name !== f.name}
+                      <span class="field-type-annotation">: {f.qualified_name.split('::').pop()}</span>
+                    {/if}
                   </button>
                 </li>
               {/each}
@@ -268,20 +441,20 @@
           </details>
         {/if}
 
-        <!-- Used By / Dependents -->
-        {#if relationships.calledBy.length > 0}
+        <!-- Used By: callers + incoming FieldOf edges -->
+        {#if typeUsedBy.length > 0}
           <details class="detail-collapsible" open>
-            <summary class="detail-section-title">Used By ({relationships.calledBy.length})</summary>
+            <summary class="detail-section-title">Used By ({typeUsedBy.length})</summary>
             <ul class="detail-ref-list">
-              {#each relationships.calledBy.slice(0, 15) as caller}
+              {#each typeUsedBy.slice(0, 15) as user}
                 <li>
-                  <button class="detail-ref-link" onclick={() => handleNodeClick(caller)} type="button">
-                    <span class="ref-type">{caller.node_type}</span> {caller.name}
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(user)} type="button">
+                    <span class="ref-type">{user.node_type}</span> {user.name}
                   </button>
                 </li>
               {/each}
-              {#if relationships.calledBy.length > 15}
-                <li class="detail-more">+{relationships.calledBy.length - 15} more</li>
+              {#if typeUsedBy.length > 15}
+                <li class="detail-more">+{typeUsedBy.length - 15} more</li>
               {/if}
             </ul>
           </details>
@@ -293,20 +466,81 @@
           {#if node.doc_comment}
             <p class="detail-doc">{node.doc_comment}</p>
           {/if}
-          {#if node.spec_path || relationships.governedBy}
-            <p class="detail-spec-link">Spec: <span class="detail-spec">{node.spec_path ?? relationships.governedBy}</span></p>
-          {/if}
           {#if story}
             <p class="detail-story">{story}</p>
-          {:else if !node.doc_comment && !node.spec_path && !relationships.governedBy}
+          {/if}
+          <div class="story-provenance">
+            {#if node.created_sha}
+              <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
+            {/if}
+            {#if node.last_modified_sha}
+              <p class="detail-provenance">Last modified in <code>{node.last_modified_sha.slice(0, 7)}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
+            {/if}
+            {#if node.churn_count_30d}
+              <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
+            {/if}
+          </div>
+          {#if !story && !node.doc_comment && !node.created_sha}
             <p class="detail-story detail-muted">No documentation or history available.</p>
           {/if}
         </details>
+
+        <!-- Risk Summary (type-specific) -->
+        {#if typeRisk}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Risk Summary</summary>
+            <div class="risk-summary-grid">
+              <span class="risk-metric">
+                <span class="risk-metric-label">Churn</span>
+                <span class="risk-metric-value">{typeRisk.churn}/30d</span>
+              </span>
+              <span class="risk-metric">
+                <span class="risk-metric-label">Coupling</span>
+                <span class="risk-metric-value risk-coupling-{typeRisk.couplingLabel}">{typeRisk.couplingLabel} ({typeRisk.coupling})</span>
+              </span>
+              <span class="risk-metric">
+                <span class="risk-metric-label">Spec</span>
+                <span class="risk-metric-value">{typeRisk.specCoverage}</span>
+              </span>
+              <span class="risk-metric">
+                <span class="risk-metric-label">Tests</span>
+                <span class="risk-metric-value">{typeRisk.testCoverage}</span>
+              </span>
+            </div>
+          </details>
+        {/if}
 
       <!-- ============================================ -->
       <!-- TRAIT / INTERFACE VIEW: methods / implementations / dependents -->
       <!-- ============================================ -->
       {:else if node.node_type === 'interface' || node.node_type === 'trait'}
+        <!-- Spec link -->
+        {#if node.spec_path || relationships.governedBy}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Spec</h4>
+            <button class="detail-spec-button" onclick={() => onNavigate({ id: node.spec_path ?? relationships.governedBy, name: node.spec_path ?? relationships.governedBy, node_type: 'spec' })} type="button">
+              {node.spec_path ?? relationships.governedBy}
+            </button>
+          </div>
+        {/if}
+
+        <!-- Crate / module info -->
+        {#if node.qualified_name}
+          {@const crateName = node.qualified_name.split('::')[0]}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Crate</h4>
+            <p class="detail-crate"><code>{crateName}</code></p>
+          </div>
+        {/if}
+
+        <!-- Doc comment -->
+        {#if node.doc_comment}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Documentation</h4>
+            <p class="detail-doc">{node.doc_comment}</p>
+          </div>
+        {/if}
+
         <!-- Methods (contained functions) -->
         {#if relationships.methods.length > 0}
           <details class="detail-collapsible" open>
@@ -329,12 +563,15 @@
         <!-- Implementors -->
         {#if relationships.implementedBy.length > 0}
           <details class="detail-collapsible" open>
-            <summary class="detail-section-title">Implemented By ({relationships.implementedBy.length})</summary>
+            <summary class="detail-section-title">Implementations ({relationships.implementedBy.length})</summary>
             <ul class="detail-ref-list">
               {#each relationships.implementedBy as impl}
                 <li>
                   <button class="detail-ref-link" onclick={() => handleNodeClick(impl)} type="button">
                     <span class="ref-type">{impl.node_type}</span> {impl.name}
+                    {#if impl.file_path}
+                      <span class="impl-location">{impl.file_path.split('/').pop()}</span>
+                    {/if}
                   </button>
                 </li>
               {/each}
@@ -344,7 +581,7 @@
 
         <!-- Dependents (who calls methods on this trait) -->
         {#if relationships.calledBy.length > 0}
-          <details class="detail-collapsible">
+          <details class="detail-collapsible" open>
             <summary class="detail-section-title">Dependents ({relationships.calledBy.length})</summary>
             <ul class="detail-ref-list">
               {#each relationships.calledBy.slice(0, 15) as caller}
@@ -361,25 +598,32 @@
           </details>
         {/if}
 
-        <!-- Doc comment -->
-        {#if node.doc_comment}
-          <div class="detail-section">
-            <h4 class="detail-section-title">Documentation</h4>
-            <p class="detail-doc">{node.doc_comment}</p>
-          </div>
-        {/if}
-
       <!-- ============================================ -->
-      <!-- ENDPOINT VIEW: route / handler / request-response / tests -->
+      <!-- ENDPOINT VIEW: route / handler / flow / gates / tests -->
       <!-- ============================================ -->
       {:else if node.node_type === 'endpoint'}
-        <!-- Route info -->
+        <!-- Route info (method + path) -->
         {#if endpointMeta}
           <div class="detail-section">
             <h4 class="detail-section-title">Route</h4>
             {#if endpointMeta.method || endpointMeta.path}
-              <p class="detail-endpoint-method"><code>{endpointMeta.method} {endpointMeta.path}</code></p>
+              <p class="detail-endpoint-method">
+                {#if endpointMeta.method}<span class="http-method http-{endpointMeta.method.toLowerCase()}">{endpointMeta.method}</span>{/if}
+                <code>{endpointMeta.path || node.qualified_name || node.name}</code>
+              </p>
+            {:else}
+              <p class="detail-endpoint-method"><code>{node.qualified_name || node.name}</code></p>
             {/if}
+          </div>
+        {/if}
+
+        <!-- Spec link -->
+        {#if node.spec_path || relationships.governedBy}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Spec</h4>
+            <button class="detail-spec-button" onclick={() => onNavigate({ id: node.spec_path ?? relationships.governedBy, name: node.spec_path ?? relationships.governedBy, node_type: 'spec' })} type="button">
+              {node.spec_path ?? relationships.governedBy}
+            </button>
           </div>
         {/if}
 
@@ -392,6 +636,9 @@
                 <li>
                   <button class="detail-ref-link" onclick={() => handleNodeClick(handler)} type="button">
                     <span class="ref-type">{handler.node_type}</span> {handler.name}
+                    {#if handler.file_path}
+                      <span class="handler-location">{handler.file_path.split('/').pop()}{handler.line_start ? `:${handler.line_start}` : ''}</span>
+                    {/if}
                   </button>
                 </li>
               {/each}
@@ -405,6 +652,9 @@
                 <li>
                   <button class="detail-ref-link" onclick={() => handleNodeClick(handler)} type="button">
                     <span class="ref-type">{handler.node_type}</span> {handler.name}
+                    {#if handler.file_path}
+                      <span class="handler-location">{handler.file_path.split('/').pop()}{handler.line_start ? `:${handler.line_start}` : ''}</span>
+                    {/if}
                   </button>
                 </li>
               {/each}
@@ -412,15 +662,16 @@
           </details>
         {/if}
 
-        <!-- Request/Response types (types this endpoint calls or references) -->
-        {#if relationships.calls.length > 0}
+        <!-- Flow: call chain from handler, depth 3 -->
+        {#if endpointFlow.length > 0}
           <details class="detail-collapsible" open>
-            <summary class="detail-section-title">Request/Response Flow ({relationships.calls.length})</summary>
-            <ul class="detail-ref-list">
-              {#each relationships.calls as callee}
-                <li>
-                  <button class="detail-ref-link" onclick={() => handleNodeClick(callee)} type="button">
-                    <span class="ref-type">{callee.node_type}</span> {callee.name}
+            <summary class="detail-section-title">Flow ({endpointFlow.length})</summary>
+            <ul class="detail-ref-list flow-chain">
+              {#each endpointFlow as step}
+                <li class="flow-step" style="padding-left: {step.depth * 12}px">
+                  <span class="flow-arrow">{step.depth === 1 ? '' : ''}</span>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(step.node)} type="button">
+                    <span class="ref-type">{step.node.node_type}</span> {step.node.name}
                   </button>
                 </li>
               {/each}
@@ -428,29 +679,40 @@
           </details>
         {/if}
 
-        <!-- Spec / Gates -->
-        {#if node.spec_path || relationships.governedBy}
+        <!-- Gates -->
+        {#if endpointGates.length > 0}
           <div class="detail-section">
-            <h4 class="detail-section-title">Gates / Spec</h4>
-            <p class="detail-spec">{node.spec_path ?? relationships.governedBy}</p>
+            <h4 class="detail-section-title">Gates</h4>
+            <div class="gate-list">
+              {#each endpointGates as gate}
+                <span class="gate-badge">{gate}</span>
+              {/each}
+            </div>
           </div>
         {/if}
 
-        <!-- Connected tests -->
-        {#if relationships.testedBy.length > 0}
-          <details class="detail-collapsible" open>
-            <summary class="detail-section-title">Tests ({relationships.testedBy.length})</summary>
-            <ul class="detail-ref-list">
-              {#each relationships.testedBy as testNode}
-                <li>
-                  <button class="detail-ref-link" onclick={() => handleNodeClick(testNode)} type="button">
-                    <span class="ref-type">test</span> {testNode.name}
-                  </button>
-                </li>
-              {/each}
-            </ul>
-          </details>
-        {/if}
+        <!-- Tests -->
+        <div class="detail-section">
+          <h4 class="detail-section-title">Tests</h4>
+          {#if relationships.testedBy.length > 0}
+            <details class="detail-collapsible" open>
+              <summary class="detail-section-title">{relationships.testedBy.length} test{relationships.testedBy.length !== 1 ? 's' : ''} covering this endpoint</summary>
+              <ul class="detail-ref-list">
+                {#each relationships.testedBy as testNode}
+                  <li>
+                    <button class="detail-ref-link" onclick={() => handleNodeClick(testNode)} type="button">
+                      <span class="ref-type">test</span> {testNode.name}
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            </details>
+          {:else if endpointTestCount > 0}
+            <p class="detail-test-count">{endpointTestCount} test{endpointTestCount !== 1 ? 's' : ''} reach this endpoint</p>
+          {:else}
+            <p class="detail-story detail-muted">No tests found for this endpoint.</p>
+          {/if}
+        </div>
 
         <!-- Doc comment -->
         {#if node.doc_comment}
@@ -986,6 +1248,181 @@
     font-family: var(--font-mono);
     font-weight: 600;
     color: var(--color-primary);
+  }
+
+  /* Clickable spec link button */
+  .detail-spec-button {
+    display: inline-block;
+    font-size: var(--text-sm);
+    color: var(--color-link);
+    font-family: var(--font-mono);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: var(--space-1) 0;
+    text-align: left;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 2px;
+  }
+
+  .detail-spec-button:hover {
+    color: var(--color-primary);
+    text-decoration-style: solid;
+  }
+
+  /* Modified summary in type header */
+  .detail-modified-summary {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+
+  .detail-modified-summary code {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    background: color-mix(in srgb, var(--color-text) 8%, transparent);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  /* Field type annotations */
+  .field-name {
+    color: var(--color-link);
+  }
+
+  .field-type-annotation {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    margin-left: 2px;
+  }
+
+  /* Risk summary grid for type view */
+  .risk-summary-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-1);
+  }
+
+  .risk-metric {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+  }
+
+  .risk-metric-label {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    letter-spacing: 0.03em;
+  }
+
+  .risk-metric-value {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: var(--color-text);
+  }
+
+  .risk-coupling-high { color: #fca5a5; }
+  .risk-coupling-medium { color: #fde68a; }
+  .risk-coupling-low { color: #bbf7d0; }
+
+  /* Story provenance section */
+  .story-provenance {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: var(--space-1);
+  }
+
+  /* Crate info for trait view */
+  .detail-crate {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+
+  .detail-crate code {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    background: color-mix(in srgb, var(--color-text) 8%, transparent);
+    padding: 1px 6px;
+    border-radius: 3px;
+  }
+
+  /* Implementation location hint */
+  .impl-location, .handler-location {
+    margin-left: auto;
+    font-size: 9px;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  /* HTTP method badges */
+  .http-method {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    font-family: var(--font-mono);
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-right: var(--space-1);
+  }
+
+  .http-get { background: color-mix(in srgb, #22c55e 20%, transparent); color: #bbf7d0; }
+  .http-post { background: color-mix(in srgb, #3b82f6 20%, transparent); color: #bfdbfe; }
+  .http-put { background: color-mix(in srgb, #f59e0b 20%, transparent); color: #fde68a; }
+  .http-patch { background: color-mix(in srgb, #f59e0b 20%, transparent); color: #fde68a; }
+  .http-delete { background: color-mix(in srgb, #ef4444 20%, transparent); color: #fca5a5; }
+
+  /* Flow chain */
+  .flow-chain {
+    gap: 0;
+  }
+
+  .flow-step {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .flow-arrow {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    width: 14px;
+  }
+
+  .flow-step .detail-ref-link {
+    flex: 1;
+  }
+
+  /* Gate badges */
+  .gate-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .gate-badge {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    color: var(--color-primary);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+  }
+
+  /* Test count text */
+  .detail-test-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    margin: 0;
   }
 
   @media (prefers-reduced-motion: reduce) {
