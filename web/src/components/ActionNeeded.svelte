@@ -8,10 +8,11 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
-  import { entityName } from '../lib/entityNames.svelte.js';
+  import { entityName, shortId } from '../lib/entityNames.svelte.js';
   import { relativeTime } from '../lib/timeFormat.js';
   import Badge from '../lib/Badge.svelte';
   import Icon from '../lib/Icon.svelte';
+  import EntityLink from '../lib/EntityLink.svelte';
 
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
@@ -50,8 +51,19 @@
 
   let visible = $derived(showAll ? actionable : actionable.slice(0, maxVisible));
 
+  const HIGH_PRIORITY_TYPES = new Set(['spec_approval', 'gate_failure', 'agent_failed']);
+
+  function isHighPriority(n) {
+    return HIGH_PRIORITY_TYPES.has(normType(n.notification_type));
+  }
+
   function getUrgency(n) {
     return URGENCY[normType(n.notification_type)] ?? { color: 'var(--color-text-muted)', iconName: 'circle', label: 'Info' };
+  }
+
+  function repoName(n) {
+    const rid = n.repo_id ?? parseBody(n).repo_id;
+    return rid ? entityName('repo', rid) : null;
   }
 
   function parseBody(n) {
@@ -116,20 +128,40 @@
         {@const urgency = getUrgency(item)}
         {@const body = parseBody(item)}
         {@const nt = normType(item.notification_type)}
+        {@const rName = repoName(item)}
+        {@const entityType = getEntityType(item)}
+        {@const entityId = getEntityId(item)}
         <button
           class="action-item"
+          class:action-item-high={isHighPriority(item)}
           style="border-left-color: {urgency.color}"
           onclick={() => handleClick(item)}
           title={getTitle(item)}
         >
           <span class="action-icon" style="color: {urgency.color}"><Icon name={urgency.iconName} size={14} /></span>
           <div class="action-body">
-            <span class="action-label">{urgency.label}</span>
+            <div class="action-meta">
+              <span class="action-label">{urgency.label}</span>
+              {#if rName}
+                <span class="action-repo-tag" title="Repository">{rName}</span>
+              {/if}
+            </div>
             <span class="action-title">{getTitle(item)}</span>
+            {#if entityType && entityId}
+              <span class="action-ref">
+                <EntityLink type={entityType} id={entityId} data={{ repo_id: item.repo_id }} showType={true} />
+              </span>
+            {/if}
           </div>
           <div class="action-buttons">
             {#if nt === 'spec_approval'}
-              <button class="action-btn action-btn-review" onclick={(e) => { e.stopPropagation(); handleClick(item); }} title="Review spec before approving">Review</button>
+              {#if onApproveSpec}
+                <button class="action-btn action-btn-approve" onclick={(e) => { e.stopPropagation(); onApproveSpec(item); }} title="Approve spec">Approve</button>
+              {/if}
+              {#if onRejectSpec}
+                <button class="action-btn action-btn-reject" onclick={(e) => { e.stopPropagation(); onRejectSpec(item); }} title="Reject spec">Reject</button>
+              {/if}
+              <button class="action-btn action-btn-review" onclick={(e) => { e.stopPropagation(); handleClick(item); }} title="Review spec before deciding">Review</button>
             {:else if nt === 'gate_failure' && onRetryGate && body.mr_id}
               <button class="action-btn" onclick={(e) => { e.stopPropagation(); onRetryGate(item); }} title="Re-enqueue for merge">Retry</button>
             {:else if (nt === 'agent_completed' || nt === 'mr_needs_review') && body.mr_id}
@@ -145,7 +177,7 @@
     </div>
     {#if actionable.length > maxVisible}
       <button class="action-show-all" onclick={() => showAll = !showAll}>
-        {showAll ? 'Show less' : `Show all ${actionable.length}`}
+        {showAll ? 'Show less' : `Show ${actionable.length - maxVisible} more`}
       </button>
     {/if}
   </section>
@@ -216,6 +248,15 @@
     outline-offset: 2px;
   }
 
+  .action-item-high {
+    background: color-mix(in srgb, var(--color-warning) 6%, var(--color-surface));
+    border-color: color-mix(in srgb, var(--color-warning) 25%, var(--color-border));
+  }
+
+  .action-item-high:hover {
+    background: color-mix(in srgb, var(--color-warning) 10%, var(--color-surface-elevated));
+  }
+
   .action-icon {
     font-size: var(--text-sm);
     font-weight: 700;
@@ -232,12 +273,36 @@
     gap: 1px;
   }
 
+  .action-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
   .action-label {
     font-size: var(--text-xs);
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--color-text-muted);
+  }
+
+  .action-repo-tag {
+    font-size: 0.65rem;
+    padding: 0 4px;
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 20%, var(--color-border));
+    border-radius: var(--radius-sm);
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .action-ref {
+    display: inline-flex;
+    margin-top: 1px;
   }
 
   .action-title {
@@ -303,6 +368,28 @@
 
   .action-btn-review:hover {
     background: color-mix(in srgb, var(--color-primary) 20%, transparent);
+  }
+
+  .action-btn-approve {
+    background: color-mix(in srgb, var(--color-success, #22c55e) 12%, transparent);
+    border-color: color-mix(in srgb, var(--color-success, #22c55e) 30%, var(--color-border));
+    color: var(--color-success, #16a34a);
+    font-weight: 600;
+  }
+
+  .action-btn-approve:hover {
+    background: color-mix(in srgb, var(--color-success, #22c55e) 22%, transparent);
+  }
+
+  .action-btn-reject {
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border-color: color-mix(in srgb, var(--color-danger) 30%, var(--color-border));
+    color: var(--color-danger);
+    font-weight: 600;
+  }
+
+  .action-btn-reject:hover {
+    background: color-mix(in srgb, var(--color-danger) 20%, transparent);
   }
 
   .action-btn-dismiss {
