@@ -4450,7 +4450,15 @@
               </div>
             {:else if conversationData}
               {@const turns = conversationData.turns ?? conversationData.messages ?? []}
+              {@const toolCalls = turns.filter(t => t.tool_name || t.role === 'tool')}
+              {@const decisions = turns.filter(t => t.role === 'assistant' && (t.content ?? t.text ?? '').length > 50)}
               {#if turns.length > 0}
+                <div class="conv-summary">
+                  <span class="conv-summary-stat">{turns.length} turns</span>
+                  {#if toolCalls.length > 0}<span class="conv-summary-stat">{toolCalls.length} tool calls</span>{/if}
+                  {#if decisions.length > 0}<span class="conv-summary-stat">{decisions.length} reasoning steps</span>{/if}
+                  {#if conversationData.model}<span class="conv-summary-stat">{conversationData.model}</span>{/if}
+                </div>
                 <span class="progress-section-label">Conversation ({turns.length} turns)</span>
                 <div class="conversation-trace">
                   {#each turns as turn, i}
@@ -4820,6 +4828,26 @@
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
     margin-bottom: var(--space-2);
+  }
+
+  .conv-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-2);
+  }
+
+  .conv-summary-stat {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    padding: 2px 8px;
+    background: var(--color-surface);
+    border-radius: var(--radius-sm);
   }
 
   .conv-meta {
