@@ -1417,11 +1417,11 @@
                           </td>
                           <td>
                             {#if gates && gates.total > 0}
-                              <span class="gates-mini" title="{gates.passed} passed, {gates.failed} failed of {gates.total} gates">
+                              <button class="gates-mini gates-mini-clickable" title="View gate details" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }}>
                                 {#if gates.failed > 0}<span class="gate-fail-count">&#10007;{gates.failed}</span>{/if}
                                 {#if gates.passed > 0}<span class="gate-pass-count">&#10003;{gates.passed}</span>{/if}
                                 <span class="gate-total-count">/{gates.total}</span>
-                              </span>
+                              </button>
                             {:else}
                               <span class="text-muted">-</span>
                             {/if}
@@ -2214,6 +2214,20 @@
     font-size: 10px;
     font-weight: 600;
     font-family: var(--font-mono);
+  }
+
+  .gates-mini-clickable {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+  }
+
+  .gates-mini-clickable:hover {
+    background: var(--color-surface-elevated);
+    text-decoration: underline;
   }
 
   .gate-fail-count { color: var(--color-danger); }
