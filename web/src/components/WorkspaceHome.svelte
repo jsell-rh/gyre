@@ -1630,9 +1630,15 @@
                                   {#if gates.total - gates.passed - gates.failed > 0}<span class="gate-chip gate-chip-pending">○{gates.total - gates.passed - gates.failed}</span>{/if}
                                 </button>
                               {/if}
+                              {#if mr.spec_ref}
+                                {@const mrSpecPath = mr.spec_ref.split('@')[0]}
+                                <button class="entity-list-chip" onclick={(e) => { e.stopPropagation(); nav('spec', mrSpecPath, { path: mrSpecPath, repo_id: mr.repository_id ?? mr.repo_id }); }} title="Spec: {mr.spec_ref}">
+                                  <Icon name="spec" size={10} /> {mrSpecPath.split('/').pop()?.replace(/\.md$/, '')}
+                                </button>
+                              {/if}
                               {#if mr.author_agent_id}
                                 <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', mr.author_agent_id, { repo_id: mr.repository_id ?? mr.repo_id }); }}>
-                                  {entityName('agent', mr.author_agent_id)}
+                                  <Icon name="agent" size={10} /> {entityName('agent', mr.author_agent_id)}
                                 </button>
                               {/if}
                               {#if ds}
