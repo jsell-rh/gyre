@@ -981,6 +981,36 @@
     return parts.join(' · ');
   });
 
+  // ── Recent completions: merged MRs with provenance chain ──────────────
+  let recentCompletions = $derived.by(() => {
+    const merged = wsMrs
+      .filter(m => m.status === 'merged')
+      .sort((a, b) => {
+        const aTime = a.merged_at ?? a.updated_at ?? '';
+        const bTime = b.merged_at ?? b.updated_at ?? '';
+        return bTime.localeCompare(aTime);
+      })
+      .slice(0, 5);
+    return merged.map(mr => {
+      const specPath = mr.spec_ref?.split('@')[0] ?? null;
+      const agent = mr.author_agent_id ? wsAgents.find(a => a.id === mr.author_agent_id) : null;
+      const task = agent?.task_id ? wsTasks.find(t => t.id === agent.task_id) : wsTasks.find(t => t.spec_path === specPath);
+      const repoName = repoMap[mr.repository_id ?? mr.repo_id]?.name;
+      return {
+        mr,
+        specPath,
+        specName: specPath?.split('/').pop()?.replace(/\.md$/, ''),
+        agent,
+        agentName: agent?.name ?? (mr.author_agent_id ? entityName('agent', mr.author_agent_id) : null),
+        task,
+        taskTitle: task?.title,
+        repoName,
+        mergedAt: mr.merged_at,
+        gates: mr._gates,
+      };
+    });
+  });
+
   // ── Load all data when workspace changes ───────────────────────────────
   $effect(() => {
     void workspace?.id;
@@ -1224,6 +1254,43 @@
             {#if briefingData.narrative && briefingData.narrative !== briefingData.summary}
               <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
             {/if}
+          </div>
+        </section>
+      {/if}
+
+      <!-- ── Recent Completions: end-to-end provenance chains ── -->
+      {#if !mrsLoading && recentCompletions.length > 0}
+        <section class="ws-completions-section">
+          <h3 class="completions-title">Recent Completions</h3>
+          <div class="completions-list">
+            {#each recentCompletions as c}
+              <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
+                <div class="completion-chain">
+                  {#if c.specName}
+                    <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
+                    <span class="completion-arrow">→</span>
+                  {/if}
+                  {#if c.agentName}
+                    <span class="completion-node completion-agent" title="Agent: {c.agentName}">{c.agentName}</span>
+                    <span class="completion-arrow">→</span>
+                  {/if}
+                  <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title?.length > 40 ? c.mr.title.slice(0, 37) + '...' : c.mr.title ?? 'Untitled'}</span>
+                  <span class="completion-arrow">→</span>
+                  <span class="completion-node completion-merged">Merged</span>
+                </div>
+                <div class="completion-meta">
+                  {#if c.gates?.total > 0}
+                    <span class="completion-gates">{c.gates.passed}/{c.gates.total} gates</span>
+                  {/if}
+                  {#if c.repoName}
+                    <span class="completion-repo">{c.repoName}</span>
+                  {/if}
+                  {#if c.mergedAt}
+                    <span class="completion-time">{relTime(c.mergedAt)}</span>
+                  {/if}
+                </div>
+              </button>
+            {/each}
           </div>
         </section>
       {/if}
@@ -1995,6 +2062,90 @@
     flex-shrink: 0;
     padding: 0 2px;
     opacity: 0.5;
+  }
+
+  /* ── Recent Completions ────────────────────────────────────────── */
+  .ws-completions-section {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .completions-title {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0 0 var(--space-2) 0;
+  }
+
+  .completions-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .completion-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    transition: all var(--transition-fast);
+    width: 100%;
+  }
+
+  .completion-item:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+  }
+
+  .completion-chain {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+    font-size: var(--text-xs);
+  }
+
+  .completion-node {
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+  }
+
+  .completion-spec { color: var(--color-info, #1e90ff); }
+  .completion-agent { color: var(--color-warning); }
+  .completion-mr { color: var(--color-text); }
+  .completion-merged { color: var(--color-success); font-weight: 600; }
+
+  .completion-arrow {
+    color: var(--color-text-muted);
+    opacity: 0.5;
+    font-size: 10px;
+    flex-shrink: 0;
+  }
+
+  .completion-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .completion-gates {
+    color: var(--color-success);
+    font-weight: 500;
   }
 
   /* ── Workspace briefing (inline) ─────────────────────────────────── */
