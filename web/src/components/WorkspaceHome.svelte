@@ -636,6 +636,7 @@
   // ── Activity filter + pagination ──────────────────────────────────────
   let activityFilter = $state('');
   let activityLimit = $state(10);
+  let browseExpanded = $state(false);
 
   let filteredActivity = $derived.by(() => {
     if (!activityFilter) return activityEvents;
@@ -1042,7 +1043,7 @@
 
       <!-- ── Pipeline progress: visual flow showing autonomous dev lifecycle ── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-        <div class="pipeline-progress" data-testid="pipeline-progress">
+        <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { wsTab = 'specs'; userSelectedTab = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
             <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
             <span class="pipeline-stage-label">Specs</span>
@@ -1245,63 +1246,105 @@
                   </form>
                 {/if}
 
-        <!-- Workspace quick links -->
-        <div class="ws-quick-links">
-          {#if goToAgentRules}
-            <button class="ws-quick-link" onclick={goToAgentRules} title="Configure agent personas, principles, and standards">
-              <Icon name="settings" size={12} /> Agent Rules
-            </button>
-          {/if}
-          {#if goToWorkspaceSettings}
-            <button class="ws-quick-link" onclick={goToWorkspaceSettings} title="Workspace settings: trust level, budget, members">
-              <Icon name="settings" size={12} /> Settings
-            </button>
-          {/if}
-        </div>
       </section>
 
-      <!-- ── Recent completions (compact provenance chains) ────────── -->
-      {#if !mrsLoading && recentCompletions.length > 0}
-        <section class="ws-completions-section">
-          <h3 class="completions-title">Recent Completions</h3>
-          <div class="completions-list">
-            {#each recentCompletions as c}
-              <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
-                <div class="completion-chain">
-                  {#if c.specName}
-                    <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
-                    <span class="completion-arrow">→</span>
-                  {/if}
-                  {#if c.agentName}
-                    <span class="completion-node completion-agent" title="Agent: {c.agentName}">{c.agentName}</span>
-                    <span class="completion-arrow">→</span>
-                  {/if}
-                  <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title?.length > 30 ? c.mr.title.slice(0, 27) + '...' : c.mr.title ?? 'Untitled'}</span>
-                  <span class="completion-arrow">→</span>
-                  <span class="completion-node completion-merged">Merged</span>
-                </div>
-                <div class="completion-meta">
-                  {#if c.gates?.total > 0}
-                    <span class="completion-gates">{c.gates.passed}/{c.gates.total} gates</span>
-                  {/if}
-                  {#if c.repoName}
-                    <span class="completion-repo">{c.repoName}</span>
-                  {/if}
-                  {#if c.mergedAt}
-                    <span class="completion-time">{relTime(c.mergedAt)}</span>
-                  {/if}
-                </div>
-              </button>
-            {/each}
-          </div>
-        </section>
-      {/if}
+      <!-- ── Two-column layout: Repos primary, Activity/Completions secondary ── -->
+      <div class="dashboard-columns">
+        <!-- Left column: Activity feed + Recent completions -->
+        <aside class="dashboard-sidebar">
+          {#if !mrsLoading && recentCompletions.length > 0}
+            <section class="ws-completions-section">
+              <h3 class="completions-title">Recent Completions</h3>
+              <div class="completions-list">
+                {#each recentCompletions as c}
+                  <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
+                    <div class="completion-chain">
+                      {#if c.specName}
+                        <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
+                        <span class="completion-arrow">→</span>
+                      {/if}
+                      {#if c.agentName}
+                        <span class="completion-node completion-agent" title="Agent: {c.agentName}">{c.agentName}</span>
+                        <span class="completion-arrow">→</span>
+                      {/if}
+                      <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title?.length > 30 ? c.mr.title.slice(0, 27) + '...' : c.mr.title ?? 'Untitled'}</span>
+                      <span class="completion-arrow">→</span>
+                      <span class="completion-node completion-merged">Merged</span>
+                    </div>
+                    <div class="completion-meta">
+                      {#if c.gates?.total > 0}
+                        <span class="completion-gates">{c.gates.passed}/{c.gates.total} gates</span>
+                      {/if}
+                      {#if c.repoName}
+                        <span class="completion-repo">{c.repoName}</span>
+                      {/if}
+                      {#if c.mergedAt}
+                        <span class="completion-time">{relTime(c.mergedAt)}</span>
+                      {/if}
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            </section>
+          {/if}
+          <!-- Inline activity feed (replaces buried Activity tab) -->
+          <section class="ws-activity-sidebar">
+            <h3 class="completions-title">Activity</h3>
+            {#if activityLoading}
+              <div class="skeleton-row"></div>
+            {:else if activityEvents.length === 0}
+              <p class="empty-text-compact">No recent activity</p>
+            {:else}
+              <div class="activity-timeline activity-timeline-compact">
+                {#each activityEvents.slice(0, 8) as event, i}
+                  {@const variant = activityVariant(event)}
+                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                  <button
+                    class="activity-item activity-item-clickable"
+                    onclick={() => {
+                      if (primaryType && primaryId) {
+                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                        nav(primaryType, primaryId, data);
+                      }
+                    }}
+                  >
+                    <div class="activity-dot activity-dot-{variant}"></div>
+                    {#if i < 7}<div class="activity-line"></div>{/if}
+                    <div class="activity-content">
+                      <div class="activity-main-row">
+                        <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
+                        <span class="activity-label">{activityLabel(event)}</span>
+                        {#if event.entity_name ?? event.title}
+                          <span class="activity-detail">{(event.entity_name ?? event.title ?? '').slice(0, 40)}</span>
+                        {/if}
+                      </div>
+                      {#if event.timestamp ?? event.created_at}
+                        <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                      {/if}
+                    </div>
+                  </button>
+                {/each}
+              </div>
+              {#if activityEvents.length > 8}
+                <button class="show-more-btn-compact" onclick={() => { wsTab = 'activity'; userSelectedTab = true; browseExpanded = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
+                  View all activity ({activityEvents.length})
+                </button>
+              {/if}
+            {/if}
+          </section>
+        </aside>
+      </div>
 
-      <!-- ── Cross-repo browse: entity tabs ─────────────────────────── -->
+      <!-- ── Cross-repo browse: entity tabs (collapsible) ─────────────── -->
       <div class="dashboard-flow">
         <div class="ws-main-content" data-testid="browse-panel">
+          <button class="browse-toggle" onclick={() => { browseExpanded = !browseExpanded; }} aria-expanded={browseExpanded}>
+            <span class="browse-toggle-label">Explore workspace</span>
+            <span class="browse-toggle-icon">{browseExpanded ? '−' : '+'}</span>
+          </button>
+          {#if browseExpanded}
           <nav class="ws-tab-bar ws-tab-bar-secondary" aria-label="Browse workspace entities">
-            <span class="ws-tab-bar-label">Browse</span>
             <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
               Specs
               {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
@@ -1888,6 +1931,7 @@
               </div>
             {/if}
 
+          {/if}<!-- browseExpanded -->
         </div><!-- .ws-main-content -->
       </div><!-- .dashboard-flow -->
 
@@ -1938,14 +1982,108 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
-    padding: var(--space-4) var(--space-6);
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-6);
     max-width: 1200px;
     margin: 0 auto;
     width: 100%;
   }
 
-  /* ── Status sentence ──────────────────────────────────────────── */
+  /* ── Two-column layout ──────────────────────────────────────────── */
+  .dashboard-columns {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: var(--space-3);
+  }
+
+  @media (min-width: 900px) {
+    .dashboard-columns {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .dashboard-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .ws-activity-sidebar {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .activity-timeline-compact .activity-item {
+    padding: var(--space-1) 0;
+  }
+
+  .activity-timeline-compact .activity-content {
+    gap: 2px;
+  }
+
+  .empty-text-compact {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: var(--space-2);
+    text-align: center;
+  }
+
+  .show-more-btn-compact {
+    display: block;
+    width: 100%;
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: none;
+    border-top: 1px solid var(--color-border);
+    color: var(--color-link);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    font-family: var(--font-body);
+    text-align: center;
+    margin-top: var(--space-1);
+  }
+
+  .show-more-btn-compact:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  /* ── Browse toggle ────────────────────────────────────────────── */
+  .browse-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: all var(--transition-fast);
+  }
+
+  .browse-toggle:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border-strong);
+  }
+
+  .browse-toggle-label {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+  }
+
+  .browse-toggle-icon {
+    font-size: var(--text-base);
+    color: var(--color-text-muted);
+    font-weight: 700;
+    width: 20px;
+    text-align: center;
+  }
+
   /* ── Pipeline progress bar ─────────────────────────────────────── */
   .pipeline-progress {
     display: flex;
