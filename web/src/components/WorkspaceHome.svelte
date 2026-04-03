@@ -618,19 +618,21 @@
   let wsTab = $state('specs');
   // Track whether user has manually selected a tab (don't auto-switch after that)
   let userSelectedTab = $state(false);
+  // Entity browse section starts collapsed — opens when user clicks pipeline stage or tab
+  let browseExpanded = $state(false);
 
   // Auto-select the most actionable tab once data loads
   $effect(() => {
     if (userSelectedTab) return;
     // Wait until at least specs+tasks are loaded
     if (specsLoading || tasksLoading) return;
-    // If there are actionable items, jump to the relevant tab
-    if (pipelineSpecs.pending > 0) wsTab = 'specs';
-    else if (pipelineMrs.failed_gates > 0) wsTab = 'mrs';
-    else if (pipelineAgents.active > 0) wsTab = 'agents';
-    else if (pipelineMrs.open > 0) wsTab = 'mrs';
-    else if (pipelineTasks.in_progress > 0 || pipelineTasks.blocked > 0) wsTab = 'tasks';
-    // else stay on specs
+    // If there are actionable items, jump to the relevant tab and expand
+    if (pipelineSpecs.pending > 0) { wsTab = 'specs'; browseExpanded = true; }
+    else if (pipelineMrs.failed_gates > 0) { wsTab = 'mrs'; browseExpanded = true; }
+    else if (pipelineAgents.active > 0) { wsTab = 'agents'; browseExpanded = true; }
+    else if (pipelineMrs.open > 0) { wsTab = 'mrs'; browseExpanded = true; }
+    else if (pipelineTasks.in_progress > 0 || pipelineTasks.blocked > 0) { wsTab = 'tasks'; browseExpanded = true; }
+    // else stay collapsed — repos are the primary content
   });
 
   // ── Activity filter + pagination ──────────────────────────────────────
@@ -1076,14 +1078,14 @@
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => {
             const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
             if (pendingSpecs.length === 1) { navigateToSpec(pendingSpecs[0]); return; }
-            wsTab = 'specs'; userSelectedTab = true;
+            wsTab = 'specs'; userSelectedTab = true; browseExpanded = true;
           }}>
             <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
             <span class="pipeline-stage-label">Specs</span>
             {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; browseExpanded = true; }}>
             <span class="pipeline-stage-count">{pipelineTasks.total}</span>
             <span class="pipeline-stage-label">Tasks</span>
             {#if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge">{pipelineTasks.in_progress} active</span>{/if}
@@ -1093,7 +1095,7 @@
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => {
             const activeAgentList = wsAgents.filter(a => a.status === 'active');
             if (activeAgentList.length === 1) { nav('agent', activeAgentList[0].id, { repo_id: activeAgentList[0].repo_id, name: activeAgentList[0].name }); return; }
-            wsTab = 'agents'; userSelectedTab = true;
+            wsTab = 'agents'; userSelectedTab = true; browseExpanded = true;
           }}>
             <span class="pipeline-stage-count">{pipelineAgents.total}</span>
             <span class="pipeline-stage-label">Agents</span>
@@ -1105,7 +1107,7 @@
             if (failedMrs.length === 1) { nav('mr', failedMrs[0].id, { repo_id: failedMrs[0].repository_id ?? failedMrs[0].repo_id, title: failedMrs[0].title, _openTab: 'gates' }); return; }
             const openMrs = wsMrs.filter(m => m.status === 'open');
             if (openMrs.length === 1 && failedMrs.length === 0) { nav('mr', openMrs[0].id, { repo_id: openMrs[0].repository_id ?? openMrs[0].repo_id, title: openMrs[0].title }); return; }
-            wsTab = 'mrs'; userSelectedTab = true;
+            wsTab = 'mrs'; userSelectedTab = true; browseExpanded = true;
           }}>
             <span class="pipeline-stage-count">{pipelineMrs.total}</span>
             <span class="pipeline-stage-label">MRs</span>
@@ -1190,8 +1192,11 @@
 
       <!-- ── Recent Completions — provenance chain visualization ──── -->
       {#if recentCompletions.length > 0}
-        <section class="ws-completions-section" data-testid="section-completions">
-          <h2 class="completions-title">Recent completions</h2>
+        <details class="ws-completions-section" data-testid="section-completions">
+          <summary class="completions-title completions-toggle">
+            Recent completions
+            <span class="completions-count">{recentCompletions.length}</span>
+          </summary>
           <div class="completions-list">
             {#each recentCompletions as c}
               <div class="completion-item">
@@ -1223,7 +1228,7 @@
               </div>
             {/each}
           </div>
-        </section>
+        </details>
       {/if}
 
       <!-- ── Main dashboard: single-column layout ──────────────────── -->
@@ -1321,39 +1326,52 @@
 
       </div>
 
-      <!-- ── Cross-repo entity browse (always visible tabs) ──────────── -->
-      <div class="dashboard-flow" data-testid="browse-panel">
+      <!-- ── Cross-repo entity browse (collapsible — opens on pipeline click) ── -->
+      <div class="dashboard-flow" class:dashboard-flow-collapsed={!browseExpanded} data-testid="browse-panel">
+        <button class="browse-section-toggle" onclick={() => { browseExpanded = !browseExpanded; }} aria-expanded={browseExpanded}>
+          <span class="browse-toggle-chevron" class:browse-toggle-open={browseExpanded}>&#9656;</span>
+          <span class="browse-toggle-label">Cross-repo details</span>
+          {#if !browseExpanded}
+            <span class="browse-toggle-hint">
+              {#if pipelineSpecs.pending > 0}{pipelineSpecs.pending} specs pending{/if}
+              {#if pipelineAgents.active > 0}{pipelineAgents.active > 0 && pipelineSpecs.pending > 0 ? ' · ' : ''}{pipelineAgents.active} agents active{/if}
+              {#if pipelineMrs.failed_gates > 0}{(pipelineAgents.active > 0 || pipelineSpecs.pending > 0) ? ' · ' : ''}{pipelineMrs.failed_gates} gates failed{/if}
+              {#if pipelineMrs.open > 0 && pipelineMrs.failed_gates === 0}{(pipelineAgents.active > 0 || pipelineSpecs.pending > 0) ? ' · ' : ''}{pipelineMrs.open} MRs open{/if}
+            </span>
+          {/if}
+        </button>
+        {#if browseExpanded}
         <nav class="ws-tab-bar" aria-label="Browse workspace entities">
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; browseExpanded = true; }}>
             Specs
             {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
             {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; browseExpanded = true; }}>
             Tasks
             {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
             {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
             {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; browseExpanded = true; }}>
             MRs
             {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
             {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
             {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; browseExpanded = true; }}>
             Agents
             {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
             {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
           </button>
           {#if mergeQueueItems.length > 0}
-            <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; }}>
+            <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; browseExpanded = true; }}>
               Queue
               <span class="ws-tab-badge ws-tab-badge-warn">{mergeQueueItems.length}</span>
             </button>
           {/if}
           <span class="ws-tab-spacer"></span>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; browseExpanded = true; }}>
             Activity
           </button>
         </nav>
@@ -1918,6 +1936,7 @@
               </div>
             {/if}
 
+        {/if}
       </div><!-- .dashboard-flow -->
 
     </div><!-- .focused-dashboard -->
@@ -2166,6 +2185,45 @@
     margin: 0 0 var(--space-2) 0;
   }
 
+  .completions-toggle {
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: 0;
+  }
+
+  .completions-toggle::-webkit-details-marker { display: none; }
+
+  .completions-toggle::before {
+    content: '▸';
+    font-size: 10px;
+    color: var(--color-text-muted);
+    transition: transform var(--transition-fast);
+  }
+
+  details.ws-completions-section[open] > .completions-toggle::before {
+    transform: rotate(90deg);
+  }
+
+  details.ws-completions-section[open] > .completions-toggle {
+    margin-bottom: var(--space-2);
+  }
+
+  .completions-count {
+    font-size: 10px;
+    font-weight: 700;
+    background: var(--color-surface-elevated);
+    color: var(--color-success);
+    border-radius: 8px;
+    padding: 0 5px;
+    min-width: 14px;
+    text-align: center;
+    line-height: 16px;
+  }
+
   .completions-list {
     display: flex;
     flex-direction: column;
@@ -2389,6 +2447,53 @@
     border-radius: var(--radius);
     background: var(--color-surface);
     overflow: hidden;
+  }
+
+  .dashboard-flow-collapsed {
+    border-color: var(--color-border);
+  }
+
+  .browse-section-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    width: 100%;
+    text-align: left;
+    transition: background var(--transition-fast);
+  }
+
+  .browse-section-toggle:hover {
+    background: color-mix(in srgb, var(--color-primary) 6%, var(--color-surface-elevated));
+  }
+
+  .browse-toggle-chevron {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    transition: transform 0.15s ease;
+    display: inline-block;
+  }
+
+  .browse-toggle-open {
+    transform: rotate(90deg);
+  }
+
+  .browse-toggle-label {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .browse-toggle-hint {
+    font-weight: 400;
+    color: var(--color-text-muted);
+    margin-left: auto;
   }
 
   /* ── Queue list (inline in entity panel tab) ──────────────────────── */
