@@ -1161,6 +1161,20 @@
         </section>
       {/if}
 
+      <!-- ── Briefing (LLM summary of recent changes) ──────────────── -->
+      {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
+        <section class="ws-briefing-section">
+          <div class="ws-briefing-body">
+            {#if briefingData.summary}
+              <p class="ws-briefing-text">{briefingData.summary}</p>
+            {/if}
+            {#if briefingData.narrative && briefingData.narrative !== briefingData.summary}
+              <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
+            {/if}
+          </div>
+        </section>
+      {/if}
+
       <!-- ── Repos: primary navigation ────────────────────────────── -->
       <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
         <div class="section-header">
