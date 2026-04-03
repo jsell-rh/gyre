@@ -607,8 +607,8 @@
   // ── Workspace-level entity tab ──────────────────────────────────────
   // Default to activity feed — the unified cross-repo stream
   let wsTab = $state('activity');
-  // Whether the "Browse all" entity section is expanded
-  let browseExpanded = $state(false);
+  // Entity tables are always visible — they ARE the workspace home
+  let browseExpanded = $state(true);
 
   function toggleBrowse() {
     browseExpanded = !browseExpanded;
@@ -1006,11 +1006,20 @@
   {:else}
     <div class="focused-dashboard">
 
-      {#if workspace.description}
-        <p class="ws-description">{workspace.description}</p>
+      {#if workspace.description || (briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative))}
+        <p class="ws-description">
+          {workspace.description ?? ''}
+          {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
+            {#if workspace.description}<br/>{/if}
+            <span class="briefing-inline">{briefingData.summary ?? briefingData.narrative ?? ''}</span>
+            {#if briefingData.exceptions?.length > 0}
+              <span class="briefing-exception-count"> — {briefingData.exceptions.length} exception{briefingData.exceptions.length !== 1 ? 's' : ''}</span>
+            {/if}
+          {/if}
+        </p>
       {/if}
 
-      <!-- Pipeline bar (compact, navigational — click stages to jump to repo tab) -->
+      <!-- Pipeline bar (compact, navigational — click stages to jump to entity tab) -->
       <PipelineOverview
         specs={pipelineSpecs}
         tasks={pipelineTasks}
@@ -1028,16 +1037,6 @@
         onNavigateSpec={navigateToSpec}
       />
 
-      <!-- Briefing one-liner (if available) -->
-      {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative || briefingData.exceptions?.length > 0)}
-        <p class="briefing-oneliner" data-testid="section-briefing">
-          {briefingData.summary ?? briefingData.narrative ?? ''}
-          {#if briefingData.exceptions?.length > 0}
-            <span class="briefing-exception-count"> — {briefingData.exceptions.length} exception{briefingData.exceptions.length !== 1 ? 's' : ''} flagged</span>
-          {/if}
-        </p>
-      {/if}
-
       <!-- Action needed banner (collapses when empty) -->
       {#if actionableNotifications.length > 0}
         <ActionNeeded
@@ -1051,220 +1050,9 @@
 
       <!-- ── Single-column layout ─────────────────────────────────────── -->
       <div class="dashboard-flow">
-          <!-- Repositories -->
-          <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
-            <div class="section-header">
-              <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
-              <div class="repo-header-actions">
-                <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
-                <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
-              </div>
-            </div>
-            <div class="section-body">
-              {#if reposLoading}
-                <div class="skeleton-row"></div>
-              {:else if reposError}
-                <div class="error-row" role="alert">
-                  <p class="error-text">{reposError}</p>
-                  <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
-                </div>
-              {:else if repos.length === 0}
-                <p class="empty-text" data-testid="repos-empty">{$t('workspace_home.repos_empty')}</p>
-              {:else}
-                <div class="repo-cards-grid">
-                  {#each repos.slice().sort((a, b) => {
-                    const aStats = repoStats(a);
-                    const bStats = repoStats(b);
-                    // Active agents first, then most recent activity
-                    if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
-                    const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
-                    const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
-                    return bTime - aTime;
-                  }) as repo (repo.id)}
-                    <RepoCard
-                      {repo}
-                      health={repoHealth(repo)}
-                      stats={repoStats(repo)}
-                      activeAgentNames={repoActiveAgentNames(repo)}
-                      specBreakdown={repoSpecBreakdown(repo)}
-                      latestMr={repoLatestMr(repo)}
-                      onclick={() => onSelectRepo?.(repo)}
-                    />
-                  {/each}
-                </div>
-              {/if}
 
-              {#if newRepoOpen}
-                <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
-                  <div class="inline-form-header">
-                    <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
-                    <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
-                  </div>
-                  <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
-                  <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
-                  {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
-                  <div class="inline-form-actions">
-                    <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
-                    <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
-                  </div>
-                </form>
-              {/if}
-
-              {#if importOpen}
-                <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
-                  <div class="inline-form-header">
-                    <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
-                    <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
-                  </div>
-                  <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
-                  <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
-                  {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
-                  <div class="inline-form-actions">
-                    <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
-                    <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
-                  </div>
-                </form>
-              {/if}
-            </div>
-          </section>
-
-          <!-- Merge queue (promoted — visible when items are queued) -->
-          {#if mergeQueueItems.length > 0}
-            <section class="merge-queue-banner" data-testid="merge-queue-banner">
-              <div class="mq-banner-header">
-                <Icon name="git-merge" size={14} />
-                <span class="mq-banner-title">Merge Queue</span>
-                <span class="mq-banner-count">{mergeQueueItems.length} item{mergeQueueItems.length !== 1 ? 's' : ''}</span>
-              </div>
-              <div class="mq-banner-list">
-                {#each mergeQueueItems.slice(0, 5) as item, i}
-                  {@const mrId = item.merge_request_id ?? item.mr_id}
-                  <button class="mq-banner-item" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">
-                    <span class="mq-item-position">#{i + 1}</span>
-                    <span class="mq-banner-item-title">{item._title}</span>
-                    {#if item._mr?._gates?.total > 0}
-                      <span class="mq-banner-gates">
-                        {#if item._mr._gates.failed > 0}<span class="gate-fail-count">&#10007;{item._mr._gates.failed}</span>{/if}
-                        {#if item._mr._gates.passed > 0}<span class="gate-pass-count">&#10003;{item._mr._gates.passed}</span>{/if}
-                        <span class="gate-total-count">/{item._mr._gates.total}</span>
-                      </span>
-                    {/if}
-                  </button>
-                {/each}
-                {#if mergeQueueItems.length > 5}
-                  <span class="mq-banner-overflow">+{mergeQueueItems.length - 5} more</span>
-                {/if}
-              </div>
-            </section>
-          {/if}
-
-          <!-- Activity feed — the primary cross-repo stream -->
-          <section class="ws-feed-panel" data-testid="ws-tabbed-panel">
-            <div class="feed-header-bar">
-              <span class="feed-header-title">
-                <Icon name="activity" size={14} />
-                Activity
-              </span>
-              <div class="feed-header-controls">
-                <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity">
-                  <option value="">All</option>
-                  <option value="spec">Specs</option>
-                  <option value="task">Tasks</option>
-                  <option value="agent">Agents</option>
-                  <option value="mr">MRs</option>
-                  <option value="gate">Gates</option>
-                </select>
-                <button class="browse-toggle" class:browse-toggle-active={browseExpanded} onclick={toggleBrowse} title="Browse all specs, tasks, MRs, and agents across repos">
-                  Browse all
-                  {#if pipelineSpecs.pending > 0 || pipelineMrs.failed_gates > 0}
-                    <span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending + pipelineMrs.failed_gates}</span>
-                  {/if}
-                </button>
-              </div>
-            </div>
-
-            <!-- ── Activity feed (always visible) ──────────────────── -->
-              <div class="feed-body">
-                {#if activityLoading}
-                  <div class="skeleton-row"></div>
-                  <div class="skeleton-row"></div>
-                {:else if filteredActivity.length === 0}
-                  <p class="empty-text">No recent activity. Push specs and approve them to get started.</p>
-                {:else}
-                  <div class="activity-timeline">
-                    {#each filteredActivity.slice(0, activityLimit) as event, i}
-                      {@const variant = activityVariant(event)}
-                      {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                      {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                      <button
-                        class="activity-item activity-item-clickable"
-                        onclick={() => {
-                          if (primaryType && primaryId) {
-                            const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                            nav(primaryType, primaryId, data);
-                          }
-                        }}
-                      >
-                        <div class="activity-dot activity-dot-{variant}"></div>
-                        {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                        <div class="activity-content">
-                          <div class="activity-main-row">
-                            <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
-                            <span class="activity-label">{activityLabel(event)}</span>
-                            {#if event.entity_name ?? event.title}
-                              <span class="activity-detail">{event.entity_name ?? event.title}</span>
-                            {/if}
-                            <span class="activity-entity-badges">
-                              {#if event.agent_id}
-                                <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }} title="View agent">
-                                  <Icon name="agent" size={10} /> {event.entity_name && event.entity_type === 'agent' ? event.entity_name : entityName('agent', event.agent_id)}
-                                </button>
-                              {/if}
-                              {#if event.mr_id}
-                                <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }} title="View merge request">
-                                  <Icon name="git-merge" size={10} /> {event.entity_name && event.entity_type === 'mr' ? event.entity_name : entityName('mr', event.mr_id)}
-                                </button>
-                              {/if}
-                              {#if event.task_id}
-                                <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('task', event.task_id, { repo_id: event.repo_id }); }} title="View task">
-                                  <Icon name="task" size={10} /> {event.entity_name && event.entity_type === 'task' ? event.entity_name : entityName('task', event.task_id)}
-                                </button>
-                              {/if}
-                              {#if event.spec_path}
-                                <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }} title="View spec">
-                                  <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                                </button>
-                              {/if}
-                            </span>
-                            {#if event.repo_id && repoMap[event.repo_id]}
-                              <button class="activity-repo-tag activity-repo-tag-clickable" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[event.repo_id]); }} title="Go to repo">
-                                {repoMap[event.repo_id].name}
-                              </button>
-                            {/if}
-                            {#if event.timestamp ?? event.created_at}
-                              <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                            {/if}
-                          </div>
-                          {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                            <p class="activity-reason">{event.description.length > 140 ? event.description.slice(0, 140) + '...' : event.description}</p>
-                          {/if}
-                        </div>
-                      </button>
-                    {/each}
-                  </div>
-                  {#if filteredActivity.length > activityLimit}
-                    <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
-                      Show more ({filteredActivity.length - activityLimit} remaining)
-                    </button>
-                  {/if}
-                {/if}
-              </div>
-
-          </section>
-
-          <!-- ── Browse All (collapsible entity tables) ──────────── -->
-          {#if browseExpanded}
-          <section class="ws-feed-panel browse-panel" data-testid="browse-panel">
+          <!-- ── Entity Tables (primary content) ────────────────── -->
+          <section class="ws-feed-panel" data-testid="browse-panel">
             <nav class="ws-tab-bar" aria-label="Browse entities">
               <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; }}>
                 <Icon name="spec" size={12} />
@@ -1615,7 +1403,207 @@
               </div>
             {/if}
           </section>
+
+          <!-- Repositories (compact section below entity tables) -->
+          <section class="home-section" aria-labelledby="section-repos" data-testid="section-repos">
+            <div class="section-header">
+              <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
+              <div class="repo-header-actions">
+                <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
+                <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
+              </div>
+            </div>
+            <div class="section-body">
+              {#if reposLoading}
+                <div class="skeleton-row"></div>
+              {:else if reposError}
+                <div class="error-row" role="alert">
+                  <p class="error-text">{reposError}</p>
+                  <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
+                </div>
+              {:else if repos.length === 0}
+                <p class="empty-text" data-testid="repos-empty">{$t('workspace_home.repos_empty')}</p>
+              {:else}
+                <div class="repo-cards-grid">
+                  {#each repos.slice().sort((a, b) => {
+                    const aStats = repoStats(a);
+                    const bStats = repoStats(b);
+                    if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
+                    const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
+                    const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
+                    return bTime - aTime;
+                  }) as repo (repo.id)}
+                    <RepoCard
+                      {repo}
+                      health={repoHealth(repo)}
+                      stats={repoStats(repo)}
+                      activeAgentNames={repoActiveAgentNames(repo)}
+                      specBreakdown={repoSpecBreakdown(repo)}
+                      latestMr={repoLatestMr(repo)}
+                      onclick={() => onSelectRepo?.(repo)}
+                    />
+                  {/each}
+                </div>
+              {/if}
+
+              {#if newRepoOpen}
+                <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
+                  <div class="inline-form-header">
+                    <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
+                    <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
+                  </div>
+                  <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
+                  <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
+                  {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
+                  <div class="inline-form-actions">
+                    <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
+                    <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
+                  </div>
+                </form>
+              {/if}
+
+              {#if importOpen}
+                <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
+                  <div class="inline-form-header">
+                    <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
+                    <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
+                  </div>
+                  <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
+                  <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
+                  {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
+                  <div class="inline-form-actions">
+                    <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
+                    <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
+                  </div>
+                </form>
+              {/if}
+            </div>
+          </section>
+
+          <!-- Activity feed (collapsible secondary) -->
+          <details class="activity-details" data-testid="ws-tabbed-panel">
+            <summary class="activity-summary-bar">
+              <Icon name="activity" size={14} />
+              <span>Activity</span>
+              {#if activityEvents.length > 0}
+                <span class="activity-count-badge">{activityEvents.length}</span>
+              {/if}
+              <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity" onclick={(e) => e.stopPropagation()}>
+                <option value="">All</option>
+                <option value="spec">Specs</option>
+                <option value="task">Tasks</option>
+                <option value="agent">Agents</option>
+                <option value="mr">MRs</option>
+                <option value="gate">Gates</option>
+              </select>
+            </summary>
+            <div class="feed-body">
+              {#if activityLoading}
+                <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
+              {:else if filteredActivity.length === 0}
+                <p class="empty-text">No recent activity. Push specs and approve them to get started.</p>
+              {:else}
+                <div class="activity-timeline">
+                  {#each filteredActivity.slice(0, activityLimit) as event, i}
+                    {@const variant = activityVariant(event)}
+                    {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                    {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                    <button
+                      class="activity-item activity-item-clickable"
+                      onclick={() => {
+                        if (primaryType && primaryId) {
+                          const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                          nav(primaryType, primaryId, data);
+                        }
+                      }}
+                    >
+                      <div class="activity-dot activity-dot-{variant}"></div>
+                      {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                      <div class="activity-content">
+                        <div class="activity-main-row">
+                          <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
+                          <span class="activity-label">{activityLabel(event)}</span>
+                          {#if event.entity_name ?? event.title}
+                            <span class="activity-detail">{event.entity_name ?? event.title}</span>
+                          {/if}
+                          <span class="activity-entity-badges">
+                            {#if event.agent_id}
+                              <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }} title="View agent">
+                                <Icon name="agent" size={10} /> {event.entity_name && event.entity_type === 'agent' ? event.entity_name : entityName('agent', event.agent_id)}
+                              </button>
+                            {/if}
+                            {#if event.mr_id}
+                              <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }} title="View merge request">
+                                <Icon name="git-merge" size={10} /> {event.entity_name && event.entity_type === 'mr' ? event.entity_name : entityName('mr', event.mr_id)}
+                              </button>
+                            {/if}
+                            {#if event.task_id}
+                              <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('task', event.task_id, { repo_id: event.repo_id }); }} title="View task">
+                                <Icon name="task" size={10} /> {event.entity_name && event.entity_type === 'task' ? event.entity_name : entityName('task', event.task_id)}
+                              </button>
+                            {/if}
+                            {#if event.spec_path}
+                              <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }} title="View spec">
+                                <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                              </button>
+                            {/if}
+                          </span>
+                          {#if event.repo_id && repoMap[event.repo_id]}
+                            <button class="activity-repo-tag activity-repo-tag-clickable" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[event.repo_id]); }} title="Go to repo">
+                              {repoMap[event.repo_id].name}
+                            </button>
+                          {/if}
+                          {#if event.timestamp ?? event.created_at}
+                            <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                          {/if}
+                        </div>
+                        {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
+                          <p class="activity-reason">{event.description.length > 140 ? event.description.slice(0, 140) + '...' : event.description}</p>
+                        {/if}
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+                {#if filteredActivity.length > activityLimit}
+                  <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
+                    Show more ({filteredActivity.length - activityLimit} remaining)
+                  </button>
+                {/if}
+              {/if}
+            </div>
+          </details>
+
+          <!-- Merge queue (visible when items are queued) -->
+          {#if mergeQueueItems.length > 0}
+            <section class="merge-queue-banner" data-testid="merge-queue-banner">
+              <div class="mq-banner-header">
+                <Icon name="git-merge" size={14} />
+                <span class="mq-banner-title">Merge Queue</span>
+                <span class="mq-banner-count">{mergeQueueItems.length} item{mergeQueueItems.length !== 1 ? 's' : ''}</span>
+              </div>
+              <div class="mq-banner-list">
+                {#each mergeQueueItems.slice(0, 5) as item, i}
+                  {@const mrId = item.merge_request_id ?? item.mr_id}
+                  <button class="mq-banner-item" onclick={() => nav('mr', mrId, item._mr)} title="View merge request">
+                    <span class="mq-item-position">#{i + 1}</span>
+                    <span class="mq-banner-item-title">{item._title}</span>
+                    {#if item._mr?._gates?.total > 0}
+                      <span class="mq-banner-gates">
+                        {#if item._mr._gates.failed > 0}<span class="gate-fail-count">&#10007;{item._mr._gates.failed}</span>{/if}
+                        {#if item._mr._gates.passed > 0}<span class="gate-pass-count">&#10003;{item._mr._gates.passed}</span>{/if}
+                        <span class="gate-total-count">/{item._mr._gates.total}</span>
+                      </span>
+                    {/if}
+                  </button>
+                {/each}
+                {#if mergeQueueItems.length > 5}
+                  <span class="mq-banner-overflow">+{mergeQueueItems.length - 5} more</span>
+                {/if}
+              </div>
+            </section>
           {/if}
+
       </div><!-- .dashboard-flow -->
 
     </div><!-- .focused-dashboard -->
@@ -1679,13 +1667,9 @@
     line-height: 1.4;
   }
 
-  /* ── Compact briefing one-liner ────────────────────────────────────────── */
-  .briefing-oneliner {
-    font-size: var(--text-xs);
+  .briefing-inline {
+    font-style: italic;
     color: var(--color-text-muted);
-    margin: 0;
-    line-height: 1.4;
-    padding: 0 var(--space-1);
   }
 
   .briefing-exception-count {
@@ -2103,6 +2087,58 @@
   .browse-panel {
     border-color: var(--color-primary);
     border-top: 2px solid var(--color-primary);
+  }
+
+  /* ── Activity feed collapsible ──────────────────── */
+  .activity-details {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .activity-summary-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    user-select: none;
+    list-style: none;
+  }
+
+  .activity-summary-bar::-webkit-details-marker { display: none; }
+
+  .activity-summary-bar::before {
+    content: '▸';
+    font-size: 10px;
+    color: var(--color-text-muted);
+    transition: transform var(--transition-fast);
+  }
+
+  .activity-details[open] > .activity-summary-bar::before {
+    transform: rotate(90deg);
+  }
+
+  .activity-count-badge {
+    font-size: 10px;
+    font-weight: 700;
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    border-radius: 8px;
+    padding: 0 5px;
+    min-width: 14px;
+    text-align: center;
+    line-height: 16px;
+    border: 1px solid var(--color-border);
+  }
+
+  .activity-summary-bar .filter-select {
+    margin-left: auto;
   }
 
   /* ── Activity feed (full-width) ──────────────────── */
