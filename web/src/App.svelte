@@ -337,6 +337,31 @@
         }
       } catch { /* best effort */ }
     }
+    // If we still don't have repo context, try to resolve from the entity itself
+    if (!currentRepo && !entityRepoId) {
+      try {
+        let resolvedRepoId = null;
+        if (entityType === 'task') {
+          const taskData = await api.task(entityId).catch(() => null);
+          resolvedRepoId = taskData?.repo_id;
+        } else if (entityType === 'agent') {
+          const agentData = await api.agent(entityId).catch(() => null);
+          resolvedRepoId = agentData?.repo_id;
+        } else if (entityType === 'mr') {
+          const mrData = await api.mergeRequest(entityId).catch(() => null);
+          resolvedRepoId = mrData?.repository_id ?? mrData?.repo_id;
+        }
+        if (resolvedRepoId) {
+          const repos = await api.workspaceRepos(currentWorkspace.id);
+          const repo = (Array.isArray(repos) ? repos : []).find(r => r.id === resolvedRepoId);
+          if (repo) {
+            currentRepo = { id: repo.id, name: repo.name };
+            repoIdCache.set(`${currentWorkspace.id}:${repo.name}`, repo.id);
+            d.repo_id = repo.id;
+          }
+        }
+      } catch { /* best effort */ }
+    }
     if (!currentRepo) return; // Can't navigate without repo context
 
     mode = 'repo';

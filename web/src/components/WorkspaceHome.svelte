@@ -503,6 +503,12 @@
 
   // ── Spec navigation ────────────────────────────────────────────────────
   function navigateToSpec(spec) {
+    // Try direct navigation to spec detail first (one-click to detail)
+    if (spec.path && spec.repo_id) {
+      nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id });
+      return;
+    }
+    // Fallback: navigate to repo specs tab
     const repo = repoMap[spec.repo_id];
     if (repo && onSelectRepo) {
       onSelectRepo(repo, 'specs', spec.path);
