@@ -49,6 +49,15 @@ vi.mock('../lib/api.js', () => ({
 // Reference data for assertions (NOT used inside vi.mock)
 const SPECS_PATHS = ['system/vision.md', 'system/payment-retry.md', 'system/identity.md'];
 
+// Helper: the component renders spec paths with .md stripped and directory in a child span,
+// but sets title={spec.path} on the .spec-path span. Use title attribute for lookups.
+function findSpecByPath(path) {
+  return screen.getByTitle(path);
+}
+function querySpecByPath(path) {
+  return screen.queryByTitle(path);
+}
+
 // Mock toast
 vi.mock('../lib/toast.svelte.js', () => ({
   toastSuccess: vi.fn(),
@@ -78,37 +87,39 @@ describe('SpecDashboard', () => {
   // ── Table columns and sorting ──────────────────────────────────────────────
   it('table shows spec paths in rows', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/vision.md')).toBeTruthy());
-    expect(screen.getByText('system/payment-retry.md')).toBeTruthy();
-    expect(screen.getByText('system/identity.md')).toBeTruthy();
+    await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
+    expect(findSpecByPath('system/payment-retry.md')).toBeTruthy();
+    expect(findSpecByPath('system/identity.md')).toBeTruthy();
   });
 
   it('sorts by path ascending by default', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/identity.md')).toBeTruthy());
+    await waitFor(() => expect(findSpecByPath('system/identity.md')).toBeTruthy());
     const rows = screen.getAllByRole('row');
     // Skip header row (index 0), check data rows are sorted alphabetically
     const sortedPaths = [...SPECS_PATHS].sort();
     const rowTexts = rows.slice(1).map((r) => r.textContent ?? '');
+    // Component strips .md extension; check for base name without extension
     sortedPaths.forEach((p, i) => {
-      expect(rowTexts[i]).toContain(p);
+      const baseName = p.split('/').pop().replace(/\.md$/, '');
+      expect(rowTexts[i]).toContain(baseName);
     });
   });
 
   it('sorts descending on second click of same column', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/vision.md')).toBeTruthy());
+    await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
     const pathBtn = screen.getByRole('button', { name: /path/i });
     await fireEvent.click(pathBtn); // → desc
     const rows = screen.getAllByRole('row');
     const rowTexts = rows.slice(1).map((r) => r.textContent ?? '');
     const first = rowTexts[0];
-    expect(first).toContain('system/vision.md');
+    expect(first).toContain('vision');
   });
 
   it('sorts by status column on click', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/vision.md')).toBeTruthy());
+    await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
     const statusBtn = screen.getByRole('button', { name: /status/i });
     await fireEvent.click(statusBtn);
     // Should not throw and table should still be rendered
@@ -118,7 +129,7 @@ describe('SpecDashboard', () => {
   // ── Filter pills ──────────────────────────────────────────────────────────
   it('shows status filter pills', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/vision.md')).toBeTruthy());
+    await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
     expect(screen.getByRole('button', { name: /approved/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: /pending/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: /deprecated/i })).toBeTruthy();
@@ -126,38 +137,38 @@ describe('SpecDashboard', () => {
 
   it('filters to approved only when pill clicked', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/vision.md')).toBeTruthy());
+    await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
     const approvedBtn = screen.getByRole('button', { name: /^approved$/i });
     await fireEvent.click(approvedBtn);
     await waitFor(() => {
-      expect(screen.getByText('system/vision.md')).toBeTruthy();
-      expect(screen.queryByText('system/payment-retry.md')).toBeNull();
-      expect(screen.queryByText('system/identity.md')).toBeNull();
+      expect(findSpecByPath('system/vision.md')).toBeTruthy();
+      expect(querySpecByPath('system/payment-retry.md')).toBeNull();
+      expect(querySpecByPath('system/identity.md')).toBeNull();
     });
   });
 
   it('filters to pending only when pill clicked', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/payment-retry.md')).toBeTruthy());
+    await waitFor(() => expect(findSpecByPath('system/payment-retry.md')).toBeTruthy());
     const pendingBtn = screen.getByRole('button', { name: /^pending$/i });
     await fireEvent.click(pendingBtn);
     await waitFor(() => {
-      expect(screen.getByText('system/payment-retry.md')).toBeTruthy();
-      expect(screen.queryByText('system/vision.md')).toBeNull();
+      expect(findSpecByPath('system/payment-retry.md')).toBeTruthy();
+      expect(querySpecByPath('system/vision.md')).toBeNull();
     });
   });
 
   it('returns to all specs when All pill clicked', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/vision.md')).toBeTruthy());
+    await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
     const approvedBtn = screen.getByRole('button', { name: /^approved$/i });
     await fireEvent.click(approvedBtn);
     // There may be two "All" pills (status + kind), use the first one
     const allBtns = screen.getAllByRole('button', { name: /^all$/i });
     await fireEvent.click(allBtns[0]);
     await waitFor(() => {
-      expect(screen.getByText('system/payment-retry.md')).toBeTruthy();
-      expect(screen.getByText('system/identity.md')).toBeTruthy();
+      expect(findSpecByPath('system/payment-retry.md')).toBeTruthy();
+      expect(findSpecByPath('system/identity.md')).toBeTruthy();
     });
   });
 
@@ -191,7 +202,7 @@ describe('SpecDashboard', () => {
     const openDetailPanel = vi.fn();
     // Provide context via a wrapper — for simplicity, test that click highlights row
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/vision.md')).toBeTruthy());
+    await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
     const row = screen.getAllByRole('row')[1]; // first data row
     await fireEvent.click(row);
     // After click, the row should be selected (has selected class)
@@ -200,7 +211,7 @@ describe('SpecDashboard', () => {
 
   it('keyboard Enter on row also selects it', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/vision.md')).toBeTruthy());
+    await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
     const row = screen.getAllByRole('row')[1];
     await fireEvent.keyDown(row, { key: 'Enter' });
     expect(row.classList.contains('selected')).toBe(true);
@@ -246,7 +257,7 @@ describe('SpecDashboard', () => {
   // ── Kind filter pills ─────────────────────────────────────────────────────
   it('kind filter pills are shown when multiple kinds present', async () => {
     render(SpecDashboard, { props: { scope: 'workspace' } });
-    await waitFor(() => expect(screen.getByText('system/vision.md')).toBeTruthy());
+    await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
     // Mock data has kinds: system, feature, security
     expect(screen.getByRole('button', { name: /^system$/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: /^feature$/i })).toBeTruthy();

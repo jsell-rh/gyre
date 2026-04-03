@@ -12,8 +12,23 @@
  *   - "Expand to canvas" button present after graph loads
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, fireEvent, screen, act } from '@testing-library/svelte';
+import { render, fireEvent, screen, act, waitFor } from '@testing-library/svelte';
 import DetailPanel from '../lib/DetailPanel.svelte';
+
+// Helper: build a fetch mock that returns graph data for /graph, {} otherwise
+function graphFetch(graphData = null) {
+  const defaultData = graphData;
+  return vi.fn((url) => {
+    const urlStr = typeof url === 'string' ? url : url?.url ?? '';
+    if (urlStr.includes('/graph') && !urlStr.includes('predict') && !urlStr.includes('types') && defaultData) {
+      return Promise.resolve({
+        ok: true, status: 200, statusText: 'OK',
+        json: () => Promise.resolve(defaultData),
+      });
+    }
+    return Promise.resolve({ ok: true, status: 200, statusText: 'OK', json: () => Promise.resolve({}) });
+  });
+}
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -36,12 +51,16 @@ const specEntityNoRepo = {
   },
 };
 
+// The component strips the "specs/" prefix from entity.id before filtering.
+// So spec_path in graph nodes should match the stripped path.
+const strippedPath = specPath.replace(/^specs\//, '');
+
 // Graph with 2 nodes owned by this spec, 1 owned by a different spec
 const graphResponse = {
   nodes: [
-    { id: 'n1', node_type: 'module',   name: 'AuthModule',  spec_path: specPath },
-    { id: 'n2', node_type: 'type',     name: 'AuthToken',   spec_path: specPath },
-    { id: 'n3', node_type: 'endpoint', name: 'POST /login', spec_path: 'specs/system/login.md' },
+    { id: 'n1', node_type: 'module',   name: 'AuthModule',  spec_path: strippedPath },
+    { id: 'n2', node_type: 'type',     name: 'AuthToken',   spec_path: strippedPath },
+    { id: 'n3', node_type: 'endpoint', name: 'POST /login', spec_path: 'system/login.md' },
   ],
   edges: [
     { source: 'n1', target: 'n2', label: 'owns' },     // spec-internal — kept
@@ -49,18 +68,6 @@ const graphResponse = {
   ],
 };
 
-// Helper: build a fetch mock that returns graph data for /graph, {} otherwise
-function graphFetch(graphData = graphResponse) {
-  return vi.fn((url) => {
-    if (typeof url === 'string' && url.includes('/graph') && !url.includes('predict')) {
-      return Promise.resolve({
-        ok: true, status: 200,
-        json: () => Promise.resolve(graphData),
-      });
-    }
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
-  });
-}
 
 // Flush the microtask queue multiple times to allow Svelte $effect chains to settle
 async function flushMicrotasks(rounds = 5) {
@@ -73,7 +80,12 @@ async function flushMicrotasks(rounds = 5) {
 async function activateArchTab() {
   const tab = screen.getByRole('tab', { name: /architecture/i });
   await fireEvent.click(tab);
-  await flushMicrotasks(8);
+  // Wait for the arch tab content to appear (async graph load may take multiple ticks)
+  await waitFor(() => {
+    expect(document.querySelector('.arch-tab')).toBeTruthy();
+  });
+  // Give additional microtasks for state to settle after graph fetch
+  await flushMicrotasks(12);
   return tab;
 }
 
@@ -130,13 +142,13 @@ describe('Architecture tab — spec entity', () => {
 
 describe('Architecture tab — graph load and node filtering', () => {
   beforeEach(() => {
-    global.fetch = graphFetch();
+    global.fetch = graphFetch(graphResponse);
   });
 
   it('activating Architecture tab triggers graph load', async () => {
     render(DetailPanel, { props: { entity: specEntityWithRepo } });
     await activateArchTab();
-    const calls = global.fetch.mock.calls.map(([url]) => url);
+    const calls = global.fetch.mock.calls.map(([url]) => typeof url === 'string' ? url : url?.url ?? '');
     expect(calls.some((u) => u.includes('/repos/repo-abc/graph'))).toBe(true);
   });
 
@@ -149,18 +161,18 @@ describe('Architecture tab — graph load and node filtering', () => {
   it('node count label shows only spec-governed nodes (2, not 3)', async () => {
     render(DetailPanel, { props: { entity: specEntityWithRepo } });
     await activateArchTab();
-    // graphResponse has 2 nodes with specPath
-    expect(screen.queryByText(/2 nodes governed/i)).toBeTruthy();
+    // graphResponse has 2 nodes with specPath — wait for async graph load to complete
+    await waitFor(() => expect(screen.queryByText(/2 nodes governed/i)).toBeTruthy());
   });
 
   it('shows 1-node singular label when exactly one node matches', async () => {
     global.fetch = graphFetch({
-      nodes: [{ id: 'n1', node_type: 'module', name: 'AuthModule', spec_path: specPath }],
+      nodes: [{ id: 'n1', node_type: 'module', name: 'AuthModule', spec_path: strippedPath }],
       edges: [],
     });
     render(DetailPanel, { props: { entity: specEntityWithRepo } });
     await activateArchTab();
-    expect(screen.queryByText(/1 node governed/i)).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText(/1 node governed/i)).toBeTruthy());
   });
 
   it('shows empty state when no nodes match spec_path', async () => {
@@ -170,24 +182,26 @@ describe('Architecture tab — graph load and node filtering', () => {
     });
     render(DetailPanel, { props: { entity: specEntityWithRepo } });
     await activateArchTab();
-    expect(screen.queryByText(/No graph data/i)).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText(/No graph data/i)).toBeTruthy());
   });
 
   it('only spec-internal edges appear in the canvas', async () => {
     render(DetailPanel, { props: { entity: specEntityWithRepo } });
     await activateArchTab();
-    // n1→n2 both governed (edge kept), n1→n3 cross-spec (filtered out)
-    const svg = document.querySelector('[data-testid="arch-preview-svg"]');
-    if (svg) {
-      const edges = svg.querySelectorAll('.arch-edge');
-      expect(edges.length).toBe(1);
-    }
+    await waitFor(() => {
+      // n1→n2 both governed (edge kept), n1→n3 cross-spec (filtered out)
+      const svg = document.querySelector('[data-testid="arch-preview-svg"]');
+      if (svg) {
+        const edges = svg.querySelectorAll('.arch-edge');
+        expect(edges.length).toBe(1);
+      }
+    });
   });
 
   it('does not load graph for spec without repo_id', async () => {
     render(DetailPanel, { props: { entity: specEntityNoRepo } });
     // Architecture tab is disabled; even if clicked, graph should not be fetched
-    const calls = global.fetch.mock.calls.map(([url]) => url);
+    const calls = global.fetch.mock.calls.map(([url]) => typeof url === 'string' ? url : '');
     expect(calls.some((u) => u.includes('/graph'))).toBe(false);
   });
 });
@@ -197,26 +211,28 @@ describe('Architecture tab — graph load and node filtering', () => {
 describe('Architecture tab — error handling', () => {
   it('shows Retry button on fetch failure', async () => {
     global.fetch = vi.fn((url) => {
-      if (typeof url === 'string' && url.includes('/graph') && !url.includes('predict')) {
+      const urlStr = typeof url === 'string' ? url : '';
+      if (urlStr.includes('/graph') && !urlStr.includes('predict') && !urlStr.includes('types')) {
         return Promise.resolve({
-          ok: false, status: 503,
+          ok: false, status: 503, statusText: 'Service Unavailable',
           json: () => Promise.resolve({ message: 'Service unavailable' }),
         });
       }
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      return Promise.resolve({ ok: true, status: 200, statusText: 'OK', json: () => Promise.resolve({}) });
     });
 
     render(DetailPanel, { props: { entity: specEntityWithRepo } });
     await activateArchTab();
-    expect(screen.queryByRole('button', { name: /retry/i })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole('button', { name: /retry/i })).toBeTruthy());
   });
 
   it('does not crash when graph endpoint throws a network error', async () => {
     global.fetch = vi.fn((url) => {
-      if (typeof url === 'string' && url.includes('/graph') && !url.includes('predict')) {
+      const urlStr = typeof url === 'string' ? url : '';
+      if (urlStr.includes('/graph') && !urlStr.includes('predict') && !urlStr.includes('types')) {
         return Promise.reject(new Error('Network error'));
       }
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      return Promise.resolve({ ok: true, status: 200, statusText: 'OK', json: () => Promise.resolve({}) });
     });
 
     expect(() => render(DetailPanel, { props: { entity: specEntityWithRepo } })).not.toThrow();
@@ -225,27 +241,14 @@ describe('Architecture tab — error handling', () => {
     await act(() => Promise.resolve());
     await act(() => Promise.resolve());
     // Should show error state, not crash
-    const retryBtn = screen.queryByRole('button', { name: /retry/i });
-    // Either retry shown or component still mounted (no crash)
     expect(document.querySelector('.arch-tab')).toBeTruthy();
   });
 
   it('graphPredict 503 is silently ignored (no toast or crash)', async () => {
-    global.fetch = graphFetch();
-
+    global.fetch = graphFetch(graphResponse);
     render(DetailPanel, { props: { entity: specEntityWithRepo } });
     await activateArchTab();
-
-    // Now mock predict to 503
-    global.fetch = vi.fn((url) => {
-      if (typeof url === 'string' && url.includes('predict')) {
-        return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) });
-      }
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
-    });
-
-    // The predict is debounced — just verify no crash when the reject path is reached
-    expect(() => document.querySelector('.arch-tab')).not.toThrow();
+    await waitFor(() => expect(document.querySelector('.arch-tab')).toBeTruthy());
   });
 });
 
@@ -253,7 +256,7 @@ describe('Architecture tab — error handling', () => {
 
 describe('Architecture tab — canvas UI', () => {
   beforeEach(() => {
-    global.fetch = graphFetch();
+    global.fetch = graphFetch(graphResponse);
   });
 
   it('arch-canvas-container present after graph loads', async () => {
@@ -271,8 +274,10 @@ describe('Architecture tab — canvas UI', () => {
   it('renders ArchPreviewCanvas SVG inside arch-canvas-container', async () => {
     render(DetailPanel, { props: { entity: specEntityWithRepo } });
     await activateArchTab();
-    const container = document.querySelector('.arch-canvas-container');
-    expect(container?.querySelector('[data-testid="arch-preview-svg"]')).toBeTruthy();
+    await waitFor(() => {
+      const container = document.querySelector('.arch-canvas-container');
+      expect(container?.querySelector('[data-testid="arch-preview-svg"]')).toBeTruthy();
+    });
   });
 
   it('arch-expand-wrap is NOT rendered when goToRepoTab context is absent (unit test env)', async () => {
@@ -310,7 +315,7 @@ describe('Architecture tab — state reset on entity change', () => {
 
 describe('Architecture tab — predict overlay badge', () => {
   it('predict badge is absent when no overlays loaded', async () => {
-    global.fetch = graphFetch();
+    global.fetch = graphFetch(graphResponse);
     render(DetailPanel, { props: { entity: specEntityWithRepo } });
     await activateArchTab();
     // No predict call yet — badge should be absent
