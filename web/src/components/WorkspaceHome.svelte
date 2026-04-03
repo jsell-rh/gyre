@@ -1642,10 +1642,14 @@
                                 <span class="entity-list-context entity-list-context-success">all gates passed</span>
                               {/if}
                               {#if gates && gates.total > 0}
-                                <button class="entity-list-chip" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }}>
-                                  {#each (gates.details ?? []).slice(0, 3) as g}
-                                    <span class="gate-chip gate-chip-{g.status}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}</span>
+                                <button class="entity-list-chip entity-list-chip-gates" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }} title="Click to view full gate details">
+                                  {#each (gates.details ?? []).slice(0, 4) as g}
+                                    {@const gateTitle = `${g.name}${g.gate_type ? ' (' + g.gate_type.replace(/_/g, ' ') + ')' : ''}${g.command ? '\n$ ' + g.command : ''}${g.required === false ? '\nAdvisory — does not block merge' : ''}${g.output ? '\n' + g.output.split('\n')[0]?.slice(0, 100) : ''}`}
+                                    <span class="gate-chip gate-chip-{g.status}" title={gateTitle}>{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}{#if g.required === false} <span class="gate-adv-tag">adv</span>{/if}</span>
                                   {/each}
+                                  {#if (gates.details ?? []).length > 4}
+                                    <span class="gate-chip gate-chip-more">+{(gates.details ?? []).length - 4}</span>
+                                  {/if}
                                   {#if (gates.details ?? []).length === 0}
                                     {#if gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{gates.passed}</span>{/if}
                                     {#if gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{gates.failed}</span>{/if}
@@ -1654,8 +1658,8 @@
                               {/if}
                               {#if gates?.failed > 0}
                                 {@const failedGate = (gates.details ?? []).find(g => g.status === 'failed')}
-                                {#if failedGate?.output}
-                                  <span class="gate-error-preview">{failedGate.output.split('\n')[0]?.slice(0, 80)}{failedGate.output.length > 80 ? '...' : ''}</span>
+                                {#if failedGate}
+                                  <span class="gate-error-preview" title="Click MR to see full gate output">{#if failedGate.command}<code class="gate-cmd-inline">$ {failedGate.command}</code> → {/if}{failedGate.output ? failedGate.output.split('\n')[0]?.slice(0, 80) : failedGate.error?.split('\n')[0]?.slice(0, 80) ?? 'failed'}{(failedGate.output?.length ?? 0) > 80 ? '...' : ''}</span>
                                 {/if}
                               {/if}
                               {#if mr.author_agent_id}
@@ -3626,6 +3630,22 @@
     font-size: 10px;
     color: var(--color-text-muted);
     padding: 1px 4px;
+  }
+
+  .gate-adv-tag {
+    font-size: 8px;
+    opacity: 0.6;
+    font-style: italic;
+  }
+
+  .entity-list-chip-gates {
+    gap: 3px;
+  }
+
+  .gate-cmd-inline {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    opacity: 0.8;
   }
 
   .gate-error-preview {
