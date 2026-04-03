@@ -1155,8 +1155,8 @@
       <!-- ── Briefing — one-line workspace summary ─────────────────── -->
       {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
         <p class="ws-briefing-inline" data-testid="briefing-inline">{briefingData.summary ?? briefingData.narrative}</p>
-      {:else if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && statusItems.length === 0}
-        <p class="ws-briefing-inline ws-briefing-idle">{statusSentence}</p>
+      {:else if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
+        <p class="ws-briefing-inline" class:ws-briefing-idle={statusItems.length === 0} data-testid="briefing-inline">{statusSentence}</p>
       {/if}
 
       <!-- ── Decisions / Action Needed (compact, inline) ────────────── -->
