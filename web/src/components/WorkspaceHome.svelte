@@ -1385,7 +1385,7 @@
                 {:else if specs.length === 0}
                   <div class="empty-state-guided">
                     <p class="empty-text">No specs yet</p>
-                    <p class="empty-guide">Create <code>specs/manifest.yaml</code> in your repo and push. Specs are the starting point — they define what agents build.</p>
+                    <p class="empty-guide">Create <code>specs/manifest.yaml</code> + spec files in your repo and push. After you <strong>approve</strong> a spec, Gyre automatically creates tasks and spawns agents to implement it.</p>
                   </div>
                 {:else if filteredSpecs.length === 0}
                   <p class="empty-text">No specs matching "{entitySearch}"</p>
@@ -1507,8 +1507,8 @@
                   <div class="skeleton-row"></div>
                 {:else if wsTasks.length === 0}
                   <div class="empty-state-guided">
-                    <p class="empty-text">No tasks yet.</p>
-                    <p class="empty-guide">Tasks are created automatically when you approve specs. Each approved spec generates implementation tasks for agents to work on.</p>
+                    <p class="empty-text">No tasks yet</p>
+                    <p class="empty-guide">Tasks are created automatically when specs are approved. Each task is assigned to an agent that implements it in an isolated branch, iterating through the Ralph loop until quality gates pass.</p>
                   </div>
                 {:else if filteredTasks.length === 0}
                   <p class="empty-text">No tasks matching "{entitySearch}"</p>
@@ -1622,8 +1622,8 @@
                   <div class="skeleton-row"></div>
                 {:else if wsMrs.length === 0}
                   <div class="empty-state-guided">
-                    <p class="empty-text">No merge requests yet.</p>
-                    <p class="empty-guide">MRs are created when agents complete their implementation. Each MR runs through quality gates before merging and produces a signed attestation bundle.</p>
+                    <p class="empty-text">No merge requests yet</p>
+                    <p class="empty-guide">When an agent finishes implementing a task, it creates an MR. The merge queue runs quality gates (tests, lint, traces), and on success produces a cryptographically signed attestation linking spec → code.</p>
                   </div>
                 {:else if filteredMrs.length === 0}
                   <p class="empty-text">No MRs matching "{entitySearch}"</p>
@@ -1771,8 +1771,8 @@
                   <div class="skeleton-row"></div>
                 {:else if wsAgents.length === 0}
                   <div class="empty-state-guided">
-                    <p class="empty-text">No agents yet.</p>
-                    <p class="empty-guide">Agents are spawned to work on tasks. Each agent gets its own branch, writes code, runs tests, and creates a merge request when done.</p>
+                    <p class="empty-text">No agents yet</p>
+                    <p class="empty-guide">Agents are spawned to implement tasks. Each runs in an isolated branch with its own worktree, iterating through code → test → fix cycles until quality gates pass, then creates an MR.</p>
                   </div>
                 {:else if filteredAgents.length === 0}
                   <p class="empty-text">No agents matching "{entitySearch}"</p>

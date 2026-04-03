@@ -647,7 +647,7 @@
         {:else if repoMrs.length === 0}
           <div class="list-empty">
             <p>No merge requests yet</p>
-            <p class="list-empty-hint">Spec → Task → Agent implements → <strong>MR created</strong> → Gates run → Merged</p>
+            <p class="list-empty-hint">When an agent finishes its task, it creates an MR. The merge queue runs configured quality gates (tests, lint, traces). On success, the MR is merged with a signed attestation.</p>
           </div>
         {:else}
           <table class="entity-table">
@@ -740,7 +740,7 @@
         {:else if allAgents.length === 0}
           <div class="list-empty">
             <p>No agents yet</p>
-            <p class="list-empty-hint">Spec → Task → <strong>Agent spawned</strong> → implements on branch → creates MR when done</p>
+            <p class="list-empty-hint">Agents are spawned to implement tasks from approved specs. Each agent works in an isolated branch, writing code and iterating until quality gates pass. You can view their logs, conversation history, and reasoning.</p>
           </div>
         {:else}
           <table class="entity-table">
