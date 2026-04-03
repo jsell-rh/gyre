@@ -357,16 +357,11 @@ pub async fn get_spec(
             .find_by_id(&gyre_common::Id::new(&repo_id))
             .await
         {
-            let git_bin =
-                std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+            let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
             let git_file_path = format!("specs/{spec_path}");
-            if let Some(content) = crate::spec_registry::read_git_file(
-                &git_bin,
-                &repo.path,
-                "HEAD",
-                &git_file_path,
-            )
-            .await
+            if let Some(content) =
+                crate::spec_registry::read_git_file(&git_bin, &repo.path, "HEAD", &git_file_path)
+                    .await
             {
                 resp.content = Some(content);
             }
