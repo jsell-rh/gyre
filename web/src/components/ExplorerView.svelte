@@ -796,6 +796,7 @@
                 canvasState={explorerCanvasState}
                 onViewQuery={(q) => { activeViewQuery = q; }}
                 savedViews={explorerSavedViews}
+                onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
               />
             </div>
           </div>

@@ -8,6 +8,7 @@
     canvasState = {},
     onViewQuery = () => {},
     savedViews = [],
+    onSavedViewsUpdate = () => {},
   } = $props();
 
   // ── Constants ────────────────────────────────────────────────────────────
@@ -139,9 +140,9 @@
         break;
       }
       case 'views': {
-        // Update saved views list from server response
+        // Notify parent via callback to avoid Svelte 5 prop shadow
         if (msg.views) {
-          savedViews = msg.views;
+          onSavedViewsUpdate(msg.views);
         }
         break;
       }
@@ -323,7 +324,7 @@
       <button
         class="save-view-btn"
         onclick={saveCurrentView}
-        disabled={!canvasState?.selected_node && status !== 'ready'}
+        disabled={status !== 'ready' || !messages.some(m => m.viewQuery)}
         title={$t('explorer_chat.save_this_view')}
         aria-label={$t('explorer_chat.save_this_view')}
         type="button"
