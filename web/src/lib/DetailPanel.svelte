@@ -1291,6 +1291,9 @@
   function taskStatusColor(s) {
     if (s === 'done')        return 'success';
     if (s === 'in_progress') return 'warning';
+    if (s === 'review')      return 'info';
+    if (s === 'blocked')     return 'danger';
+    if (s === 'cancelled')   return 'muted';
     return 'neutral';
   }
 
@@ -1501,19 +1504,27 @@
   /** Explain agent status in human terms — the "why" behind the status badge */
   function agentStatusExplain(ag) {
     if (!ag?.status) return '';
+    const durStr = (() => {
+      if (!ag.created_at) return '';
+      const end = ag.completed_at ?? (Date.now() / 1000);
+      const dur = Math.max(0, end - ag.created_at);
+      if (dur < 60) return ` after ${Math.round(dur)}s`;
+      if (dur < 3600) return ` after ${Math.floor(dur / 60)}m ${Math.round(dur % 60)}s`;
+      return ` after ${Math.floor(dur / 3600)}h ${Math.round((dur % 3600) / 60)}m`;
+    })();
     switch (ag.status) {
       case 'active': return ag.branch ? `Working on branch ${ag.branch}` : 'Actively executing its task';
-      case 'idle': return ag.mr_id ? 'Finished — MR created for review' : 'Finished its work successfully';
-      case 'completed': return ag.mr_id ? 'Task complete — MR submitted' : 'Task completed';
+      case 'idle': return ag.mr_id ? `Finished${durStr} — MR created for review` : `Finished${durStr}`;
+      case 'completed': return ag.mr_id ? `Completed${durStr} — MR submitted` : `Completed${durStr}`;
       case 'failed': {
         const exit = ag._container?.exit_code;
-        if (exit === 137) return 'Killed — out of memory or resource limit exceeded';
-        if (exit === 143) return 'Terminated by the system (SIGTERM)';
-        if (exit === 1) return 'Exited with error — check logs for details';
-        return 'Encountered an error during execution';
+        if (exit === 137) return `Killed${durStr} — out of memory or resource limit exceeded`;
+        if (exit === 143) return `Terminated${durStr} by the system (SIGTERM)`;
+        if (exit === 1) return `Failed${durStr} — see logs for details`;
+        return `Failed${durStr} — see logs`;
       }
-      case 'dead': return 'Process is no longer running — may have crashed or been killed';
-      case 'stopped': return 'Gracefully stopped by an operator or budget limit';
+      case 'dead': return `Process died${durStr} — may have crashed or been killed`;
+      case 'stopped': return `Stopped${durStr} by an operator or budget limit`;
       default: return '';
     }
   }
@@ -2182,6 +2193,28 @@
                 </div>
               {/if}
 
+              <!-- Prominent cost/token summary -->
+              {#if ag._costs && (ag._costs.totalTokens > 0 || ag._costs.totalCost > 0)}
+                <div class="agent-cost-summary">
+                  <span class="cost-summary-item">
+                    <span class="cost-summary-value">{ag._costs.totalTokens.toLocaleString()}</span>
+                    <span class="cost-summary-label">tokens</span>
+                  </span>
+                  {#if ag._costs.totalCost > 0}
+                    <span class="cost-summary-item">
+                      <span class="cost-summary-value">${ag._costs.totalCost.toFixed(4)}</span>
+                      <span class="cost-summary-label">cost</span>
+                    </span>
+                  {/if}
+                  {#if Object.keys(ag._costs.models ?? {}).length > 0}
+                    <span class="cost-summary-item">
+                      <span class="cost-summary-value">{Object.keys(ag._costs.models).length}</span>
+                      <span class="cost-summary-label">{Object.keys(ag._costs.models).length === 1 ? 'model' : 'models'}</span>
+                    </span>
+                  {/if}
+                </div>
+              {/if}
+
               <dl class="entity-meta">
                 <dt>Name</dt><dd>{ag.name ?? shortId(entity.id)}</dd>
                 <dt>Status</dt>
@@ -2448,6 +2481,16 @@
                   </div>
                 </div>
               {/if}
+              <!-- Prominent spec link banner -->
+              {#if tk.spec_path}
+                <div class="task-spec-banner">
+                  <button class="task-spec-banner-link" onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })} title="Open spec: {tk.spec_path}">
+                    <span class="task-spec-banner-icon">&#128196;</span>
+                    <span class="task-spec-banner-name">{tk.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>
+                    <span class="task-spec-banner-arrow">&#x2192;</span>
+                  </button>
+                </div>
+              {/if}
               <dl class="entity-meta">
                 <dt>Title</dt><dd>{tk.title ?? '—'}</dd>
                 <dt>Status</dt>
@@ -2457,7 +2500,13 @@
                 </dd>
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{shortId(entity.id)}</dd>
                 {#if tk.priority}
-                  <dt>Priority</dt><dd><Badge value={tk.priority} variant={tk.priority === 'high' || tk.priority === 'critical' ? 'danger' : tk.priority === 'low' ? 'muted' : 'warning'} /></dd>
+                  <dt>Priority</dt>
+                  <dd>
+                    <span class="priority-indicator priority-{tk.priority}">
+                      {#if tk.priority === 'critical'}&#x26A0;{:else if tk.priority === 'high'}&#x2191;{:else if tk.priority === 'low'}&#x2193;{:else}&#x2022;{/if}
+                    </span>
+                    <Badge value={tk.priority} variant={tk.priority === 'high' || tk.priority === 'critical' ? 'danger' : tk.priority === 'low' ? 'muted' : 'warning'} />
+                  </dd>
                 {/if}
                 {#if tk.task_type}
                   <dt>Type</dt><dd>{tk.task_type}</dd>
@@ -6856,6 +6905,57 @@
     line-height: 1.5;
   }
 
+  .task-spec-banner {
+    margin-bottom: var(--space-3);
+  }
+
+  .task-spec-banner-link {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-bg-secondary, var(--color-bg-hover));
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md, 8px);
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    transition: border-color 0.15s;
+  }
+
+  .task-spec-banner-link:hover {
+    border-color: var(--color-accent, var(--color-primary));
+  }
+
+  .task-spec-banner-icon {
+    font-size: 1.1em;
+    flex-shrink: 0;
+  }
+
+  .task-spec-banner-name {
+    font-weight: 600;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .task-spec-banner-arrow {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .priority-indicator {
+    margin-right: var(--space-1);
+    font-weight: 700;
+  }
+
+  .priority-critical { color: var(--color-danger, #e53e3e); }
+  .priority-high { color: var(--color-danger, #e53e3e); }
+  .priority-low { color: var(--color-text-muted); }
+
   /* ── Status story (how did it get here) ──────────────────────────────── */
   .status-story {
     display: flex;
@@ -7395,6 +7495,37 @@
   .cost-total-row td {
     color: var(--color-text);
     padding-top: var(--space-2);
+  }
+
+  .agent-cost-summary {
+    display: flex;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-bg-secondary, var(--color-bg-hover));
+    border-radius: var(--radius-md, 8px);
+    border: 1px solid var(--color-border);
+    margin-bottom: var(--space-3);
+  }
+
+  .cost-summary-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .cost-summary-value {
+    font-size: var(--text-lg, 1.125rem);
+    font-weight: 700;
+    color: var(--color-text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .cost-summary-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
   }
 
   .status-explain {
