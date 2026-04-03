@@ -1213,11 +1213,19 @@
                   <span class="decision-type">{typeLabel(nt)}{#if n.repo_id && repoMap[n.repo_id]} · {repoMap[n.repo_id].name}{/if}</span>
                   <span class="decision-title">{n.title ?? n.message ?? ''}</span>
                   {#if nt === 'gate_failure' && body.gate_name}
-                    <span class="decision-detail">Gate: {body.gate_name}</span>
+                    <span class="decision-detail">Gate "{body.gate_name}" failed — merge blocked until fixed</span>
+                  {:else if nt === 'gate_failure' && body.mr_id}
+                    <span class="decision-detail">Quality gate failed on {entityName('mr', body.mr_id)}</span>
                   {:else if nt === 'agent_failed' && body.agent_name}
-                    <span class="decision-detail">Agent: {body.agent_name}</span>
+                    <span class="decision-detail">Agent "{body.agent_name}" stopped — check logs for root cause</span>
+                  {:else if nt === 'agent_failed' && body.agent_id}
+                    <span class="decision-detail">{entityName('agent', body.agent_id)} encountered an error</span>
                   {:else if nt === 'spec_approval' && body.spec_path}
-                    <span class="decision-detail">{body.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>
+                    <span class="decision-detail">Agents cannot begin until "{body.spec_path.split('/').pop()?.replace(/\.md$/, '')}" is approved</span>
+                  {:else if nt === 'mr_needs_review' && body.mr_id}
+                    <span class="decision-detail">{entityName('mr', body.mr_id)} is ready for human review</span>
+                  {:else if nt === 'budget_warning'}
+                    <span class="decision-detail">Budget threshold exceeded — consider adjusting limits</span>
                   {/if}
                   {#if n.created_at}
                     <span class="decision-time">{relTime(n.created_at)}</span>
