@@ -246,6 +246,10 @@
   let budgetSummary = $state(null);
   let budgetSummaryLoading = $state(true);
 
+  // ── System health state ──────────────────────────────────────────────────
+  let systemHealth = $state(null);
+  let systemHealthLoading = $state(true);
+
   // ── Agent Rules state ────────────────────────────────────────────────────
   let rulesLoading = $state(true);
   let rulesError = $state(null);
@@ -262,6 +266,7 @@
     loadAgentRules();
     loadBudgetSummary();
     loadStats();
+    loadSystemHealth();
   });
 
   async function loadDecisions() {
@@ -347,6 +352,33 @@
       budgetSummary = null;
     } finally {
       budgetSummaryLoading = false;
+    }
+  }
+
+  async function loadSystemHealth() {
+    systemHealthLoading = true;
+    try {
+      const [health, jobs, version] = await Promise.all([
+        api.adminHealth().catch(() => null),
+        api.adminJobs().catch(() => []),
+        api.version().catch(() => null),
+      ]);
+      const jobList = Array.isArray(jobs) ? jobs : (jobs?.jobs ?? []);
+      const failedJobs = jobList.filter(j => j.status === 'failed' || j.status === 'error').length;
+      const runningJobs = jobList.filter(j => j.status === 'running' || j.status === 'active').length;
+      systemHealth = {
+        uptime_secs: health?.uptime_secs,
+        server_version: version?.version ?? health?.version,
+        milestone: version?.milestone,
+        total_jobs: jobList.length,
+        failed_jobs: failedJobs,
+        running_jobs: runningJobs,
+        status: failedJobs > 0 ? 'degraded' : 'healthy',
+      };
+    } catch {
+      systemHealth = null;
+    } finally {
+      systemHealthLoading = false;
     }
   }
 
@@ -581,6 +613,20 @@
         {/if}
       </div>
     {/if}
+    {#if !systemHealthLoading && systemHealth}
+      <button class="cwh-stat-card cwh-stat-card-health" class:cwh-stat-card-degraded={systemHealth.status === 'degraded'} onclick={() => onSettings?.()} title="View system details in admin settings">
+        <span class="cwh-stat-value cwh-health-dot" class:health-ok={systemHealth.status === 'healthy'} class:health-degraded={systemHealth.status === 'degraded'}>
+          {systemHealth.status === 'healthy' ? '●' : '!'}
+        </span>
+        <span class="cwh-stat-label">{systemHealth.status === 'healthy' ? 'System Healthy' : 'System Degraded'}</span>
+        {#if systemHealth.server_version}
+          <span class="cwh-stat-sub">v{systemHealth.server_version}{systemHealth.milestone ? ` (${systemHealth.milestone})` : ''}</span>
+        {/if}
+        {#if systemHealth.failed_jobs > 0}
+          <span class="cwh-stat-sub cwh-stat-warn">{systemHealth.failed_jobs} failed job{systemHealth.failed_jobs !== 1 ? 's' : ''}</span>
+        {/if}
+      </button>
+    {/if}
   </div>
 
   <!-- ── Decisions ─────────────────────────────────────────────────────── -->
@@ -607,15 +653,20 @@
           {@const state = actionStates[notif.id] ?? {}}
           <li class="decision-item" data-testid="cwh-decision-item">
             <span class="decision-icon" aria-hidden="true">{TYPE_ICONS[notif.notification_type] ?? '•'}</span>
-            <div class="decision-body">
+            <button class="decision-body decision-body-clickable" onclick={() => {
+              if (body.mr_id) nav('mr', body.mr_id, { repo_id: notif.repo_id });
+              else if (body.agent_id) nav('agent', body.agent_id, { repo_id: notif.repo_id });
+              else if (body.task_id) nav('task', body.task_id, { repo_id: notif.repo_id });
+              else if (body.spec_path) { const sp = normalizeSpecPath(body.spec_path); nav('spec', sp, { path: sp, repo_id: notif.repo_id }); }
+            }}>
               <div class="decision-content">
                 <span class="decision-type">{typeLabel(notif.notification_type)}</span>
                 <span class="decision-desc">{notif.message ?? notif.title ?? $t('cross_workspace.decision_pending')}</span>
               </div>
               {#if notif.workspace_id && workspaceNameMap[notif.workspace_id]}
-                <button class="decision-ws-badge decision-ws-link" onclick={(e) => { e.stopPropagation(); const ws = workspaces.find(w => w.id === notif.workspace_id); if (ws) onSelectWorkspace?.(ws); }} title="Go to {workspaceNameMap[notif.workspace_id]}">{workspaceNameMap[notif.workspace_id]}</button>
+                <span class="decision-ws-badge" onclick={(e) => { e.stopPropagation(); const ws = workspaces.find(w => w.id === notif.workspace_id); if (ws) onSelectWorkspace?.(ws); }} title="Go to {workspaceNameMap[notif.workspace_id]}" role="link" tabindex="0">{workspaceNameMap[notif.workspace_id]}</span>
               {/if}
-            </div>
+            </button>
             <div class="decision-actions">
               {#if state.success}
                 <span class="action-feedback success">{state.message}</span>
@@ -1284,6 +1335,22 @@
     gap: var(--space-3);
     flex: 1;
     min-width: 0;
+  }
+
+  .decision-body-clickable {
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    padding: 0;
+    border-radius: var(--radius-sm);
+    transition: color var(--transition-fast);
+  }
+
+  .decision-body-clickable:hover .decision-desc {
+    color: var(--color-primary);
+    text-decoration: underline;
   }
 
   .decision-content {
@@ -1980,6 +2047,33 @@
   .cwh-stat-card-alert {
     border-color: var(--color-warning);
     background: color-mix(in srgb, var(--color-warning) 5%, var(--color-surface));
+  }
+
+  .cwh-stat-card-health {
+    cursor: pointer;
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  }
+
+  .cwh-stat-card-health:hover {
+    border-color: var(--color-primary);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .cwh-stat-card-degraded {
+    border-color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 5%, var(--color-surface));
+  }
+
+  .cwh-health-dot {
+    font-size: var(--text-lg) !important;
+  }
+
+  .cwh-health-dot.health-ok {
+    color: var(--color-success);
+  }
+
+  .cwh-health-dot.health-degraded {
+    color: var(--color-danger);
   }
 
   @media (max-width: 768px) {
