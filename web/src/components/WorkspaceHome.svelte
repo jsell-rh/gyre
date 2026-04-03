@@ -13,7 +13,7 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
-  import { entityName, shortId, seedEntityName, seedFromEntities } from '../lib/entityNames.svelte.js';
+  import { entityName, shortId, formatId, seedEntityName, seedFromEntities } from '../lib/entityNames.svelte.js';
   import { relativeTime, formatDuration } from '../lib/timeFormat.js';
   import { specStatusTooltip, taskStatusTooltip, mrStatusTooltip, agentStatusTooltip, SPEC_STATUS_ICONS } from '../lib/statusTooltips.js';
   import ActionNeeded from './ActionNeeded.svelte';
@@ -651,7 +651,7 @@
   function repoActiveAgentNames(repo) {
     return wsAgents
       .filter(a => a.repo_id === repo.id && a.status === 'active')
-      .map(a => a.name ?? shortId(a.id));
+      .map(a => a.name ?? formatId('agent', a.id));
   }
 
   function repoLatestMr(repo) {
@@ -1328,7 +1328,7 @@
                                 {taskStatus}
                               </span>
                               {#if taskStatus === 'in_progress' && taskAgent}
-                                <span class="status-context">Agent: {taskAgent.name ?? shortId(taskAgent.id)}</span>
+                                <span class="status-context">Agent: {taskAgent.name ?? formatId('agent', taskAgent.id)}</span>
                               {:else if taskStatus === 'done'}
                                 {@const taskMr = wsMrs.find(m => m.task_id === task.id || m.spec_ref?.includes(task.spec_path))}
                                 {#if taskMr}
@@ -1480,7 +1480,7 @@
                         <tr class="ws-entity-row" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
                           <td class="entity-name-cell">
                             <Icon name="agent" size={12} />
-                            <span class="entity-primary-name">{agent.name ?? shortId(agent.id)}</span>
+                            <span class="entity-primary-name">{agent.name ?? formatId('agent', agent.id)}</span>
                           </td>
                           <td>
                             <div class="status-with-context">
