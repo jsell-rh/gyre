@@ -1338,17 +1338,21 @@
                   </div>
                 {:else if repos.length === 0}
                   <div class="empty-state-guided" data-testid="repos-empty">
-                    <p class="empty-text">{$t('workspace_home.repos_empty')}</p>
+                    <p class="empty-text">No repositories yet</p>
+                    <p class="empty-guide">Create a repo, push your code with specs, and Gyre handles the rest.</p>
                     <div class="pipeline-guide">
-                      <span class="pipeline-step">1. Create a repo</span>
+                      <div class="pipeline-step"><span class="pipeline-step-num">1</span><span class="pipeline-step-title">Create a repo</span><span class="pipeline-step-desc">Click "+ New" above</span></div>
                       <span class="pipeline-arrow">→</span>
-                      <span class="pipeline-step">2. Push specs</span>
+                      <div class="pipeline-step"><span class="pipeline-step-num">2</span><span class="pipeline-step-title">Push specs</span><span class="pipeline-step-desc">specs/manifest.yaml + .md files</span></div>
                       <span class="pipeline-arrow">→</span>
-                      <span class="pipeline-step">3. Approve specs</span>
+                      <div class="pipeline-step"><span class="pipeline-step-num">3</span><span class="pipeline-step-title">Approve</span><span class="pipeline-step-desc">Review & approve specs</span></div>
                       <span class="pipeline-arrow">→</span>
-                      <span class="pipeline-step">4. Agents implement</span>
+                      <div class="pipeline-step"><span class="pipeline-step-num">4</span><span class="pipeline-step-title">Agents implement</span><span class="pipeline-step-desc">Autonomous code + MR</span></div>
                       <span class="pipeline-arrow">→</span>
-                      <span class="pipeline-step">5. Gates verify & merge</span>
+                      <div class="pipeline-step"><span class="pipeline-step-num">5</span><span class="pipeline-step-title">Gates & merge</span><span class="pipeline-step-desc">Test, lint, attest, merge</span></div>
+                    </div>
+                    <div class="empty-actions">
+                      <button class="section-btn primary" onclick={() => { newRepoOpen = true; }}>Create your first repo</button>
                     </div>
                   </div>
                 {:else}
@@ -3780,13 +3784,48 @@
   }
 
   .pipeline-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
     color: var(--color-text-secondary);
     background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    padding: 2px 8px;
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
     white-space: nowrap;
     font-weight: 500;
+    min-width: 90px;
+    text-align: center;
+  }
+
+  .pipeline-step-num {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--color-primary);
+    width: 18px;
+    height: 18px;
+    line-height: 18px;
+    text-align: center;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  }
+
+  .pipeline-step-title {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .pipeline-step-desc {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    font-weight: 400;
+  }
+
+  .empty-actions {
+    margin-top: var(--space-3);
   }
 
   .pipeline-arrow {
