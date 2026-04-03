@@ -1096,251 +1096,74 @@
         {/if}
       </div><!-- .repos-and-queue -->
 
-      <!-- ── Zone 5: Two-column layout — Activity feed + Entity summaries ── -->
-      <div class="ws-two-col" data-testid="ws-tabbed-panel">
-        <!-- Left: Activity feed (primary — tells the story) -->
-        <section class="ws-feed-panel" aria-labelledby="feed-title">
-          <div class="feed-header">
-            <h2 class="feed-title" id="feed-title">
-              <Icon name="activity" size={14} />
-              Activity
-            </h2>
-            <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity">
-              <option value="">All</option>
-              <option value="spec">Specs</option>
-              <option value="task">Tasks</option>
-              <option value="agent">Agents</option>
-              <option value="mr">MRs</option>
-              <option value="gate">Gates</option>
-            </select>
-          </div>
-          <div class="feed-body">
-            {#if activityLoading}
-              <div class="skeleton-row"></div>
-              <div class="skeleton-row"></div>
-            {:else if filteredActivity.length === 0}
-              <p class="empty-text">No recent activity. Push specs and approve them to get started.</p>
-            {:else}
-              <div class="activity-timeline">
-                {#each filteredActivity.slice(0, activityLimit) as event, i}
-                  {@const variant = activityVariant(event)}
-                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                  <button
-                    class="activity-item activity-item-clickable"
-                    onclick={() => {
-                      if (primaryType && primaryId) {
-                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                        nav(primaryType, primaryId, data);
-                      }
-                    }}
-                  >
-                    <div class="activity-dot activity-dot-{variant}"></div>
-                    {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                    <div class="activity-content">
-                      <div class="activity-main-row">
-                        <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
-                        <span class="activity-label">{activityLabel(event)}</span>
-                        {#if event.entity_name ?? event.title}
-                          <span class="activity-detail">{event.entity_name ?? event.title}</span>
-                        {/if}
-                        {#if event.repo_id && repoMap[event.repo_id]}
-                          <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
-                        {/if}
-                        {#if event.timestamp ?? event.created_at}
-                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                        {/if}
-                      </div>
-                      {#if event.description && event.description !== event.title && event.description !== event.entity_name}
-                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 120) + '...' : event.description}</p>
+      <!-- ── Zone 5: Activity feed (full-width) ── -->
+      <section class="ws-feed-panel" aria-labelledby="feed-title" data-testid="ws-tabbed-panel">
+        <div class="feed-header">
+          <h2 class="feed-title" id="feed-title">
+            <Icon name="activity" size={14} />
+            Activity
+          </h2>
+          <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity">
+            <option value="">All</option>
+            <option value="spec">Specs</option>
+            <option value="task">Tasks</option>
+            <option value="agent">Agents</option>
+            <option value="mr">MRs</option>
+            <option value="gate">Gates</option>
+          </select>
+        </div>
+        <div class="feed-body">
+          {#if activityLoading}
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+          {:else if filteredActivity.length === 0}
+            <p class="empty-text">No recent activity. Push specs and approve them to get started.</p>
+          {:else}
+            <div class="activity-timeline">
+              {#each filteredActivity.slice(0, activityLimit) as event, i}
+                {@const variant = activityVariant(event)}
+                {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                <button
+                  class="activity-item activity-item-clickable"
+                  onclick={() => {
+                    if (primaryType && primaryId) {
+                      const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                      nav(primaryType, primaryId, data);
+                    }
+                  }}
+                >
+                  <div class="activity-dot activity-dot-{variant}"></div>
+                  {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                  <div class="activity-content">
+                    <div class="activity-main-row">
+                      <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
+                      <span class="activity-label">{activityLabel(event)}</span>
+                      {#if event.entity_name ?? event.title}
+                        <span class="activity-detail">{event.entity_name ?? event.title}</span>
+                      {/if}
+                      {#if event.repo_id && repoMap[event.repo_id]}
+                        <span class="activity-repo-tag">{repoMap[event.repo_id].name}</span>
+                      {/if}
+                      {#if event.timestamp ?? event.created_at}
+                        <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                       {/if}
                     </div>
-                  </button>
-                {/each}
-              </div>
-              {#if filteredActivity.length > activityLimit}
-                <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
-                  Show more ({filteredActivity.length - activityLimit} remaining)
+                    {#if event.description && event.description !== event.title && event.description !== event.entity_name}
+                      <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 120) + '...' : event.description}</p>
+                    {/if}
+                  </div>
                 </button>
-              {/if}
+              {/each}
+            </div>
+            {#if filteredActivity.length > activityLimit}
+              <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
+                Show more ({filteredActivity.length - activityLimit} remaining)
+              </button>
             {/if}
-          </div>
-        </section>
-
-        <!-- Right: Entity summaries (glanceable, compact) -->
-        <aside class="ws-sidebar-panels">
-          <!-- Active Agents -->
-          {#if pipelineAgents.active > 0}
-            <div class="sidebar-card sidebar-card-agents">
-              <h3 class="sidebar-card-title">
-                <Icon name="agent" size={14} />
-                <span>{pipelineAgents.active} agent{pipelineAgents.active !== 1 ? 's' : ''} running</span>
-              </h3>
-              <ul class="sidebar-list">
-                {#each wsAgents.filter(a => a.status === 'active').slice(0, 5) as agent}
-                  {@const spawnedAt = agent.created_at ?? agent.spawned_at}
-                  {@const elapsed = spawnedAt ? Math.round((Date.now() / 1000 - spawnedAt) / 60) : 0}
-                  <li>
-                    <button class="sidebar-list-item" onclick={() => nav('agent', agent.id, agent)}>
-                      <span class="sidebar-item-dot sidebar-dot-active"></span>
-                      <span class="sidebar-item-name">{agent.name ?? entityName('agent', agent.id)}</span>
-                      {#if agent.spec_path}<span class="sidebar-item-meta">{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>{/if}
-                      <span class="sidebar-item-time">{elapsed < 60 ? `${elapsed}m` : `${Math.floor(elapsed/60)}h`}</span>
-                    </button>
-                  </li>
-                {/each}
-              </ul>
-              {#if wsAgents.filter(a => a.status === 'active').length > 5}
-                <span class="sidebar-more">{wsAgents.filter(a => a.status === 'active').length - 5} more</span>
-              {/if}
-            </div>
           {/if}
-
-          <!-- Pending Specs (need approval) -->
-          {#if pipelineSpecs.pending > 0}
-            <div class="sidebar-card sidebar-card-specs">
-              <h3 class="sidebar-card-title sidebar-title-warn">
-                <Icon name="clock" size={14} />
-                <span>{pipelineSpecs.pending} spec{pipelineSpecs.pending !== 1 ? 's' : ''} awaiting review</span>
-              </h3>
-              <ul class="sidebar-list">
-                {#each specs.filter(s => (s.approval_status ?? s.status) === 'pending').slice(0, 5) as spec}
-                  {@const actionState = specActionStates[spec.path]}
-                  <li>
-                    <div class="sidebar-list-item sidebar-spec-item">
-                      <button class="sidebar-spec-name" onclick={() => navigateToSpec(spec)} title="View spec details">
-                        <span class="sidebar-item-dot sidebar-dot-warn"></span>
-                        <span class="sidebar-item-name">{spec.path.split('/').pop()?.replace(/\.md$/, '')}</span>
-                        {#if spec.repo_id && repoMap[spec.repo_id]}<span class="sidebar-item-meta">{repoMap[spec.repo_id].name}</span>{/if}
-                      </button>
-                      {#if actionState === 'approved'}
-                        <span class="sidebar-action-done">Approved</span>
-                      {:else if actionState === 'rejected'}
-                        <span class="sidebar-action-done sidebar-action-rejected">Rejected</span>
-                      {:else if actionState === 'loading'}
-                        <span class="sidebar-action-done">...</span>
-                      {:else}
-                        <span class="sidebar-spec-actions">
-                          <button class="sidebar-approve-btn" onclick={(e) => quickApproveSpec(spec, e)} title="Approve this spec">Approve</button>
-                          <button class="sidebar-reject-btn" onclick={(e) => quickRejectSpec(spec, e)} title="Reject this spec">Reject</button>
-                        </span>
-                      {/if}
-                    </div>
-                  </li>
-                {/each}
-              </ul>
-            </div>
-          {/if}
-
-          <!-- Open MRs -->
-          {#if wsMrs.filter(m => m.status === 'open').length > 0}
-            {@const openMrs = wsMrs.filter(m => m.status === 'open')}
-            <div class="sidebar-card">
-              <h3 class="sidebar-card-title">
-                <Icon name="git-merge" size={14} />
-                <span>{openMrs.length} open MR{openMrs.length !== 1 ? 's' : ''}</span>
-              </h3>
-              <ul class="sidebar-list">
-                {#each openMrs.slice(0, 5) as mr}
-                  {@const enqState = mrEnqueueStates[mr.id]}
-                  <li>
-                    <div class="sidebar-list-item sidebar-mr-item">
-                      <button class="sidebar-spec-name" onclick={() => nav('mr', mr.id, mr)} title="View merge request details">
-                        {#if mr._gates?.failed > 0}
-                          <span class="sidebar-item-dot sidebar-dot-danger"></span>
-                        {:else if mr.queue_position != null}
-                          <span class="sidebar-item-dot sidebar-dot-active"></span>
-                        {:else}
-                          <span class="sidebar-item-dot sidebar-dot-info"></span>
-                        {/if}
-                        <span class="sidebar-item-name">{mr.title ?? 'Untitled'}</span>
-                      </button>
-                      {#if mr._gates?.total > 0}
-                        <span class="sidebar-gates-mini">
-                          {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
-                          {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
-                        </span>
-                      {/if}
-                      {#if enqState === 'queued' || mr.queue_position != null}
-                        <span class="sidebar-item-meta">#{mr.queue_position != null ? mr.queue_position + 1 : '?'}</span>
-                      {:else if enqState === 'loading'}
-                        <span class="sidebar-action-done">...</span>
-                      {:else if mr.status === 'open' && mr.queue_position == null}
-                        <button class="sidebar-approve-btn" onclick={(e) => quickEnqueueMr(mr, e)} title="Add to merge queue">Enqueue</button>
-                      {/if}
-                    </div>
-                  </li>
-                {/each}
-              </ul>
-            </div>
-          {/if}
-
-          <!-- Workspace Stats (compact) -->
-          <div class="sidebar-card sidebar-card-stats">
-            <h3 class="sidebar-card-title">
-              <Icon name="hash" size={14} />
-              <span>Summary</span>
-            </h3>
-            <div class="stats-grid">
-              <button class="stat-row" onclick={() => handlePipelineStageClick('specs')} title="{specs.length} specs total">
-                <span class="stat-label">Specs</span>
-                <span class="stat-value">{specs.length}</span>
-                {#if pipelineSpecs.approved > 0}<span class="stat-detail stat-ok">{pipelineSpecs.approved} approved</span>{/if}
-              </button>
-              <button class="stat-row" onclick={() => handlePipelineStageClick('tasks')} title="{wsTasks.length} tasks total">
-                <span class="stat-label">Tasks</span>
-                <span class="stat-value">{wsTasks.length}</span>
-                {#if pipelineTasks.in_progress > 0}<span class="stat-detail stat-active">{pipelineTasks.in_progress} active</span>
-                {:else if pipelineTasks.done > 0}<span class="stat-detail stat-ok">{pipelineTasks.done} done</span>{/if}
-              </button>
-              <button class="stat-row" onclick={() => handlePipelineStageClick('agents')} title="{wsAgents.length} agents total">
-                <span class="stat-label">Agents</span>
-                <span class="stat-value">{wsAgents.length}</span>
-                {#if pipelineAgents.active > 0}<span class="stat-detail stat-active">{pipelineAgents.active} running</span>{/if}
-              </button>
-              <button class="stat-row" onclick={() => handlePipelineStageClick('mrs')} title="{wsMrs.length} MRs total">
-                <span class="stat-label">MRs</span>
-                <span class="stat-value">{wsMrs.length}</span>
-                {#if pipelineMrs.merged > 0}<span class="stat-detail stat-ok">{pipelineMrs.merged} merged</span>{/if}
-              </button>
-            </div>
-          </div>
-
-          <!-- Budget (if configured) -->
-          {#if budgetData?.config}
-            {@const cfg = budgetData.config}
-            {@const usage = budgetData.usage ?? {}}
-            <div class="sidebar-card">
-              <h3 class="sidebar-card-title">
-                <Icon name="dollar" size={14} />
-                <span>Budget</span>
-              </h3>
-              <div class="budget-details">
-                {#if cfg.max_concurrent_agents}
-                  <div class="budget-row">
-                    <span class="budget-label">Agents</span>
-                    <span class="budget-value">{usage.agents_active ?? 0} / {cfg.max_concurrent_agents}</span>
-                  </div>
-                {/if}
-                {#if cfg.max_tokens_per_day}
-                  {@const tokenPct = Math.round(((usage.tokens_used_today ?? 0) / cfg.max_tokens_per_day) * 100)}
-                  <div class="budget-row">
-                    <span class="budget-label">Tokens</span>
-                    <span class="budget-value" class:budget-warn={tokenPct > 75}>{tokenPct}%</span>
-                  </div>
-                {/if}
-                {#if cfg.max_cost_per_day}
-                  {@const costPct = Math.round(((usage.cost_today ?? 0) / cfg.max_cost_per_day) * 100)}
-                  <div class="budget-row">
-                    <span class="budget-label">Cost</span>
-                    <span class="budget-value" class:budget-warn={costPct > 75}>${usage.cost_today?.toFixed(2) ?? '0'} / ${cfg.max_cost_per_day}</span>
-                  </div>
-                {/if}
-              </div>
-            </div>
-          {/if}
-        </aside>
-      </div>
+        </div>
+      </section>
 
     </div><!-- .focused-dashboard -->
   {/if}
@@ -1771,20 +1594,7 @@
   .budget-mini-value { font-weight: 600; font-family: var(--font-mono); color: var(--color-text); }
   .budget-mini-value.budget-warn { color: var(--color-warning); }
 
-  /* ── Two-column layout (Activity + Sidebar) ──────────────────── */
-  .ws-two-col {
-    display: grid;
-    grid-template-columns: 1fr 320px;
-    gap: var(--space-4);
-    align-items: start;
-  }
-
-  @media (max-width: 1024px) {
-    .ws-two-col {
-      grid-template-columns: 1fr;
-    }
-  }
-
+  /* ── Activity feed (full-width) ──────────────────── */
   .ws-feed-panel {
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
@@ -1817,224 +1627,7 @@
     overflow-y: auto;
   }
 
-  /* ── Sidebar panels ─────────────────────────────────────────── */
-  .ws-sidebar-panels {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
-  .sidebar-card {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    background: var(--color-surface);
-    overflow: hidden;
-  }
-
-  .sidebar-card-agents {
-    border-color: color-mix(in srgb, var(--color-success) 30%, var(--color-border));
-  }
-
-  .sidebar-card-specs {
-    border-color: color-mix(in srgb, var(--color-warning) 30%, var(--color-border));
-  }
-
-  .sidebar-card-title {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    margin: 0;
-    font-family: var(--font-display);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--color-text);
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
-  }
-
-  .sidebar-title-warn {
-    color: var(--color-warning);
-  }
-
-  .sidebar-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-
-  .sidebar-list-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--color-border);
-    cursor: pointer;
-    text-align: left;
-    font-family: var(--font-body);
-    width: 100%;
-    font-size: var(--text-xs);
-    color: var(--color-text);
-    transition: background var(--transition-fast);
-  }
-
-  .sidebar-list-item:last-child { border-bottom: none; }
-  .sidebar-list-item:hover { background: var(--color-surface-elevated); }
-
-  .sidebar-item-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .sidebar-dot-active { background: var(--color-success); }
-  .sidebar-dot-warn { background: var(--color-warning); }
-  .sidebar-dot-danger { background: var(--color-danger); }
-  .sidebar-dot-info { background: var(--color-info, #1e90ff); }
-
-  .sidebar-item-name {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-weight: 500;
-  }
-
-  .sidebar-item-meta {
-    color: var(--color-text-muted);
-    font-size: 10px;
-    flex-shrink: 0;
-  }
-
-  .sidebar-item-time {
-    color: var(--color-text-muted);
-    font-size: 10px;
-    font-family: var(--font-mono);
-    flex-shrink: 0;
-  }
-
-  .sidebar-gates-mini {
-    display: flex;
-    gap: 2px;
-    flex-shrink: 0;
-    font-size: 10px;
-  }
-
-  .sidebar-action-btn {
-    padding: 1px 6px;
-    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, var(--color-border));
-    border-radius: var(--radius-sm);
-    color: var(--color-primary);
-    font-family: var(--font-body);
-    font-size: 10px;
-    font-weight: 600;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-
-  .sidebar-action-btn:hover {
-    background: color-mix(in srgb, var(--color-primary) 20%, transparent);
-  }
-
-  .sidebar-action-tag {
-    padding: 1px 6px;
-    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, var(--color-border));
-    border-radius: var(--radius-sm);
-    color: var(--color-primary);
-    font-size: 10px;
-    font-weight: 600;
-    flex-shrink: 0;
-  }
-
-  .sidebar-more {
-    display: block;
-    padding: var(--space-1) var(--space-3);
-    font-size: 10px;
-    color: var(--color-text-muted);
-    text-align: center;
-  }
-
-  /* Stats grid */
-  .stats-grid {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .stat-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-1) var(--space-3);
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--color-border);
-    cursor: pointer;
-    text-align: left;
-    font-family: var(--font-body);
-    width: 100%;
-    transition: background var(--transition-fast);
-  }
-
-  .stat-row:last-child { border-bottom: none; }
-  .stat-row:hover { background: var(--color-surface-elevated); }
-
-  .stat-label {
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    min-width: 50px;
-  }
-
-  .stat-value {
-    font-size: var(--text-sm);
-    font-weight: 700;
-    color: var(--color-text);
-    font-family: var(--font-mono);
-    min-width: 24px;
-  }
-
-  .stat-detail {
-    font-size: 10px;
-    color: var(--color-text-muted);
-    margin-left: auto;
-  }
-
-  .stat-ok { color: var(--color-success); }
-  .stat-active { color: var(--color-success); font-weight: 600; }
-
-  /* Budget details */
-  .budget-details {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .budget-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: var(--space-1) var(--space-3);
-    font-size: var(--text-xs);
-    border-bottom: 1px solid var(--color-border);
-  }
-
-  .budget-row:last-child { border-bottom: none; }
-
-  .budget-label {
-    color: var(--color-text-secondary);
-  }
-
-  .budget-value {
-    font-family: var(--font-mono);
-    font-weight: 500;
-    color: var(--color-text);
-  }
-
-  .budget-value.budget-warn { color: var(--color-warning); }
+  /* Sidebar styles removed — entity summaries moved to PipelineOverview expansion */
 
   /* ═══ Original styles ══════════════════════════════════════════════════ */
   .workspace-home {
