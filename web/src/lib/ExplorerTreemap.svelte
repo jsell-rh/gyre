@@ -142,13 +142,20 @@
   // layoutNodes: flat array of { id, kind, x, y, w, h, label, node, treeDepth, parentTreeGroup, totalChildren, children: Map }
   let layoutNodes = $state([]);
   let layoutNodeMap = $state(new Map());
+  let prevNodeCount = 0;
+  let prevBreadcrumbLen = -1;
 
-  // Rebuild layout when nodes/edges/breadcrumb change
+  // Rebuild layout when nodes/edges/breadcrumb/size change
   $effect(() => {
     const { childToParent, parentToChildren, nodeById } = treeData;
     const _bc = breadcrumb; // depend on breadcrumb
     const _f = filter;
     const _n = nodes.length;
+
+    // Track whether this is a data/breadcrumb change or just a resize
+    const isDataChange = _n !== prevNodeCount || breadcrumb.length !== prevBreadcrumbLen;
+    prevNodeCount = _n;
+    prevBreadcrumbLen = breadcrumb.length;
 
     // Determine root nodes for the current view
     let rootIds;
@@ -187,10 +194,12 @@
       .filter(Boolean)
       .sort((a, b) => b.totalDescendants - a.totalDescendants);
 
-    // Compute bounding area
+    // Compute bounding area — generous world space so nodes have room
     const totalWeight = rootTrees.reduce((s, t) => s + t.totalDescendants, 0);
     const aspect = W / H || 1.5;
-    const area = totalWeight * 1200; // pixels per node
+    // More area per node = bigger world = nodes further apart
+    const areaPerNode = Math.max(2000, 4000 - Math.log10(totalWeight + 1) * 800);
+    const area = totalWeight * areaPerNode;
     const layoutH = Math.sqrt(area / aspect);
     const layoutW = layoutH * aspect;
 
@@ -260,16 +269,26 @@
     }
 
     // Recursive layout: place tree nodes with nested squarified treemap
+    // Apply inter-cell gap by shrinking each rect inward
     function layoutTree(treez, x, y, w, h, parentLn) {
       const items = treez.map(t => ({ ...t, weight: t.totalDescendants }));
       const rects = squarify(items, x, y, w, h);
 
-      for (const r of rects) {
+      // Gap between sibling cells: proportional to container size
+      const gap = Math.max(2, Math.min(8, Math.min(w, h) * 0.008));
+
+      for (let idx = 0; idx < rects.length; idx++) {
+        const r = rects[idx];
+        // Shrink rect by gap/2 on each side for inter-cell spacing
+        const gw = r.w - gap;
+        const gh = r.h - gap;
+        if (gw <= 0 || gh <= 0) continue;
+
         const hasChildren = r.children.length > 0;
         const ln = {
           id: r.id,
           kind: hasChildren ? 'tree-group' : 'leaf',
-          x: r.x, y: r.y, w: r.w, h: r.h,
+          x: r.x, y: r.y, w: gw, h: gh,
           label: r.node.name ?? '',
           node: r.node,
           treeDepth: r.depth,
@@ -277,19 +296,19 @@
           totalChildren: r.totalDescendants - 1,
           isLeafGraphNode: !hasChildren,
           treeNode: hasChildren ? { children: new Map(r.children.map(c => [c.id, c])), graphNodes: [] } : null,
-          childIndex: rects.indexOf(r),
+          childIndex: idx,
         };
         allLayoutNodes.push(ln);
         lnMap.set(ln.id, ln);
 
         // Recursively layout children inside this rect with padding
         if (hasChildren) {
-          const pad = Math.max(4, Math.min(r.w, r.h) * 0.03);
-          const headerH = Math.max(12, Math.min(r.w, r.h) * 0.05);
-          const cx = r.x - r.w / 2 + pad;
-          const cy = r.y - r.h / 2 + pad + headerH;
-          const cw = r.w - pad * 2;
-          const ch = r.h - pad * 2 - headerH;
+          const pad = Math.max(4, Math.min(gw, gh) * 0.025);
+          const headerH = Math.max(12, Math.min(gw, gh) * 0.04);
+          const cx = r.x - gw / 2 + pad;
+          const cy = r.y - gh / 2 + pad + headerH;
+          const cw = gw - pad * 2;
+          const ch = gh - pad * 2 - headerH;
           if (cw > 5 && ch > 5) {
             layoutTree(r.children, cx, cy, cw, ch, ln);
           }
@@ -304,8 +323,23 @@
     layoutNodes = allLayoutNodes;
     layoutNodeMap = lnMap;
 
-    // Center camera on layout
-    targetCam = { x: 0, y: 0, zoom: Math.min(W / layoutW, H / layoutH) * 0.9 };
+    // Only reset camera when data/breadcrumb changes, not on resize
+    if (isDataChange) {
+      // Set initial zoom so top-level nodes appear in summary mode (~100-200px on screen)
+      const fitZoom = Math.min(W / layoutW, H / layoutH) * 0.9;
+
+      // If there are many root nodes (>20), zoom out further so they start as summaries
+      const rootCount = rootTrees.length;
+      let initialZoom = fitZoom;
+      if (rootCount > 20) {
+        const avgCellSize = Math.sqrt((layoutW * layoutH) / rootCount);
+        const targetScreenSize = 130;
+        initialZoom = Math.min(fitZoom, targetScreenSize / avgCellSize);
+      }
+
+      targetCam = { x: 0, y: 0, zoom: initialZoom };
+      cam = { ...targetCam };
+    }
     needsAnim = true;
   });
 
