@@ -67,6 +67,10 @@
   let investigateLoading = $state(null); // commit SHA being investigated
   let fileLang = $derived(selectedFile ? detectLang(selectedFile) : 'text');
 
+  // Inline blame popover state (code view click-to-reveal)
+  let popoverLineIdx = $state(null);  // index into blame lines array
+  let popoverEl = $state(null);       // DOM ref for positioning
+
   // Agent color assignment for attribution markers
   // Uses a plain Map (not $state) to avoid state_unsafe_mutation when called from templates.
   const AGENT_COLORS = ['#c678dd','#61afef','#e5c07b','#56b6c2','#e06c75','#98c379','#d19a66','#be5046'];
@@ -450,11 +454,27 @@
     return rows;
   });
 
+  function closePopover() {
+    popoverLineIdx = null;
+  }
+
+  function togglePopover(idx, line) {
+    const agentId = line.agent_id ?? line.agent;
+    const sha = line.sha ?? line.commit_sha;
+    if (!agentId && !sha) return; // nothing to show
+    if (popoverLineIdx === idx) {
+      closePopover();
+    } else {
+      popoverLineIdx = idx;
+    }
+  }
+
   async function selectFile(path) {
     selectedFile = path;
     blameData = null;
     blameLoading = true;
     reviewRouting = [];
+    popoverLineIdx = null;
     agentColorMap.clear();
     try {
       const [blame, routing] = await Promise.all([
@@ -661,18 +681,85 @@
             {@const lines = Array.isArray(blameData) ? blameData : (blameData.lines ?? blameData.blame ?? [])}
             {#if lines.length > 0}
               {#if fileViewMode === 'code'}
-                <!-- Clean code view with line numbers and agent color gutter -->
-                <div class="code-viewer">
+                <!-- Clean code view with line numbers, agent color gutter, and click-to-reveal blame popover -->
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div class="code-viewer" onclick={(e) => { if (!e.target.closest('.blame-popover')) closePopover(); }}>
                   <table class="code-table-viewer">
                     <tbody>
                       {#each lines as line, i}
                         {@const agentId = line.agent_id ?? line.agent}
+                        {@const sha = line.sha ?? line.commit_sha}
+                        {@const specRef = line.spec_ref ?? line.spec_path}
                         {@const lineContent = line.content ?? line.text ?? line.line ?? ''}
                         {@const lineNum = line.line_number ?? (i + 1)}
-                        <tr class="code-line" onclick={() => { if (agentId) fileViewMode = 'blame'; }} title={agentId ? `Written by ${resolveEntityName('agent', agentId)} — click for blame view` : ''}>
+                        {@const hasAttribution = !!(agentId || sha)}
+                        <tr
+                          class="code-line"
+                          class:code-line-attributed={!!agentId}
+                          onclick={(e) => { if (!e.target.closest('.blame-popover')) togglePopover(i, line); }}
+                          title={agentId ? `Written by ${resolveEntityName('agent', agentId)} — click for details` : sha ? `Commit ${sha.slice(0, 7)} — click for details` : ''}
+                        >
                           <td class="code-gutter-agent" style="border-left: 3px solid {agentColor(agentId)}"></td>
                           <td class="code-line-num">{lineNum}</td>
-                          <td class="code-line-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang) || '&nbsp;'}</pre></td>
+                          <td class="code-line-content mono">
+                            <pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang) || '&nbsp;'}</pre>
+                            {#if popoverLineIdx === i && hasAttribution}
+                              <!-- Inline blame popover -->
+                              <div class="blame-popover" onclick={(e) => e.stopPropagation()}>
+                                <div class="popover-header">
+                                  {#if agentId}
+                                    <button class="agent-link popover-agent" onclick={() => onRowClick({ id: agentId }, 'agent')}>
+                                      <span class="agent-icon" aria-hidden="true">&#x2699;</span>
+                                      {resolveEntityName('agent', agentId)}
+                                    </button>
+                                  {:else}
+                                    <span class="popover-author">{line.author ?? 'Unknown'}</span>
+                                  {/if}
+                                  <button class="popover-close" onclick={closePopover} aria-label="Close popover">&times;</button>
+                                </div>
+                                <div class="popover-details">
+                                  {#if sha}
+                                    <div class="popover-row">
+                                      <span class="popover-label">Commit</span>
+                                      <button class="entity-link-sm" onclick={() => onRowClick({ sha, id: sha, agent_id: agentId, spec_ref: specRef }, 'commit')}>{sha.slice(0, 7)}</button>
+                                      {#if line.timestamp ?? line.authored_at ?? line.date}
+                                        <span class="popover-time">{relativeTime(line.timestamp ?? line.authored_at ?? line.date)}</span>
+                                      {/if}
+                                    </div>
+                                  {/if}
+                                  {#if specRef}
+                                    {@const specName = specRef.split('@')[0]?.split('/').pop()}
+                                    <div class="popover-row">
+                                      <span class="popover-label">Spec</span>
+                                      <button class="entity-link-sm" onclick={() => { if (goToEntityDetail) goToEntityDetail('spec', specRef.split('@')[0], { path: specRef.split('@')[0], repo_id: repoId }); else openDetailPanel?.({ type: 'spec', id: specRef.split('@')[0], data: { path: specRef.split('@')[0], repo_id: repoId } }); }}>{specName}</button>
+                                    </div>
+                                  {/if}
+                                  {#if line.message ?? line.commit_message}
+                                    <div class="popover-row popover-message">
+                                      {(line.message ?? line.commit_message).slice(0, 120)}
+                                    </div>
+                                  {/if}
+                                </div>
+                                {#if agentId && sha}
+                                  <div class="popover-actions">
+                                    <button
+                                      class="investigate-btn-prominent popover-investigate"
+                                      onclick={() => investigateLine(line)}
+                                      disabled={investigateLoading === sha}
+                                    >
+                                      {#if investigateLoading === sha}
+                                        <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                                        Spawning...
+                                      {:else}
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                                        Ask why this was written
+                                      {/if}
+                                    </button>
+                                  </div>
+                                {/if}
+                              </div>
+                            {/if}
+                          </td>
                         </tr>
                       {/each}
                     </tbody>
@@ -689,6 +776,7 @@
                         <th scope="col" class="blame-col-line">#</th>
                         <th scope="col" class="blame-col-agent">Agent</th>
                         <th scope="col" class="blame-col-sha">Commit</th>
+                        <th scope="col" class="blame-col-time">When</th>
                         <th scope="col" class="blame-col-spec">Spec</th>
                         <th scope="col" class="blame-col-action"></th>
                         <th scope="col" class="blame-col-content">Content</th>
@@ -723,6 +811,9 @@
                                 {:else}
                                   —
                                 {/if}
+                              </td>
+                              <td class="blame-time secondary" rowspan={group.lines.length}>
+                                {relativeTime(line.timestamp ?? line.authored_at ?? line.date)}
                               </td>
                               <td class="blame-spec" rowspan={group.lines.length}>
                                 {#if group.specRef}
@@ -1664,6 +1755,7 @@
   .blame-col-agent { width: 120px; }
   .blame-col-sha { width: 70px; }
   .blame-col-spec { width: 100px; }
+  .blame-col-time { width: 80px; }
 
   .blame-spec { white-space: nowrap; font-size: var(--text-xs); }
 
@@ -1685,6 +1777,7 @@
 
   .blame-row.blame-group-cont .blame-agent,
   .blame-row.blame-group-cont .blame-sha,
+  .blame-row.blame-group-cont .blame-time,
   .blame-row.blame-group-cont .blame-spec,
   .blame-row.blame-group-cont .blame-action {
     /* rowspan handles hiding; border cleanup */
@@ -1692,6 +1785,7 @@
 
   .blame-row.blame-group-first .blame-agent,
   .blame-row.blame-group-first .blame-sha,
+  .blame-row.blame-group-first .blame-time,
   .blame-row.blame-group-first .blame-spec,
   .blame-row.blame-group-first .blame-action {
     vertical-align: top;
@@ -1786,6 +1880,118 @@
   }
 
   .entity-link-sm:hover { text-decoration-color: var(--color-primary); }
+
+  .blame-time {
+    white-space: nowrap;
+    font-size: var(--text-xs);
+  }
+
+  /* Code line with agent attribution — subtle indicator */
+  .code-line-attributed {
+    cursor: pointer;
+  }
+
+  .code-line-attributed:hover {
+    background: color-mix(in srgb, var(--color-info) 6%, transparent);
+  }
+
+  /* ── Inline blame popover (code view click-to-reveal) ────────────── */
+  .code-line-content {
+    position: relative;
+  }
+
+  .blame-popover {
+    position: absolute;
+    top: 100%;
+    left: 40px;
+    z-index: 10;
+    min-width: 280px;
+    max-width: 400px;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    padding: 0;
+    font-size: var(--text-xs);
+  }
+
+  .popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-primary) 5%, transparent);
+  }
+
+  .popover-agent {
+    font-size: var(--text-xs);
+    font-weight: 600;
+  }
+
+  .popover-author {
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .popover-close {
+    background: none;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    padding: 0 var(--space-1);
+    line-height: 1;
+  }
+
+  .popover-close:hover {
+    color: var(--color-text);
+  }
+
+  .popover-details {
+    padding: var(--space-2) var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .popover-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .popover-label {
+    font-weight: 600;
+    color: var(--color-text-muted);
+    min-width: 48px;
+  }
+
+  .popover-time {
+    color: var(--color-text-muted);
+    margin-left: auto;
+  }
+
+  .popover-message {
+    color: var(--color-text-secondary);
+    font-style: italic;
+    border-top: 1px solid var(--color-border);
+    padding-top: var(--space-1);
+    margin-top: var(--space-1);
+    line-height: 1.4;
+  }
+
+  .popover-actions {
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .popover-investigate {
+    opacity: 1 !important;
+    width: 100%;
+    justify-content: center;
+  }
 
   .no-data {
     padding: var(--space-4);
