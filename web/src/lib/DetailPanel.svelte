@@ -1856,6 +1856,28 @@
                 </div>
               {/if}
 
+              <!-- Quick Actions — prominent, discoverable -->
+              <div class="mr-quick-links mr-quick-links-top">
+                <button class="mr-explore-btn mr-explore-primary" onclick={() => { activeTab = 'diff'; }} title="View code changes">
+                  <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8.75 1.75a.75.75 0 0 0-1.5 0V5H3.5a.75.75 0 0 0 0 1.5h3.75v3.25a.75.75 0 0 0 1.5 0V6.5H12.5a.75.75 0 0 0 0-1.5H8.75V1.75Z"/><path d="M3.5 11a.75.75 0 0 0 0 1.5h9a.75.75 0 0 0 0-1.5h-9Z"/></svg>
+                  View Diff
+                </button>
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'gates'; }} title="View quality gate results and logs">
+                  <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM6.5 7.5a.75.75 0 0 0 0 1.5h3a.75.75 0 0 0 0-1.5h-3Z"/></svg>
+                  Gates
+                  {#if mr._gateSummary}
+                    <span class="mr-quick-badge mr-quick-badge-{mr._gateSummary.failed > 0 ? 'danger' : 'success'}">
+                      {mr._gateSummary.failed > 0 ? `${mr._gateSummary.failed} failed` : `${mr._gateSummary.passed} passed`}
+                    </span>
+                  {/if}
+                </button>
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'timeline'; }} title="View full event timeline">Timeline</button>
+                {#if mr.status === 'merged'}
+                  <button class="mr-explore-btn" onclick={() => { activeTab = 'attestation'; }} title="View signed merge attestation">Attestation</button>
+                {/if}
+                <button class="mr-explore-btn" onclick={() => { activeTab = 'ask-why'; }} title="Explore agent reasoning and conversation history">Ask Why</button>
+              </div>
+
               <!-- Status Journey Stepper -->
               {@const journey = mrStatusJourney(mr)}
               {#if journey.length > 1}
@@ -2081,16 +2103,7 @@
                 </div>
               {/if}
 
-              <!-- MR Quick Actions -->
-              <div class="mr-quick-links">
-                <button class="mr-explore-btn" onclick={() => { activeTab = 'diff'; }} title="View code changes">View Diff</button>
-                <button class="mr-explore-btn" onclick={() => { activeTab = 'gates'; }} title="View quality gate results">View Gates</button>
-                <button class="mr-explore-btn" onclick={() => { activeTab = 'timeline'; }} title="View full event timeline">Timeline</button>
-                {#if mr.status === 'merged'}
-                  <button class="mr-explore-btn" onclick={() => { activeTab = 'attestation'; }} title="View signed merge attestation">Attestation</button>
-                {/if}
-                <button class="mr-explore-btn" onclick={() => { activeTab = 'ask-why'; }} title="Explore agent reasoning">Ask Why</button>
-              </div>
+              <!-- Quick actions already shown above, after diff stats -->
 
               <!-- Architecture Impact (merged MRs) -->
               {#if mr.status === 'merged' && mr._graphNodes?.length > 0}
@@ -7841,7 +7854,47 @@
     margin-top: var(--space-3);
   }
 
+  .mr-quick-links-top {
+    border-top: none;
+    border-bottom: 1px solid var(--color-border);
+    margin-top: 0;
+    padding-top: var(--space-1);
+    padding-bottom: var(--space-3);
+  }
+
+  .mr-explore-primary {
+    background: var(--color-primary);
+    color: var(--color-text-inverse);
+    border-color: var(--color-primary);
+  }
+
+  .mr-explore-primary:hover {
+    background: var(--color-primary-hover, var(--color-primary));
+    opacity: 0.9;
+  }
+
+  .mr-quick-badge {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: var(--radius-full);
+    font-weight: 600;
+    margin-left: 2px;
+  }
+
+  .mr-quick-badge-danger {
+    background: color-mix(in srgb, var(--color-danger) 20%, transparent);
+    color: var(--color-danger);
+  }
+
+  .mr-quick-badge-success {
+    background: color-mix(in srgb, var(--color-success) 20%, transparent);
+    color: var(--color-success);
+  }
+
   .mr-explore-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     background: color-mix(in srgb, var(--color-primary) 8%, transparent);
     border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
     border-radius: var(--radius);
