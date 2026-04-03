@@ -1892,8 +1892,8 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-5);
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-5);
     max-width: 1200px;
     margin: 0 auto;
     width: 100%;
@@ -1930,7 +1930,7 @@
 
   .ws-header-name {
     margin: 0;
-    font-size: var(--text-lg);
+    font-size: var(--text-base);
     font-weight: 700;
     color: var(--color-text);
     font-family: var(--font-display);
