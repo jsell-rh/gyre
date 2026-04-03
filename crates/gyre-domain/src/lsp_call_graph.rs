@@ -13,9 +13,10 @@
 use gyre_common::graph::{EdgeType, GraphEdge, GraphNode, NodeType};
 use gyre_common::Id;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read as _, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// Result of LSP call graph extraction.
@@ -45,7 +46,7 @@ pub fn rust_analyzer_available() -> bool {
 ///
 /// This is Pass 2 of the extraction pipeline. It:
 /// 1. Starts rust-analyzer as an LSP subprocess
-/// 2. For each function/method node from Pass 1, sends textDocument/references
+/// 2. For each function/method node from Pass 1, sends textDocument/didOpen + references
 /// 3. For each reference site, resolves the enclosing function → emits Calls edge
 /// 4. Deduplicates against existing edges from Pass 1
 ///
@@ -83,13 +84,17 @@ pub fn extract_call_graph(
         return result;
     }
 
-    // Build file → line_start → node_id map for resolving reference sites
-    let mut file_line_to_node: HashMap<String, HashMap<u32, String>> = HashMap::new();
+    // Build file → sorted vec of (line_start, line_end, node_id) for resolving reference sites.
+    let mut file_functions: HashMap<String, Vec<(u32, u32, String)>> = HashMap::new();
     for n in nodes.iter().filter(|n| n.deleted_at.is_none()) {
-        file_line_to_node
+        file_functions
             .entry(n.file_path.clone())
             .or_default()
-            .insert(n.line_start, n.id.to_string());
+            .push((n.line_start, n.line_end, n.id.to_string()));
+    }
+    // Sort each file's functions by line_start for efficient lookup.
+    for fns in file_functions.values_mut() {
+        fns.sort_by_key(|(start, _, _)| *start);
     }
 
     // Collect existing edge pairs to avoid duplicates
@@ -99,6 +104,15 @@ pub fn extract_call_graph(
             existing_pairs.insert((e.source_id.to_string(), e.target_id.to_string()));
         }
     }
+
+    // Normalize the repo root path for URI construction.
+    let repo_root_str = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    // Ensure no trailing slash.
+    let repo_root_normalized = repo_root_str.trim_end_matches('/');
 
     // Start rust-analyzer
     let mut child = match Command::new("rust-analyzer")
@@ -121,15 +135,23 @@ pub fn extract_call_graph(
     let stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
 
+    // Per-query timeout: 10 seconds
+    let query_timeout = Duration::from_secs(10);
+
     // Initialize LSP
+    let root_uri = format!("file://{repo_root_normalized}");
     let init_msg = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 0,
         "method": "initialize",
         "params": {
             "processId": std::process::id(),
-            "rootUri": format!("file://{}", repo_root.display()),
-            "capabilities": {},
+            "rootUri": root_uri,
+            "capabilities": {
+                "textDocument": {
+                    "references": { "dynamicRegistration": false }
+                }
+            },
         }
     });
 
@@ -166,23 +188,50 @@ pub fn extract_call_graph(
     });
     let _ = send_lsp_message(stdin, &initialized);
 
-    // For each function node, find references
+    // Track opened files for didOpen notifications.
+    let mut opened_files: HashSet<String> = HashSet::new();
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    let max_queries = 200; // Cap to avoid excessive load
-    let nodes_to_query = if function_nodes.len() > max_queries {
-        &function_nodes[..max_queries]
-    } else {
-        &function_nodes
-    };
-
-    for (idx, func_node) in nodes_to_query.iter().enumerate() {
+    // No artificial cap — query all function nodes. For large repos
+    // (~1800 nodes), this completes in ~20 seconds per the spec estimate.
+    for (idx, func_node) in function_nodes.iter().enumerate() {
         result.definitions_queried += 1;
 
-        let file_uri = format!("file://{}/{}", repo_root.display(), func_node.file_path);
+        // Normalize file path: strip leading "./" and ensure no double slashes.
+        let normalized_path = func_node
+            .file_path
+            .strip_prefix("./")
+            .unwrap_or(&func_node.file_path);
+        let file_uri = format!("file://{repo_root_normalized}/{normalized_path}");
+
+        // Send textDocument/didOpen if we haven't opened this file yet.
+        if opened_files.insert(normalized_path.to_string()) {
+            // Read the file content for didOpen.
+            let file_content = match std::fs::read_to_string(repo_root.join(normalized_path)) {
+                Ok(c) => c,
+                Err(_) => continue, // Skip files we can't read
+            };
+            let did_open = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": file_uri,
+                        "languageId": "rust",
+                        "version": 1,
+                        "text": file_content
+                    }
+                }
+            });
+            let _ = send_lsp_message(stdin, &did_open);
+        }
+
+        // Compute character position: find the function name in the line.
+        let char_pos = compute_char_position(repo_root, normalized_path, func_node);
 
         let refs_msg = serde_json::json!({
             "jsonrpc": "2.0",
@@ -192,7 +241,7 @@ pub fn extract_call_graph(
                 "textDocument": { "uri": file_uri },
                 "position": {
                     "line": func_node.line_start.saturating_sub(1),
-                    "character": 0
+                    "character": char_pos
                 },
                 "context": { "includeDeclaration": false }
             }
@@ -205,11 +254,11 @@ pub fn extract_call_graph(
             continue;
         }
 
-        // Read response (with timeout handling via non-blocking read)
-        match read_lsp_response(&mut reader, idx + 1) {
+        // Read response with timeout
+        let deadline = Instant::now() + query_timeout;
+        match read_lsp_response_with_timeout(&mut reader, idx + 1, deadline) {
             Ok(Some(locations)) => {
                 for loc in locations {
-                    // Resolve location to a file path and line number
                     if let (Some(uri), Some(line)) = (
                         loc.get("uri").and_then(|u| u.as_str()),
                         loc.get("range")
@@ -217,19 +266,18 @@ pub fn extract_call_graph(
                             .and_then(|s| s.get("line"))
                             .and_then(|l| l.as_u64()),
                     ) {
-                        let file_path = uri
-                            .strip_prefix(&format!("file://{}/", repo_root.display()))
-                            .unwrap_or(uri);
+                        let prefix = format!("file://{repo_root_normalized}/");
+                        let file_path = uri.strip_prefix(&prefix).unwrap_or(uri);
                         let line_num = (line + 1) as u32;
 
-                        // Find the enclosing function at this reference site
-                        if let Some(line_map) = file_line_to_node.get(file_path) {
-                            // Find the closest function node that starts at or before this line
-                            let caller_id = line_map
+                        // Find the enclosing function at this reference site,
+                        // using both line_start and line_end for accurate attribution.
+                        if let Some(functions) = file_functions.get(file_path) {
+                            let caller_id = functions
                                 .iter()
-                                .filter(|(start, _)| **start <= line_num)
-                                .max_by_key(|(start, _)| *start)
-                                .map(|(_, id)| id.clone());
+                                .filter(|(start, end, _)| *start <= line_num && *end >= line_num)
+                                .max_by_key(|(start, _, _)| *start)
+                                .map(|(_, _, id)| id.clone());
 
                             if let Some(caller) = caller_id {
                                 let target = func_node.id.to_string();
@@ -285,6 +333,27 @@ pub fn extract_call_graph(
     result
 }
 
+/// Compute the character position of a function name in its definition line.
+/// Falls back to 0 if the file or line can't be read.
+fn compute_char_position(repo_root: &Path, file_path: &str, node: &GraphNode) -> u32 {
+    let full_path = repo_root.join(file_path);
+    let Ok(content) = std::fs::read_to_string(&full_path) else {
+        return 0;
+    };
+    let line_idx = node.line_start.saturating_sub(1) as usize;
+    let Some(line) = content.lines().nth(line_idx) else {
+        return 0;
+    };
+    // Look for "fn <name>" or just the name in the line.
+    if let Some(pos) = line.find(&format!("fn {}", node.name)) {
+        return (pos + 3) as u32; // Position at the start of the name after "fn "
+    }
+    if let Some(pos) = line.find(&node.name) {
+        return pos as u32;
+    }
+    0
+}
+
 fn send_lsp_message(
     stdin: &mut std::process::ChildStdin,
     msg: &serde_json::Value,
@@ -318,19 +387,25 @@ fn read_lsp_message(
     }
 
     let mut body = vec![0u8; content_length];
-    std::io::Read::read_exact(reader, &mut body)?;
+    reader.read_exact(&mut body)?;
     let parsed: serde_json::Value = serde_json::from_slice(&body)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(Some(parsed))
 }
 
-fn read_lsp_response(
+fn read_lsp_response_with_timeout(
     reader: &mut BufReader<std::process::ChildStdout>,
     expected_id: usize,
+    deadline: Instant,
 ) -> std::io::Result<Option<Vec<serde_json::Value>>> {
-    // Read messages until we get the response with our ID
-    // (rust-analyzer may send notifications/progress before the response)
-    for _ in 0..50 {
+    // Read messages until we get the response with our ID or timeout.
+    for _ in 0..100 {
+        if Instant::now() > deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "LSP response timeout",
+            ));
+        }
         match read_lsp_message(reader)? {
             Some(msg) => {
                 if let Some(id) = msg.get("id").and_then(|i| i.as_u64()) {
@@ -355,10 +430,45 @@ fn read_lsp_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gyre_common::graph::*;
+
+    fn make_function_node(
+        id: &str,
+        name: &str,
+        file: &str,
+        line_start: u32,
+        line_end: u32,
+    ) -> GraphNode {
+        GraphNode {
+            id: Id::new(id),
+            repo_id: Id::new("repo1"),
+            node_type: NodeType::Function,
+            name: name.to_string(),
+            qualified_name: format!("pkg.{}", name),
+            file_path: file.to_string(),
+            line_start,
+            line_end,
+            visibility: Visibility::Public,
+            doc_comment: None,
+            spec_path: None,
+            spec_confidence: SpecConfidence::None,
+            last_modified_sha: "abc123".to_string(),
+            last_modified_by: None,
+            last_modified_at: 1000,
+            created_sha: "abc123".to_string(),
+            created_at: 1000,
+            complexity: Some(5),
+            churn_count_30d: 2,
+            test_coverage: None,
+            first_seen_at: 1000,
+            last_seen_at: 1000,
+            deleted_at: None,
+            test_node: false,
+        }
+    }
 
     #[test]
     fn test_rust_analyzer_availability() {
-        // Just test the check function doesn't panic
         let _available = rust_analyzer_available();
     }
 
@@ -371,8 +481,40 @@ mod tests {
             &Id::new("repo1"),
             "abc123",
         );
-        // Should return immediately with no edges
         assert_eq!(result.edges.len(), 0);
         assert_eq!(result.definitions_queried, 0);
+    }
+
+    #[test]
+    fn test_enclosing_function_resolution() {
+        // Test that we correctly find the enclosing function using line ranges.
+        let nodes = vec![
+            make_function_node("n1", "outer_fn", "src/lib.rs", 1, 20),
+            make_function_node("n2", "inner_fn", "src/lib.rs", 5, 15),
+        ];
+        let mut file_functions: HashMap<String, Vec<(u32, u32, String)>> = HashMap::new();
+        for n in &nodes {
+            file_functions
+                .entry(n.file_path.clone())
+                .or_default()
+                .push((n.line_start, n.line_end, n.id.to_string()));
+        }
+
+        // A reference on line 10 should resolve to inner_fn (more specific)
+        let functions = file_functions.get("src/lib.rs").unwrap();
+        let caller = functions
+            .iter()
+            .filter(|(start, end, _)| *start <= 10 && *end >= 10)
+            .max_by_key(|(start, _, _)| *start)
+            .map(|(_, _, id)| id.clone());
+        assert_eq!(caller.as_deref(), Some("n2")); // inner_fn, not outer_fn
+
+        // A reference on line 18 should resolve to outer_fn
+        let caller2 = functions
+            .iter()
+            .filter(|(start, end, _)| *start <= 18 && *end >= 18)
+            .max_by_key(|(start, _, _)| *start)
+            .map(|(_, _, id)| id.clone());
+        assert_eq!(caller2.as_deref(), Some("n1")); // outer_fn
     }
 }

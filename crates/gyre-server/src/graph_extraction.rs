@@ -348,10 +348,39 @@ async fn do_extract(
         %new_sha,
         nodes = node_count,
         edges = edge_count,
-        "knowledge graph extraction complete"
+        "knowledge graph extraction (pass 1) complete"
     );
 
-    // --- Step 5: post-extraction divergence check (HSI §8 priority 5) ---------
+    // --- Step 7: Non-blocking Pass 2 (LSP) -----------------------------------
+    // Per lsp-call-graph.md, the graph is usable after Pass 1 with partial call data.
+    // Pass 2 runs in the background and merges additional edges when done.
+    {
+        let pass2_nodes = final_nodes.clone();
+        let pass2_edges: Vec<GraphEdge> = new_edge_map.into_values().collect();
+        let pass2_repo_root = tmp.path().to_path_buf();
+        let pass2_repo_id = repo_id_parsed.clone();
+        let pass2_sha = new_sha.to_string();
+
+        // Spawn a blocking task for LSP extraction — it won't block the push response.
+        let lsp_edges = tokio::task::spawn_blocking(move || {
+            extract_lsp_edges(
+                &pass2_repo_root,
+                &pass2_nodes,
+                &pass2_edges,
+                &pass2_repo_id,
+                &pass2_sha,
+            )
+        })
+        .await
+        .unwrap_or_default();
+
+        // Persist any new LSP-discovered edges.
+        for edge in lsp_edges {
+            let _ = graph_store.create_edge(edge).await;
+        }
+    }
+
+    // --- Step 8: post-extraction divergence check (HSI §8 priority 5) ---------
 
     if let (Some(ctx), Some(ports)) = (agent_ctx, divergence_ports) {
         if !ctx.spec_ref.is_empty() {
@@ -716,31 +745,46 @@ fn run_all_extractors(
         all_edges.extend(edges);
     }
 
-    // --- Pass 2: LSP-powered call graph extraction (Rust only) ---------------
-    // Runs rust-analyzer to find references for function/method definitions,
-    // resolving cross-module calls, trait dispatch, and generic instantiations.
-    if repo_root.join("Cargo.toml").is_file() {
-        let lsp_result = gyre_domain::lsp_call_graph::extract_call_graph(
-            repo_root, &all_nodes, &all_edges, &repo_id, commit_sha,
-        );
+    (all_nodes, all_edges)
+}
 
-        if !lsp_result.errors.is_empty() {
-            for err in &lsp_result.errors {
-                tracing::info!("LSP call graph: {err}");
-            }
-        }
+/// Run Pass 2 (LSP) extraction and return additional edges.
+/// This is designed to run AFTER Pass 1 results are already persisted,
+/// so the graph is usable immediately and becomes complete when Pass 2 finishes.
+pub fn extract_lsp_edges(
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    existing_edges: &[GraphEdge],
+    repo_id: &Id,
+    commit_sha: &str,
+) -> Vec<GraphEdge> {
+    if !repo_root.join("Cargo.toml").is_file() {
+        return vec![];
+    }
 
-        if lsp_result.new_edges_found > 0 {
-            tracing::info!(
-                definitions = lsp_result.definitions_queried,
-                new_edges = lsp_result.new_edges_found,
-                "LSP call graph extraction complete"
-            );
-            all_edges.extend(lsp_result.edges);
+    let lsp_result = gyre_domain::lsp_call_graph::extract_call_graph(
+        repo_root,
+        nodes,
+        existing_edges,
+        repo_id,
+        commit_sha,
+    );
+
+    if !lsp_result.errors.is_empty() {
+        for err in &lsp_result.errors {
+            tracing::info!("LSP call graph: {err}");
         }
     }
 
-    (all_nodes, all_edges)
+    if lsp_result.new_edges_found > 0 {
+        tracing::info!(
+            definitions = lsp_result.definitions_queried,
+            new_edges = lsp_result.new_edges_found,
+            "LSP call graph extraction complete"
+        );
+    }
+
+    lsp_result.edges
 }
 
 /// Parse `nodes_added` from a delta_json string.
