@@ -1354,7 +1354,7 @@
                         <th>Status</th>
                         <th>Gates</th>
                         <th>Diff</th>
-                        <th>Repo</th>
+                        <th>Spec</th>
                         <th>Updated</th>
                       </tr>
                     </thead>
@@ -1370,6 +1370,11 @@
                           <td class="entity-name-cell">
                             <Icon name="git-merge" size={12} />
                             <span class="entity-primary-name">{mr.title ?? 'Untitled MR'}</span>
+                            {#if mr.author_agent_id}
+                              <button class="entity-agent-chip" onclick={(e) => { e.stopPropagation(); nav('agent', mr.author_agent_id, { repo_id: mr.repository_id ?? mr.repo_id }); }} title="Created by agent">
+                                {entityName('agent', mr.author_agent_id)}
+                              </button>
+                            {/if}
                             {#if mr.source_branch}
                               <span class="entity-branch-tag">{mr.source_branch}</span>
                             {/if}
@@ -1410,10 +1415,13 @@
                             {/if}
                           </td>
                           <td>
-                            {#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}
-                              <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id ?? mr.repo_id]); }}>
-                                {repoMap[mr.repository_id ?? mr.repo_id].name}
+                            {#if mr.spec_ref}
+                              {@const specRefPath = mr.spec_ref.split('@')[0]}
+                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', specRefPath, { path: specRefPath, repo_id: mr.repository_id ?? mr.repo_id }); }}>
+                                {specRefPath.split('/').pop()?.replace(/\.md$/, '')}
                               </button>
+                            {:else if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}
+                              <span class="text-muted">{repoMap[mr.repository_id ?? mr.repo_id].name}</span>
                             {/if}
                           </td>
                           <td class="entity-time">{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
@@ -2102,6 +2110,27 @@
     font-size: 10px;
     color: var(--color-text-muted);
     white-space: nowrap;
+  }
+
+  .entity-agent-chip {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    white-space: nowrap;
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .entity-agent-chip:hover {
+    background: color-mix(in srgb, var(--color-success) 16%, transparent);
+    text-decoration: underline;
   }
 
   .entity-branch-tag {
