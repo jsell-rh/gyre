@@ -283,9 +283,9 @@
             const gateTypeLabel = gateType ? gateType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '';
             const gateCommand = g.command ?? '';
             // Build a descriptive name: prefer gate_name, then formatted gate_type, then extract from command
-            const name = g.gate_name ?? g.name ?? gateTypeLabel
+            const name = g.gate_name ?? g.name ?? (gateTypeLabel
               || (gateCommand ? gateCommand.split(' ')[0].split('/').pop() : '')
-              || `Check #${idx + 1}`;
+              || `Check #${idx + 1}`);
             return {
               name,
               status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
