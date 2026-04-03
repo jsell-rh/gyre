@@ -842,19 +842,23 @@
     const agentName = body.agent_name ?? '';
     const mrTitle = body.mr_title ?? '';
     const specPath = body.spec_path ? body.spec_path.split('/').pop()?.replace(/\.md$/, '') : '';
+    const taskTitle = body.task_title ?? '';
+    const gateName = body.gate_name ?? '';
     switch (notifType) {
-      case 'AgentCompleted': return agentName ? `Agent "${agentName}" finished implementing` : '';
-      case 'AgentFailed': return agentName ? `Agent "${agentName}" encountered an error` : '';
-      case 'MrMerged': return mrTitle ? `"${mrTitle}" passed all gates and was merged` : '';
-      case 'MrCreated': return mrTitle ? `"${mrTitle}" created from agent work` : '';
-      case 'MrNeedsReview': return mrTitle ? `"${mrTitle}" is ready for review` : '';
-      case 'SpecApproved': return specPath ? `"${specPath}" approved — agents can begin` : '';
-      case 'SpecRejected': return specPath ? `"${specPath}" rejected — implementation blocked` : '';
-      case 'SpecChanged': return specPath ? `"${specPath}" was updated` : '';
-      case 'GateFailure': return body.gate_name ? `Gate "${body.gate_name}" failed` : 'A quality gate failed';
-      case 'TaskCreated': return specPath ? `Task created from spec "${specPath}"` : '';
-      case 'SuggestedSpecLink': return mrTitle ? `MR "${mrTitle}" may relate to a spec` : '';
-      case 'BudgetWarning': return 'Budget threshold exceeded';
+      case 'AgentCompleted': return agentName ? `Agent "${agentName}" finished implementing` : 'Agent completed work';
+      case 'AgentFailed': return agentName ? `Agent "${agentName}" encountered an error` : 'Agent failed';
+      case 'MrMerged': return mrTitle ? `"${mrTitle}" passed all gates and was merged` : 'MR merged successfully';
+      case 'MrCreated': return mrTitle ? `"${mrTitle}" created from agent work` : 'New MR created';
+      case 'MrNeedsReview': return mrTitle ? `"${mrTitle}" is ready for review` : 'MR needs review';
+      case 'SpecApproved': return specPath ? `"${specPath}" approved — agents can begin` : 'Spec approved';
+      case 'SpecRejected': return specPath ? `"${specPath}" rejected — implementation blocked` : 'Spec rejected';
+      case 'SpecChanged': return specPath ? `"${specPath}" was updated` : 'Spec updated';
+      case 'SpecPendingApproval': return specPath ? `"${specPath}" pushed — needs your approval` : 'Spec needs approval';
+      case 'GateFailure': return gateName ? `Gate "${gateName}" failed — merge blocked` : 'A quality gate failed';
+      case 'TaskCreated': return taskTitle ? `"${taskTitle}" created${specPath ? ` from spec "${specPath}"` : ''}` : (specPath ? `Task created from spec "${specPath}"` : 'Task created');
+      case 'SuggestedSpecLink': return mrTitle ? `MR "${mrTitle}" may relate to a spec` : 'Spec link suggested';
+      case 'BudgetWarning': return 'Budget threshold exceeded — consider adjusting limits';
+      case 'MetaSpecDrift': return 'Agent rules changed — repos may need reconciliation';
       default: return '';
     }
   }
@@ -1861,12 +1865,15 @@
                             {#if event.entity_name ?? event.title}
                               <span class="activity-detail">{event.entity_name ?? event.title}</span>
                             {/if}
+                            {#if event.repo_id && repoMap[event.repo_id]}
+                              <span class="activity-repo">{repoMap[event.repo_id].name}</span>
+                            {/if}
                             {#if event.timestamp ?? event.created_at}
                               <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                             {/if}
                           </div>
                           {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                            <p class="activity-reason">{event.description.length > 100 ? event.description.slice(0, 100) + '...' : event.description}</p>
+                            <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
                           {/if}
                         </div>
                       </button>
@@ -4617,6 +4624,16 @@
     font-size: 10px;
     white-space: nowrap;
     margin-left: auto;
+  }
+
+  .activity-repo {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
   }
 
   .activity-repo-tag {
