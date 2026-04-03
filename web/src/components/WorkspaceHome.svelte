@@ -1098,7 +1098,7 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Workspace header (compact, merged with pipeline) ──────── -->
+      <!-- ── Workspace header with integrated status ──────── -->
       <header class="ws-header">
         <div class="ws-header-main">
           <div class="ws-header-top-row">
@@ -1106,101 +1106,41 @@
             <div class="ws-header-actions">
               <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings (g s)">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M6.5 1.5h3l.5 2 1.5.9 2-.5 1.5 2.6-1.5 1.5v1.5l1.5 1.5-1.5 2.6-2-.5-1.5.9-.5 2h-3l-.5-2L4.5 11l-2 .5L1 8.9l1.5-1.5V6L1 4.5l1.5-2.6 2 .5L6 1.5z"/><circle cx="8" cy="8" r="2"/></svg>
+                Settings
               </button>
               <button class="ws-header-link" onclick={() => goToAgentRules?.()} title="Agent rules (g a)">
                 <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M4 2h8v12H4zM7 5h2M7 7h2M7 9h1"/></svg>
+                Agent Rules
               </button>
             </div>
           </div>
+
+          <!-- Status line: one sentence + clickable status chips -->
           {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-            <p class="ws-header-status">{statusSentence}</p>
+            {#if statusItems.length > 0}
+              <div class="ws-status-chips">
+                {#each statusItems as item}
+                  <button class="ws-status-chip ws-status-chip-{item.variant}" onclick={() => { wsTab = item.tab; userSelectedTab = true; }} title={item.text}>
+                    <span class="ws-status-chip-icon">{item.icon}</span>
+                    {item.text}
+                  </button>
+                {/each}
+              </div>
+            {:else}
+              <p class="ws-header-status">{statusSentence}</p>
+            {/if}
           {:else if workspace.description}
             <p class="ws-header-desc">{workspace.description}</p>
           {/if}
+
+          <!-- Briefing — only show when LLM summary available -->
+          {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
+            <p class="ws-briefing-inline" data-testid="briefing-inline">{briefingData.summary ?? briefingData.narrative}</p>
+          {:else if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && specs.length === 0 && repos.length === 0}
+            <p class="ws-briefing-inline ws-briefing-idle" data-testid="briefing-inline">Get started by creating a repo and pushing specs.</p>
+          {/if}
         </div>
       </header>
-
-      <!-- ── Pipeline progress: only show when there's real data ────── -->
-      {#if !specsLoading && !tasksLoading && (pipelineSpecs.total > 0 || pipelineTasks.total > 0 || pipelineMrs.total > 0 || pipelineAgents.total > 0)}
-        <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
-          <!-- Workspace health indicator -->
-          {#if pipelineMrs.failed_gates > 0}
-            <span class="ws-health-indicator ws-health-danger" title="{pipelineMrs.failed_gates} MR(s) with failed gates">
-              <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM7.25 5a.75.75 0 011.5 0v3a.75.75 0 01-1.5 0V5zM8 10.5A.75.75 0 118 12a.75.75 0 010-1.5z"/></svg>
-            </span>
-          {:else if pipelineAgents.active > 0}
-            <span class="ws-health-indicator ws-health-active" title="{pipelineAgents.active} agent(s) running">
-              <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><circle cx="8" cy="8" r="4"/></svg>
-            </span>
-          {:else if pipelineMrs.merged > 0}
-            <span class="ws-health-indicator ws-health-healthy" title="{pipelineMrs.merged} merged — all gates passed">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="8" cy="8" r="5.5"/><path d="M5.5 8l2 2 3-3.5"/></svg>
-            </span>
-          {:else}
-            <span class="ws-health-indicator ws-health-idle" title="No active work">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" width="14" height="14"><circle cx="8" cy="8" r="5.5"/></svg>
-            </span>
-          {/if}
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} title="{pipelineSpecs.total} specs: {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending" onclick={() => {
-            const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
-            if (pendingSpecs.length === 1) { navigateToSpec(pendingSpecs[0]); return; }
-            wsTab = 'specs'; userSelectedTab = true;
-          }}>
-            <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
-            <span class="pipeline-stage-label">Specs</span>
-            {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending}</span>{/if}
-          </button>
-          <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} title="{pipelineTasks.total} tasks: {pipelineTasks.done} done, {pipelineTasks.in_progress} active, {pipelineTasks.blocked} blocked" onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
-            <span class="pipeline-stage-count">{pipelineTasks.total}</span>
-            <span class="pipeline-stage-label">Tasks</span>
-            {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked}</span>
-            {:else if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge">{pipelineTasks.in_progress}</span>{/if}
-          </button>
-          <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} title="{pipelineAgents.total} agents: {pipelineAgents.active} running" onclick={() => {
-            const activeAgentList = wsAgents.filter(a => a.status === 'active');
-            if (activeAgentList.length === 1) { nav('agent', activeAgentList[0].id, { repo_id: activeAgentList[0].repo_id, name: activeAgentList[0].name }); return; }
-            wsTab = 'agents'; userSelectedTab = true;
-          }}>
-            <span class="pipeline-stage-count">{pipelineAgents.total}</span>
-            <span class="pipeline-stage-label">Agents</span>
-            {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active}</span>{/if}
-          </button>
-          <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-warn={pipelineMrs.failed_gates > 0} title="{pipelineMrs.total} MRs: {pipelineMrs.open} open, {pipelineMrs.merged} merged" onclick={() => {
-            const failedMrs = wsMrs.filter(m => m._gates?.failed > 0);
-            if (failedMrs.length === 1) { nav('mr', failedMrs[0].id, { repo_id: failedMrs[0].repository_id ?? failedMrs[0].repo_id, title: failedMrs[0].title, _openTab: 'gates' }); return; }
-            const openMrs = wsMrs.filter(m => m.status === 'open');
-            if (openMrs.length === 1 && failedMrs.length === 0) { nav('mr', openMrs[0].id, { repo_id: openMrs[0].repository_id ?? openMrs[0].repo_id, title: openMrs[0].title }); return; }
-            wsTab = 'mrs'; userSelectedTab = true;
-          }}>
-            <span class="pipeline-stage-count">{pipelineMrs.total}</span>
-            <span class="pipeline-stage-label">MRs</span>
-            {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates}</span>
-            {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge">{pipelineMrs.open}</span>{/if}
-          </button>
-          <span class="pipeline-arrow">→</span>
-          <div class="pipeline-stage pipeline-stage-done pipeline-stage-terminal" title="{pipelineMrs.merged} merged with signed attestation">
-            <span class="pipeline-stage-count">{pipelineMrs.merged}</span>
-            <span class="pipeline-stage-label">Merged</span>
-          </div>
-          {#if budgetData?.config?.monthly_limit_usd}
-            {@const budgetPct = budgetData.usage?.total_cost_usd ? Math.round((budgetData.usage.total_cost_usd / budgetData.config.monthly_limit_usd) * 100) : 0}
-            <span class="pipeline-budget-indicator" title="Budget: ${budgetData.usage?.total_cost_usd?.toFixed(2) ?? '0'} / ${budgetData.config.monthly_limit_usd} ({budgetPct}% used)">
-              <span class="pipeline-budget-bar"><span class="pipeline-budget-fill" class:budget-warn={budgetPct > 75} class:budget-danger={budgetPct > 90} style="width: {Math.min(budgetPct, 100)}%"></span></span>
-              <span class="pipeline-budget-label" class:budget-warn={budgetPct > 75} class:budget-danger={budgetPct > 90}>{budgetPct}%</span>
-            </span>
-          {/if}
-        </div>
-      {/if}
-
-      <!-- ── Briefing — only show when LLM summary available ─────── -->
-      {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
-        <p class="ws-briefing-inline" data-testid="briefing-inline">{briefingData.summary ?? briefingData.narrative}</p>
-      {:else if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && specs.length === 0 && repos.length === 0}
-        <p class="ws-briefing-inline ws-briefing-idle" data-testid="briefing-inline">Get started by creating a repo and pushing specs.</p>
-      {/if}
 
       <!-- ── Main content ──────────────────────────────────────────── -->
       <div class="ws-main-col">
@@ -1287,29 +1227,36 @@
       <div class="dashboard-flow" data-testid="browse-panel">
         <nav class="ws-tab-bar" aria-label="Workspace navigation" data-testid="section-repos">
           <button class="ws-tab" class:ws-tab-active={wsTab === 'repos'} onclick={() => { wsTab = 'repos'; userSelectedTab = true; }} title="{repos.length} repositories">
-            Repos
-            {#if !reposLoading}<span class="ws-tab-count">{repos.length}</span>{/if}
+            Repos{#if !reposLoading && repos.length > 0} <span class="ws-tab-count">{repos.length}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }} title="{specs.length} specs: {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending">
-            Specs
-            {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => {
+            const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
+            if (pendingSpecs.length === 1 && wsTab !== 'specs') { navigateToSpec(pendingSpecs[0]); return; }
+            wsTab = 'specs'; userSelectedTab = true;
+          }} title="{specs.length} specs: {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending">
+            Specs{#if !specsLoading && specs.length > 0} <span class="ws-tab-count">{specs.length}</span>{/if}
             {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
           </button>
           <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }} title="{wsTasks.length} tasks: {pipelineTasks.done} done, {pipelineTasks.in_progress} active, {pipelineTasks.blocked} blocked">
-            Tasks
-            {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
+            Tasks{#if !tasksLoading && wsTasks.length > 0} <span class="ws-tab-count">{wsTasks.length}</span>{/if}
             {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
             {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }} title="{wsMrs.length} MRs: {pipelineMrs.open} open, {pipelineMrs.merged} merged{pipelineMrs.failed_gates > 0 ? ', ' + pipelineMrs.failed_gates + ' with failed gates' : ''}">
-            MRs
-            {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => {
+            const failedMrs = wsMrs.filter(m => m._gates?.failed > 0);
+            if (failedMrs.length === 1 && wsTab !== 'mrs') { nav('mr', failedMrs[0].id, { repo_id: failedMrs[0].repository_id ?? failedMrs[0].repo_id, title: failedMrs[0].title, _openTab: 'gates' }); return; }
+            wsTab = 'mrs'; userSelectedTab = true;
+          }} title="{wsMrs.length} MRs: {pipelineMrs.open} open, {pipelineMrs.merged} merged{pipelineMrs.failed_gates > 0 ? ', ' + pipelineMrs.failed_gates + ' with failed gates' : ''}">
+            MRs{#if !mrsLoading && wsMrs.length > 0} <span class="ws-tab-count">{wsMrs.length}</span>{/if}
             {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
             {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }} title="{wsAgents.length} agents: {pipelineAgents.active} active">
-            Agents
-            {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => {
+            const activeAgentList = wsAgents.filter(a => a.status === 'active');
+            if (activeAgentList.length === 1 && wsTab !== 'agents') { nav('agent', activeAgentList[0].id, { repo_id: activeAgentList[0].repo_id, name: activeAgentList[0].name }); return; }
+            wsTab = 'agents'; userSelectedTab = true;
+          }} title="{wsAgents.length} agents: {pipelineAgents.active} active">
+            Agents{#if !agentsLoading && wsAgents.length > 0} <span class="ws-tab-count">{wsAgents.length}</span>{/if}
             {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
           </button>
           <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }} title="Recent workspace activity feed">
@@ -1955,6 +1902,68 @@
     color: var(--color-text-secondary);
     max-width: 700px;
     line-height: 1.4;
+  }
+
+  /* ── Integrated status chips (replacing pipeline progress bar) ── */
+  .ws-status-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin-top: 2px;
+  }
+
+  .ws-status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    font-family: var(--font-body);
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all var(--transition-fast);
+    line-height: 1.3;
+  }
+
+  .ws-status-chip:hover {
+    filter: brightness(1.15);
+    transform: translateY(-1px);
+  }
+
+  .ws-status-chip-icon {
+    font-size: 10px;
+  }
+
+  .ws-status-chip-danger {
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    color: var(--color-danger);
+    border-color: color-mix(in srgb, var(--color-danger) 25%, transparent);
+  }
+
+  .ws-status-chip-warning {
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+    color: var(--color-warning);
+    border-color: color-mix(in srgb, var(--color-warning) 25%, transparent);
+  }
+
+  .ws-status-chip-success {
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
+    color: var(--color-success);
+    border-color: color-mix(in srgb, var(--color-success) 25%, transparent);
+  }
+
+  .ws-status-chip-info {
+    background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent);
+    color: var(--color-info, #1e90ff);
+    border-color: color-mix(in srgb, var(--color-info, #1e90ff) 25%, transparent);
+  }
+
+  .ws-status-chip-muted {
+    background: var(--color-surface-elevated);
+    color: var(--color-text-muted);
+    border-color: var(--color-border);
   }
 
   .ws-header-actions {
