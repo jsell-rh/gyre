@@ -67,16 +67,72 @@ impl From<SavedView> for ViewResponse {
 pub async fn list_views(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
 ) -> Result<Json<Vec<ViewResponse>>, (axum::http::StatusCode, String)> {
     let rid = Id::new(&repo_id);
-    match state.saved_views.list_by_repo(&rid).await {
-        Ok(views) => Ok(Json(views.into_iter().map(ViewResponse::from).collect())),
-        Err(e) => Err((
+    let views = state.saved_views.list_by_repo(&rid).await.map_err(|e| {
+        (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to list views: {e}"),
-        )),
+        )
+    })?;
+
+    // Seed system default views on first access (lazy initialization).
+    if !views.iter().any(|v| v.is_system) {
+        let now = now_secs();
+        for default in system_default_views(&repo_id, &auth.tenant_id) {
+            let view = SavedView {
+                id: new_id(),
+                repo_id: Id::new(&repo_id),
+                workspace_id: Id::new(""),
+                tenant_id: Id::new(&auth.tenant_id),
+                name: default.0.to_string(),
+                description: Some(default.1.to_string()),
+                query_json: default.2.to_string(),
+                created_by: "system".to_string(),
+                created_at: now,
+                updated_at: now,
+                is_system: true,
+            };
+            let _ = state.saved_views.create(view).await;
+        }
+        // Re-fetch after seeding.
+        let refreshed = state.saved_views.list_by_repo(&rid).await.map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to list views: {e}"),
+            )
+        })?;
+        return Ok(Json(refreshed.into_iter().map(ViewResponse::from).collect()));
     }
+
+    Ok(Json(views.into_iter().map(ViewResponse::from).collect()))
+}
+
+/// System default views per the explorer-implementation.md spec.
+fn system_default_views(_repo_id: &str, _tenant_id: &str) -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        (
+            "Architecture Overview",
+            "Full codebase structure",
+            r##"{"scope":{"type":"all"},"zoom":"fit"}"##,
+        ),
+        (
+            "Test Coverage Gaps",
+            "Functions not reachable from any test",
+            r##"{"scope":{"type":"test_gaps"},"emphasis":{"highlight":{"matched":{"color":"#ef4444","label":"Untested"}},"dim_unmatched":0.3},"annotation":{"title":"Test coverage gaps","description":"{{count}} functions not reachable from any test"}}"##,
+        ),
+        (
+            "Hot Paths",
+            "Most-called functions",
+            r##"{"scope":{"type":"all"},"emphasis":{"heat":{"metric":"incoming_calls","palette":"blue-red"}},"annotation":{"title":"Hot paths"}}"##,
+        ),
+        (
+            "Blast Radius (click)",
+            "Click any node to see what it impacts",
+            r##"{"scope":{"type":"focus","node":"$clicked","edges":["calls","implements","field_of","depends_on"],"direction":"incoming","depth":10},"emphasis":{"tiered_colors":["#ef4444","#f97316","#eab308","#94a3b8"],"dim_unmatched":0.12},"edges":{"filter":["calls","implements","field_of","depends_on"]},"zoom":"fit","annotation":{"title":"Blast radius: $name","description":"{{count}} transitive callers/implementors"}}"##,
+        ),
+    ]
 }
 
 pub async fn create_view(

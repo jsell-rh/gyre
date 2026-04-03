@@ -78,6 +78,26 @@
   // Context menu state
   let contextMenu = $state(null); // { x, y, node }
 
+  // Evaluative lens metric mode
+  let evaluativeMetric = $state('complexity'); // 'complexity' | 'churn' | 'incoming_calls' | 'test_coverage'
+
+  function onLensChange(newLens) {
+    if (newLens === 'evaluative') {
+      // When switching to evaluative lens, apply a heat map query
+      activeQuery = {
+        scope: { type: 'all' },
+        emphasis: { heat: { metric: evaluativeMetric, palette: 'blue-red' } },
+        annotation: { title: `Evaluative: ${evaluativeMetric.replace('_', ' ')}`, description: 'Node heat shows relative metric intensity' },
+      };
+    } else if (newLens === 'structural') {
+      // Clear any evaluative-lens query when switching back
+      if (activeQuery?.annotation?.title?.startsWith('Evaluative:')) {
+        activeQuery = null;
+      }
+    }
+    scheduleRedraw();
+  }
+
   // Inertial zoom velocity
   let zoomVelocity = 0;
   let zoomDecayFrame = null;
@@ -870,8 +890,10 @@
         }
       } else if (metric === 'complexity') {
         value = node.complexity ?? 0;
-      } else if (metric === 'churn') {
-        value = node.churn ?? 0;
+      } else if (metric === 'churn' || metric === 'churn_count_30d') {
+        value = node.churn_count_30d ?? node.churn ?? 0;
+      } else if (metric === 'test_coverage') {
+        value = (node.test_coverage ?? 0) * 100;
       } else if (metric === 'test_fragility') {
         // Count distinct test paths reaching this node
         for (const e of edges) {
@@ -927,8 +949,10 @@
         }
       } else if (metric === 'complexity') {
         v = node.complexity ?? 0;
-      } else if (metric === 'churn') {
-        v = node.churn ?? 0;
+      } else if (metric === 'churn' || metric === 'churn_count_30d') {
+        v = node.churn_count_30d ?? node.churn ?? 0;
+      } else if (metric === 'test_coverage') {
+        v = (node.test_coverage ?? 0) * 100;
       }
       if (v > max) max = v;
     }
@@ -1960,10 +1984,19 @@
     <div class="tb-sep"></div>
 
     <div class="lens-group" role="group" aria-label="Lens toggle">
-      <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; }} aria-pressed={lens === 'structural'} type="button">Structural</button>
-      <button class="tb-btn" disabled title="Evaluative (coming soon)" type="button">Evaluative</button>
+      <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
+      <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
       <button class="tb-btn" disabled title="Observable (requires production telemetry)" type="button">Observable</button>
     </div>
+
+    {#if lens === 'evaluative'}
+      <div class="eval-metric-group" role="group" aria-label="Evaluative metric">
+        {#each [['complexity', 'Complexity'], ['churn', 'Churn'], ['incoming_calls', 'Call Count'], ['test_coverage', 'Test Coverage']] as [key, label]}
+          <button class="tb-btn tb-btn-sm" class:active={evaluativeMetric === key} onclick={() => { evaluativeMetric = key; onLensChange('evaluative'); }} type="button">{label}</button>
+        {/each}
+      </div>
+      <div class="tb-sep"></div>
+    {/if}
 
     <div class="treemap-legend">
       {#each legendItems as [label, color]}
@@ -2123,6 +2156,8 @@
   .tb-btn:hover:not(:disabled) { background: rgba(51,65,85,0.5); color: #e2e8f0; }
   .tb-btn.active { background: #1e293b; color: #e2e8f0; box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
+  .eval-metric-group { display: flex; gap: 2px; align-items: center; }
 
   .tb-sep { width: 1px; height: 20px; background: #334155; margin: 0 4px; }
 

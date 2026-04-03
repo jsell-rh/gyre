@@ -1646,11 +1646,12 @@ async fn test_saved_views_crud() {
     let ctx = Ctx::new().await;
     let repo_id = create_repo(&ctx, "proj-views").await;
 
-    // List empty
+    // List — system defaults are seeded on first access
     let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
     assert_eq!(resp.status(), 200);
     let views: Vec<Value> = resp.json().await.unwrap();
-    assert!(views.is_empty());
+    let system_count = views.iter().filter(|v| v["is_system"].as_bool() == Some(true)).count();
+    assert!(system_count >= 4, "Expected at least 4 system default views, got {system_count}");
 
     // Create a view
     let resp = ctx
@@ -1673,10 +1674,11 @@ async fn test_saved_views_crud() {
     assert_eq!(view["name"].as_str().unwrap(), "Test View");
     assert!(view["query"]["scope"]["type"].as_str().unwrap() == "all");
 
-    // List — should have 1
+    // List — should have system defaults + our new view
     let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
     let views: Vec<Value> = resp.json().await.unwrap();
-    assert_eq!(views.len(), 1);
+    let user_views: Vec<&Value> = views.iter().filter(|v| v["is_system"].as_bool() != Some(true)).collect();
+    assert_eq!(user_views.len(), 1);
 
     // Get by ID
     let resp = ctx
@@ -1712,10 +1714,11 @@ async fn test_saved_views_crud() {
         .unwrap();
     assert_eq!(resp.status(), 204);
 
-    // List — should be empty again
+    // List — user view deleted, only system defaults remain
     let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
     let views: Vec<Value> = resp.json().await.unwrap();
-    assert!(views.is_empty());
+    let user_views: Vec<&Value> = views.iter().filter(|v| v["is_system"].as_bool() != Some(true)).collect();
+    assert!(user_views.is_empty(), "Expected no user views after delete");
 }
 
 /// MCP graph_summary tool returns valid summary.
