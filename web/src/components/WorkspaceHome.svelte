@@ -1830,7 +1830,7 @@
     flex-direction: column;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4);
-    max-width: 960px;
+    max-width: 1200px;
     margin: 0 auto;
     width: 100%;
   }
@@ -2392,7 +2392,7 @@
   }
 
   .feed-body {
-    max-height: 500px;
+    max-height: calc(100vh - 320px);
     overflow-y: auto;
   }
 
