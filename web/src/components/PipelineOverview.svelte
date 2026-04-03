@@ -9,11 +9,7 @@
    * old sidebar panels entirely.
    */
   import { getContext } from 'svelte';
-  import Badge from '../lib/Badge.svelte';
   import Icon from '../lib/Icon.svelte';
-  import { entityName, shortId } from '../lib/entityNames.svelte.js';
-  import { relativeTime } from '../lib/timeFormat.js';
-  import { specStatusTooltip, taskStatusTooltip, mrStatusTooltip, agentStatusTooltip } from '../lib/statusTooltips.js';
 
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
@@ -36,10 +32,7 @@
     onNavigateSpec = undefined,
   } = $props();
 
-  let expandedStage = $state(null);
-
-  function toggleStage(stageId) {
-    expandedStage = expandedStage === stageId ? null : stageId;
+  function handleStageClick(stageId) {
     onStageClick?.(stageId);
   }
 
@@ -119,27 +112,7 @@
     },
   ]);
 
-  // Filtered entity lists for each expanded stage
-  let expandedSpecs = $derived(specsList.filter(s => {
-    const st = s.approval_status ?? s.status;
-    return st === 'pending' || st === 'approved' || st === 'draft';
-  }).slice(0, 8));
-
-  let expandedTasks = $derived(tasksList.filter(t =>
-    t.status === 'in_progress' || t.status === 'blocked' || t.status === 'backlog'
-  ).slice(0, 8));
-
-  let expandedAgents = $derived(agentsList.filter(a =>
-    a.status === 'active'
-  ).slice(0, 8));
-
-  let expandedMrs = $derived(mrsList.filter(m =>
-    m.status === 'open'
-  ).slice(0, 8));
-
-  let expandedMerged = $derived(mrsList.filter(m =>
-    m.status === 'merged'
-  ).sort((a, b) => (b.merged_at ?? b.updated_at ?? 0) - (a.merged_at ?? a.updated_at ?? 0)).slice(0, 5));
+  // Entity lists are passed through but not expanded inline — stages navigate to repo tabs
 </script>
 
 <div class="pipeline-overview" data-testid="pipeline-overview">
@@ -156,10 +129,8 @@
         class="pipeline-stage"
         class:has-alert={stage.alert}
         class:has-highlight={stage.highlight}
-        class:is-expanded={expandedStage === stage.id}
-        onclick={() => toggleStage(stage.id)}
+        onclick={() => handleStageClick(stage.id)}
         title={stage.tooltip}
-        aria-expanded={expandedStage === stage.id}
       >
         <span class="stage-count" style={stage.alert ? `color: ${stage.alertColor}` : ''}>{stage.count}</span>
         <span class="stage-label">{stage.label}</span>
@@ -180,156 +151,6 @@
     {/if}
   </div>
 
-  <!-- Expandable entity list -->
-  {#if expandedStage}
-    <div class="pipeline-expansion">
-      {#if expandedStage === 'specs'}
-        {#if expandedSpecs.length === 0}
-          <p class="expansion-empty">No specs yet. Push a spec manifest to get started.</p>
-        {:else}
-          <div class="expansion-list">
-            {#each expandedSpecs as spec}
-              {@const status = spec.approval_status ?? spec.status}
-              <div class="expansion-row">
-                <button class="expansion-name" onclick={() => nav('spec', spec.id, spec)} title={specStatusTooltip(status)}>
-                  <span class="expansion-dot expansion-dot-{status === 'pending' ? 'warn' : status === 'approved' ? 'ok' : 'muted'}"></span>
-                  <span class="expansion-label">{spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</span>
-                  <Badge value={status} variant={status === 'approved' ? 'success' : status === 'pending' ? 'warning' : status === 'rejected' ? 'danger' : 'muted'} />
-                  {#if spec.task_count != null}
-                    <span class="expansion-meta">{spec.task_count} task{spec.task_count !== 1 ? 's' : ''}</span>
-                  {/if}
-                </button>
-                {#if status === 'pending' && onApproveSpec}
-                  <span class="expansion-actions">
-                    <button class="expansion-action-btn expansion-approve" onclick={(e) => onApproveSpec(spec, e)}>Approve</button>
-                    {#if onRejectSpec}
-                      <button class="expansion-action-btn expansion-reject" onclick={(e) => onRejectSpec(spec, e)}>Reject</button>
-                    {/if}
-                  </span>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        {/if}
-
-      {:else if expandedStage === 'tasks'}
-        {#if expandedTasks.length === 0}
-          <p class="expansion-empty">No active tasks. Approve specs to generate tasks.</p>
-        {:else}
-          <div class="expansion-list">
-            {#each expandedTasks as task}
-              <button class="expansion-row expansion-clickable" onclick={() => nav('task', task.id, task)} title={taskStatusTooltip(task)}>
-                <span class="expansion-dot expansion-dot-{task.status === 'in_progress' ? 'ok' : task.status === 'blocked' ? 'danger' : 'muted'}"></span>
-                <span class="expansion-label">{task.title ?? entityName('task', task.id)}</span>
-                <Badge value={task.status} variant={task.status === 'in_progress' ? 'success' : task.status === 'blocked' ? 'danger' : 'muted'} />
-                {#if task.spec_path}
-                  <span class="expansion-meta">{task.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>
-                {/if}
-                {#if task.agent_name ?? task.assigned_agent_name}
-                  <span class="expansion-meta">⤷ {task.agent_name ?? task.assigned_agent_name}</span>
-                {/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-
-      {:else if expandedStage === 'agents'}
-        {#if expandedAgents.length === 0}
-          <p class="expansion-empty">No agents currently running.</p>
-        {:else}
-          <div class="expansion-list">
-            {#each expandedAgents as agent}
-              {@const spawnedAt = agent.created_at ?? agent.spawned_at}
-              {@const elapsed = spawnedAt ? Math.round((Date.now() / 1000 - spawnedAt) / 60) : 0}
-              <button class="expansion-row expansion-clickable" onclick={() => nav('agent', agent.id, agent)} title={agentStatusTooltip(agent.status)}>
-                <span class="expansion-dot expansion-dot-ok"></span>
-                <span class="expansion-label">{agent.task_title ?? agent.name ?? entityName('agent', agent.id)}</span>
-                {#if agent.task_title && agent.name}
-                  <span class="expansion-meta">{agent.name}</span>
-                {/if}
-                {#if agent.spec_path}
-                  <span class="expansion-meta">{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>
-                {/if}
-                {#if elapsed > 0}
-                  <span class="expansion-time">{elapsed < 60 ? `${elapsed}m` : `${Math.floor(elapsed/60)}h${elapsed % 60}m`}</span>
-                {/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-
-      {:else if expandedStage === 'mrs'}
-        {#if expandedMrs.length === 0}
-          <p class="expansion-empty">No open merge requests.</p>
-        {:else}
-          <div class="expansion-list">
-            {#each expandedMrs as mr}
-              <div class="expansion-row">
-                <button class="expansion-name" onclick={() => nav('mr', mr.id, mr)} title={mrStatusTooltip(mr)}>
-                  {#if mr._gates?.failed > 0}
-                    <span class="expansion-dot expansion-dot-danger"></span>
-                  {:else if mr.queue_position != null}
-                    <span class="expansion-dot expansion-dot-ok"></span>
-                  {:else}
-                    <span class="expansion-dot expansion-dot-info"></span>
-                  {/if}
-                  <span class="expansion-label">{mr.title ?? 'Untitled'}</span>
-                  {#if mr._gateDetails?.length > 0}
-                    <span class="expansion-gates">
-                      {#each mr._gateDetails as gate}
-                        <span class="gate-badge gate-badge-{gate.status === 'passed' ? 'pass' : gate.status === 'failed' ? 'fail' : 'pending'}"
-                          title="{gate.name}: {gate.status}">{gate.status === 'passed' ? '✓' : gate.status === 'failed' ? '✗' : '⋯'}{gate.name}</span>
-                      {/each}
-                    </span>
-                  {:else if mr._gates?.total > 0}
-                    <span class="expansion-gates">
-                      {#if mr._gates.failed > 0}<span class="gate-fail-inline">✗{mr._gates.failed}</span>{/if}
-                      {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
-                    </span>
-                  {/if}
-                  {#if mr._diffStats ?? mr.diff_stats}
-                    {@const diff = mr._diffStats ?? mr.diff_stats}
-                    <span class="expansion-diff-stats">
-                      {#if diff.insertions != null}<span class="diff-add">+{diff.insertions}</span>{/if}
-                      {#if diff.deletions != null}<span class="diff-del">-{diff.deletions}</span>{/if}
-                    </span>
-                  {/if}
-                </button>
-                {#if mr.status === 'open' && mr.queue_position == null && onEnqueueMr}
-                  <button class="expansion-action-btn expansion-approve" onclick={(e) => onEnqueueMr(mr, e)}>Enqueue</button>
-                {:else if mr.queue_position != null}
-                  <span class="expansion-meta">#{mr.queue_position + 1}</span>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        {/if}
-
-      {:else if expandedStage === 'merged'}
-        {#if expandedMerged.length === 0}
-          <p class="expansion-empty">No merged MRs yet.</p>
-        {:else}
-          <div class="expansion-list">
-            {#each expandedMerged as mr}
-              <button class="expansion-row expansion-clickable" onclick={() => nav('mr', mr.id, mr)} title={mrStatusTooltip(mr)}>
-                <span class="expansion-dot expansion-dot-ok"></span>
-                <span class="expansion-label">{mr.title ?? 'Untitled'}</span>
-                {#if mr.merge_commit_sha}
-                  <code class="expansion-sha">{mr.merge_commit_sha.slice(0, 7)}</code>
-                {/if}
-                {#if mr.spec_ref ?? mr.spec_path}
-                  <span class="expansion-meta">{(mr.spec_ref ?? mr.spec_path).split('/').pop()?.replace(/\.md$/, '')}</span>
-                {/if}
-                {#if mr.merged_at ?? mr.updated_at}
-                  <span class="expansion-time">{relativeTime(mr.merged_at ?? mr.updated_at)}</span>
-                {/if}
-              </button>
-            {/each}
-          </div>
-        {/if}
-      {/if}
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -387,11 +208,6 @@
 
   .pipeline-stage.has-highlight {
     background: color-mix(in srgb, var(--color-success) 6%, transparent);
-  }
-
-  .pipeline-stage.is-expanded {
-    border-color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 6%, transparent);
   }
 
   .stage-count {
@@ -460,196 +276,6 @@
 
   .budget-pct.budget-warn { color: var(--color-warning); }
   .budget-pct.budget-danger { color: var(--color-danger); }
-
-  /* ── Expansion panel ─────────────────────────────────────────── */
-  .pipeline-expansion {
-    border-top: 1px solid var(--color-border);
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    max-height: 320px;
-    overflow-y: auto;
-  }
-
-  .expansion-empty {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    margin: var(--space-1) 0;
-    text-align: center;
-  }
-
-  .expansion-list {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-
-  .expansion-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-2);
-    border-radius: var(--radius-sm);
-    transition: background var(--transition-fast);
-  }
-
-  .expansion-row:hover {
-    background: var(--color-surface);
-  }
-
-  .expansion-clickable {
-    cursor: pointer;
-    background: transparent;
-    border: none;
-    text-align: left;
-    font-family: var(--font-body);
-    width: 100%;
-    color: var(--color-text);
-  }
-
-  .expansion-name {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex: 1;
-    min-width: 0;
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    text-align: left;
-    font-family: var(--font-body);
-    color: var(--color-text);
-    padding: 0;
-  }
-
-  .expansion-name:hover .expansion-label {
-    color: var(--color-primary);
-    text-decoration: underline;
-  }
-
-  .expansion-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .expansion-dot-ok { background: var(--color-success); }
-  .expansion-dot-warn { background: var(--color-warning); }
-  .expansion-dot-danger { background: var(--color-danger); }
-  .expansion-dot-info { background: var(--color-info, #1e90ff); }
-  .expansion-dot-muted { background: var(--color-text-muted); }
-
-  .expansion-label {
-    font-size: var(--text-xs);
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .expansion-meta {
-    font-size: 10px;
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
-  .expansion-time {
-    font-size: 10px;
-    color: var(--color-text-muted);
-    font-family: var(--font-mono);
-    flex-shrink: 0;
-  }
-
-  .expansion-sha {
-    font-size: 10px;
-    font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
-  .expansion-gates {
-    display: flex;
-    gap: 2px;
-    flex-shrink: 0;
-    font-size: 10px;
-  }
-
-  .expansion-actions {
-    display: flex;
-    gap: 2px;
-    flex-shrink: 0;
-  }
-
-  .expansion-action-btn {
-    font-family: var(--font-body);
-    font-size: 10px;
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    border: none;
-    transition: background var(--transition-fast);
-  }
-
-  .expansion-approve {
-    color: var(--color-success);
-    background: color-mix(in srgb, var(--color-success) 12%, transparent);
-  }
-  .expansion-approve:hover { background: color-mix(in srgb, var(--color-success) 25%, transparent); }
-
-  .expansion-reject {
-    color: var(--color-text-muted);
-    background: transparent;
-  }
-  .expansion-reject:hover { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 12%, transparent); }
-
-  .gate-fail-inline {
-    color: var(--color-danger);
-    font-weight: 600;
-  }
-
-  .gate-pass-inline {
-    color: var(--color-success);
-  }
-
-  .gate-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    font-size: 10px;
-    font-weight: 500;
-    padding: 0 4px;
-    border-radius: var(--radius-sm);
-    white-space: nowrap;
-  }
-
-  .gate-badge-pass {
-    color: var(--color-success);
-    background: color-mix(in srgb, var(--color-success) 10%, transparent);
-  }
-
-  .gate-badge-fail {
-    color: var(--color-danger);
-    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
-  }
-
-  .gate-badge-pending {
-    color: var(--color-text-muted);
-    background: color-mix(in srgb, var(--color-text-muted) 10%, transparent);
-  }
-
-  .expansion-diff-stats {
-    display: flex;
-    gap: 4px;
-    flex-shrink: 0;
-    font-size: 10px;
-    font-family: var(--font-mono);
-  }
-
-  .diff-add { color: var(--color-success); }
-  .diff-del { color: var(--color-danger); }
 
   @media (max-width: 640px) {
     .pipeline-stage {
