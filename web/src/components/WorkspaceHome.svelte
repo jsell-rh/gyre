@@ -1713,7 +1713,13 @@
                             {/if}
                           </td>
                           <td class="entity-time">{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
-                          <td class="td-actions">
+                          <td class="td-actions td-actions-mr">
+                            {#if ds}
+                              <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'diff' }); }} title="View code changes">Diff</button>
+                            {/if}
+                            {#if gates?.total > 0}
+                              <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }} title="View gate results and logs">Gates</button>
+                            {/if}
                             {#if mrStatus === 'open' && mr.queue_position == null && mrEnqueueStates[mr.id] !== 'queued'}
                               <button class="inline-action-btn inline-action-approve" onclick={(e) => quickEnqueueMr(mr, e)} disabled={mrEnqueueStates[mr.id] === 'loading'} title="Enqueue for merge">Enqueue</button>
                             {:else if mrEnqueueStates[mr.id] === 'queued'}
@@ -3436,6 +3442,18 @@
     cursor: pointer;
     border: none;
     transition: background var(--transition-fast);
+  }
+
+  .inline-action-view {
+    color: var(--color-link);
+    background: color-mix(in srgb, var(--color-link) 8%, transparent);
+  }
+  .inline-action-view:hover { background: color-mix(in srgb, var(--color-link) 18%, transparent); }
+
+  .td-actions-mr {
+    display: flex;
+    gap: 2px;
+    flex-wrap: nowrap;
   }
 
   .inline-action-approve {
