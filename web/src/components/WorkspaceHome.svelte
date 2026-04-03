@@ -1026,6 +1026,9 @@
       {/if}
 
       <!-- ── Decisions / Action Needed (top — most important) ──────── -->
+      {#if !decisionsLoading && actionableNotifications.length === 0 && !specsLoading && (specs.length > 0 || wsTasks.length > 0)}
+        <div class="ws-all-clear" data-testid="all-clear">All clear — no items need your attention</div>
+      {/if}
       {#if !decisionsLoading && actionableNotifications.length > 0}
         <section class="ws-decisions-section" data-testid="section-decisions">
           <div class="decisions-header">
@@ -1835,6 +1838,17 @@
     max-width: 1200px;
     margin: 0 auto;
     width: 100%;
+  }
+
+  /* ── All clear indicator ─────────────────────────────────────── */
+  .ws-all-clear {
+    font-size: var(--text-xs);
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 6%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-success) 20%, transparent);
+    border-radius: var(--radius);
+    padding: var(--space-1) var(--space-3);
+    text-align: center;
   }
 
   /* ── Status sentence ──────────────────────────────────────────── */
