@@ -1200,7 +1200,10 @@
                   <span class="decision-type">{typeLabel(nt)}{#if n.repo_id && repoMap[n.repo_id]} · {repoMap[n.repo_id].name}{/if}</span>
                   <span class="decision-title">{n.title ?? n.message ?? ''}</span>
                   {#if nt === 'gate_failure' && body.gate_name}
-                    <span class="decision-detail">Gate "{body.gate_name}" failed — merge blocked until fixed</span>
+                    <span class="decision-detail">
+                      Gate "{body.gate_name}" failed{#if body.gate_type} ({body.gate_type.replace(/_/g, ' ')}){/if} — merge blocked
+                      {#if body.error}<code class="decision-error-preview">{body.error.split('\n')[0]?.slice(0, 100)}</code>{/if}
+                    </span>
                   {:else if nt === 'gate_failure' && body.mr_id}
                     <span class="decision-detail">Quality gate failed on {entityName('mr', body.mr_id)}</span>
                   {:else if nt === 'agent_failed' && body.agent_name}
@@ -4325,10 +4328,21 @@
   .decision-detail {
     font-size: 10px;
     color: var(--color-text-secondary);
-    font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .decision-error-preview {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-danger);
+    opacity: 0.8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-top: 1px;
   }
 
   .decision-time {
