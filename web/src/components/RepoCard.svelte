@@ -32,10 +32,10 @@
 
   // Derive the most relevant "what's happening" summary
   let statusSummary = $derived.by(() => {
-    if (stats.failedGates > 0) return { text: `${stats.failedGates} gate failure${stats.failedGates !== 1 ? 's' : ''}`, variant: 'danger' };
-    if (stats.agents > 0) return { text: `${stats.agents} agent${stats.agents !== 1 ? 's' : ''} working`, variant: 'success' };
-    if (specBreakdown?.pending > 0) return { text: `${specBreakdown.pending} spec${specBreakdown.pending !== 1 ? 's' : ''} awaiting review`, variant: 'warning' };
-    if (stats.openMrs > 0) return { text: `${stats.openMrs} open MR${stats.openMrs !== 1 ? 's' : ''}`, variant: 'info' };
+    if (stats.failedGates > 0) return { text: `${stats.failedGates} gate failure${stats.failedGates !== 1 ? 's' : ''}`, why: 'MR merge blocked until gates pass', variant: 'danger' };
+    if (stats.agents > 0) return { text: `${stats.agents} agent${stats.agents !== 1 ? 's' : ''} working`, why: 'Implementing code from approved specs', variant: 'success' };
+    if (specBreakdown?.pending > 0) return { text: `${specBreakdown.pending} spec${specBreakdown.pending !== 1 ? 's' : ''} awaiting review`, why: 'Agents cannot start until specs are approved', variant: 'warning' };
+    if (stats.openMrs > 0) return { text: `${stats.openMrs} open MR${stats.openMrs !== 1 ? 's' : ''}`, why: 'Ready to enqueue for merge', variant: 'info' };
     return null;
   });
 </script>
@@ -57,7 +57,10 @@
     <!-- Status summary — the ONE most important thing about this repo right now -->
     {#if statusSummary}
       <div class="repo-card-status repo-card-status-{statusSummary.variant}">
-        {statusSummary.text}
+        <span class="status-text">{statusSummary.text}</span>
+        {#if statusSummary.why}
+          <span class="status-why">{statusSummary.why}</span>
+        {/if}
       </div>
     {/if}
 
@@ -173,13 +176,21 @@
     white-space: nowrap;
   }
 
-  /* Status summary — prominent one-liner */
+  /* Status summary — prominent one-liner with WHY sub-text */
   .repo-card-status {
     font-size: var(--text-xs);
     font-weight: 500;
     padding: 2px var(--space-2);
     border-radius: var(--radius-sm);
-    white-space: nowrap;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .status-why {
+    font-weight: 400;
+    font-size: 10px;
+    opacity: 0.8;
   }
 
   .repo-card-status-danger {
