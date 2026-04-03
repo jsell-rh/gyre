@@ -331,6 +331,59 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["q"]
                 }
+            },
+            {
+                "name": "graph_summary",
+                "description": "Get a condensed summary of a repo's knowledge graph: node/edge counts, top types by fields, top functions by calls, modules, test coverage stats.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" }
+                    },
+                    "required": ["repo_id"]
+                }
+            },
+            {
+                "name": "graph_query_dryrun",
+                "description": "Dry-run a view query against the knowledge graph. Returns matched node count, names, resolved groups/callouts/narrative, and warnings (e.g. 'too many matches'). Use this to validate queries before sending to the frontend.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "query": { "type": "object", "description": "View query JSON (scope, emphasis, groups, callouts, narrative)" },
+                        "selected_node_id": { "type": "string", "description": "Currently selected node ID (for $selected/$clicked resolution)" }
+                    },
+                    "required": ["repo_id", "query"]
+                }
+            },
+            {
+                "name": "graph_nodes",
+                "description": "Query specific graph nodes by ID, name pattern, or node type. Returns up to 50 nodes with full details.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "node_id": { "type": "string", "description": "Specific node ID to look up" },
+                        "name_pattern": { "type": "string", "description": "Substring match on node name or qualified_name (case-insensitive)" },
+                        "node_type": { "type": "string", "description": "Filter by node type: package, module, type, interface, function, endpoint, component, table, constant, field" }
+                    },
+                    "required": ["repo_id"]
+                }
+            },
+            {
+                "name": "graph_edges",
+                "description": "Query graph edges by source/target node ID or edge type. Returns up to 100 edges.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "node_id": { "type": "string", "description": "Find all edges connected to this node (source or target)" },
+                        "edge_type": { "type": "string", "description": "Filter by edge type: contains, implements, depends_on, calls, field_of, returns, routes_to, governed_by" },
+                        "source_id": { "type": "string", "description": "Filter edges by source node ID" },
+                        "target_id": { "type": "string", "description": "Filter edges by target node ID" }
+                    },
+                    "required": ["repo_id"]
+                }
             }
         ]
     })
@@ -1151,6 +1204,212 @@ async fn handle_search(state: &AppState, args: &Value) -> Value {
     }
 }
 
+// ── Explorer graph MCP tools ──────────────────────────────────────────────────
+
+async fn handle_graph_summary(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let rid = Id::new(&repo_id);
+    let nodes = match state.graph_store.list_nodes(&rid, None).await {
+        Ok(n) => n,
+        Err(e) => return tool_error(format!("Failed to load graph nodes: {e}")),
+    };
+    let edges = match state.graph_store.list_edges(&rid, None).await {
+        Ok(e) => e,
+        Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
+    };
+    let summary =
+        gyre_domain::view_query_resolver::compute_graph_summary(&repo_id, &nodes, &edges);
+    tool_result(serde_json::to_string_pretty(&summary).unwrap_or_default())
+}
+
+async fn handle_graph_query_dryrun(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let query_value = match args.get("query") {
+        Some(q) => q.clone(),
+        None => return tool_error("missing required field: query"),
+    };
+    let query: gyre_common::view_query::ViewQuery = match serde_json::from_value(query_value) {
+        Ok(q) => q,
+        Err(e) => return tool_error(format!("Invalid view query: {e}")),
+    };
+    let selected = get_str(args, "selected_node_id");
+
+    let rid = Id::new(&repo_id);
+    let nodes = match state.graph_store.list_nodes(&rid, None).await {
+        Ok(n) => n,
+        Err(e) => return tool_error(format!("Failed to load graph nodes: {e}")),
+    };
+    let edges = match state.graph_store.list_edges(&rid, None).await {
+        Ok(e) => e,
+        Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
+    };
+
+    let result = gyre_domain::view_query_resolver::dry_run(&query, &nodes, &edges, selected);
+    tool_result(serde_json::to_string_pretty(&result).unwrap_or_default())
+}
+
+async fn handle_graph_nodes(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let rid = Id::new(&repo_id);
+
+    // Specific node by ID
+    if let Some(node_id) = get_str(args, "node_id") {
+        let nid = Id::new(node_id);
+        match state.graph_store.get_node(&nid).await {
+            Ok(Some(node)) => {
+                return tool_result(serde_json::to_string_pretty(&node).unwrap_or_default());
+            }
+            Ok(None) => return tool_error(format!("Node not found: {node_id}")),
+            Err(e) => return tool_error(format!("Failed: {e}")),
+        }
+    }
+
+    // Filter by type
+    let node_type_filter = get_str(args, "node_type").and_then(|s| {
+        match s.to_lowercase().as_str() {
+            "package" => Some(gyre_common::NodeType::Package),
+            "module" => Some(gyre_common::NodeType::Module),
+            "type" => Some(gyre_common::NodeType::Type),
+            "interface" => Some(gyre_common::NodeType::Interface),
+            "function" => Some(gyre_common::NodeType::Function),
+            "endpoint" => Some(gyre_common::NodeType::Endpoint),
+            "component" => Some(gyre_common::NodeType::Component),
+            "table" => Some(gyre_common::NodeType::Table),
+            "constant" => Some(gyre_common::NodeType::Constant),
+            "field" => Some(gyre_common::NodeType::Field),
+            _ => None,
+        }
+    });
+
+    let nodes = match state.graph_store.list_nodes(&rid, node_type_filter).await {
+        Ok(n) => n,
+        Err(e) => return tool_error(format!("Failed: {e}")),
+    };
+
+    // Name pattern filter
+    let name_pattern = get_str(args, "name_pattern").map(|s| s.to_lowercase());
+    let filtered: Vec<_> = nodes
+        .into_iter()
+        .filter(|n| n.deleted_at.is_none())
+        .filter(|n| {
+            match &name_pattern {
+                Some(pat) => {
+                    n.name.to_lowercase().contains(pat)
+                        || n.qualified_name.to_lowercase().contains(pat)
+                }
+                None => true,
+            }
+        })
+        .take(50)
+        .collect();
+
+    let items: Vec<serde_json::Value> = filtered
+        .iter()
+        .map(|n| {
+            json!({
+                "id": n.id.to_string(),
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "node_type": format!("{:?}", n.node_type).to_lowercase(),
+                "file_path": n.file_path,
+                "line_start": n.line_start,
+                "line_end": n.line_end,
+                "visibility": format!("{:?}", n.visibility).to_lowercase(),
+                "spec_path": n.spec_path,
+                "complexity": n.complexity,
+                "test_node": n.test_node,
+                "test_coverage": n.test_coverage,
+            })
+        })
+        .collect();
+
+    tool_result(format!("{} nodes:\n{}", items.len(), serde_json::to_string_pretty(&items).unwrap_or_default()))
+}
+
+async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let rid = Id::new(&repo_id);
+
+    // If node_id is specified, get edges for that node
+    if let Some(node_id) = get_str(args, "node_id") {
+        let nid = Id::new(node_id);
+        match state.graph_store.list_edges_for_node(&nid).await {
+            Ok(edges) => {
+                let items: Vec<serde_json::Value> = edges
+                    .iter()
+                    .filter(|e| e.deleted_at.is_none())
+                    .take(100)
+                    .map(|e| {
+                        json!({
+                            "id": e.id.to_string(),
+                            "source_id": e.source_id.to_string(),
+                            "target_id": e.target_id.to_string(),
+                            "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
+                        })
+                    })
+                    .collect();
+                return tool_result(format!("{} edges:\n{}", items.len(), serde_json::to_string_pretty(&items).unwrap_or_default()));
+            }
+            Err(e) => return tool_error(format!("Failed: {e}")),
+        }
+    }
+
+    // Filter by edge type
+    let edge_type_filter = get_str(args, "edge_type").and_then(|s| {
+        match s.to_lowercase().as_str() {
+            "contains" => Some(gyre_common::EdgeType::Contains),
+            "implements" => Some(gyre_common::EdgeType::Implements),
+            "depends_on" => Some(gyre_common::EdgeType::DependsOn),
+            "calls" => Some(gyre_common::EdgeType::Calls),
+            "field_of" => Some(gyre_common::EdgeType::FieldOf),
+            "returns" => Some(gyre_common::EdgeType::Returns),
+            "routes_to" => Some(gyre_common::EdgeType::RoutesTo),
+            "governed_by" => Some(gyre_common::EdgeType::GovernedBy),
+            _ => None,
+        }
+    });
+
+    let edges = match state.graph_store.list_edges(&rid, edge_type_filter).await {
+        Ok(e) => e,
+        Err(e) => return tool_error(format!("Failed: {e}")),
+    };
+
+    let source_filter = get_str(args, "source_id");
+    let target_filter = get_str(args, "target_id");
+
+    let items: Vec<serde_json::Value> = edges
+        .iter()
+        .filter(|e| e.deleted_at.is_none())
+        .filter(|e| {
+            source_filter.map_or(true, |s| e.source_id.to_string() == s)
+                && target_filter.map_or(true, |t| e.target_id.to_string() == t)
+        })
+        .take(100)
+        .map(|e| {
+            json!({
+                "id": e.id.to_string(),
+                "source_id": e.source_id.to_string(),
+                "target_id": e.target_id.to_string(),
+                "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
+            })
+        })
+        .collect();
+
+    tool_result(format!("{} edges:\n{}", items.len(), serde_json::to_string_pretty(&items).unwrap_or_default()))
+}
+
 // ── MCP Resources ─────────────────────────────────────────────────────────────
 
 fn resource_definitions() -> Value {
@@ -1426,6 +1685,10 @@ pub async fn mcp_handler(
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
                 "gyre_search" => handle_search(&state, &args).await,
                 "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
+                "graph_summary" => handle_graph_summary(&state, &args).await,
+                "graph_query_dryrun" => handle_graph_query_dryrun(&state, &args).await,
+                "graph_nodes" => handle_graph_nodes(&state, &args).await,
+                "graph_edges" => handle_graph_edges(&state, &args).await,
                 other => tool_error(format!("Unknown tool: {other}")),
             };
             JsonRpcResponse::ok(id, result)
