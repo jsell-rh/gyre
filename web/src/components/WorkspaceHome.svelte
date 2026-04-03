@@ -598,6 +598,9 @@
     failed_gates: wsMrs.filter(m => m._gates?.failed > 0).length,
   });
 
+  // ── Workspace-level entity tab ──────────────────────────────────────
+  let wsTab = $state('activity');
+
   // ── Activity filter + pagination ──────────────────────────────────────
   let activityFilter = $state('');
   let activityLimit = $state(10);
@@ -670,15 +673,8 @@
     const tabMap = { specs: 'specs', tasks: 'tasks', mrs: 'mrs', agents: 'agents', merged: 'mrs' };
     const tab = tabMap[stageId];
     if (!tab) return;
-    // Single repo: navigate directly to that repo's tab
-    if (repos.length === 1 && onSelectRepo) {
-      onSelectRepo(repos[0], tab);
-      return;
-    }
-    // Multiple repos: scroll to activity feed (which shows cross-repo data)
-    // and set a filter matching the stage type
-    const filterMap = { specs: 'spec', tasks: 'task', agents: 'agent', mrs: 'mr', merged: 'mr' };
-    if (filterMap[stageId]) activityFilter = filterMap[stageId];
+    // Switch to the corresponding workspace tab and scroll into view
+    wsTab = tab;
     document.querySelector('[data-testid="ws-tabbed-panel"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
@@ -1093,97 +1089,376 @@
             </div>
           </section>
 
-          <!-- Activity feed -->
-          <section class="ws-feed-panel" aria-labelledby="feed-title" data-testid="ws-tabbed-panel">
-            <div class="feed-header">
-              <h2 class="feed-title" id="feed-title">
-                <Icon name="activity" size={14} />
+          <!-- Tabbed entity panel: Activity | Specs | Tasks | MRs | Agents -->
+          <section class="ws-feed-panel" data-testid="ws-tabbed-panel">
+            <nav class="ws-tab-bar" aria-label="Workspace sections">
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; }}>
+                <Icon name="activity" size={12} />
                 Activity
-              </h2>
-              <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity">
-                <option value="">All</option>
-                <option value="spec">Specs</option>
-                <option value="task">Tasks</option>
-                <option value="agent">Agents</option>
-                <option value="mr">MRs</option>
-                <option value="gate">Gates</option>
-              </select>
-            </div>
-            <div class="feed-body">
-              {#if activityLoading}
-                <div class="skeleton-row"></div>
-                <div class="skeleton-row"></div>
-              {:else if filteredActivity.length === 0}
-                <p class="empty-text">No recent activity. Push specs and approve them to get started.</p>
-              {:else}
-                <div class="activity-timeline">
-                  {#each filteredActivity.slice(0, activityLimit) as event, i}
-                    {@const variant = activityVariant(event)}
-                    {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                    {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                    <button
-                      class="activity-item activity-item-clickable"
-                      onclick={() => {
-                        if (primaryType && primaryId) {
-                          const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                          nav(primaryType, primaryId, data);
-                        }
-                      }}
-                    >
-                      <div class="activity-dot activity-dot-{variant}"></div>
-                      {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                      <div class="activity-content">
-                        <div class="activity-main-row">
-                          <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
-                          <span class="activity-label">{activityLabel(event)}</span>
-                          {#if event.entity_name ?? event.title}
-                            <span class="activity-detail">{event.entity_name ?? event.title}</span>
-                          {/if}
-                          <span class="activity-entity-badges">
-                            {#if event.agent_id}
-                              <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }} title="View agent">
-                                <Icon name="agent" size={10} /> {event.entity_name && event.entity_type === 'agent' ? event.entity_name : entityName('agent', event.agent_id)}
+              </button>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; }}>
+                <Icon name="spec" size={12} />
+                Specs
+                {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
+              </button>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; }}>
+                <Icon name="task" size={12} />
+                Tasks
+                {#if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
+              </button>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; }}>
+                <Icon name="git-merge" size={12} />
+                MRs
+                {#if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>
+                {:else if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>{/if}
+              </button>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; }}>
+                <Icon name="agent" size={12} />
+                Agents
+                {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
+              </button>
+            </nav>
+
+            <!-- ── Activity tab ──────────────────────────────────────── -->
+            {#if wsTab === 'activity'}
+              <div class="ws-tab-toolbar">
+                <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity">
+                  <option value="">All</option>
+                  <option value="spec">Specs</option>
+                  <option value="task">Tasks</option>
+                  <option value="agent">Agents</option>
+                  <option value="mr">MRs</option>
+                  <option value="gate">Gates</option>
+                </select>
+              </div>
+              <div class="feed-body">
+                {#if activityLoading}
+                  <div class="skeleton-row"></div>
+                  <div class="skeleton-row"></div>
+                {:else if filteredActivity.length === 0}
+                  <p class="empty-text">No recent activity. Push specs and approve them to get started.</p>
+                {:else}
+                  <div class="activity-timeline">
+                    {#each filteredActivity.slice(0, activityLimit) as event, i}
+                      {@const variant = activityVariant(event)}
+                      {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                      {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                      <button
+                        class="activity-item activity-item-clickable"
+                        onclick={() => {
+                          if (primaryType && primaryId) {
+                            const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                            nav(primaryType, primaryId, data);
+                          }
+                        }}
+                      >
+                        <div class="activity-dot activity-dot-{variant}"></div>
+                        {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                        <div class="activity-content">
+                          <div class="activity-main-row">
+                            <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
+                            <span class="activity-label">{activityLabel(event)}</span>
+                            {#if event.entity_name ?? event.title}
+                              <span class="activity-detail">{event.entity_name ?? event.title}</span>
+                            {/if}
+                            <span class="activity-entity-badges">
+                              {#if event.agent_id}
+                                <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }} title="View agent">
+                                  <Icon name="agent" size={10} /> {event.entity_name && event.entity_type === 'agent' ? event.entity_name : entityName('agent', event.agent_id)}
+                                </button>
+                              {/if}
+                              {#if event.mr_id}
+                                <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }} title="View merge request">
+                                  <Icon name="git-merge" size={10} /> {event.entity_name && event.entity_type === 'mr' ? event.entity_name : entityName('mr', event.mr_id)}
+                                </button>
+                              {/if}
+                              {#if event.task_id}
+                                <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('task', event.task_id, { repo_id: event.repo_id }); }} title="View task">
+                                  <Icon name="task" size={10} /> {event.entity_name && event.entity_type === 'task' ? event.entity_name : entityName('task', event.task_id)}
+                                </button>
+                              {/if}
+                              {#if event.spec_path}
+                                <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }} title="View spec">
+                                  <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                                </button>
+                              {/if}
+                            </span>
+                            {#if event.repo_id && repoMap[event.repo_id]}
+                              <button class="activity-repo-tag activity-repo-tag-clickable" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[event.repo_id]); }} title="Go to repo">
+                                {repoMap[event.repo_id].name}
                               </button>
                             {/if}
-                            {#if event.mr_id}
-                              <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }} title="View merge request">
-                                <Icon name="git-merge" size={10} /> {event.entity_name && event.entity_type === 'mr' ? event.entity_name : entityName('mr', event.mr_id)}
-                              </button>
+                            {#if event.timestamp ?? event.created_at}
+                              <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                             {/if}
-                            {#if event.task_id}
-                              <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('task', event.task_id, { repo_id: event.repo_id }); }} title="View task">
-                                <Icon name="task" size={10} /> {event.entity_name && event.entity_type === 'task' ? event.entity_name : entityName('task', event.task_id)}
-                              </button>
-                            {/if}
-                            {#if event.spec_path}
-                              <button class="activity-entity-badge" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }} title="View spec">
-                                <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                              </button>
-                            {/if}
-                          </span>
-                          {#if event.repo_id && repoMap[event.repo_id]}
-                            <button class="activity-repo-tag activity-repo-tag-clickable" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[event.repo_id]); }} title="Go to repo">
-                              {repoMap[event.repo_id].name}
-                            </button>
-                          {/if}
-                          {#if event.timestamp ?? event.created_at}
-                            <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                          </div>
+                          {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
+                            <p class="activity-reason">{event.description.length > 140 ? event.description.slice(0, 140) + '...' : event.description}</p>
                           {/if}
                         </div>
-                        {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                          <p class="activity-reason">{event.description.length > 140 ? event.description.slice(0, 140) + '...' : event.description}</p>
-                        {/if}
-                      </div>
+                      </button>
+                    {/each}
+                  </div>
+                  {#if filteredActivity.length > activityLimit}
+                    <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
+                      Show more ({filteredActivity.length - activityLimit} remaining)
                     </button>
-                  {/each}
-                </div>
-                {#if filteredActivity.length > activityLimit}
-                  <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
-                    Show more ({filteredActivity.length - activityLimit} remaining)
-                  </button>
+                  {/if}
                 {/if}
-              {/if}
-            </div>
+              </div>
+
+            <!-- ── Specs tab ──────────────────────────────────────────── -->
+            {:else if wsTab === 'specs'}
+              <div class="feed-body">
+                {#if specsLoading}
+                  <div class="skeleton-row"></div>
+                {:else if specs.length === 0}
+                  <p class="empty-text">No specs yet. Push a spec manifest to define what agents should build.</p>
+                {:else}
+                  <table class="ws-entity-table">
+                    <thead>
+                      <tr>
+                        <th>Spec</th>
+                        <th>Status</th>
+                        <th>Repo</th>
+                        <th>Updated</th>
+                        <th class="th-actions"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each specs as spec}
+                        {@const status = spec.approval_status ?? spec.status ?? 'pending'}
+                        {@const specName = spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}
+                        {@const specDir = spec.path?.includes('/') ? spec.path.split('/').slice(0, -1).join('/') : ''}
+                        <tr class="ws-entity-row" onclick={() => navigateToSpec(spec)}>
+                          <td class="entity-name-cell">
+                            <Icon name="spec" size={12} />
+                            <span class="entity-primary-name">{specName}</span>
+                            {#if specDir}<span class="entity-secondary-path">{specDir}/</span>{/if}
+                          </td>
+                          <td>
+                            <span class="status-pill status-pill-{status}" title={specStatusTooltip(status)}>
+                              {SPEC_STATUS_ICONS[status] ?? ''} {status}
+                            </span>
+                          </td>
+                          <td>
+                            {#if spec.repo_id && repoMap[spec.repo_id]}
+                              <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id]); }}>
+                                {repoMap[spec.repo_id].name}
+                              </button>
+                            {/if}
+                          </td>
+                          <td class="entity-time">{relTime(spec.updated_at ?? spec.created_at)}</td>
+                          <td class="td-actions">
+                            {#if status === 'pending' && specActionStates[spec.path] !== 'approved'}
+                              <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'} title="Approve this spec">Approve</button>
+                              <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'} title="Reject this spec">Reject</button>
+                            {:else if specActionStates[spec.path] === 'approved'}
+                              <span class="inline-action-done">Approved</span>
+                            {:else if specActionStates[spec.path] === 'rejected'}
+                              <span class="inline-action-done inline-action-rejected">Rejected</span>
+                            {/if}
+                          </td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                {/if}
+              </div>
+
+            <!-- ── Tasks tab ──────────────────────────────────────────── -->
+            {:else if wsTab === 'tasks'}
+              <div class="feed-body">
+                {#if tasksLoading}
+                  <div class="skeleton-row"></div>
+                {:else if wsTasks.length === 0}
+                  <p class="empty-text">No tasks yet. Approve specs to auto-generate implementation tasks.</p>
+                {:else}
+                  <table class="ws-entity-table">
+                    <thead>
+                      <tr>
+                        <th>Task</th>
+                        <th>Status</th>
+                        <th>Priority</th>
+                        <th>Spec</th>
+                        <th>Updated</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each wsTasks.sort((a, b) => {
+                        const order = { blocked: 0, in_progress: 1, review: 2, backlog: 3, done: 4, cancelled: 5 };
+                        return (order[a.status] ?? 3) - (order[b.status] ?? 3);
+                      }) as task}
+                        {@const taskStatus = task.status ?? 'backlog'}
+                        <tr class="ws-entity-row" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })}>
+                          <td class="entity-name-cell">
+                            <Icon name="task" size={12} />
+                            <span class="entity-primary-name">{task.title ?? 'Untitled'}</span>
+                          </td>
+                          <td>
+                            <span class="status-pill status-pill-{taskStatus}" title={taskStatusTooltip(taskStatus)}>
+                              {taskStatus}
+                            </span>
+                          </td>
+                          <td>
+                            {#if task.priority}
+                              <span class="priority-pill priority-{task.priority}">{task.priority}</span>
+                            {/if}
+                          </td>
+                          <td>
+                            {#if task.spec_path}
+                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }}>
+                                {task.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                              </button>
+                            {/if}
+                          </td>
+                          <td class="entity-time">{relTime(task.updated_at ?? task.created_at)}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                {/if}
+              </div>
+
+            <!-- ── MRs tab ────────────────────────────────────────────── -->
+            {:else if wsTab === 'mrs'}
+              <div class="feed-body">
+                {#if mrsLoading}
+                  <div class="skeleton-row"></div>
+                {:else if wsMrs.length === 0}
+                  <p class="empty-text">No merge requests yet. Agents create MRs when they complete implementation.</p>
+                {:else}
+                  <table class="ws-entity-table">
+                    <thead>
+                      <tr>
+                        <th>Merge Request</th>
+                        <th>Status</th>
+                        <th>Gates</th>
+                        <th>Diff</th>
+                        <th>Repo</th>
+                        <th>Updated</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each wsMrs.sort((a, b) => {
+                        const order = { open: 0, queued: 1, merged: 2, closed: 3 };
+                        return (order[a.status] ?? 2) - (order[b.status] ?? 2);
+                      }) as mr}
+                        {@const mrStatus = mr.status ?? 'open'}
+                        {@const gates = mr._gates}
+                        {@const ds = mr.diff_stats}
+                        <tr class="ws-entity-row" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })}>
+                          <td class="entity-name-cell">
+                            <Icon name="git-merge" size={12} />
+                            <span class="entity-primary-name">{mr.title ?? 'Untitled MR'}</span>
+                            {#if mr.source_branch}
+                              <span class="entity-branch-tag">{mr.source_branch}</span>
+                            {/if}
+                          </td>
+                          <td>
+                            <span class="status-pill status-pill-{mrStatus}" title={mrStatusTooltip(mrStatus)}>
+                              {mrStatus}
+                            </span>
+                          </td>
+                          <td>
+                            {#if gates && gates.total > 0}
+                              <span class="gates-mini">
+                                {#if gates.failed > 0}<span class="gate-fail-count">&#10007;{gates.failed}</span>{/if}
+                                {#if gates.passed > 0}<span class="gate-pass-count">&#10003;{gates.passed}</span>{/if}
+                                <span class="gate-total-count">/{gates.total}</span>
+                              </span>
+                            {:else}
+                              <span class="text-muted">-</span>
+                            {/if}
+                          </td>
+                          <td>
+                            {#if ds}
+                              <span class="diff-stats-mini">
+                                <span class="diff-ins-mini">+{ds.insertions ?? 0}</span>
+                                <span class="diff-del-mini">-{ds.deletions ?? 0}</span>
+                              </span>
+                            {/if}
+                          </td>
+                          <td>
+                            {#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}
+                              <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id ?? mr.repo_id]); }}>
+                                {repoMap[mr.repository_id ?? mr.repo_id].name}
+                              </button>
+                            {/if}
+                          </td>
+                          <td class="entity-time">{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                {/if}
+              </div>
+
+            <!-- ── Agents tab ─────────────────────────────────────────── -->
+            {:else if wsTab === 'agents'}
+              <div class="feed-body">
+                {#if agentsLoading}
+                  <div class="skeleton-row"></div>
+                {:else if wsAgents.length === 0}
+                  <p class="empty-text">No agents yet. Create tasks and spawn agents to start autonomous development.</p>
+                {:else}
+                  <table class="ws-entity-table">
+                    <thead>
+                      <tr>
+                        <th>Agent</th>
+                        <th>Status</th>
+                        <th>Task</th>
+                        <th>Spec</th>
+                        <th>Repo</th>
+                        <th>Last Active</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each wsAgents.sort((a, b) => {
+                        const order = { active: 0, spawning: 1, idle: 2, completed: 3, failed: 4, dead: 5 };
+                        return (order[a.status] ?? 3) - (order[b.status] ?? 3);
+                      }) as agent}
+                        {@const agStatus = agent.status ?? 'idle'}
+                        <tr class="ws-entity-row" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
+                          <td class="entity-name-cell">
+                            <Icon name="agent" size={12} />
+                            <span class="entity-primary-name">{agent.name ?? shortId(agent.id)}</span>
+                          </td>
+                          <td>
+                            <span class="status-pill status-pill-{agStatus}" title={agentStatusTooltip(agStatus)}>
+                              {#if agStatus === 'active'}<span class="status-pulse"></span>{/if}
+                              {agStatus}
+                            </span>
+                          </td>
+                          <td>
+                            {#if agent.task_id ?? agent.current_task_id}
+                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('task', agent.task_id ?? agent.current_task_id, { repo_id: agent.repo_id }); }}>
+                                {entityName('task', agent.task_id ?? agent.current_task_id)}
+                              </button>
+                            {/if}
+                          </td>
+                          <td>
+                            {#if agent.spec_path}
+                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', agent.spec_path, { path: agent.spec_path, repo_id: agent.repo_id }); }}>
+                                {agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                              </button>
+                            {/if}
+                          </td>
+                          <td>
+                            {#if agent.repo_id && repoMap[agent.repo_id]}
+                              <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id]); }}>
+                                {repoMap[agent.repo_id].name}
+                              </button>
+                            {/if}
+                          </td>
+                          <td class="entity-time">{relTime(agent.last_heartbeat ?? agent.completed_at ?? agent.spawned_at ?? agent.created_at)}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                {/if}
+              </div>
+            {/if}
           </section>
         </div><!-- .dashboard-main -->
 
@@ -1661,9 +1936,296 @@
   }
 
   .feed-body {
-    max-height: 400px;
+    max-height: 500px;
     overflow-y: auto;
   }
+
+  /* ── Workspace tab bar ────────────────────────────────────────────── */
+  .ws-tab-bar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+    overflow-x: auto;
+  }
+
+  .ws-tab {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .ws-tab:hover {
+    color: var(--color-text);
+    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
+  }
+
+  .ws-tab-active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+    font-weight: 600;
+  }
+
+  .ws-tab-badge {
+    font-size: 10px;
+    font-weight: 700;
+    background: var(--color-primary);
+    color: var(--color-text-inverse);
+    border-radius: 8px;
+    padding: 0 5px;
+    min-width: 14px;
+    text-align: center;
+    line-height: 16px;
+  }
+
+  .ws-tab-badge-warn { background: var(--color-warning); }
+  .ws-tab-badge-danger { background: var(--color-danger); }
+  .ws-tab-badge-success { background: var(--color-success); }
+
+  .ws-tab-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: var(--space-1) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  /* ── Entity tables ─────────────────────────────────────────────────── */
+  .ws-entity-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-xs);
+  }
+
+  .ws-entity-table th {
+    text-align: left;
+    padding: var(--space-2) var(--space-3);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 10px;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+    white-space: nowrap;
+  }
+
+  .ws-entity-table .th-actions { width: 120px; }
+
+  .ws-entity-row {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .ws-entity-row:hover {
+    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
+  }
+
+  .ws-entity-row td {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    vertical-align: middle;
+  }
+
+  .entity-name-cell {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+
+  .entity-primary-name {
+    font-weight: 500;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .entity-secondary-path {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .entity-branch-tag {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .entity-time {
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    font-size: 10px;
+  }
+
+  .entity-repo-link,
+  .entity-spec-link {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    padding: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+  }
+
+  .entity-repo-link:hover,
+  .entity-spec-link:hover {
+    text-decoration: underline;
+  }
+
+  /* ── Status pills ──────────────────────────────────────────────────── */
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    text-transform: capitalize;
+  }
+
+  .status-pill-approved, .status-pill-merged, .status-pill-done, .status-pill-completed, .status-pill-idle {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  }
+
+  .status-pill-pending, .status-pill-in_progress, .status-pill-spawning, .status-pill-open, .status-pill-queued {
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  }
+
+  .status-pill-rejected, .status-pill-failed, .status-pill-dead, .status-pill-closed, .status-pill-blocked, .status-pill-cancelled {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  }
+
+  .status-pill-active {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  }
+
+  .status-pill-backlog, .status-pill-draft, .status-pill-deprecated, .status-pill-review {
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+  }
+
+  .status-pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  /* ── Priority pills ────────────────────────────────────────────────── */
+  .priority-pill {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    text-transform: capitalize;
+  }
+
+  .priority-critical { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
+  .priority-high { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
+  .priority-medium { color: var(--color-text-secondary); background: var(--color-surface-elevated); }
+  .priority-low { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+
+  /* ── Gates mini display ────────────────────────────────────────────── */
+  .gates-mini {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+
+  .gate-fail-count { color: var(--color-danger); }
+  .gate-pass-count { color: var(--color-success); }
+  .gate-total-count { color: var(--color-text-muted); }
+
+  /* ── Diff stats mini ───────────────────────────────────────────────── */
+  .diff-stats-mini {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: 10px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+  }
+
+  .diff-ins-mini { color: var(--color-success); }
+  .diff-del-mini { color: var(--color-danger); }
+
+  .text-muted { color: var(--color-text-muted); font-size: 10px; }
+
+  /* ── Inline action buttons ─────────────────────────────────────────── */
+  .td-actions {
+    white-space: nowrap;
+  }
+
+  .inline-action-btn {
+    font-family: var(--font-body);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    border: none;
+    transition: background var(--transition-fast);
+  }
+
+  .inline-action-approve {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  }
+  .inline-action-approve:hover { background: color-mix(in srgb, var(--color-success) 20%, transparent); }
+
+  .inline-action-reject {
+    color: var(--color-text-muted);
+    background: transparent;
+  }
+  .inline-action-reject:hover { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
+
+  .inline-action-done {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-success);
+  }
+
+  .inline-action-rejected { color: var(--color-text-muted); }
+
+  .inline-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* Sidebar styles removed — entity summaries moved to PipelineOverview expansion */
 
