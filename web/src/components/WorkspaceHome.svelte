@@ -1315,49 +1315,11 @@
 
       </div>
 
-      <!-- ── Recent activity (always visible, last 5 events) ─────────── -->
-      {#if !activityLoading && activityEvents.length > 0}
-        <section class="ws-inline-activity" data-testid="inline-activity">
-          <div class="inline-activity-header">
-            <h3 class="inline-activity-title">Recent activity</h3>
-            <button class="section-btn" onclick={() => { wsTab = 'activity'; userSelectedTab = true; browseExpanded = true; }}>View all</button>
-          </div>
-          <div class="inline-activity-list">
-            {#each activityEvents.slice(0, 5) as event}
-              {@const variant = activityVariant(event)}
-              {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-              {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-              <button
-                class="inline-activity-item"
-                onclick={() => {
-                  if (primaryType && primaryId) {
-                    const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                    nav(primaryType, primaryId, data);
-                  }
-                }}
-              >
-                <span class="inline-activity-dot inline-activity-dot-{variant}"></span>
-                <span class="inline-activity-label">{activityLabel(event)}</span>
-                {#if event.entity_name ?? event.title}
-                  <span class="inline-activity-detail">{event.entity_name ?? event.title}</span>
-                {/if}
-                {#if event.repo_id && repoMap[event.repo_id]}
-                  <span class="inline-activity-repo">{repoMap[event.repo_id].name}</span>
-                {/if}
-                {#if event.timestamp ?? event.created_at}
-                  <span class="inline-activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                {/if}
-              </button>
-            {/each}
-          </div>
-        </section>
-      {/if}
-
       <!-- ── Cross-repo entity browse (collapsible — opens on pipeline click) ── -->
       <div class="dashboard-flow" class:dashboard-flow-collapsed={!browseExpanded} data-testid="browse-panel">
         <button class="browse-section-toggle" onclick={() => { browseExpanded = !browseExpanded; }} aria-expanded={browseExpanded} title="Browse all specs, tasks, MRs, and agents across repos">
           <span class="browse-toggle-chevron" class:browse-toggle-open={browseExpanded}>&#9656;</span>
-          <span class="browse-toggle-label">All entities</span>
+          <span class="browse-toggle-label">Browse workspace</span>
           {#if !browseExpanded}
             {@const hints = []}
             {@const _ = (() => {
@@ -2026,9 +1988,9 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-6);
-    max-width: 1200px;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    max-width: 1100px;
     margin: 0 auto;
     width: 100%;
   }
@@ -2274,99 +2236,6 @@
 
   .pipeline-budget-label.budget-warn { color: var(--color-warning); }
   .pipeline-budget-label.budget-danger { color: var(--color-danger); }
-
-  /* ── Recent Completions ────────────────────────────────────────── */
-  /* ── Inline activity feed ───────────────────────────────────────── */
-  .ws-inline-activity {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    background: var(--color-surface);
-    padding: var(--space-2) var(--space-3);
-  }
-
-  .inline-activity-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: var(--space-1);
-  }
-
-  .inline-activity-title {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin: 0;
-  }
-
-  .inline-activity-list {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-
-  .inline-activity-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: 3px var(--space-1);
-    background: transparent;
-    border: none;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    color: var(--color-text);
-    text-align: left;
-    width: 100%;
-    transition: background var(--transition-fast);
-  }
-
-  .inline-activity-item:hover {
-    background: var(--color-surface-elevated);
-  }
-
-  .inline-activity-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .inline-activity-dot-success { background: var(--color-success); }
-  .inline-activity-dot-danger { background: var(--color-danger); }
-  .inline-activity-dot-warning { background: var(--color-warning); }
-  .inline-activity-dot-info { background: var(--color-info, #1e90ff); }
-
-  .inline-activity-label {
-    font-weight: 500;
-    white-space: nowrap;
-  }
-
-  .inline-activity-detail {
-    color: var(--color-text-secondary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .inline-activity-repo {
-    color: var(--color-text-muted);
-    font-family: var(--font-mono);
-    font-size: 10px;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  .inline-activity-time {
-    color: var(--color-text-muted);
-    white-space: nowrap;
-    flex-shrink: 0;
-    margin-left: auto;
-  }
 
   /* ── Workspace briefing (inline) ─────────────────────────────────── */
   .ws-briefing-section {
