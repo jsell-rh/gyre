@@ -12,8 +12,23 @@
     lens = 'structural',
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
     onNodeDetail = () => {},
+    onInteractiveQuery = () => {},
     ghostOverlays = [],
   } = $props();
+
+  // ── Interactive $clicked mode ──────────────────────────────────────────
+  // When a view query uses "$clicked" as scope.node, we store the template
+  // and re-evaluate on each subsequent click, substituting the clicked node.
+  let interactiveQueryTemplate = $state(null);
+
+  $effect(() => {
+    if (activeQuery?.scope?.node === '$clicked') {
+      // Store template (use JSON round-trip to avoid Svelte 5 $state proxy issues)
+      interactiveQueryTemplate = JSON.parse(JSON.stringify(activeQuery));
+    } else if (!activeQuery) {
+      interactiveQueryTemplate = null;
+    }
+  });
 
   // ── Color palette (depth-based HSL for tree groups) ──────────────────
   const TREE_HUES = [210, 260, 160, 30, 340, 50, 190, 300];
@@ -2278,6 +2293,19 @@
         breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })),
       };
       onNodeDetail(hit.node);
+
+      // Interactive $clicked mode: re-evaluate query template with the clicked node
+      if (interactiveQueryTemplate) {
+        const q = JSON.parse(JSON.stringify(interactiveQueryTemplate));
+        q.scope.node = hit.node.qualified_name || hit.node.name || hit.node.id;
+        if (q.annotation?.title) {
+          q.annotation.title = q.annotation.title.replace(/\$name/g, hit.node.name ?? '');
+        }
+        if (q.annotation?.description) {
+          q.annotation.description = q.annotation.description.replace(/\$name/g, hit.node.name ?? '');
+        }
+        onInteractiveQuery(q);
+      }
     } else {
       selectedNodeId = null;
       canvasState = { ...canvasState, selectedNode: null };
@@ -2658,7 +2686,10 @@
           <span class="annotation-desc">{activeQuery.annotation.description.replace('{{count}}', queryMatchedIds?.size ?? '?')}</span>
         {/if}
       </div>
-      <button class="annotation-clear" onclick={() => { activeQuery = null; }} title="Clear" type="button" aria-label="Clear view query">
+      {#if interactiveQueryTemplate}
+        <span class="annotation-interactive-badge">click mode</span>
+      {/if}
+      <button class="annotation-clear" onclick={() => { activeQuery = null; interactiveQueryTemplate = null; }} title="Clear" type="button" aria-label="Clear view query">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
@@ -3101,6 +3132,19 @@
     border-radius: 4px; color: #94a3b8; cursor: pointer;
   }
   .annotation-clear:hover { background: #1e293b; color: #e2e8f0; }
+
+  .annotation-interactive-badge {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(59, 130, 246, 0.2);
+    color: #60a5fa;
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    flex-shrink: 0;
+  }
 
   /* Context menu */
   .ctx-menu-backdrop {

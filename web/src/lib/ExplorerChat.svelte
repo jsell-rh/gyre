@@ -211,7 +211,12 @@
       e.preventDefault();
       sendMessage();
     } else if (e.key === 'Escape') {
-      inputText = '';
+      if (inputText) {
+        inputText = '';
+      } else {
+        // Blur so the global Escape handler can cascade
+        inputEl?.blur();
+      }
     }
   }
 

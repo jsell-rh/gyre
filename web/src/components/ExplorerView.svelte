@@ -332,9 +332,25 @@
   let searchInputEl = $state(null);
 
   function onWindowKeydown(e) {
-    if (e.key === '/' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'SELECT' && !e.target.isContentEditable) {
+    const isTyping = e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT' || e.target.isContentEditable;
+
+    if (e.key === 'Escape' && !isTyping) {
+      // Escape cascade: close the most recent overlay first
+      if (specEditorOpen) { closeSpecEditor(); return; }
+      if (detailNode) { detailNode = null; return; }
+      if (activeViewQuery) { activeViewQuery = null; return; }
+      return;
+    }
+
+    if (e.key === '/' && !isTyping && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
-      searchInputEl?.focus();
+      // Focus the chat input if graph is showing, otherwise the concept search input
+      const chatInput = document.querySelector('.chat-input');
+      if (chatInput) {
+        chatInput.focus();
+      } else {
+        searchInputEl?.focus();
+      }
     }
   }
 
@@ -703,6 +719,7 @@
                 lens={explorerLens}
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => { detailNode = n; }}
+                onInteractiveQuery={(q) => { activeViewQuery = q; }}
                 {ghostOverlays}
               />
             </div>
