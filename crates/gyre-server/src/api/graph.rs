@@ -63,6 +63,14 @@ pub struct GraphNodeResponse {
     pub complexity: Option<u32>,
     pub churn_count_30d: u32,
     pub test_coverage: Option<f64>,
+    /// Unix timestamp when this node first appeared in any extraction.
+    pub first_seen_at: u64,
+    /// Unix timestamp of the most recent extraction that included this node.
+    pub last_seen_at: u64,
+    /// Set when a node is no longer present in extraction (soft-delete). `None` = active.
+    pub deleted_at: Option<u64>,
+    /// Whether this node is a test function/class (for structural test coverage analysis).
+    pub test_node: bool,
 }
 
 impl From<GraphNode> for GraphNodeResponse {
@@ -88,6 +96,10 @@ impl From<GraphNode> for GraphNodeResponse {
             complexity: n.complexity,
             churn_count_30d: n.churn_count_30d,
             test_coverage: n.test_coverage,
+            first_seen_at: n.first_seen_at,
+            last_seen_at: n.last_seen_at,
+            deleted_at: n.deleted_at,
+            test_node: n.test_node,
         }
     }
 }
@@ -100,6 +112,12 @@ pub struct GraphEdgeResponse {
     pub target_id: String,
     pub edge_type: EdgeType,
     pub metadata: Option<String>,
+    /// Unix timestamp when this edge first appeared in any extraction.
+    pub first_seen_at: u64,
+    /// Unix timestamp of the most recent extraction that included this edge.
+    pub last_seen_at: u64,
+    /// Set when an edge is no longer present in extraction (soft-delete). `None` = active.
+    pub deleted_at: Option<u64>,
 }
 
 impl From<GraphEdge> for GraphEdgeResponse {
@@ -111,6 +129,9 @@ impl From<GraphEdge> for GraphEdgeResponse {
             target_id: e.target_id.to_string(),
             edge_type: e.edge_type,
             metadata: e.metadata,
+            first_seen_at: e.first_seen_at,
+            last_seen_at: e.last_seen_at,
+            deleted_at: e.deleted_at,
         }
     }
 }
