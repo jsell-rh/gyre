@@ -124,8 +124,17 @@
         {/if}
         {#if latestMr._gates}
           <span class="latest-gates-summary" onclick={(e) => { e.stopPropagation(); if (goToEntityDetail) goToEntityDetail('mr', latestMr.id, { ...latestMr, _openTab: 'gates' }); }}>
-            {#if latestMr._gates.failed > 0}<span class="gate-fail-count">&#10007;{latestMr._gates.failed}</span>{/if}
-            {#if latestMr._gates.passed > 0}<span class="gate-pass-count">&#10003;{latestMr._gates.passed}</span>{/if}
+            {#if latestMr._gates.details?.length > 0}
+              {#each latestMr._gates.details.slice(0, 2) as g}
+                <span class="gate-chip-mini gate-chip-mini-{g.status}" title="{g.name}: {g.status}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}</span>
+              {/each}
+              {#if latestMr._gates.details.length > 2}
+                <span class="gate-chip-mini-more">+{latestMr._gates.details.length - 2}</span>
+              {/if}
+            {:else}
+              {#if latestMr._gates.failed > 0}<span class="gate-fail-count">&#10007;{latestMr._gates.failed}</span>{/if}
+              {#if latestMr._gates.passed > 0}<span class="gate-pass-count">&#10003;{latestMr._gates.passed}</span>{/if}
+            {/if}
           </span>
         {:else if latestMr.gate_status}
           <span class="latest-gate latest-gate-{latestMr.gate_status}">{latestMr.gate_status}</span>
@@ -391,4 +400,17 @@
   .gate-fail-count {
     color: var(--color-danger);
   }
+
+  .gate-chip-mini {
+    font-size: 9px;
+    font-weight: 500;
+    padding: 0 3px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .gate-chip-mini-passed { color: var(--color-success); }
+  .gate-chip-mini-failed { color: var(--color-danger); }
+  .gate-chip-mini-pending { color: var(--color-text-muted); }
+  .gate-chip-mini-more { font-size: 9px; color: var(--color-text-muted); }
 </style>
