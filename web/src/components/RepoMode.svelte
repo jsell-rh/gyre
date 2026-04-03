@@ -588,6 +588,8 @@
                     <Badge value={task.status ?? 'backlog'} variant={taskStatusVariant(task.status)} />
                     {#if task.status === 'in_progress' && task.assigned_to}
                       <span class="status-why">{entityName('agent', task.assigned_to)}</span>
+                    {:else if task.status === 'review'}
+                      <span class="status-why">awaiting review</span>
                     {:else if task.status === 'blocked'}
                       <span class="status-why status-why-danger">blocked</span>
                     {:else if task.status === 'done'}
