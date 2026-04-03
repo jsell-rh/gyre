@@ -2007,7 +2007,7 @@
                         {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
                         <button class="gate-detail-item" class:gate-pass={passed} class:gate-fail={failed} onclick={() => { activeTab = 'gates'; }} title="View gate details">
                           <span class="gate-check">{passed ? '✓' : failed ? '✗' : '○'}</span>
-                          <span class="gate-detail-name">{gate.gate_name ?? gate.name ?? ((gate.gate_type ?? '').replace(/_/g, ' ') || 'Quality gate')}</span>
+                          <span class="gate-detail-name">{gate.gate_name ?? gate.name ?? (gate.gate_type ? gate.gate_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : (gate.command ? gate.command.split(' ')[0].split('/').pop() : 'Quality Gate'))}</span>
                           {#if gate.gate_type}<span class="gate-type-tag">{gate.gate_type.replace(/_/g, ' ')}</span>{/if}
                           {#if gate.required === false}<span class="gate-advisory-tag">advisory</span>{/if}
                           {#if duration}<span class="gate-duration-tag">{duration < 1000 ? duration + 'ms' : (duration / 1000).toFixed(1) + 's'}</span>{/if}
@@ -3728,7 +3728,8 @@
             <ul class="gates-list">
               {#each mrGates as gate}
                 {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
-                {@const gateName = gate.gate_name ?? gate.name ?? ((gate.gate_type ? gate.gate_type.replace(/_/g, ' ') : '') || 'Quality gate')}
+                {@const gateTypeLabel = gate.gate_type ? gate.gate_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : ''}
+                {@const gateName = gate.gate_name ?? gate.name ?? (gateTypeLabel || (gate.command ? gate.command.split(' ')[0].split('/').pop() : '') || 'Quality Gate')}
                 {@const gateStatus = (gate.status === 'Passed' || gate.status === 'passed') ? 'passed' : (gate.status === 'Failed' || gate.status === 'failed') ? 'failed' : (gate.status === 'Running' || gate.status === 'running') ? 'running' : gate.status ?? 'pending'}
                 {@const gateDesc = ({
                   test_command: 'Runs the test suite to verify correctness',
@@ -3923,7 +3924,7 @@
                       <li class="gate-item gate-item-{gStatus}">
                         <div class="gate-row">
                           <span class="gate-status-icon">{gStatus === 'passed' ? '✓' : gStatus === 'failed' ? '✗' : '○'}</span>
-                          <span class="gate-name">{gate.gate_name ?? gate.name ?? (gate.gate_type ? gate.gate_type.replace(/_/g, ' ') : 'Quality gate')}</span>
+                          <span class="gate-name">{gate.gate_name ?? gate.name ?? (gate.gate_type ? gate.gate_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : (gate.command ? gate.command.split(' ')[0].split('/').pop() : 'Quality Gate'))}</span>
                           {#if gate.gate_type}
                             <span class="gate-type-badge">{gate.gate_type.replace(/_/g, ' ')}</span>
                           {/if}
