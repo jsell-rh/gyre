@@ -3,7 +3,6 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
-  import MoldableView from '../lib/MoldableView.svelte';
   import ExplorerTreemap from '../lib/ExplorerTreemap.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
