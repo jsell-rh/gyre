@@ -79,6 +79,29 @@
     return color;
   }
 
+  /**
+   * Group consecutive blame lines by same agent+sha into visual blocks (GitHub blame style).
+   * Returns array of { agentId, sha, specRef, startIdx, lines[] }.
+   */
+  function computeBlameGroups(lines) {
+    const groups = [];
+    let current = null;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const agentId = line.agent_id ?? line.agent ?? null;
+      const sha = line.sha ?? line.commit_sha ?? null;
+      const specRef = line.spec_ref ?? line.spec_path ?? null;
+      const key = `${agentId}:${sha}`;
+      if (current && current._key === key) {
+        current.lines.push(line);
+      } else {
+        current = { agentId, sha, specRef, startIdx: i, lines: [line], _key: key };
+        groups.push(current);
+      }
+    }
+    return groups;
+  }
+
   // Sort state
   let sortField = $state('name');
   let sortDir = $state('asc');
@@ -649,7 +672,8 @@
                   </table>
                 </div>
               {:else}
-                <!-- Blame view with agent attribution -->
+                <!-- Blame view with agent attribution (GitHub-style grouping) -->
+                {@const blameGroups = computeBlameGroups(lines)}
                 <div class="blame-code-viewer">
                   <table class="blame-table">
                     <thead>
@@ -664,62 +688,67 @@
                       </tr>
                     </thead>
                     <tbody>
-                      {#each lines as line, i}
-                        {@const agentId = line.agent_id ?? line.agent}
-                        {@const specRef = line.spec_ref ?? line.spec_path}
-                        {@const lineContent = line.content ?? line.text ?? line.line ?? ''}
-                        <tr class="blame-row" class:blame-agent-row={!!agentId}>
-                          <td class="blame-marker" style="border-left: 3px solid {agentColor(agentId)}" title={agentId ? `Agent: ${resolveEntityName('agent', agentId)}` : ''}></td>
-                          <td class="blame-line-num">{line.line_number ?? (i + 1)}</td>
-                          <td class="blame-agent">
-                            {#if agentId}
-                              <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: agentId }, 'agent'); }} title="View agent: {agentId}">
-                                <span class="agent-icon" aria-hidden="true">&#x2699;</span>
-                                {resolveEntityName('agent', agentId)}
-                              </button>
-                            {:else}
-                              <span class="secondary">{line.author ?? '—'}</span>
-                            {/if}
-                          </td>
-                          <td class="blame-sha mono">
-                            {#if line.sha ?? line.commit_sha}
-                              <button class="entity-link-sm" onclick={() => onRowClick({ sha: line.sha ?? line.commit_sha, id: line.sha ?? line.commit_sha, agent_id: agentId, spec_ref: specRef, conversation_sha: line.conversation_sha }, 'commit')} title="View commit: {(line.sha ?? line.commit_sha).slice(0, 7)}">
-                                {(line.sha ?? line.commit_sha).slice(0, 7)}
-                              </button>
-                            {:else}
-                              —
-                            {/if}
-                          </td>
-                          <td class="blame-spec">
-                            {#if specRef}
-                              {@const specName = specRef.split('@')[0]?.split('/').pop()}
-                              <button class="entity-link-sm" onclick={(e) => { e.stopPropagation(); if (goToEntityDetail) goToEntityDetail('spec', specRef.split('@')[0], { path: specRef.split('@')[0], repo_id: repoId }); else openDetailPanel?.({ type: 'spec', id: specRef.split('@')[0], data: { path: specRef.split('@')[0], repo_id: repoId } }); }} title={specRef}>
-                                {specName}
-                              </button>
-                            {:else}
-                              <span class="secondary">—</span>
-                            {/if}
-                          </td>
-                          <td class="blame-action">
-                            {#if agentId && (line.sha ?? line.commit_sha)}
-                              <button
-                                class="investigate-btn-prominent"
-                                onclick={(e) => { e.stopPropagation(); investigateLine(line); }}
-                                disabled={investigateLoading === (line.sha ?? line.commit_sha)}
-                                title="Spawn an interrogation agent to discuss why this code was written this way"
-                              >
-                                {#if investigateLoading === (line.sha ?? line.commit_sha)}
-                                  <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                                  <span>Spawning...</span>
+                      {#each blameGroups as group}
+                        {#each group.lines as line, lineIdx}
+                          {@const agentId = line.agent_id ?? line.agent}
+                          {@const specRef = line.spec_ref ?? line.spec_path}
+                          {@const lineContent = line.content ?? line.text ?? line.line ?? ''}
+                          {@const isFirst = lineIdx === 0}
+                          <tr class="blame-row" class:blame-agent-row={!!agentId} class:blame-group-first={isFirst} class:blame-group-cont={!isFirst}>
+                            <td class="blame-marker" style="border-left: 3px solid {agentColor(group.agentId)}" title={group.agentId ? `Agent: ${resolveEntityName('agent', group.agentId)}` : ''}></td>
+                            <td class="blame-line-num">{line.line_number ?? (group.startIdx + lineIdx + 1)}</td>
+                            {#if isFirst}
+                              <td class="blame-agent" rowspan={group.lines.length}>
+                                {#if group.agentId}
+                                  <button class="agent-link" onclick={(e) => { e.stopPropagation(); onRowClick({ id: group.agentId }, 'agent'); }} title="View agent: {group.agentId}">
+                                    <span class="agent-icon" aria-hidden="true">&#x2699;</span>
+                                    {resolveEntityName('agent', group.agentId)}
+                                  </button>
                                 {:else}
-                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
-                                  <span>Ask why</span>
+                                  <span class="secondary">{line.author ?? '—'}</span>
                                 {/if}
-                              </button>
+                              </td>
+                              <td class="blame-sha mono" rowspan={group.lines.length}>
+                                {#if group.sha}
+                                  <button class="entity-link-sm" onclick={() => onRowClick({ sha: group.sha, id: group.sha, agent_id: group.agentId, spec_ref: specRef, conversation_sha: line.conversation_sha }, 'commit')} title="View commit: {group.sha.slice(0, 7)}">
+                                    {group.sha.slice(0, 7)}
+                                  </button>
+                                {:else}
+                                  —
+                                {/if}
+                              </td>
+                              <td class="blame-spec" rowspan={group.lines.length}>
+                                {#if group.specRef}
+                                  {@const specName = group.specRef.split('@')[0]?.split('/').pop()}
+                                  <button class="entity-link-sm" onclick={(e) => { e.stopPropagation(); if (goToEntityDetail) goToEntityDetail('spec', group.specRef.split('@')[0], { path: group.specRef.split('@')[0], repo_id: repoId }); else openDetailPanel?.({ type: 'spec', id: group.specRef.split('@')[0], data: { path: group.specRef.split('@')[0], repo_id: repoId } }); }} title={group.specRef}>
+                                    {specName}
+                                  </button>
+                                {:else}
+                                  <span class="secondary">—</span>
+                                {/if}
+                              </td>
+                              <td class="blame-action" rowspan={group.lines.length}>
+                                {#if group.agentId && group.sha}
+                                  <button
+                                    class="investigate-btn-prominent"
+                                    onclick={(e) => { e.stopPropagation(); investigateLine(line); }}
+                                    disabled={investigateLoading === group.sha}
+                                    title="Spawn an interrogation agent to discuss why this code was written this way"
+                                  >
+                                    {#if investigateLoading === group.sha}
+                                      <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                                      <span>Spawning...</span>
+                                    {:else}
+                                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                                      <span>Ask why</span>
+                                    {/if}
+                                  </button>
+                                {/if}
+                              </td>
                             {/if}
-                          </td>
-                          <td class="blame-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang) || '&nbsp;'}</pre></td>
-                        </tr>
+                            <td class="blame-content mono"><pre class="blame-line-pre">{@html highlightLine(lineContent, fileLang) || '&nbsp;'}</pre></td>
+                          </tr>
+                        {/each}
                       {/each}
                     </tbody>
                   </table>
@@ -1640,6 +1669,26 @@
 
   .blame-row.blame-agent-row {
     background: color-mix(in srgb, var(--color-info) 3%, transparent);
+  }
+
+  /* GitHub-style blame grouping: visual separator between groups */
+  .blame-row.blame-group-first td {
+    border-top: 2px solid var(--color-border);
+  }
+
+  .blame-row.blame-group-cont .blame-agent,
+  .blame-row.blame-group-cont .blame-sha,
+  .blame-row.blame-group-cont .blame-spec,
+  .blame-row.blame-group-cont .blame-action {
+    /* rowspan handles hiding; border cleanup */
+  }
+
+  .blame-row.blame-group-first .blame-agent,
+  .blame-row.blame-group-first .blame-sha,
+  .blame-row.blame-group-first .blame-spec,
+  .blame-row.blame-group-first .blame-action {
+    vertical-align: top;
+    padding-top: var(--space-1);
   }
 
   .blame-line-num {
