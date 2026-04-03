@@ -35,6 +35,8 @@
     return entityName(type, id);
   });
 
+  let copyFeedback = $state(false);
+
   function handleClick(e) {
     e.stopPropagation();
     if (onclick) {
@@ -43,18 +45,40 @@
     }
     goToEntityDetail?.(type, id, data ?? {});
   }
+
+  function handleCopy(e) {
+    e.stopPropagation();
+    e.preventDefault();
+    navigator.clipboard.writeText(id);
+    copyFeedback = true;
+    setTimeout(() => { copyFeedback = false; }, 1200);
+  }
 </script>
 
 {#if id}
-  <button
-    class="entity-link"
-    onclick={handleClick}
-    title={id}
-    aria-label="{TYPE_LABELS[type] ?? type}: {displayName}"
-  >
-    {#if showType}<span class="entity-link-type">{TYPE_LABELS[type] ?? type}</span>{/if}
-    <span class="entity-link-name">{displayName}</span>
-  </button>
+  <span class="entity-link-wrapper">
+    <button
+      class="entity-link"
+      onclick={handleClick}
+      title={id}
+      aria-label="{TYPE_LABELS[type] ?? type}: {displayName}"
+    >
+      {#if showType}<span class="entity-link-type">{TYPE_LABELS[type] ?? type}</span>{/if}
+      <span class="entity-link-name">{displayName}</span>
+    </button>
+    <button
+      class="entity-copy-btn"
+      onclick={handleCopy}
+      title="Copy ID to clipboard"
+      aria-label="Copy {TYPE_LABELS[type] ?? type} ID"
+    >
+      {#if copyFeedback}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><polyline points="20 6 9 17 4 12"/></svg>
+      {:else}
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+      {/if}
+    </button>
+  </span>
 {/if}
 
 <style>
@@ -99,5 +123,36 @@
   .entity-link-name {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .entity-link-wrapper {
+    display: inline-flex;
+    align-items: center;
+    gap: 0;
+    max-width: 180px;
+    vertical-align: middle;
+  }
+
+  .entity-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    padding: 1px 2px;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .entity-link-wrapper:hover .entity-copy-btn {
+    opacity: 0.7;
+  }
+
+  .entity-copy-btn:hover {
+    opacity: 1 !important;
+    color: var(--color-primary);
   }
 </style>
