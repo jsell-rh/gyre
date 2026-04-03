@@ -1063,6 +1063,15 @@
     return statusItems.map(i => i.text).join('. ') + '.';
   });
 
+  // ── Budget percentage ──────────────────────────────────────────────────
+  let budgetPct = $derived.by(() => {
+    if (!budgetData) return null;
+    const maxTokens = budgetData.max_tokens_per_day ?? 0;
+    if (!maxTokens) return null;
+    const used = budgetData.tokens_used_today ?? 0;
+    return Math.min(100, Math.round((used / maxTokens) * 100));
+  });
+
   // ── Load all data when workspace changes ───────────────────────────────
   $effect(() => {
     void workspace?.id;
@@ -1108,6 +1117,12 @@
           <div class="ws-header-top-row">
             <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
             <div class="ws-header-actions">
+              {#if budgetPct !== null}
+                <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
+                  <span class="ws-budget-bar"><span class="ws-budget-fill" style="width: {budgetPct}%"></span></span>
+                  <span class="ws-budget-label">{budgetPct}%</span>
+                </span>
+              {/if}
               <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings (g s)">
                 <Icon name="settings" size={14} />
                 Settings
@@ -2074,6 +2089,42 @@
     border-color: var(--color-primary);
     background: color-mix(in srgb, var(--color-primary) 4%, transparent);
   }
+
+  /* ── Budget indicator ─────────────────────────────────────────────── */
+  .ws-budget-indicator {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .ws-budget-bar {
+    width: 40px;
+    height: 4px;
+    background: var(--color-border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .ws-budget-fill {
+    height: 100%;
+    background: var(--color-success);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .ws-budget-warn .ws-budget-fill { background: var(--color-warning); }
+  .ws-budget-danger .ws-budget-fill { background: var(--color-danger); }
+
+  .ws-budget-label {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+
+  .ws-budget-warn .ws-budget-label { color: var(--color-warning); }
+  .ws-budget-danger .ws-budget-label { color: var(--color-danger); }
 
   /* ── Status hero — prominent workspace summary ──────────────────── */
   .ws-status-hero {
