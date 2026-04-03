@@ -1110,14 +1110,26 @@ pub async fn get_workspace_graph_concept(
     }))
 }
 
+/// Request body for structural prediction.
+#[derive(Deserialize, Default)]
+pub struct PredictRequest {
+    /// Spec file path for contextual prediction.
+    pub spec_path: Option<String>,
+    /// Draft spec content to predict impact of.
+    pub draft_content: Option<String>,
+}
+
 /// GET /api/v1/repos/{id}/graph/predict (legacy compat)
 /// POST /api/v1/repos/{id}/graph/predict
-/// Structural prediction via LLM — analyzes graph nodes and returns structured predictions.
-/// Request body (POST): `{spec_path, draft_content}` — reserved for future implementation.
+/// Structural prediction via LLM — analyzes the spec diff against the current
+/// knowledge graph and predicts new types/traits, modifications, and dependency changes.
 pub async fn predict_graph(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    body: Option<Json<PredictRequest>>,
 ) -> Result<Json<PredictResponse>, ApiError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+
     // Load repo to get workspace_id.
     let repo = state
         .repos
@@ -1140,28 +1152,69 @@ pub async fn predict_graph(
         .map(|t| t.content)
         .unwrap_or_else(|| crate::llm_defaults::PROMPT_GRAPH_PREDICT.to_string());
 
-    // Load graph nodes for context.
+    // Load graph nodes and edges for context.
     let repo_id = Id::new(&id);
     let nodes = state
         .graph_store
         .list_nodes(&repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
+    let edges = state
+        .graph_store
+        .list_edges(&repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
 
+    // Build rich context including edges and spec linkage
     let nodes_summary: Vec<serde_json::Value> = nodes
         .iter()
+        .filter(|n| n.deleted_at.is_none())
         .map(|n| {
             serde_json::json!({
                 "name": n.name,
                 "qualified_name": n.qualified_name,
                 "type": format!("{:?}", n.node_type),
+                "spec_path": n.spec_path,
+                "visibility": format!("{:?}", n.visibility),
             })
         })
         .collect();
-    let nodes_json = serde_json::to_string(&nodes_summary).unwrap_or_else(|_| "[]".to_string());
 
-    let system_prompt = template_content.replace("{{nodes}}", &nodes_json);
-    let user_prompt = format!("Predict structural improvements for repo {id}.");
+    // Include edge summary for structural context
+    let mut edge_summary: Vec<serde_json::Value> = Vec::new();
+    let node_names: std::collections::HashMap<String, &str> = nodes
+        .iter()
+        .map(|n| (n.id.to_string(), n.name.as_str()))
+        .collect();
+    for e in edges.iter().filter(|e| e.deleted_at.is_none()).take(200) {
+        let src = node_names.get(&e.source_id.to_string()).unwrap_or(&"?");
+        let tgt = node_names.get(&e.target_id.to_string()).unwrap_or(&"?");
+        edge_summary.push(serde_json::json!({
+            "source": src, "target": tgt,
+            "type": format!("{:?}", e.edge_type).to_lowercase(),
+        }));
+    }
+
+    let nodes_json = serde_json::to_string(&nodes_summary).unwrap_or_else(|_| "[]".to_string());
+    let edges_json = serde_json::to_string(&edge_summary).unwrap_or_else(|_| "[]".to_string());
+
+    let mut system_prompt = template_content
+        .replace("{{nodes}}", &nodes_json)
+        .replace("{{edges}}", &edges_json);
+
+    // Build user prompt based on whether spec context is provided
+    let user_prompt = if let (Some(spec_path), Some(draft)) =
+        (&req.spec_path, &req.draft_content)
+    {
+        system_prompt.push_str("\n\nThe user is editing a spec and wants to understand the structural impact.");
+        format!(
+            "Predict what would change in the codebase if this spec is implemented:\n\nSpec: {spec_path}\n\nContent:\n{draft}"
+        )
+    } else if let Some(spec_path) = &req.spec_path {
+        format!("Predict structural improvements related to spec: {spec_path}")
+    } else {
+        format!("Predict structural improvements for repo {id}.")
+    };
 
     // Resolve model and call LLM for structured JSON output.
     let (model, _) =
