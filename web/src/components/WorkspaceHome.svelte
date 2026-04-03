@@ -1225,8 +1225,9 @@
               {@const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type}
               {@const body = getBody(n)}
               {@const aState = actionStates[n.id]}
-              <div class="decision-item" class:decision-resolved={aState?.success}>
-                <div class="decision-icon decision-icon-{nt === 'gate_failure' || nt === 'agent_failed' ? 'danger' : nt === 'spec_approval' || nt === 'mr_needs_review' ? 'action' : 'warn'}">
+              {@const severity = nt === 'gate_failure' || nt === 'agent_failed' ? 'danger' : nt === 'spec_approval' || nt === 'mr_needs_review' ? 'action' : 'warn'}
+              <div class="decision-item decision-severity-{severity}" class:decision-resolved={aState?.success}>
+                <div class="decision-icon decision-icon-{severity}">
                   {TYPE_ICONS[nt] ?? '?'}
                 </div>
                 <button class="decision-body" onclick={() => {
@@ -1360,7 +1361,7 @@
                     <button class="section-btn section-btn-compact" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">+ New</button>
                     <button class="section-btn section-btn-compact" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">Import</button>
                   </div>
-                  <div class="repo-cards-grid">
+                  <div class="repo-cards-grid" class:repo-cards-few={repos.length <= 2}>
                     {#each repos.slice().sort((a, b) => {
                       const aStats = repoStats(a);
                       const bStats = repoStats(b);
@@ -1476,20 +1477,24 @@
                                   {doneTasks}/{totalTasks}
                                 </span>
                               {/if}
-                              {#if activeAgent}
-                                <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', activeAgent.id, { repo_id: activeAgent.repo_id, name: activeAgent.name }); }}>
-                                  <span class="status-pulse-tiny"></span> {activeAgent.name ?? formatId('agent', activeAgent.id)}
-                                </button>
-                              {/if}
-                              {#if latestMr}
-                                <button class="entity-list-chip entity-list-chip-{latestMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', latestMr.id, { repo_id: latestMr.repository_id ?? latestMr.repo_id, title: latestMr.title }); }}>
-                                  <Icon name="git-merge" size={10} /> {latestMr.status}
-                                </button>
-                              {/if}
                               {#if spec.updated_at ?? spec.created_at}
                                 <span class="entity-list-time" title={absTime(spec.updated_at ?? spec.created_at)}>{relTime(spec.updated_at ?? spec.created_at)}</span>
                               {/if}
                             </div>
+                            {#if activeAgent || latestMr}
+                              <div class="entity-list-meta entity-list-meta-secondary">
+                                {#if activeAgent}
+                                  <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', activeAgent.id, { repo_id: activeAgent.repo_id, name: activeAgent.name }); }}>
+                                    <span class="status-pulse-tiny"></span> {activeAgent.name ?? formatId('agent', activeAgent.id)}
+                                  </button>
+                                {/if}
+                                {#if latestMr}
+                                  <button class="entity-list-chip entity-list-chip-{latestMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', latestMr.id, { repo_id: latestMr.repository_id ?? latestMr.repo_id, title: latestMr.title }); }}>
+                                    <Icon name="git-merge" size={10} /> {latestMr.status}
+                                  </button>
+                                {/if}
+                              </div>
+                            {/if}
                           </div>
                         </div>
                         <div class="entity-list-actions">
@@ -2558,6 +2563,11 @@
     padding: var(--space-2) 0;
   }
 
+  .repo-cards-few {
+    grid-template-columns: 1fr;
+    max-width: 500px;
+  }
+
   .repo-header-actions {
     display: flex;
     gap: var(--space-2);
@@ -2937,8 +2947,8 @@
   }
 
   .feed-body {
-    max-height: calc(100vh - 300px);
-    min-height: 200px;
+    max-height: calc(100vh - 250px);
+    min-height: 120px;
     overflow-y: auto;
     padding: var(--space-1) 0;
   }
@@ -2967,12 +2977,14 @@
     font-size: var(--text-sm);
     font-weight: 500;
     color: var(--color-text-muted);
+    opacity: 0.75;
     white-space: nowrap;
-    transition: color var(--transition-fast), border-color var(--transition-fast);
+    transition: color var(--transition-fast), border-color var(--transition-fast), opacity var(--transition-fast), background var(--transition-fast);
   }
 
   .ws-tab:hover {
     color: var(--color-text);
+    opacity: 1;
     background: color-mix(in srgb, var(--color-primary) 4%, transparent);
   }
 
@@ -2980,6 +2992,8 @@
     color: var(--color-primary);
     border-bottom-color: var(--color-primary);
     font-weight: 600;
+    opacity: 1;
+    background: color-mix(in srgb, var(--color-primary) 6%, transparent);
   }
 
   .ws-tab-count {
@@ -3065,7 +3079,7 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: var(--space-2);
-    padding: var(--space-3) var(--space-3);
+    padding: var(--space-2) var(--space-3);
     background: transparent;
     border: none;
     border-bottom: 1px solid var(--color-border);
@@ -3134,6 +3148,11 @@
     align-items: center;
     gap: var(--space-2);
     flex-wrap: wrap;
+    font-size: var(--text-xs);
+  }
+
+  .entity-list-meta-secondary {
+    margin-top: 2px;
     font-size: var(--text-xs);
   }
 
@@ -4030,6 +4049,10 @@
   .decision-item:last-child { border-bottom: none; }
   .decision-item:hover { background: color-mix(in srgb, var(--color-warning) 4%, transparent); }
   .decision-resolved { opacity: 0.5; }
+
+  .decision-severity-danger { border-left: 3px solid var(--color-danger); }
+  .decision-severity-action { border-left: 3px solid var(--color-warning); }
+  .decision-severity-warn { border-left: 3px solid var(--color-primary); }
 
   .decision-icon {
     display: flex;
