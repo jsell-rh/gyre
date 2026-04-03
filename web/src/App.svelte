@@ -378,6 +378,8 @@
       repoTab: parentTab,
       entityType,
       entityId,
+      entityTitle: name ?? null,
+      previousMode: mode === 'workspace_home' ? 'workspace_home' : null,
     };
     window.history.pushState(stateObj, '', urlFor(parsed));
   }
@@ -908,13 +910,16 @@
         return;
       }
       if (e.state?.mode) {
-        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid } = e.state;
+        const { mode: m, wsId, repoName, repoTab: rt, crossWorkspaceTab: cwt, entityType: et, entityId: eid, entityTitle: eTitle } = e.state;
         mode = (m === 'workspace_settings' || m === 'workspace_home' || m === 'repo' || m === 'profile' || m === 'cross_workspace' || m === 'agent_rules')
           ? m : 'workspace_home';
         repoTab = rt ?? 'specs';
         crossWorkspaceTab = m === 'cross_workspace' ? (cwt ?? null) : null;
-        // Restore entity detail state from history
+        // Restore entity detail state from history, including cached title for breadcrumbs
         entityDetail = (et && eid) ? { type: et, id: eid, data: {} } : null;
+        if (et && eid && eTitle) {
+          breadcrumbNameCache = { ...breadcrumbNameCache, [`${et}:${eid}`]: eTitle };
+        }
         if (wsId) {
           currentWorkspace = workspaces.find(w => w.id === wsId) ?? currentWorkspace;
         } else if (m !== 'cross_workspace' && m !== 'profile') {
