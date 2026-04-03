@@ -701,16 +701,6 @@
     };
   }
 
-  function handlePipelineStageClick(stageId) {
-    const tabMap = { specs: 'specs', tasks: 'tasks', mrs: 'mrs', agents: 'agents', merged: 'mrs' };
-    const tab = tabMap[stageId];
-    if (!tab) return;
-    wsTab = tab;
-    // Scroll entity tables into view
-    requestAnimationFrame(() => {
-      document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
-  }
 
   // ── Merge Queue state ───────────────────────────────────────────────────
   let mergeQueueLoading = $state(true);
@@ -975,17 +965,6 @@
     const openMrs = wsMrs.filter(m => m.status === 'open').length;
     const inProgressTasks = wsTasks.filter(t => t.status === 'in_progress').length;
     return { approved, pending, activeAgentCount, mergedMrs, openMrs, inProgressTasks, totalTasks: wsTasks.length };
-  });
-
-  // ── Status sentence: one-line summary of workspace state ───────────────
-  let statusSentence = $derived.by(() => {
-    const parts = [];
-    if (pipelineSpecs.pending > 0) parts.push(`${pipelineSpecs.pending} spec${pipelineSpecs.pending !== 1 ? 's' : ''} awaiting approval`);
-    if (pipelineMrs.failed_gates > 0) parts.push(`${pipelineMrs.failed_gates} MR${pipelineMrs.failed_gates !== 1 ? 's' : ''} with failed gates`);
-    if (pipelineAgents.active > 0) parts.push(`${pipelineAgents.active} agent${pipelineAgents.active !== 1 ? 's' : ''} running`);
-    if (pipelineMrs.open > 0 && pipelineMrs.failed_gates === 0) parts.push(`${pipelineMrs.open} open MR${pipelineMrs.open !== 1 ? 's' : ''}`);
-    if (pipelineTasks.blocked > 0) parts.push(`${pipelineTasks.blocked} blocked task${pipelineTasks.blocked !== 1 ? 's' : ''}`);
-    return parts.join(' · ');
   });
 
   // ── Recent completions: merged MRs with provenance chain ──────────────
@@ -1960,22 +1939,6 @@
   }
 
   /* ── Status sentence ──────────────────────────────────────────── */
-  .ws-status-sentence {
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-    padding: var(--space-1) var(--space-2);
-    line-height: 1.4;
-    border-radius: var(--radius);
-  }
-
-  .ws-status-clear {
-    color: var(--color-success);
-    background: color-mix(in srgb, var(--color-success) 6%, transparent);
-    border: 1px solid color-mix(in srgb, var(--color-success) 20%, transparent);
-    text-align: center;
-    font-size: var(--text-xs);
-  }
-
   /* ── Pipeline progress bar ─────────────────────────────────────── */
   .pipeline-progress {
     display: flex;
@@ -2709,33 +2672,6 @@
     min-height: 0;
   }
 
-  .overview-body {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3);
-  }
-
-  /* ── Two-column overview layout ──────────────────────────────── */
-  .overview-columns {
-    display: grid;
-    grid-template-columns: 1fr 300px;
-    gap: var(--space-3);
-    align-items: start;
-  }
-
-  @media (max-width: 900px) {
-    .overview-columns {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  .overview-sidebar {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
   /* ── Workspace quick links ──────────────────────────────────── */
   .ws-quick-links {
     display: flex;
@@ -2763,38 +2699,6 @@
     border-color: var(--color-primary);
     background: color-mix(in srgb, var(--color-primary) 4%, transparent);
   }
-
-  /* ── Overview inline activity ─────────────────────────────────── */
-  .overview-activity-section {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    background: var(--color-surface);
-    padding: var(--space-2) var(--space-3);
-  }
-
-  .activity-timeline-compact .activity-item {
-    padding: var(--space-1) 0;
-  }
-
-  .activity-timeline-compact .activity-main-row {
-    font-size: 11px;
-  }
-
-  .overview-activity-more {
-    display: block;
-    width: 100%;
-    padding: var(--space-1);
-    background: transparent;
-    border: none;
-    color: var(--color-link);
-    font-size: 10px;
-    cursor: pointer;
-    text-align: center;
-    font-family: var(--font-body);
-    margin-top: var(--space-1);
-  }
-
-  .overview-activity-more:hover { text-decoration: underline; }
 
   /* ── Activity feed (full-width) ──────────────────── */
   .ws-feed-panel {
