@@ -1855,8 +1855,8 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
-    padding: var(--space-3) var(--space-4);
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-5);
     max-width: 1100px;
     margin: 0 auto;
     width: 100%;
@@ -2436,8 +2436,9 @@
   /* ── Repo cards grid (responsive — list layout for fewer repos) ────── */
   .repo-cards-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: var(--space-2);
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
   }
 
   .repo-header-actions {
@@ -2819,9 +2820,10 @@
   }
 
   .feed-body {
-    max-height: calc(100vh - 280px);
+    max-height: calc(100vh - 300px);
     min-height: 200px;
     overflow-y: auto;
+    padding: var(--space-1) 0;
   }
 
   /* ── Workspace tab bar ────────────────────────────────────────────── */
@@ -2839,13 +2841,13 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: 6px var(--space-2);
+    padding: 8px var(--space-3);
     background: transparent;
     border: none;
     border-bottom: 2px solid transparent;
     cursor: pointer;
     font-family: var(--font-body);
-    font-size: var(--text-xs);
+    font-size: var(--text-sm);
     font-weight: 500;
     color: var(--color-text-muted);
     white-space: nowrap;
@@ -2946,7 +2948,7 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-3);
     background: transparent;
     border: none;
     border-bottom: 1px solid var(--color-border);
@@ -2973,7 +2975,7 @@
   .entity-list-info {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
     min-width: 0;
     flex: 1;
   }
@@ -2986,6 +2988,7 @@
   }
 
   .entity-list-name {
+    font-size: var(--text-sm);
     font-weight: 600;
     color: var(--color-text);
     overflow: hidden;
@@ -3012,9 +3015,9 @@
   .entity-list-meta {
     display: flex;
     align-items: center;
-    gap: var(--space-1);
+    gap: var(--space-2);
     flex-wrap: wrap;
-    font-size: 10px;
+    font-size: var(--text-xs);
   }
 
   .entity-list-context {
