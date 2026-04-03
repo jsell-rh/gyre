@@ -1473,13 +1473,17 @@
                                 {mrStatus}
                               </span>
                               {#if mrStatus === 'open' && gates?.failed > 0}
-                                <span class="status-context status-context-danger">{gates.failed} gate{gates.failed !== 1 ? 's' : ''} failed</span>
+                                <span class="status-context status-context-danger">{gates.failed} gate{gates.failed !== 1 ? 's' : ''} failed — merge blocked</span>
                               {:else if mrStatus === 'open' && mr.queue_position != null}
-                                <span class="status-context">Queue #{mr.queue_position + 1}</span>
+                                <span class="status-context">Queue #{mr.queue_position + 1} — waiting for gates</span>
                               {:else if mrStatus === 'merged' && mr.merged_at}
-                                <span class="status-context">{relTime(mr.merged_at)}</span>
+                                <span class="status-context status-context-success">merged {relTime(mr.merged_at)}</span>
                               {:else if mrStatus === 'open' && gates?.passed === gates?.total && gates?.total > 0}
-                                <span class="status-context status-context-success">All gates passed</span>
+                                <span class="status-context status-context-success">All gates passed — ready to enqueue</span>
+                              {:else if mrStatus === 'open' && (!gates || gates.total === 0)}
+                                <span class="status-context">Awaiting enqueue</span>
+                              {:else if mrStatus === 'closed'}
+                                <span class="status-context status-context-danger">Changes not merged</span>
                               {/if}
                             </div>
                           </td>
@@ -1505,9 +1509,9 @@
                                   <span class="gate-chip-more">+{gates.details.length - 3}</span>
                                 {/if}
                                 {#if (gates.details ?? []).length === 0}
-                                  {#if gates.failed > 0}<span class="gate-fail-count">✗{gates.failed}</span>{/if}
-                                  {#if gates.passed > 0}<span class="gate-pass-count">✓{gates.passed}</span>{/if}
-                                  <span class="gate-total-count">/{gates.total}</span>
+                                  {#if gates.failed > 0}<span class="gate-chip gate-chip-failed">✗ {gates.failed} failed</span>{/if}
+                                  {#if gates.passed > 0}<span class="gate-chip gate-chip-passed">✓ {gates.passed} passed</span>{/if}
+                                  {#if gates.total > gates.passed + gates.failed}<span class="gate-chip gate-chip-pending">○ {gates.total - gates.passed - gates.failed} pending</span>{/if}
                                 {/if}
                               </button>
                             {:else}
@@ -1592,9 +1596,15 @@
                                 {agStatus}
                               </span>
                               {#if agStatus === 'active'}
-                                <span class="status-context">implementing code</span>
+                                <span class="status-context status-context-success">implementing code</span>
+                              {:else if agStatus === 'idle' || agStatus === 'completed'}
+                                <span class="status-context">work complete</span>
                               {:else if agStatus === 'failed'}
-                                <span class="status-context status-context-danger">check logs</span>
+                                <span class="status-context status-context-danger">failed — click for logs</span>
+                              {:else if agStatus === 'dead'}
+                                <span class="status-context status-context-danger">process terminated</span>
+                              {:else if agStatus === 'spawning'}
+                                <span class="status-context">starting up</span>
                               {/if}
                             </div>
                           </td>
