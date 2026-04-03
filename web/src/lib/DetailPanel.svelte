@@ -11,6 +11,7 @@
   import { api } from './api.js';
   import { entityName as sharedEntityName, shortId as sharedShortId, formatSha, formatId as sharedFormatId } from './entityNames.svelte.js';
   import { relativeTime, absoluteTime, formatDuration, formatDate } from './timeFormat.js';
+  import { mrStatusJourney } from './statusTooltips.js';
   import { toastSuccess, toastError } from './toast.svelte.js';
   import { detectLang, highlightLine } from './syntaxHighlight.js';
   import { renderMarkdown } from './markdown.js';
@@ -1846,6 +1847,23 @@
               {#if mrAttestation?.attestation?.completion_summary ?? mrAttestation?.completion_summary}
                 <div class="mr-agent-summary">
                   <p class="mr-agent-summary-text">{mrAttestation.attestation?.completion_summary ?? mrAttestation.completion_summary}</p>
+                </div>
+              {/if}
+
+              <!-- Status Journey Stepper -->
+              {@const journey = mrStatusJourney(mr)}
+              {#if journey.length > 1}
+                <div class="status-journey">
+                  {#each journey as step, i}
+                    <div class="journey-step journey-step-{step.status}">
+                      <span class="journey-dot">{step.status === 'done' ? '✓' : step.status === 'failed' ? '✗' : step.status === 'active' ? '●' : '○'}</span>
+                      <span class="journey-label">{step.step}</span>
+                      {#if step.detail}<span class="journey-detail">{step.detail}</span>{/if}
+                    </div>
+                    {#if i < journey.length - 1}
+                      <span class="journey-connector" class:journey-connector-done={step.status === 'done'}></span>
+                    {/if}
+                  {/each}
                 </div>
               {/if}
 
@@ -7914,6 +7932,88 @@
     color: var(--color-text-muted);
     margin-top: 2px;
     font-style: italic;
+  }
+
+  /* Status Journey Stepper */
+  .status-journey {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: var(--space-3) var(--space-2);
+    margin-bottom: var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow-x: auto;
+  }
+
+  .journey-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+    min-width: 60px;
+  }
+
+  .journey-dot {
+    font-size: var(--text-sm);
+    font-weight: 700;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--color-surface-elevated);
+    border: 2px solid var(--color-border);
+  }
+
+  .journey-step-done .journey-dot {
+    background: color-mix(in srgb, var(--color-success) 15%, transparent);
+    border-color: var(--color-success);
+    color: var(--color-success);
+  }
+
+  .journey-step-failed .journey-dot {
+    background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+    border-color: var(--color-danger);
+    color: var(--color-danger);
+  }
+
+  .journey-step-active .journey-dot {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .journey-step-pending .journey-dot {
+    color: var(--color-text-muted);
+  }
+
+  .journey-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .journey-detail {
+    font-size: 9px;
+    color: var(--color-text-muted);
+  }
+
+  .journey-connector {
+    flex: 1;
+    min-width: 20px;
+    height: 2px;
+    background: var(--color-border);
+    margin: 0 2px;
+    align-self: center;
+    margin-bottom: 16px; /* offset for label height */
+  }
+
+  .journey-connector-done {
+    background: var(--color-success);
   }
 
   .exit-code-explain {
