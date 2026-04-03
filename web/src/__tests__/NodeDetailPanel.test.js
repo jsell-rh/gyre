@@ -109,8 +109,8 @@ describe('NodeDetailPanel', () => {
       props: { node: TYPE_NODE, nodes: NODES, edges: EDGES },
     });
     const sectionTitles = Array.from(container.querySelectorAll('.detail-section-title')).map(t => t.textContent);
-    expect(sectionTitles).toContain('Implements');
-    expect(sectionTitles).toContain('Called By (1)');
+    expect(sectionTitles).toContain('Implements (1)');
+    expect(sectionTitles).toContain('Used By (1)');
   });
 
   it('shows spec coverage section for spec-linked nodes', () => {

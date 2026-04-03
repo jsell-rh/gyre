@@ -11,7 +11,7 @@
 
   // Compute relationships for the selected node
   let relationships = $derived.by(() => {
-    if (!node) return { implementedBy: [], implements: [], calledBy: [], calls: [], fields: [], containedIn: null, contains: [], governedBy: null, usedBy: [] };
+    if (!node) return { implementedBy: [], implements: [], calledBy: [], calls: [], fields: [], containedIn: null, contains: [], governedBy: null, usedBy: [], routesTo: [], testedBy: [], methods: [] };
     const nodeId = node.id;
 
     const implementedBy = [];
@@ -21,6 +21,9 @@
     const fields = [];
     const contains = [];
     const usedBy = [];
+    const routesTo = [];
+    const testedBy = [];
+    const methods = [];
     let containedIn = null;
     let governedBy = null;
 
@@ -55,7 +58,11 @@
       }
       if (et === 'contains' && src === nodeId) {
         const tgtNode = nodes.find(n => n.id === tgt);
-        if (tgtNode) contains.push(tgtNode);
+        if (tgtNode) {
+          contains.push(tgtNode);
+          // Methods are functions contained in a trait/interface
+          if (tgtNode.node_type === 'function') methods.push(tgtNode);
+        }
       }
       if (et === 'contains' && tgt === nodeId) {
         const srcNode = nodes.find(n => n.id === src);
@@ -64,9 +71,44 @@
       if (et === 'governed_by' && src === nodeId) {
         governedBy = tgt; // spec path or node id
       }
+      if (et === 'routes_to' && src === nodeId) {
+        const tgtNode = nodes.find(n => n.id === tgt);
+        if (tgtNode) routesTo.push(tgtNode);
+      }
+      if (et === 'tests' && tgt === nodeId) {
+        const srcNode = nodes.find(n => n.id === src);
+        if (srcNode) testedBy.push(srcNode);
+      }
+      if (et === 'tests' && src === nodeId) {
+        const tgtNode = nodes.find(n => n.id === tgt);
+        if (tgtNode) testedBy.push(tgtNode);
+      }
     }
 
-    return { implementedBy, implements: implementsTraits, calledBy, calls: callsOut, fields, containedIn, contains, governedBy, usedBy };
+    // Also find test nodes that call this node (tests often just call the function under test)
+    if (testedBy.length === 0) {
+      for (const caller of calledBy) {
+        if (caller.test_node) testedBy.push(caller);
+      }
+    }
+
+    return { implementedBy, implements: implementsTraits, calledBy, calls: callsOut, fields, containedIn, contains, governedBy, usedBy, routesTo, testedBy, methods };
+  });
+
+  // Compute call-site counts for trait methods (how many call edges target each method)
+  let methodCallCounts = $derived.by(() => {
+    if (!node || (node.node_type !== 'interface' && node.node_type !== 'trait')) return new Map();
+    const counts = new Map();
+    for (const method of relationships.methods) {
+      let count = 0;
+      for (const e of edges) {
+        const tgt = e.target_id ?? e.to_node_id ?? e.to;
+        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+        if (et === 'calls' && tgt === method.id) count++;
+      }
+      counts.set(method.id, count);
+    }
+    return counts;
   });
 
   let nodeTypeLabel = $derived.by(() => {
@@ -169,7 +211,7 @@
     </div>
 
     <div class="detail-body">
-      <!-- Location -->
+      <!-- Location (all node types) -->
       {#if node.file_path}
         <div class="detail-section">
           <h4 class="detail-section-title">Location</h4>
@@ -179,53 +221,7 @@
         </div>
       {/if}
 
-      <!-- Doc comment -->
-      {#if node.doc_comment}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Documentation</h4>
-          <p class="detail-doc">{node.doc_comment}</p>
-        </div>
-      {/if}
-
-      <!-- Spec linkage -->
-      {#if node.spec_path || relationships.governedBy}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Spec</h4>
-          <p class="detail-spec">{node.spec_path ?? relationships.governedBy}</p>
-        </div>
-      {/if}
-
-      <!-- Story (evolution narrative) -->
-      {#if story}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Story</h4>
-          <p class="detail-story">{story}</p>
-        </div>
-      {/if}
-
-      <!-- Endpoint-specific view -->
-      {#if node.node_type === 'endpoint' && endpointMeta}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Endpoint</h4>
-          {#if endpointMeta.method || endpointMeta.path}
-            <p class="detail-endpoint-method"><code>{endpointMeta.method} {endpointMeta.path}</code></p>
-          {/if}
-          {#if endpointMeta.routesTo.length > 0}
-            <p class="detail-endpoint-label">Routes to:</p>
-            <ul class="detail-ref-list">
-              {#each endpointMeta.routesTo as handler}
-                <li>
-                  <button class="detail-ref-link" onclick={() => handleNodeClick(handler)} type="button">
-                    <span class="ref-type">{handler.node_type}</span> {handler.name}
-                  </button>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </div>
-      {/if}
-
-      <!-- Contained in -->
+      <!-- Contained in (all node types) -->
       {#if relationships.containedIn}
         <div class="detail-section">
           <h4 class="detail-section-title">Contained In</h4>
@@ -236,131 +232,357 @@
         </div>
       {/if}
 
-      <!-- Fields (for types) -->
-      {#if relationships.fields.length > 0}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Fields ({relationships.fields.length})</h4>
-          <ul class="detail-ref-list">
-            {#each relationships.fields as f}
-              <li>
-                <button class="detail-ref-link" onclick={() => handleNodeClick(f)} type="button">
-                  <span class="ref-type">{f.node_type}</span> {f.name}
-                </button>
-              </li>
-            {/each}
-          </ul>
-        </div>
-      {/if}
+      <!-- ============================================ -->
+      <!-- TYPE VIEW: fields / implements / used-by / story / risk -->
+      <!-- ============================================ -->
+      {#if node.node_type === 'type' || node.node_type === 'table' || node.node_type === 'component'}
+        <!-- Fields -->
+        {#if relationships.fields.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Fields ({relationships.fields.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.fields as f}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(f)} type="button">
+                    <span class="ref-type">{f.node_type}</span> {f.name}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
 
-      <!-- Contains (children) -->
-      {#if relationships.contains.length > 0}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Contains ({relationships.contains.length})</h4>
-          <ul class="detail-ref-list">
-            {#each relationships.contains.slice(0, 15) as c}
-              <li>
-                <button class="detail-ref-link" onclick={() => handleNodeClick(c)} type="button">
-                  <span class="ref-type">{c.node_type}</span> {c.name}
-                </button>
-              </li>
-            {/each}
-            {#if relationships.contains.length > 15}
-              <li class="detail-more">+{relationships.contains.length - 15} more</li>
+        <!-- Implements (traits this type implements) -->
+        {#if relationships.implements.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Implements ({relationships.implements.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.implements as impl}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(impl)} type="button">
+                    <span class="ref-type">{impl.node_type}</span> {impl.name}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Used By / Dependents -->
+        {#if relationships.calledBy.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Used By ({relationships.calledBy.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.calledBy.slice(0, 15) as caller}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(caller)} type="button">
+                    <span class="ref-type">{caller.node_type}</span> {caller.name}
+                  </button>
+                </li>
+              {/each}
+              {#if relationships.calledBy.length > 15}
+                <li class="detail-more">+{relationships.calledBy.length - 15} more</li>
+              {/if}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Story -->
+        <details class="detail-collapsible" open>
+          <summary class="detail-section-title">Story</summary>
+          {#if node.doc_comment}
+            <p class="detail-doc">{node.doc_comment}</p>
+          {/if}
+          {#if node.spec_path || relationships.governedBy}
+            <p class="detail-spec-link">Spec: <span class="detail-spec">{node.spec_path ?? relationships.governedBy}</span></p>
+          {/if}
+          {#if story}
+            <p class="detail-story">{story}</p>
+          {:else if !node.doc_comment && !node.spec_path && !relationships.governedBy}
+            <p class="detail-story detail-muted">No documentation or history available.</p>
+          {/if}
+        </details>
+
+      <!-- ============================================ -->
+      <!-- TRAIT / INTERFACE VIEW: methods / implementations / dependents -->
+      <!-- ============================================ -->
+      {:else if node.node_type === 'interface' || node.node_type === 'trait'}
+        <!-- Methods (contained functions) -->
+        {#if relationships.methods.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Methods ({relationships.methods.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.methods as method}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(method)} type="button">
+                    <span class="ref-type">fn</span> {method.name}
+                    {#if methodCallCounts.get(method.id)}
+                      <span class="call-count" title="Call sites">{methodCallCounts.get(method.id)} call{methodCallCounts.get(method.id) !== 1 ? 's' : ''}</span>
+                    {/if}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Implementors -->
+        {#if relationships.implementedBy.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Implemented By ({relationships.implementedBy.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.implementedBy as impl}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(impl)} type="button">
+                    <span class="ref-type">{impl.node_type}</span> {impl.name}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Dependents (who calls methods on this trait) -->
+        {#if relationships.calledBy.length > 0}
+          <details class="detail-collapsible">
+            <summary class="detail-section-title">Dependents ({relationships.calledBy.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.calledBy.slice(0, 15) as caller}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(caller)} type="button">
+                    <span class="ref-type">{caller.node_type}</span> {caller.name}
+                  </button>
+                </li>
+              {/each}
+              {#if relationships.calledBy.length > 15}
+                <li class="detail-more">+{relationships.calledBy.length - 15} more</li>
+              {/if}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Doc comment -->
+        {#if node.doc_comment}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Documentation</h4>
+            <p class="detail-doc">{node.doc_comment}</p>
+          </div>
+        {/if}
+
+      <!-- ============================================ -->
+      <!-- ENDPOINT VIEW: route / handler / request-response / tests -->
+      <!-- ============================================ -->
+      {:else if node.node_type === 'endpoint'}
+        <!-- Route info -->
+        {#if endpointMeta}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Route</h4>
+            {#if endpointMeta.method || endpointMeta.path}
+              <p class="detail-endpoint-method"><code>{endpointMeta.method} {endpointMeta.path}</code></p>
             {/if}
-          </ul>
-        </div>
+          </div>
+        {/if}
+
+        <!-- Handler -->
+        {#if relationships.routesTo.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Handler</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.routesTo as handler}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(handler)} type="button">
+                    <span class="ref-type">{handler.node_type}</span> {handler.name}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {:else if endpointMeta && endpointMeta.routesTo.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Handler</summary>
+            <ul class="detail-ref-list">
+              {#each endpointMeta.routesTo as handler}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(handler)} type="button">
+                    <span class="ref-type">{handler.node_type}</span> {handler.name}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Request/Response types (types this endpoint calls or references) -->
+        {#if relationships.calls.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Request/Response Flow ({relationships.calls.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.calls as callee}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(callee)} type="button">
+                    <span class="ref-type">{callee.node_type}</span> {callee.name}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Spec / Gates -->
+        {#if node.spec_path || relationships.governedBy}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Gates / Spec</h4>
+            <p class="detail-spec">{node.spec_path ?? relationships.governedBy}</p>
+          </div>
+        {/if}
+
+        <!-- Connected tests -->
+        {#if relationships.testedBy.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Tests ({relationships.testedBy.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.testedBy as testNode}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(testNode)} type="button">
+                    <span class="ref-type">test</span> {testNode.name}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Doc comment -->
+        {#if node.doc_comment}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Documentation</h4>
+            <p class="detail-doc">{node.doc_comment}</p>
+          </div>
+        {/if}
+
+      <!-- ============================================ -->
+      <!-- GENERIC VIEW: function / module / package / constant / other -->
+      <!-- ============================================ -->
+      {:else}
+        <!-- Doc comment -->
+        {#if node.doc_comment}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Documentation</h4>
+            <p class="detail-doc">{node.doc_comment}</p>
+          </div>
+        {/if}
+
+        <!-- Spec linkage -->
+        {#if node.spec_path || relationships.governedBy}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Spec</h4>
+            <p class="detail-spec">{node.spec_path ?? relationships.governedBy}</p>
+          </div>
+        {/if}
+
+        <!-- Contains (children) -->
+        {#if relationships.contains.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Contains ({relationships.contains.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.contains.slice(0, 15) as c}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(c)} type="button">
+                    <span class="ref-type">{c.node_type}</span> {c.name}
+                  </button>
+                </li>
+              {/each}
+              {#if relationships.contains.length > 15}
+                <li class="detail-more">+{relationships.contains.length - 15} more</li>
+              {/if}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Implements -->
+        {#if relationships.implements.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Implements</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.implements as impl}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(impl)} type="button">
+                    <span class="ref-type">{impl.node_type}</span> {impl.name}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Implemented by -->
+        {#if relationships.implementedBy.length > 0}
+          <details class="detail-collapsible">
+            <summary class="detail-section-title">Implemented By ({relationships.implementedBy.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.implementedBy as impl}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(impl)} type="button">
+                    <span class="ref-type">{impl.node_type}</span> {impl.name}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Called by -->
+        {#if relationships.calledBy.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Called By ({relationships.calledBy.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.calledBy.slice(0, 10) as caller}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(caller)} type="button">
+                    <span class="ref-type">{caller.node_type}</span> {caller.name}
+                  </button>
+                </li>
+              {/each}
+              {#if relationships.calledBy.length > 10}
+                <li class="detail-more">+{relationships.calledBy.length - 10} more</li>
+              {/if}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Calls -->
+        {#if relationships.calls.length > 0}
+          <details class="detail-collapsible">
+            <summary class="detail-section-title">Calls ({relationships.calls.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.calls.slice(0, 10) as callee}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(callee)} type="button">
+                    <span class="ref-type">{callee.node_type}</span> {callee.name}
+                  </button>
+                </li>
+              {/each}
+              {#if relationships.calls.length > 10}
+                <li class="detail-more">+{relationships.calls.length - 10} more</li>
+              {/if}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Story -->
+        {#if story}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Story</h4>
+            <p class="detail-story">{story}</p>
+          </div>
+        {/if}
       {/if}
 
-      <!-- Implements (for types implementing traits) -->
-      {#if relationships.implements.length > 0}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Implements</h4>
-          <ul class="detail-ref-list">
-            {#each relationships.implements as impl}
-              <li>
-                <button class="detail-ref-link" onclick={() => handleNodeClick(impl)} type="button">
-                  <span class="ref-type">{impl.node_type}</span> {impl.name}
-                </button>
-              </li>
-            {/each}
-          </ul>
-        </div>
-      {/if}
+      <!-- ============================================ -->
+      <!-- SHARED SECTIONS (all node types) -->
+      <!-- ============================================ -->
 
-      <!-- Implemented by (for traits) -->
-      {#if relationships.implementedBy.length > 0}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Implemented By ({relationships.implementedBy.length})</h4>
-          <ul class="detail-ref-list">
-            {#each relationships.implementedBy as impl}
-              <li>
-                <button class="detail-ref-link" onclick={() => handleNodeClick(impl)} type="button">
-                  <span class="ref-type">{impl.node_type}</span> {impl.name}
-                </button>
-              </li>
-            {/each}
-          </ul>
-        </div>
-      {/if}
-
-      <!-- Called by -->
-      {#if relationships.calledBy.length > 0}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Called By ({relationships.calledBy.length})</h4>
-          <ul class="detail-ref-list">
-            {#each relationships.calledBy.slice(0, 10) as caller}
-              <li>
-                <button class="detail-ref-link" onclick={() => handleNodeClick(caller)} type="button">
-                  <span class="ref-type">{caller.node_type}</span> {caller.name}
-                </button>
-              </li>
-            {/each}
-            {#if relationships.calledBy.length > 10}
-              <li class="detail-more">+{relationships.calledBy.length - 10} more</li>
-            {/if}
-          </ul>
-        </div>
-      {/if}
-
-      <!-- Calls -->
-      {#if relationships.calls.length > 0}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Calls ({relationships.calls.length})</h4>
-          <ul class="detail-ref-list">
-            {#each relationships.calls.slice(0, 10) as callee}
-              <li>
-                <button class="detail-ref-link" onclick={() => handleNodeClick(callee)} type="button">
-                  <span class="ref-type">{callee.node_type}</span> {callee.name}
-                </button>
-              </li>
-            {/each}
-            {#if relationships.calls.length > 10}
-              <li class="detail-more">+{relationships.calls.length - 10} more</li>
-            {/if}
-          </ul>
-        </div>
-      {/if}
-
-      <!-- Provenance -->
-      {#if node.last_modified_by || node.created_sha}
-        <div class="detail-section">
-          <h4 class="detail-section-title">Provenance</h4>
-          {#if node.last_modified_by}
-            <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
-          {/if}
-          {#if node.last_modified_at}
-            <p class="detail-provenance">Modified: {new Date(node.last_modified_at * 1000).toLocaleDateString()}</p>
-          {/if}
-          {#if node.created_sha}
-            <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
-          {/if}
-          {#if node.first_seen_at}
-            <p class="detail-provenance">First seen: {new Date(node.first_seen_at * 1000).toLocaleDateString()}</p>
-          {/if}
-        </div>
-      {/if}
-
-      <!-- Risk assessment (synthesized from metrics) -->
+      <!-- Risk Assessment -->
       {#if node.complexity != null || node.churn_count_30d || node.test_coverage != null}
         <div class="detail-section">
           <h4 class="detail-section-title">Risk Assessment</h4>
@@ -419,12 +641,31 @@
         </div>
       </div>
 
-      <!-- Spec implementation completeness (for spec-linked nodes) -->
+      <!-- Provenance -->
+      {#if node.last_modified_by || node.created_sha}
+        <details class="detail-collapsible">
+          <summary class="detail-section-title">Provenance</summary>
+          {#if node.last_modified_by}
+            <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+          {/if}
+          {#if node.last_modified_at}
+            <p class="detail-provenance">Modified: {new Date(node.last_modified_at * 1000).toLocaleDateString()}</p>
+          {/if}
+          {#if node.created_sha}
+            <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
+          {/if}
+          {#if node.first_seen_at}
+            <p class="detail-provenance">First seen: {new Date(node.first_seen_at * 1000).toLocaleDateString()}</p>
+          {/if}
+        </details>
+      {/if}
+
+      <!-- Spec Coverage -->
       {#if node.spec_path}
         {@const specNodes = nodes.filter(n => n.spec_path === node.spec_path && !n.deleted_at)}
         {#if specNodes.length > 0}
-          <div class="detail-section">
-            <h4 class="detail-section-title">Spec Coverage</h4>
+          <details class="detail-collapsible">
+            <summary class="detail-section-title">Spec Coverage</summary>
             <p class="spec-completeness">
               <strong>{specNodes.length}</strong> node{specNodes.length !== 1 ? 's' : ''} governed by <code>{node.spec_path}</code>
             </p>
@@ -441,7 +682,7 @@
                 <li class="detail-more">+{specNodes.length - 8} more</li>
               {/if}
             </ul>
-          </div>
+          </details>
         {/if}
       {/if}
     </div>
@@ -684,7 +925,71 @@
   }
   .spec-check { color: var(--color-success); margin-left: auto; font-size: 12px; }
 
+  .detail-collapsible {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .detail-collapsible > summary {
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .detail-collapsible > summary::-webkit-details-marker { display: none; }
+
+  .detail-collapsible > summary::before {
+    content: '';
+    display: inline-block;
+    width: 0;
+    height: 0;
+    border-left: 5px solid var(--color-text-muted);
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    transition: transform var(--transition-fast, 0.15s);
+    flex-shrink: 0;
+  }
+
+  .detail-collapsible[open] > summary::before {
+    transform: rotate(90deg);
+  }
+
+  .call-count {
+    margin-left: auto;
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 1px 5px;
+    flex-shrink: 0;
+  }
+
+  .detail-spec-link {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+
+  .detail-muted {
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .detail-endpoint-method code {
+    font-size: var(--text-sm);
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--color-primary);
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .detail-ref-link { transition: none; }
+    .detail-collapsible > summary::before { transition: none; }
   }
 </style>
