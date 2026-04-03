@@ -1800,13 +1800,13 @@
                       <button
                         class="status-journey-node status-journey-node-{step.variant}"
                         class:status-journey-clickable={stepTab}
-                        title={stepTab ? `Click to view ${stepTab}${step.time ? ' — ' + fmtDate(step.time) : ''}` : (step.time ? fmtDate(step.time) : '')}
+                        title={stepTab ? `Click to view ${stepTab}${step.time ? ' — ' + absoluteTime(step.time) : ''}` : (step.time ? absoluteTime(step.time) : '')}
                         onclick={() => { if (stepTab) activeTab = stepTab; }}
                       >
                         <span class="status-journey-dot"></span>
                         <span class="status-journey-label">{step.label}</span>
                         {#if step.time}
-                          <span class="status-journey-time">{fmtDate(step.time)}</span>
+                          <span class="status-journey-time">{relativeTime(step.time) || formatDate(step.time)}</span>
                         {/if}
                       </button>
                       {#if i < mr._statusStory.length - 1}
@@ -1820,6 +1820,15 @@
                     </div>
                   {/if}
                 </div>
+              {/if}
+
+              <!-- Prominent diff stats banner -->
+              {#if mr.diff_stats}
+                <button class="mr-diff-stats-banner" onclick={() => { activeTab = 'diff'; }} title="View full diff">
+                  <span class="diff-stats-banner-files">{mr.diff_stats.files_changed ?? 0} file{(mr.diff_stats.files_changed ?? 0) === 1 ? '' : 's'} changed</span>
+                  <span class="diff-stats-banner-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                  <span class="diff-stats-banner-del">-{mr.diff_stats.deletions ?? 0}</span>
+                </button>
               {/if}
 
               <!-- Agent summary (from attestation) -->
@@ -1906,15 +1915,15 @@
                   <span class="provenance-label">Provenance</span>
                   <div class="provenance-flow">
                     {#if specPath}
-                      <button class="provenance-node provenance-spec" onclick={() => navigateTo('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id })} title={specPath}>
+                      <button class="provenance-node provenance-spec" onclick={() => navigateTo('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id })} title="Open spec: {specPath}">
                         <span class="provenance-icon prov-icon-spec"></span>
                         <span class="provenance-type">Spec</span>
-                        <span class="provenance-name">{specPath.split('/').pop()}</span>
+                        <span class="provenance-name">{specPath.split('/').pop()?.replace(/\.md$/, '') ?? specPath}</span>
                       </button>
                       <span class="provenance-arrow">&#x2192;</span>
                     {/if}
                     {#if mr.task_id}
-                      <button class="provenance-node provenance-task" onclick={() => navigateTo('task', mr.task_id)} title={mr.task_id}>
+                      <button class="provenance-node provenance-task" onclick={() => navigateTo('task', mr.task_id)} title="Open task: {entityName('task', mr.task_id)}">
                         <span class="provenance-icon prov-icon-task"></span>
                         <span class="provenance-type">Task</span>
                         <span class="provenance-name">{entityName('task', mr.task_id)}</span>
@@ -1922,7 +1931,7 @@
                       <span class="provenance-arrow">&#x2192;</span>
                     {/if}
                     {#if agentId}
-                      <button class="provenance-node provenance-agent" onclick={() => navigateTo('agent', agentId)} title={agentId}>
+                      <button class="provenance-node provenance-agent" onclick={() => navigateTo('agent', agentId)} title="Open agent: {entityName('agent', agentId)}">
                         <span class="provenance-icon prov-icon-agent"></span>
                         <span class="provenance-type">Agent</span>
                         <span class="provenance-name">{entityName('agent', agentId)}</span>
@@ -1932,14 +1941,14 @@
                     <span class="provenance-node provenance-mr provenance-current">
                       <span class="provenance-icon prov-icon-mr"></span>
                       <span class="provenance-type">MR</span>
-                      <span class="provenance-name">{mr.status ?? 'open'}</span>
+                      <span class="provenance-name">{mr.title ?? mr.status ?? 'open'}</span>
                     </span>
-                    {#if mr.status === 'merged' && mr.diff_stats}
+                    {#if mr.status === 'merged'}
                       <span class="provenance-arrow">&#x2192;</span>
                       <span class="provenance-node provenance-code">
                         <span class="provenance-icon prov-icon-code"></span>
-                        <span class="provenance-type">Code</span>
-                        <span class="provenance-name">+{mr.diff_stats.insertions ?? 0} -{mr.diff_stats.deletions ?? 0}</span>
+                        <span class="provenance-type">Merged</span>
+                        <span class="provenance-name">{mr.diff_stats ? `+${mr.diff_stats.insertions ?? 0} -${mr.diff_stats.deletions ?? 0}` : (mr.merged_at ? relativeTime(mr.merged_at) || formatDate(mr.merged_at) : 'merged')}</span>
                       </span>
                     {/if}
                   </div>
@@ -6090,6 +6099,40 @@
     color: var(--color-text-secondary);
     word-break: break-all;
     line-height: 1.5;
+  }
+
+  .mr-diff-stats-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-4);
+    margin-bottom: var(--space-3);
+    cursor: pointer;
+    font-size: var(--text-sm);
+    width: 100%;
+    text-align: left;
+    color: var(--color-text-secondary);
+    transition: border-color 0.15s;
+  }
+  .mr-diff-stats-banner:hover {
+    border-color: var(--color-border-focus);
+    color: var(--color-text);
+  }
+  .diff-stats-banner-files {
+    font-weight: 500;
+  }
+  .diff-stats-banner-ins {
+    color: var(--color-success, #22c55e);
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+  .diff-stats-banner-del {
+    color: var(--color-danger, #ef4444);
+    font-weight: 600;
+    font-family: var(--font-mono);
   }
 
   .mr-agent-summary {
