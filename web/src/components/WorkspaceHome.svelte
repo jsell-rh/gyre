@@ -2481,8 +2481,11 @@
   .dashboard-flow {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
     min-width: 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
   }
 
   /* ── Queue list (inline in entity panel tab) ──────────────────────── */
@@ -2949,6 +2952,7 @@
     border-bottom: 1px solid var(--color-border);
     background: var(--color-surface-elevated);
     overflow-x: auto;
+    flex-shrink: 0;
   }
 
   .ws-tab {
