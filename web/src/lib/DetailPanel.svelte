@@ -3685,15 +3685,19 @@
             {@const passedGates = mrGates.filter(g => g.status === 'Passed' || g.status === 'passed').length}
             {@const failedGates = mrGates.filter(g => g.status === 'Failed' || g.status === 'failed').length}
             {@const pendingGates = totalGates - passedGates - failedGates}
+            {@const requiredGates = mrGates.filter(g => g.required !== false)}
+            {@const requiredFailed = requiredGates.filter(g => g.status === 'Failed' || g.status === 'failed').length}
             <div class="gates-tab-header" class:gates-all-passed={failedGates === 0 && pendingGates === 0} class:gates-has-failures={failedGates > 0}>
               <span class="gates-tab-summary-icon">{failedGates > 0 ? '✗' : pendingGates > 0 ? '○' : '✓'}</span>
               <span class="gates-tab-summary-text">
-                {#if failedGates > 0}
-                  {failedGates} of {totalGates} gate{totalGates !== 1 ? 's' : ''} failed — merge blocked
+                {#if requiredFailed > 0}
+                  {requiredFailed} required gate{requiredFailed !== 1 ? 's' : ''} failed — merge blocked
+                {:else if failedGates > 0}
+                  {failedGates} advisory gate{failedGates !== 1 ? 's' : ''} failed — merge not blocked
                 {:else if pendingGates > 0}
                   {passedGates} of {totalGates} gate{totalGates !== 1 ? 's' : ''} passed — {pendingGates} pending
                 {:else}
-                  {passedGates} of {totalGates} gate{totalGates !== 1 ? 's' : ''} passed — all checks complete
+                  All {totalGates} gate{totalGates !== 1 ? 's' : ''} passed
                 {/if}
               </span>
             </div>
@@ -3702,10 +3706,25 @@
                 {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
                 {@const gateName = gate.gate_name ?? gate.name ?? ((gate.gate_type ? gate.gate_type.replace(/_/g, ' ') : '') || 'Quality gate')}
                 {@const gateStatus = (gate.status === 'Passed' || gate.status === 'passed') ? 'passed' : (gate.status === 'Failed' || gate.status === 'failed') ? 'failed' : (gate.status === 'Running' || gate.status === 'running') ? 'running' : gate.status ?? 'pending'}
-                <li class="gate-item gate-item-{gateStatus}">
+                {@const gateDesc = ({
+                  test_command: 'Runs the test suite to verify correctness',
+                  lint_command: 'Checks code style and formatting',
+                  build_command: 'Compiles the project to verify it builds',
+                  trace_capture: 'Captures execution traces for observability',
+                  trace_validation: 'Validates execution traces match expected behavior',
+                  spec_compliance: 'Verifies implementation matches the linked specification',
+                  security_scan: 'Scans for known security vulnerabilities',
+                  coverage_check: 'Checks test coverage meets threshold',
+                })[gate.gate_type] ?? null}
+                <li class="gate-item gate-item-{gateStatus}" class:gate-item-required={gate.required !== false}>
                   <div class="gate-row">
                     <span class="gate-status-icon">{gateStatus === 'passed' ? '✓' : gateStatus === 'failed' ? '✗' : gateStatus === 'running' ? '⟳' : '○'}</span>
-                    <span class="gate-name" title={gate.gate_id ?? ''}>{gateName}</span>
+                    <div class="gate-name-block">
+                      <span class="gate-name" title={gate.gate_id ?? ''}>{gateName}</span>
+                      {#if gateDesc}
+                        <span class="gate-description">{gateDesc}</span>
+                      {/if}
+                    </div>
                     <span class="gate-status-badge gate-status-badge-{gateStatus}">
                       {#if gateStatus === 'passed'}
                         Passed
@@ -3717,12 +3736,9 @@
                         <span class="gate-pending-pulse"></span>Waiting...
                       {/if}
                     </span>
-                    {#if gate.gate_type}
-                      <span class="gate-type-badge">{gate.gate_type.replace(/_/g, ' ')}</span>
-                    {/if}
                     {#if gate.required !== undefined}
                       <span class="gate-required-badge" class:advisory={!gate.required}>
-                        {gate.required ? 'required' : 'advisory'}
+                        {gate.required ? 'Required' : 'Advisory'}
                       </span>
                     {/if}
                     {#if duration}
@@ -3731,16 +3747,41 @@
                   </div>
                   {#if gate.command}
                     <div class="gate-cmd-row">
-                      <span class="gate-cmd-label">Command</span>
+                      <span class="gate-cmd-label">$</span>
                       <code class="gate-cmd mono">{gate.command}</code>
+                    </div>
+                  {:else}
+                    <div class="gate-cmd-row gate-cmd-configured">
+                      <span class="gate-cmd-label gate-cmd-hint">Configured in repo settings</span>
                     </div>
                   {/if}
                   {#if gate.output}
-                    <details class="gate-output-details" open={gateStatus === 'failed' || gateStatus === 'passed'}>
+                    {@const isJson = gate.output.trim().startsWith('{') || gate.output.trim().startsWith('[')}
+                    {@const parsed = isJson ? (() => { try { return JSON.parse(gate.output); } catch { return null; } })() : null}
+                    <details class="gate-output-details" open={gateStatus === 'failed'}>
                       <summary class="gate-output-label">
                         Output
                         <button class="gate-copy-btn" onclick={(e) => { e.stopPropagation(); e.preventDefault(); navigator.clipboard.writeText(gate.output); e.target.textContent = 'Copied!'; setTimeout(() => { e.target.textContent = 'Copy'; }, 1500); }} title="Copy output to clipboard">Copy</button>
                       </summary>
+                      {#if parsed && (parsed.tests_passed !== undefined || parsed.total !== undefined || parsed.coverage !== undefined)}
+                        <div class="gate-structured-output">
+                          {#if parsed.tests_passed !== undefined}
+                            <span class="gate-metric gate-metric-success">{parsed.tests_passed} passed</span>
+                          {/if}
+                          {#if parsed.tests_failed !== undefined && parsed.tests_failed > 0}
+                            <span class="gate-metric gate-metric-fail">{parsed.tests_failed} failed</span>
+                          {/if}
+                          {#if parsed.total !== undefined}
+                            <span class="gate-metric">{parsed.total} total</span>
+                          {/if}
+                          {#if parsed.coverage !== undefined}
+                            <span class="gate-metric">{parsed.coverage}% coverage</span>
+                          {/if}
+                          {#if parsed.warnings !== undefined && parsed.warnings > 0}
+                            <span class="gate-metric gate-metric-warn">{parsed.warnings} warnings</span>
+                          {/if}
+                        </div>
+                      {/if}
                       <pre class="gate-output gate-terminal">{gate.output}</pre>
                     </details>
                   {/if}
@@ -5989,16 +6030,71 @@
 
   .gate-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: var(--space-2);
+  }
+
+  .gate-name-block {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
   }
 
   .gate-name {
     font-size: var(--text-sm);
     font-weight: 500;
     color: var(--color-text);
-    flex: 1;
   }
+
+  .gate-description {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.3;
+  }
+
+  .gate-item-required {
+    border-left: 2px solid var(--color-primary);
+  }
+
+  .gate-item-required.gate-item-failed {
+    border-left-color: var(--color-danger);
+  }
+
+  .gate-item-required.gate-item-passed {
+    border-left-color: var(--color-success);
+  }
+
+  .gate-cmd-configured {
+    opacity: 0.6;
+  }
+
+  .gate-cmd-hint {
+    font-style: italic;
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+  }
+
+  .gate-structured-output {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    margin-bottom: var(--space-1);
+  }
+
+  .gate-metric {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-muted);
+  }
+
+  .gate-metric-success { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
+  .gate-metric-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
+  .gate-metric-warn { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
 
   .gate-duration {
     font-size: var(--text-xs);
