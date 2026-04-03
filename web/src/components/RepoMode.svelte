@@ -696,7 +696,8 @@
                     {#if mr.status === 'merged' && mr.merge_commit_sha}
                       <code class="sha-inline mono" title="Click to copy {mr.merge_commit_sha}" onclick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); toastSuccess('SHA copied'); }} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); } }}>{mr.merge_commit_sha.slice(0, 7)}</code>
                     {:else if mr.status === 'open' && mr._gates?.failed > 0}
-                      <span class="status-why status-why-danger">{mr._gates.failed} gate{mr._gates.failed !== 1 ? 's' : ''} failed</span>
+                      {@const failedGateNames = (mr._gates.details ?? []).filter(g => g.status === 'failed').map(g => g.name).slice(0, 2)}
+                      <span class="status-why status-why-danger">{failedGateNames.length > 0 ? failedGateNames.join(', ') : `${mr._gates.failed} gate${mr._gates.failed !== 1 ? 's' : ''}`} failed</span>
                     {:else if mr.status === 'open' && mr._gates?.passed === mr._gates?.total && mr._gates?.total > 0}
                       <span class="status-why status-why-ok">gates passed</span>
                     {/if}
@@ -754,6 +755,11 @@
                       </button>
                     {:else if mr.status === 'open' && mr.queue_position != null}
                       <span class="queue-badge" title="In merge queue at position {mr.queue_position + 1}">#{mr.queue_position + 1}</span>
+                    {/if}
+                    {#if mr.diff_stats}
+                      <button class="quick-action-btn quick-action-view" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'diff' }); }} title="View code diff">
+                        Diff
+                      </button>
                     {/if}
                   </td>
                 </tr>
@@ -1714,6 +1720,8 @@
   }
   .quick-action-btn:hover { opacity: 0.85; }
   .quick-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .quick-action-view { background: var(--color-surface-elevated); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
+  .quick-action-view:hover { background: var(--color-surface); border-color: var(--color-primary); color: var(--color-primary); }
   .quick-action-done { background: var(--color-success); }
   .quick-action-blocked { background: var(--color-danger); }
   .quick-action-in_progress { background: var(--color-warning); color: var(--color-text); }
