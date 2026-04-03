@@ -21,6 +21,10 @@
     specBreakdown = null,
     latestMr = null,
     latestAgent = null,
+    /** @type {Array} All agents for this repo (used for single-agent navigation) */
+    activeAgents = [],
+    /** @type {Array} All MRs for this repo (used for single-MR navigation) */
+    failedMrs = [],
     onclick = undefined,
     onStatClick = undefined,
   } = $props();
@@ -66,12 +70,18 @@
     <!-- What's happening now — one line of context -->
     {#if statusSummary}
       <div class="repo-card-activity">
-        <span class="repo-activity-text repo-activity-{statusSummary.variant}">{statusSummary.text}</span>
+        {#if statusSummary.variant === 'danger' && failedMrs.length === 1}
+          <button class="repo-activity-link repo-activity-{statusSummary.variant}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', failedMrs[0].id, { repo_id: repo.id, title: failedMrs[0].title, _openTab: 'gates' }); }}>{statusSummary.text} — view gates</button>
+        {:else if statusSummary.variant === 'success' && activeAgents.length === 1}
+          <button class="repo-activity-link repo-activity-{statusSummary.variant}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', activeAgents[0].id, { repo_id: repo.id, name: activeAgents[0].name }); }}>{activeAgents[0].name ?? formatId('agent', activeAgents[0].id)} working</button>
+        {:else}
+          <span class="repo-activity-text repo-activity-{statusSummary.variant}">{statusSummary.text}</span>
+        {/if}
         <span class="repo-activity-why">{statusSummary.why}</span>
       </div>
     {:else if latestMr}
       <div class="repo-card-activity">
-        <span class="repo-activity-text repo-activity-{latestMr.status === 'merged' ? 'success' : 'info'}">{latestMr.status === 'merged' ? 'Last merged' : 'Latest MR'}: {latestMr.title ?? 'Untitled'}</span>
+        <button class="repo-activity-link repo-activity-{latestMr.status === 'merged' ? 'success' : 'info'}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', latestMr.id, { repo_id: repo.id, title: latestMr.title }); }}>{latestMr.status === 'merged' ? 'Last merged' : 'Latest MR'}: {latestMr.title ?? 'Untitled'}</button>
       </div>
     {/if}
 
@@ -166,6 +176,22 @@
 
   .repo-activity-text {
     font-weight: 600;
+  }
+
+  .repo-activity-link {
+    font-weight: 600;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    padding: 0;
+    text-align: left;
+    text-decoration: none;
+  }
+
+  .repo-activity-link:hover {
+    text-decoration: underline;
   }
 
   .repo-activity-success { color: var(--color-success); }

@@ -1273,6 +1273,8 @@
                     health={repoHealth(repo)}
                     stats={repoStats(repo)}
                     activeAgentNames={repoActiveAgentNames(repo)}
+                    activeAgents={wsAgents.filter(a => a.repo_id === repo.id && a.status === 'active')}
+                    failedMrs={wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m._gates?.failed > 0)}
                     specBreakdown={repoSpecBreakdown(repo)}
                     latestMr={repoLatestMr(repo)}
                     onclick={() => onSelectRepo?.(repo)}
