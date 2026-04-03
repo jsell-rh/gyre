@@ -1509,9 +1509,9 @@
                         <th>Agent</th>
                         <th>Status</th>
                         <th>Task</th>
-                        <th>Spec</th>
+                        <th>Output</th>
+                        <th>Duration</th>
                         <th>Repo</th>
-                        <th>Last Active</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1520,10 +1520,17 @@
                         return (order[a.status] ?? 3) - (order[b.status] ?? 3);
                       }) as agent}
                         {@const agStatus = agent.status ?? 'idle'}
+                        {@const agentMr = wsMrs.find(m => m.author_agent_id === agent.id)}
+                        {@const startTime = agent.spawned_at ?? agent.created_at}
+                        {@const endTime = agent.completed_at ?? (agStatus === 'active' ? null : agent.last_heartbeat)}
+                        {@const durationSecs = startTime ? Math.round(((endTime ? new Date(endTime) : new Date()) - new Date(startTime)) / 1000) : null}
                         <tr class="ws-entity-row" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
                           <td class="entity-name-cell">
                             <Icon name="agent" size={12} />
                             <span class="entity-primary-name">{agent.name ?? formatId('agent', agent.id)}</span>
+                            {#if agent.branch}
+                              <span class="entity-branch-tag">{agent.branch}</span>
+                            {/if}
                           </td>
                           <td>
                             <div class="status-with-context">
@@ -1531,19 +1538,10 @@
                                 {#if agStatus === 'active'}<span class="status-pulse"></span>{/if}
                                 {agStatus}
                               </span>
-                              {#if agStatus === 'idle' || agStatus === 'completed'}
-                                {@const agentMr = wsMrs.find(m => m.author_agent_id === agent.id)}
-                                {#if agentMr}
-                                  <button class="status-context status-context-link" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title }); }}>
-                                    MR: {agentMr.title ?? agentMr.status}
-                                  </button>
-                                {:else}
-                                  <span class="status-context">Work complete</span>
-                                {/if}
+                              {#if agStatus === 'active'}
+                                <span class="status-context">implementing code</span>
                               {:else if agStatus === 'failed'}
-                                <span class="status-context status-context-danger">Check logs for details</span>
-                              {:else if agStatus === 'active' && agent.branch}
-                                <span class="status-context">on {agent.branch}</span>
+                                <span class="status-context status-context-danger">check logs</span>
                               {/if}
                             </div>
                           </td>
@@ -1555,10 +1553,26 @@
                             {/if}
                           </td>
                           <td>
-                            {#if agent.spec_path}
-                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', agent.spec_path, { path: agent.spec_path, repo_id: agent.repo_id }); }}>
-                                {agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                            {#if agentMr}
+                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title }); }}>
+                                <span class="status-pill status-pill-{agentMr.status}" style="font-size: 9px; padding: 0 4px;">{agentMr.status}</span>
+                                {agentMr.title ?? entityName('mr', agentMr.id)}
                               </button>
+                            {:else if agStatus === 'active'}
+                              <span class="text-muted">in progress</span>
+                            {:else if agStatus === 'idle' || agStatus === 'completed'}
+                              <span class="text-muted">no MR</span>
+                            {:else}
+                              <span class="text-muted">-</span>
+                            {/if}
+                          </td>
+                          <td class="entity-time">
+                            {#if durationSecs != null}
+                              {#if agStatus === 'active'}
+                                <span class="duration-running">{formatDuration(durationSecs)}</span>
+                              {:else}
+                                {formatDuration(durationSecs)}
+                              {/if}
                             {/if}
                           </td>
                           <td>
@@ -1568,7 +1582,6 @@
                               </button>
                             {/if}
                           </td>
-                          <td class="entity-time">{relTime(agent.last_heartbeat ?? agent.completed_at ?? agent.spawned_at ?? agent.created_at)}</td>
                         </tr>
                       {/each}
                     </tbody>
@@ -2436,6 +2449,11 @@
     color: var(--color-text-muted);
     white-space: nowrap;
     font-size: 10px;
+  }
+
+  .duration-running {
+    color: var(--color-success);
+    font-weight: 500;
   }
 
   .entity-repo-link,
