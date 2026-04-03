@@ -1383,6 +1383,7 @@
       <!-- ── Cross-repo entity browse (always visible tabs) ──────────── -->
       <div class="dashboard-flow" data-testid="browse-panel">
         <nav class="ws-tab-bar" aria-label="Browse workspace entities">
+          <span class="ws-tab-bar-label">Workspace</span>
           <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
             Specs
             {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
