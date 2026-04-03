@@ -174,9 +174,13 @@
             const passed = arr.filter(g => g.status === 'Passed' || g.status === 'passed').length;
             const failed = arr.filter(g => g.status === 'Failed' || g.status === 'failed').length;
             const details = arr.map(g => {
-              const gateType = (g.gate_type ?? '').replace(/_/g, ' ');
+              const gateType = g.gate_type ?? '';
+              const gateTypeLabel = gateType ? gateType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : '';
+              const gateCommand = g.command ?? '';
               return {
-                name: g.gate_name ?? g.name ?? (gateType || 'Quality gate'),
+                name: g.gate_name ?? g.name ?? (gateTypeLabel
+                  || (gateCommand ? gateCommand.split(' ')[0].split('/').pop() : '')
+                  || 'Gate'),
                 status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
                 gate_type: g.gate_type,
                 required: g.required,
