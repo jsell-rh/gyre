@@ -219,9 +219,7 @@ async fn handle_explorer_session(
                                 message: "View does not belong to this repository".to_string(),
                             };
                             let _ = sender
-                                .send(Message::Text(
-                                    serde_json::to_string(&err).unwrap().into(),
-                                ))
+                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
                                 .await;
                             continue;
                         }
@@ -231,9 +229,7 @@ async fn handle_explorer_session(
                                 message: "Access denied".to_string(),
                             };
                             let _ = sender
-                                .send(Message::Text(
-                                    serde_json::to_string(&err).unwrap().into(),
-                                ))
+                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
                                 .await;
                             continue;
                         }
@@ -447,8 +443,7 @@ async fn run_explorer_agent(
         }
     };
 
-    let model =
-        std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+    let model = std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
     let llm_port = llm.for_model(&model);
 
     // Load graph data once for tool execution
@@ -503,19 +498,18 @@ async fn run_explorer_agent(
             // If a view query was found, perform server-enforced self-check
             if let Some(query_json) = view_query {
                 // Dry-run the query server-side
-                let dry_run_result =
-                    if let Ok(query) = serde_json::from_value::<gyre_common::view_query::ViewQuery>(
-                        query_json.clone(),
-                    ) {
-                        Some(gyre_domain::view_query_resolver::dry_run(
-                            &query,
-                            &nodes,
-                            &edges,
-                            selected_node_id,
-                        ))
-                    } else {
-                        None
-                    };
+                let dry_run_result = if let Ok(query) =
+                    serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone())
+                {
+                    Some(gyre_domain::view_query_resolver::dry_run(
+                        &query,
+                        &nodes,
+                        &edges,
+                        selected_node_id,
+                    ))
+                } else {
+                    None
+                };
 
                 if let Some(ref dr) = dry_run_result {
                     if !dr.warnings.is_empty() && refinement_count < MAX_AGENT_TURNS {
@@ -979,5 +973,67 @@ This shows all callers of TaskPort."#;
     #[test]
     fn test_max_agent_turns_is_three() {
         assert_eq!(MAX_AGENT_TURNS, 3, "Spec requires max 3 refinement turns");
+    }
+
+    #[test]
+    fn test_client_message_deserialization() {
+        // Verify the server correctly deserializes the expected message format.
+        let msg_json =
+            r#"{"type":"message","text":"What is TaskPort?","canvas_state":{"zoom_level":1.5}}"#;
+        let msg: ExplorerClientMessage = serde_json::from_str(msg_json).unwrap();
+        match msg {
+            ExplorerClientMessage::Message { text, canvas_state } => {
+                assert_eq!(text, "What is TaskPort?");
+                assert!((canvas_state.zoom_level - 1.5).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn test_save_view_message_with_all_fields() {
+        let msg_json = r#"{"type":"save_view","name":"My View","description":"A test view","query":{"scope":{"type":"all"}}}"#;
+        let msg: ExplorerClientMessage = serde_json::from_str(msg_json).unwrap();
+        match msg {
+            ExplorerClientMessage::SaveView {
+                name,
+                description,
+                query,
+            } => {
+                assert_eq!(name, "My View");
+                assert_eq!(description.as_deref(), Some("A test view"));
+                assert_eq!(query["scope"]["type"], "all");
+            }
+            _ => panic!("Expected SaveView variant"),
+        }
+    }
+
+    #[test]
+    fn test_server_message_serialization() {
+        // Verify streamed text format
+        let msg = ExplorerServerMessage::Text {
+            content: "Hello".to_string(),
+            done: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"text""#));
+        assert!(json.contains(r#""done":false"#));
+
+        // Verify view query format
+        let msg = ExplorerServerMessage::ViewQuery {
+            query: json!({"scope": {"type": "all"}}),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""type":"view_query""#));
+    }
+
+    #[test]
+    fn test_conversation_history_prompt() {
+        // Verify that the system prompt mentions conversation history
+        let prompt = build_system_prompt();
+        assert!(
+            prompt.contains("conversation history"),
+            "System prompt should mention conversation history"
+        );
     }
 }
