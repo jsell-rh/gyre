@@ -138,179 +138,328 @@
     return m;
   });
 
-  // ── Build layout tree (nested treemap) ─────────────────────────────
-  // layoutNodes: flat array of { id, kind, x, y, w, h, label, node, treeDepth, parentTreeGroup, totalChildren, children: Map }
+  // ── Path tree builder (from explore3.html prototype) ─────────────────
+  // Builds a hierarchical tree from flat graph nodes by splitting
+  // qualified_name on '.' / '::' / '/', collapsing single-child chains,
+  // and promoting dominant children. This creates meaningful groups
+  // regardless of whether the extractor emitted Contains edges.
+
+  function buildPathTree(rootNodes, childToParent, parentToChildren, nodeById) {
+    // PathTreeNode: synthetic grouping node
+    const root = { name: 'root', fullPath: '', children: new Map(), graphNodes: [], totalDescendants: 0, treeDepth: 0 };
+
+    for (const n of rootNodes) {
+      // Use file_path for hierarchy (more reliable than qualified_name for Python)
+      let pathStr = n.file_path ?? n.qualified_name ?? n.name ?? '';
+      // Normalize: strip file extension, replace / with .
+      pathStr = pathStr.replace(/\.(py|rs|go|ts|js|tsx|jsx|svelte|vue)$/, '').replace(/\//g, '.');
+      // Remove trailing __init__ (Python package markers)
+      pathStr = pathStr.replace(/\.__init__$/, '');
+      if (!pathStr) pathStr = n.name ?? 'unknown';
+
+      const parts = pathStr.split(/\.|::/);
+      let current = root;
+
+      for (let i = 0; i < parts.length; i++) {
+        const segment = parts[i];
+        if (!segment) continue;
+        const path = parts.slice(0, i + 1).join('.');
+        if (!current.children.has(segment)) {
+          current.children.set(segment, {
+            name: segment,
+            fullPath: path,
+            children: new Map(),
+            graphNodes: [],
+            totalDescendants: 0,
+            treeDepth: i + 1,
+          });
+        }
+        current = current.children.get(segment);
+      }
+      // Place this graph node at the leaf
+      current.graphNodes.push(n);
+
+      // Also collect child graph nodes (types, functions inside this module)
+      const childIds = parentToChildren.get(n.id) ?? [];
+      for (const cid of childIds) {
+        const cn = nodeById.get(cid);
+        if (cn) current.graphNodes.push(cn);
+        // Grandchildren too
+        for (const gcid of (parentToChildren.get(cid) ?? [])) {
+          const gcn = nodeById.get(gcid);
+          if (gcn) current.graphNodes.push(gcn);
+        }
+      }
+    }
+
+    // Compute totalDescendants bottom-up
+    function computeDesc(node) {
+      node.totalDescendants = node.graphNodes.length;
+      for (const child of node.children.values()) {
+        computeDesc(child);
+        node.totalDescendants += child.totalDescendants;
+      }
+    }
+    computeDesc(root);
+
+    // Collapse single-child chains (e.g., src -> api -> iam becomes src.api.iam)
+    function collapse(node) {
+      for (const child of node.children.values()) collapse(child);
+      while (node.children.size === 1 && node.graphNodes.length === 0 && node.fullPath !== '') {
+        const [, child] = [...node.children.entries()][0];
+        node.name = node.name + '.' + child.name;
+        node.fullPath = child.fullPath;
+        node.children = child.children;
+        node.graphNodes = child.graphNodes;
+      }
+      // Promote dominant child: if one child has >90% of descendants, flatten
+      if (node.children.size > 1 && node.graphNodes.length === 0 && node.fullPath !== '') {
+        const kids = [...node.children.values()];
+        const dominant = kids.reduce((a, b) => a.totalDescendants > b.totalDescendants ? a : b);
+        if (dominant.totalDescendants > node.totalDescendants * 0.9) {
+          node.children.delete(dominant.name);
+          for (const [k, v] of dominant.children) node.children.set(k, v);
+          collapse(node);
+        }
+      }
+    }
+    collapse(root);
+
+    // Recompute depths after collapsing
+    function reDepth(node, d) {
+      node.treeDepth = d;
+      for (const child of node.children.values()) reDepth(child, d + 1);
+    }
+    reDepth(root, 0);
+
+    return root;
+  }
+
+  // ── Squarified treemap algorithm ───────────────────────────────────
+  function squarify(items, x, y, w, h) {
+    if (items.length === 0 || w <= 0 || h <= 0) return [];
+    const total = items.reduce((s, i) => s + i.weight, 0);
+    if (total <= 0) return [];
+    if (items.length === 1) return [{ ...items[0], x: x + w / 2, y: y + h / 2, w, h }];
+    const sorted = [...items].sort((a, b) => b.weight - a.weight);
+    const results = [];
+    doSquarifyLayout(sorted, x, y, w, h, total, results);
+    return results;
+  }
+
+  function doSquarifyLayout(items, x, y, w, h, total, results) {
+    if (items.length === 0) return;
+    if (items.length === 1) {
+      results.push({ ...items[0], x: x + w / 2, y: y + h / 2, w, h });
+      return;
+    }
+    const horizontal = w >= h;
+    const side = horizontal ? h : w;
+    let row = [items[0]], rowW = items[0].weight;
+    let bestAspect = worstAspect(row, rowW, side, total, w, h, horizontal);
+    for (let i = 1; i < items.length; i++) {
+      const cand = [...row, items[i]], candW = rowW + items[i].weight;
+      const candA = worstAspect(cand, candW, side, total, w, h, horizontal);
+      if (candA <= bestAspect) { row = cand; rowW = candW; bestAspect = candA; }
+      else break;
+    }
+    const rowFrac = rowW / total;
+    const rowSize = horizontal ? w * rowFrac : h * rowFrac;
+    let pos = 0;
+    for (const item of row) {
+      const frac = item.weight / rowW;
+      const sz = side * frac;
+      if (horizontal) {
+        results.push({ ...item, x: x + rowSize / 2, y: y + pos + sz / 2, w: rowSize, h: sz });
+      } else {
+        results.push({ ...item, x: x + pos + sz / 2, y: y + rowSize / 2, w: sz, h: rowSize });
+      }
+      pos += sz;
+    }
+    const rem = items.slice(row.length), remW = total - rowW;
+    if (rem.length > 0) {
+      if (horizontal) doSquarifyLayout(rem, x + rowSize, y, w - rowSize, h, remW, results);
+      else doSquarifyLayout(rem, x, y + rowSize, w, h - rowSize, remW, results);
+    }
+  }
+
+  function worstAspect(row, rowW, side, total, w, h, horiz) {
+    const rowSize = horiz ? w * (rowW / total) : h * (rowW / total);
+    let worst = 0;
+    for (const item of row) {
+      const frac = item.weight / rowW;
+      const sz = side * frac;
+      const iw = horiz ? rowSize : sz, ih = horiz ? sz : rowSize;
+      if (iw <= 0 || ih <= 0) continue;
+      const a = Math.max(iw / ih, ih / iw);
+      if (a > worst) worst = a;
+    }
+    return worst;
+  }
+
+  // ── Build layout from path tree ────────────────────────────────────
   let layoutNodes = $state([]);
   let layoutNodeMap = $state(new Map());
   let prevNodeCount = 0;
   let prevBreadcrumbLen = -1;
 
-  // Rebuild layout when nodes/edges/breadcrumb/size change
   $effect(() => {
     const { childToParent, parentToChildren, nodeById } = treeData;
-    const _bc = breadcrumb; // depend on breadcrumb
+    const _bc = breadcrumb;
     const _f = filter;
     const _n = nodes.length;
 
-    // Track whether this is a data/breadcrumb change or just a resize
     const isDataChange = _n !== prevNodeCount || breadcrumb.length !== prevBreadcrumbLen;
     prevNodeCount = _n;
     prevBreadcrumbLen = breadcrumb.length;
 
-    // Determine root nodes for the current view
-    let rootIds;
-    if (breadcrumb.length === 0) {
-      rootIds = nodes.filter(n => !childToParent.has(n.id)).map(n => n.id);
-    } else {
-      const parentId = breadcrumb[breadcrumb.length - 1].id;
-      rootIds = parentToChildren.get(parentId) ?? [];
-    }
-
-    if (rootIds.length === 0) {
+    if (nodes.length === 0) {
       layoutNodes = [];
       layoutNodeMap = new Map();
       return;
     }
 
-    // Recursively build tree node structure
-    function buildTree(id, depth) {
-      const node = nodeById.get(id);
-      if (!node) return null;
-      const children = parentToChildren.get(id) ?? [];
-      const childTrees = children
-        .map(cid => buildTree(cid, depth + 1))
-        .filter(Boolean);
-      return {
-        id,
-        node,
-        depth,
-        children: childTrees,
-        totalDescendants: descendantCounts.get(id) ?? 1,
-      };
+    // Get root nodes (no Contains parent)
+    const rootNodes = nodes.filter(n => !childToParent.has(n.id));
+
+    // Build path tree from root nodes
+    const pathTreeRoot = buildPathTree(rootNodes, childToParent, parentToChildren, nodeById);
+
+    // Get top-level children (after collapsing)
+    const topKids = [...pathTreeRoot.children.values()].sort((a, b) => b.totalDescendants - a.totalDescendants);
+
+    if (topKids.length === 0) {
+      layoutNodes = [];
+      layoutNodeMap = new Map();
+      return;
     }
 
-    const rootTrees = rootIds
-      .map(id => buildTree(id, 0))
-      .filter(Boolean)
-      .sort((a, b) => b.totalDescendants - a.totalDescendants);
-
-    // Compute bounding area — generous world space so nodes have room
-    const totalWeight = rootTrees.reduce((s, t) => s + t.totalDescendants, 0);
+    // Compute world size
+    const totalNodes = pathTreeRoot.totalDescendants;
     const aspect = W / H || 1.5;
-    // More area per node = bigger world = nodes further apart
-    const areaPerNode = Math.max(2000, 4000 - Math.log10(totalWeight + 1) * 800);
-    const area = totalWeight * areaPerNode;
+    const areaPerNode = Math.max(1500, 3000 - Math.log10(totalNodes + 1) * 500);
+    const area = totalNodes * areaPerNode;
     const layoutH = Math.sqrt(area / aspect);
     const layoutW = layoutH * aspect;
 
-    // Squarified treemap layout
     const allLayoutNodes = [];
     const lnMap = new Map();
 
-    function squarify(items, x, y, w, h) {
-      if (items.length === 0 || w <= 0 || h <= 0) return [];
-      const total = items.reduce((s, i) => s + i.weight, 0);
-      if (total <= 0) return [];
-      if (items.length === 1) return [{ ...items[0], x: x + w / 2, y: y + h / 2, w, h }];
-      const sorted = [...items].sort((a, b) => b.weight - a.weight);
-      const results = [];
-      doLayout(sorted, x, y, w, h, total, results);
-      return results;
-    }
-
-    function doLayout(items, x, y, w, h, total, results) {
-      if (items.length === 0) return;
-      if (items.length === 1) {
-        results.push({ ...items[0], x: x + w / 2, y: y + h / 2, w, h });
-        return;
-      }
-      const horizontal = w >= h;
-      const side = horizontal ? h : w;
-      let row = [items[0]], rowW = items[0].weight;
-      let bestAspect = worstAspect(row, rowW, side, total, w, h, horizontal);
-      for (let i = 1; i < items.length; i++) {
-        const cand = [...row, items[i]], candW = rowW + items[i].weight;
-        const candA = worstAspect(cand, candW, side, total, w, h, horizontal);
-        if (candA <= bestAspect) { row = cand; rowW = candW; bestAspect = candA; }
-        else break;
-      }
-      const rowFrac = rowW / total;
-      const rowSize = horizontal ? w * rowFrac : h * rowFrac;
-      let pos = 0;
-      for (const item of row) {
-        const frac = item.weight / rowW;
-        const sz = side * frac;
-        if (horizontal) {
-          results.push({ ...item, x: x + rowSize / 2, y: y + pos + sz / 2, w: rowSize, h: sz });
-        } else {
-          results.push({ ...item, x: x + pos + sz / 2, y: y + rowSize / 2, w: sz, h: rowSize });
-        }
-        pos += sz;
-      }
-      const rem = items.slice(row.length), remW = total - rowW;
-      if (rem.length > 0) {
-        if (horizontal) doLayout(rem, x + rowSize, y, w - rowSize, h, remW, results);
-        else doLayout(rem, x, y + rowSize, w, h - rowSize, remW, results);
-      }
-    }
-
-    function worstAspect(row, rowW, side, total, w, h, horiz) {
-      const rowSize = horiz ? w * (rowW / total) : h * (rowW / total);
-      let worst = 0;
-      for (const item of row) {
-        const frac = item.weight / rowW;
-        const sz = side * frac;
-        const iw = horiz ? rowSize : sz, ih = horiz ? sz : rowSize;
-        if (iw <= 0 || ih <= 0) continue;
-        const a = Math.max(iw / ih, ih / iw);
-        if (a > worst) worst = a;
-      }
-      return worst;
-    }
-
-    // Recursive layout: place tree nodes with nested squarified treemap
-    // Apply inter-cell gap by shrinking each rect inward
-    function layoutTree(treez, x, y, w, h, parentLn) {
-      const items = treez.map(t => ({ ...t, weight: t.totalDescendants }));
+    // Recursively layout path tree nodes with squarified treemap
+    function layoutPathTreeNode(ptChildren, x, y, w, h, parentLn, depth) {
+      const kids = [...ptChildren].sort((a, b) => b.totalDescendants - a.totalDescendants);
+      const items = kids.map(k => ({ ...k, weight: Math.max(1, k.totalDescendants) }));
       const rects = squarify(items, x, y, w, h);
 
-      // Gap between sibling cells: proportional to container size
-      const gap = Math.max(2, Math.min(8, Math.min(w, h) * 0.008));
+      const gap = Math.max(2, Math.min(8, Math.min(w, h) * 0.01));
 
       for (let idx = 0; idx < rects.length; idx++) {
         const r = rects[idx];
-        // Shrink rect by gap/2 on each side for inter-cell spacing
         const gw = r.w - gap;
         const gh = r.h - gap;
-        if (gw <= 0 || gh <= 0) continue;
+        if (gw <= 2 || gh <= 2) continue;
 
-        const hasChildren = r.children.length > 0;
+        const hasChildren = r.children.size > 0 || r.graphNodes.length > 0;
+        const treeNodeRef = r.children.size > 0 ? { children: r.children, graphNodes: r.graphNodes } : null;
+
+        // Create a synthetic node for tree groups (they don't correspond to real graph nodes)
+        const syntheticNode = {
+          id: '__tree__' + r.fullPath,
+          name: r.name,
+          qualified_name: r.fullPath,
+          node_type: depth === 0 ? 'package' : 'module',
+          file_path: r.fullPath.replace(/\./g, '/'),
+          spec_confidence: 'none',
+        };
+
+        const ln = {
+          id: syntheticNode.id,
+          kind: 'tree-group',
+          x: r.x, y: r.y, w: gw, h: gh,
+          label: r.name,
+          node: syntheticNode,
+          treeDepth: depth,
+          parentTreeGroup: parentLn,
+          totalChildren: r.totalDescendants,
+          isLeafGraphNode: false,
+          treeNode: treeNodeRef,
+          childIndex: idx,
+        };
+        allLayoutNodes.push(ln);
+        lnMap.set(ln.id, ln);
+
+        // Layout children inside this cell
+        const pad = Math.max(3, Math.min(gw, gh) * 0.02);
+        const headerH = Math.max(10, Math.min(gw, gh) * 0.035);
+        const cx = r.x - gw / 2 + pad;
+        const cy = r.y - gh / 2 + pad + headerH;
+        const cw = gw - pad * 2;
+        const ch = gh - pad * 2 - headerH;
+
+        if (cw > 5 && ch > 5) {
+          // First layout sub-tree-groups (directories)
+          if (r.children.size > 0) {
+            layoutPathTreeNode([...r.children.values()], cx, cy, cw, ch, ln, depth + 1);
+          }
+
+          // Then layout leaf graph nodes inside remaining space
+          // (only if there are no sub-groups — otherwise they fill the space)
+          if (r.children.size === 0 && r.graphNodes.length > 0) {
+            layoutLeafNodes(r.graphNodes, cx, cy, cw, ch, ln, depth + 1);
+          }
+        }
+      }
+    }
+
+    // Layout actual graph nodes (functions, types, etc.) as leaf cells
+    function layoutLeafNodes(graphNodes, x, y, w, h, parentLn, depth) {
+      const items = graphNodes.map(n => ({
+        id: n.id,
+        node: n,
+        weight: Math.max(1, descendantCounts.get(n.id) ?? 1),
+      }));
+      const rects = squarify(items, x, y, w, h);
+      const gap = Math.max(1, Math.min(4, Math.min(w, h) * 0.008));
+
+      for (let idx = 0; idx < rects.length; idx++) {
+        const r = rects[idx];
+        const gw = r.w - gap;
+        const gh = r.h - gap;
+        if (gw <= 1 || gh <= 1) continue;
+
+        const { parentToChildren: ptc } = treeData;
+        const hasChildren = (ptc.get(r.id) ?? []).length > 0;
+
         const ln = {
           id: r.id,
           kind: hasChildren ? 'tree-group' : 'leaf',
           x: r.x, y: r.y, w: gw, h: gh,
           label: r.node.name ?? '',
           node: r.node,
-          treeDepth: r.depth,
+          treeDepth: depth,
           parentTreeGroup: parentLn,
-          totalChildren: r.totalDescendants - 1,
+          totalChildren: (descendantCounts.get(r.id) ?? 1) - 1,
           isLeafGraphNode: !hasChildren,
-          treeNode: hasChildren ? { children: new Map(r.children.map(c => [c.id, c])), graphNodes: [] } : null,
+          treeNode: hasChildren ? { children: new Map(), graphNodes: [] } : null,
           childIndex: idx,
         };
         allLayoutNodes.push(ln);
         lnMap.set(ln.id, ln);
 
-        // Recursively layout children inside this rect with padding
+        // Layout children of graph nodes (e.g., functions inside a type)
         if (hasChildren) {
-          const pad = Math.max(4, Math.min(gw, gh) * 0.025);
-          const headerH = Math.max(12, Math.min(gw, gh) * 0.04);
-          const cx = r.x - gw / 2 + pad;
-          const cy = r.y - gh / 2 + pad + headerH;
-          const cw = gw - pad * 2;
-          const ch = gh - pad * 2 - headerH;
-          if (cw > 5 && ch > 5) {
-            layoutTree(r.children, cx, cy, cw, ch, ln);
+          const childIds = (ptc.get(r.id) ?? []);
+          const childNodes = childIds.map(cid => nodeById.get(cid)).filter(Boolean);
+          if (childNodes.length > 0) {
+            const cpad = Math.max(2, Math.min(gw, gh) * 0.02);
+            const cheader = Math.max(8, Math.min(gw, gh) * 0.03);
+            const ccx = r.x - gw / 2 + cpad;
+            const ccy = r.y - gh / 2 + cpad + cheader;
+            const ccw = gw - cpad * 2;
+            const cch = gh - cpad * 2 - cheader;
+            if (ccw > 3 && cch > 3) {
+              layoutLeafNodes(childNodes, ccx, ccy, ccw, cch, ln, depth + 1);
+            }
           }
         }
       }
@@ -318,26 +467,14 @@
 
     const startX = -layoutW / 2;
     const startY = -layoutH / 2;
-    layoutTree(rootTrees, startX, startY, layoutW, layoutH, null);
+    layoutPathTreeNode(topKids, startX, startY, layoutW, layoutH, null, 0);
 
     layoutNodes = allLayoutNodes;
     layoutNodeMap = lnMap;
 
-    // Only reset camera when data/breadcrumb changes, not on resize
     if (isDataChange) {
-      // Set initial zoom so top-level nodes appear in summary mode (~100-200px on screen)
-      const fitZoom = Math.min(W / layoutW, H / layoutH) * 0.9;
-
-      // If there are many root nodes (>20), zoom out further so they start as summaries
-      const rootCount = rootTrees.length;
-      let initialZoom = fitZoom;
-      if (rootCount > 20) {
-        const avgCellSize = Math.sqrt((layoutW * layoutH) / rootCount);
-        const targetScreenSize = 130;
-        initialZoom = Math.min(fitZoom, targetScreenSize / avgCellSize);
-      }
-
-      targetCam = { x: 0, y: 0, zoom: initialZoom };
+      const fitZoom = Math.min(W / layoutW, H / layoutH) * 0.85;
+      targetCam = { x: 0, y: 0, zoom: fitZoom };
       cam = { ...targetCam };
     }
     needsAnim = true;
@@ -632,14 +769,37 @@
     return s.x + hw > 0 && s.x - hw < W && s.y + hh > 0 && s.y - hh < H;
   }
 
+  // Pre-sorted layout nodes (sorted once on layout change, not every frame)
+  let sortedLayoutNodes = $state([]);
+  $effect(() => {
+    sortedLayoutNodes = [...layoutNodes].sort((a, b) => {
+      const aTree = a.kind === 'tree-group' ? 0 : 1;
+      const bTree = b.kind === 'tree-group' ? 0 : 1;
+      if (aTree !== bTree) return aTree - bTree;
+      return (a.treeDepth || 0) - (b.treeDepth || 0);
+    });
+  });
+
+  // Track canvas size to avoid unnecessary resize
+  let lastCanvasW = 0;
+  let lastCanvasH = 0;
+
   function drawFrame() {
     const canvas = canvasEl;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = W * dpr;
-    canvas.height = H * dpr;
-    ctx.scale(dpr, dpr);
+
+    // Only resize canvas buffer when dimensions actually change
+    const needsResize = canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr);
+    if (needsResize) {
+      canvas.width = Math.round(W * dpr);
+      canvas.height = Math.round(H * dpr);
+      lastCanvasW = W;
+      lastCanvasH = H;
+    }
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     // Background
     ctx.fillStyle = '#0f0f1a';
@@ -648,24 +808,19 @@
     // Dot grid
     drawDotGrid(ctx);
 
-    if (layoutNodes.length === 0) return;
-
-    // Sort: tree-groups by depth first, then leaves
-    const sorted = [...layoutNodes].sort((a, b) => {
-      const aTree = a.kind === 'tree-group' ? 0 : 1;
-      const bTree = b.kind === 'tree-group' ? 0 : 1;
-      if (aTree !== bTree) return aTree - bTree;
-      return (a.treeDepth || 0) - (b.treeDepth || 0);
-    });
+    if (sortedLayoutNodes.length === 0) return;
 
     // Draw edges first (below nodes)
     drawEdges(ctx);
 
-    // Draw nodes
-    for (const ln of sorted) {
+    // Draw nodes — with visibility culling
+    let drawnCount = 0;
+    for (const ln of sortedLayoutNodes) {
+      // Quick frustum check FIRST (cheapest)
+      if (!isVisible(ln)) continue;
+
       let op = nodeOpacity(ln);
       if (op < 0.01) continue;
-      if (!isVisible(ln)) continue;
 
       op *= filterOpacity(ln);
       if (op < 0.01) continue;
@@ -681,6 +836,8 @@
       if (connectedHighlight && ln.node) {
         if (!connectedHighlight.has(ln.node.id)) op *= 0.2;
       }
+
+      drawnCount++;
 
       ctx.save();
       ctx.globalAlpha = op;

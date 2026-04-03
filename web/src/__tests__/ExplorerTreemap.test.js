@@ -20,6 +20,7 @@ beforeEach(() => {
     fillText: vi.fn(),
     measureText: vi.fn(() => ({ width: 40 })),
     scale: vi.fn(),
+    setTransform: vi.fn(),
     save: vi.fn(),
     restore: vi.fn(),
     translate: vi.fn(),

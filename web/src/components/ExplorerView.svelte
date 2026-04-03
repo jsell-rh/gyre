@@ -465,8 +465,8 @@
       </div>
     {/if}
 
-    <!-- Control bar — shown when architecture tab is active + repo loaded -->
-    {#if selectedRepoId && explorerTab === 'architecture'}
+    <!-- Control bar — shown when architecture tab is active + repo loaded, but not when graph canvas is showing (canvas has its own toolbar) -->
+    {#if selectedRepoId && explorerTab === 'architecture' && !graph}
       <div class="concept-search-bar">
         <!-- Filter toggle -->
         <button
@@ -575,8 +575,8 @@
 
     <!-- Main content -->
     <div class="explorer-body">
-      <!-- Filter panel (collapsible left panel, per ui-navigation.md §3) -->
-      {#if explorerTab === 'architecture'}
+      <!-- Filter panel — hidden when graph canvas active (treemap has built-in filter toolbar) -->
+      {#if explorerTab === 'architecture' && !graph}
         <ExplorerFilterPanel visible={filterVisible} onfilterchange={onFilterChange} />
       {/if}
 
@@ -654,8 +654,8 @@
           </div>
         {/if}
 
-        <!-- Repo dependencies, risks, types, modules, timeline (below graph, architecture tab only) -->
-        {#if selectedRepoId && explorerTab === 'architecture' && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
+        <!-- Repo dependencies, risks, types, modules, timeline — hidden when graph canvas is active (canvas fills viewport) -->
+        {#if selectedRepoId && explorerTab === 'architecture' && !loading && !graph && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
           <div class="arch-insights-toggle">
             <button
               class="arch-insights-btn"
