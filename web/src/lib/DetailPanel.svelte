@@ -4301,7 +4301,7 @@
                       <span class="conversation-time" title={absoluteTime(item._time)}>{relativeTime(item._time) || formatDate(item._time)}</span>
                     </div>
                     {#if item.body}
-                      <p class="review-body">{item.body}</p>
+                      <div class="review-body review-body-md">{@html renderMarkdown(item.body)}</div>
                     {/if}
                   </div>
                 {/each}
@@ -7327,7 +7327,36 @@
     color: var(--color-text);
     margin: 0;
     line-height: 1.5;
-    white-space: pre-wrap;
+  }
+
+  .review-body-md :global(p) {
+    margin: 0 0 var(--space-2) 0;
+  }
+
+  .review-body-md :global(p:last-child) {
+    margin-bottom: 0;
+  }
+
+  .review-body-md :global(code) {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+    background: var(--color-surface-elevated);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  .review-body-md :global(pre) {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    overflow-x: auto;
+    font-size: var(--text-xs);
+  }
+
+  .review-body-md :global(ul), .review-body-md :global(ol) {
+    margin: 0 0 var(--space-2) 0;
+    padding-left: var(--space-4);
   }
 
   .comment-item {
