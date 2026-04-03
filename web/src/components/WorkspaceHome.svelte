@@ -1126,28 +1126,7 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Status hero — clickable status chips ── -->
-      {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-        <div class="ws-status-hero" data-testid="status-sentence">
-          {#if statusItems.length > 0}
-            <div class="status-chips">
-              {#each statusItems as item}
-                <button class="status-chip status-chip-{item.variant}" onclick={() => { wsTab = item.tab; userSelectedTab = true; browseExpanded = true; }}>
-                  <span class="status-chip-icon">{item.icon}</span>
-                  {item.text}
-                </button>
-              {/each}
-            </div>
-          {:else}
-            <p class="ws-status-sentence">{statusSentence}</p>
-          {/if}
-          {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
-            <p class="ws-briefing-inline">{briefingData.summary ?? briefingData.narrative}</p>
-          {/if}
-        </div>
-      {/if}
-
-      <!-- ── Pipeline + Actions: compact top bar ────────────────────── -->
+      <!-- ── Pipeline progress: the primary status summary ────────── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
         <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => {
@@ -1202,6 +1181,13 @@
             </span>
           {/if}
         </div>
+      {/if}
+
+      <!-- ── Briefing — one-line workspace summary ─────────────────── -->
+      {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
+        <p class="ws-briefing-inline" data-testid="briefing-inline">{briefingData.summary ?? briefingData.narrative}</p>
+      {:else if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && statusItems.length === 0}
+        <p class="ws-briefing-inline ws-briefing-idle">{statusSentence}</p>
       {/if}
 
       <!-- ── Decisions / Action Needed (compact, inline) ────────────── -->
@@ -2116,11 +2102,17 @@
 
   .ws-briefing-inline {
     font-size: var(--text-xs);
-    color: var(--color-text-muted);
+    color: var(--color-text-secondary);
     margin: 0;
+    padding: 0 var(--space-1);
     line-height: 1.4;
     font-style: italic;
     max-width: 700px;
+  }
+
+  .ws-briefing-idle {
+    color: var(--color-text-muted);
+    font-style: normal;
   }
 
   /* ── Status chips (clickable status items) ── */
