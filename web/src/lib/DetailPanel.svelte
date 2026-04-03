@@ -278,9 +278,10 @@
     if (!entity) expanded = false;
   });
 
-  // ── Spec preview for MR info tab ─────────────────────────────────────────────
+  // ── Spec preview + progress for MR info tab ──────────────────────────────────
   let mrSpecPreview = $state(null);
   let mrSpecPreviewLoading = $state(false);
+  let mrSpecProgress = $state(null);
 
   async function loadMrSpecPreview(specRef, repoId) {
     if (mrSpecPreview || mrSpecPreviewLoading) return;
@@ -288,10 +289,15 @@
     if (!specPath) return;
     mrSpecPreviewLoading = true;
     try {
-      const data = await api.specContent(specPath, repoId);
-      mrSpecPreview = data;
+      const [content, progress] = await Promise.all([
+        api.specContent(specPath, repoId).catch(() => null),
+        api.specProgress(specPath, repoId).catch(() => null),
+      ]);
+      mrSpecPreview = content;
+      mrSpecProgress = progress;
     } catch {
       mrSpecPreview = null;
+      mrSpecProgress = null;
     } finally {
       mrSpecPreviewLoading = false;
     }
@@ -384,6 +390,7 @@
       mrDeps = null;
       mrCommits = null;
       mrSpecPreview = null;
+      mrSpecProgress = null;
     }
     if (entity?.type === 'agent') {
       agentDetail = null;
@@ -2013,20 +2020,55 @@
                 </div>
               {/if}
 
-              <!-- Spec Preview (collapsible) -->
+              <!-- Spec Preview + Implementation Progress (collapsible) -->
               {#if mr.spec_ref}
                 {@const previewSpecPath = mr.spec_ref.split('@')[0]}
                 <details class="spec-preview-section" ontoggle={(e) => { if (e.target.open) loadMrSpecPreview(mr.spec_ref, mr.repository_id ?? mr.repo_id); }}>
                   <summary class="spec-preview-summary">
-                    <span class="progress-section-label">Spec: {previewSpecPath.split('/').pop()}</span>
+                    <span class="progress-section-label">Spec: {previewSpecPath.split('/').pop()?.replace(/\.md$/, '')}</span>
+                    {#if mrSpecProgress}
+                      {@const totalTasks = mrSpecProgress.total_tasks ?? mrSpecProgress.tasks?.length ?? 0}
+                      {@const doneTasks = mrSpecProgress.done_tasks ?? mrSpecProgress.tasks?.filter(t => t.status === 'done').length ?? 0}
+                      {#if totalTasks > 0}
+                        <span class="spec-progress-mini">
+                          <span class="spec-progress-bar-mini"><span class="spec-progress-fill-mini" style="width: {Math.round((doneTasks / totalTasks) * 100)}%"></span></span>
+                          {doneTasks}/{totalTasks} tasks
+                        </span>
+                      {/if}
+                    {/if}
                   </summary>
                   <div class="spec-preview-body">
                     {#if mrSpecPreviewLoading}
                       <Skeleton width="100%" height="60px" />
-                    {:else if mrSpecPreview?.content}
-                      <div class="spec-content-rendered spec-preview-rendered">{@html renderMarkdown(mrSpecPreview.content)}</div>
                     {:else}
-                      <p class="no-data no-data-sm">Spec content not available. <button class="entity-link" onclick={() => navigateTo('spec', previewSpecPath, { path: previewSpecPath, repo_id: mr.repository_id ?? mr.repo_id })}>Open spec →</button></p>
+                      {#if mrSpecProgress}
+                        {@const prog = mrSpecProgress}
+                        {@const totalTasks = prog.total_tasks ?? prog.tasks?.length ?? 0}
+                        {@const doneTasks = prog.done_tasks ?? prog.tasks?.filter(t => t.status === 'done').length ?? 0}
+                        {@const inProgressTasks = prog.in_progress_tasks ?? prog.tasks?.filter(t => t.status === 'in_progress').length ?? 0}
+                        {@const activeAgents = prog.active_agents ?? 0}
+                        {@const totalMrs = prog.total_mrs ?? prog.merge_requests?.length ?? 0}
+                        {@const mergedMrs = prog.merged_mrs ?? prog.merge_requests?.filter(m => m.status === 'merged').length ?? 0}
+                        <div class="spec-progress-summary">
+                          {#if totalTasks > 0}
+                            <span class="spec-prog-item"><strong>{doneTasks}</strong>/{totalTasks} tasks done</span>
+                          {/if}
+                          {#if inProgressTasks > 0}
+                            <span class="spec-prog-item spec-prog-active">{inProgressTasks} in progress</span>
+                          {/if}
+                          {#if activeAgents > 0}
+                            <span class="spec-prog-item spec-prog-active">{activeAgents} agent{activeAgents !== 1 ? 's' : ''} working</span>
+                          {/if}
+                          {#if totalMrs > 0}
+                            <span class="spec-prog-item">{mergedMrs}/{totalMrs} MRs merged</span>
+                          {/if}
+                        </div>
+                      {/if}
+                      {#if mrSpecPreview?.content}
+                        <div class="spec-content-rendered spec-preview-rendered">{@html renderMarkdown(mrSpecPreview.content)}</div>
+                      {:else}
+                        <p class="no-data no-data-sm">Spec content not available. <button class="entity-link" onclick={() => navigateTo('spec', previewSpecPath, { path: previewSpecPath, repo_id: mr.repository_id ?? mr.repo_id })}>Open spec →</button></p>
+                      {/if}
                     {/if}
                   </div>
                 </details>
@@ -6688,10 +6730,62 @@
     cursor: pointer;
     background: var(--color-surface-elevated);
     border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
   }
 
   .spec-preview-summary:hover {
     background: var(--color-surface-hover);
+  }
+
+  .spec-progress-mini {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: auto;
+  }
+
+  .spec-progress-bar-mini {
+    display: inline-block;
+    width: 40px;
+    height: 4px;
+    background: var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+
+  .spec-progress-fill-mini {
+    display: block;
+    height: 100%;
+    background: var(--color-success);
+    border-radius: var(--radius-sm);
+    transition: width var(--transition-normal);
+  }
+
+  .spec-progress-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding-bottom: var(--space-2);
+    margin-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+  }
+
+  .spec-prog-item {
+    color: var(--color-text-secondary);
+    padding: 2px var(--space-2);
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .spec-prog-active {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
   }
 
   .spec-preview-body {
