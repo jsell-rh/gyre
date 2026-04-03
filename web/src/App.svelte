@@ -307,6 +307,7 @@
   function goToRepoTab(tab) {
     repoTab = tab;
     entityDetail = null; // Clear entity detail when switching tabs
+    fadeContent();
     pushState({ mode: 'repo', slug: wsSlug(currentWorkspace), repoName: currentRepo?.name, tab });
   }
 
@@ -492,7 +493,7 @@
     if (params) {
       const url = new URL(window.location.href);
       for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-      window.history.pushState({}, '', url.toString());
+      window.history.replaceState(window.history.state, '', url.toString());
     }
     goToRepoTab(tab);
   });
