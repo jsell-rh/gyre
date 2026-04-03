@@ -16,8 +16,6 @@
   import { entityName, shortId, formatId, seedEntityName, seedFromEntities } from '../lib/entityNames.svelte.js';
   import { relativeTime, formatDuration } from '../lib/timeFormat.js';
   import { specStatusTooltip, taskStatusTooltip, mrStatusTooltip, agentStatusTooltip, SPEC_STATUS_ICONS } from '../lib/statusTooltips.js';
-  import ActionNeeded from './ActionNeeded.svelte';
-  import PipelineOverview from './PipelineOverview.svelte';
   import RepoCard from './RepoCard.svelte';
   import Modal from '../lib/Modal.svelte';
   import Icon from '../lib/Icon.svelte';
@@ -1018,44 +1016,11 @@
   {:else}
     <div class="focused-dashboard">
 
-      {#if statusSentence || (briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative))}
-        <div class="ws-status-line">
-          {#if statusSentence}
-            <span class="ws-status-text">{statusSentence}</span>
-          {/if}
-          {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
-            <span class="ws-briefing-text">{briefingData.summary ?? briefingData.narrative ?? ''}</span>
-          {/if}
+      <!-- Workspace pulse: compact one-line summary of what needs attention -->
+      {#if statusSentence}
+        <div class="ws-pulse">
+          <span class="ws-pulse-text">{statusSentence}</span>
         </div>
-      {/if}
-
-      <!-- Pipeline bar (compact, navigational — click stages to jump to entity tab) -->
-      <PipelineOverview
-        specs={pipelineSpecs}
-        tasks={pipelineTasks}
-        agents={pipelineAgents}
-        mrs={pipelineMrs}
-        budget={budgetData}
-        specsList={specs}
-        tasksList={wsTasks}
-        agentsList={wsAgents}
-        mrsList={wsMrs}
-        onStageClick={handlePipelineStageClick}
-        onApproveSpec={quickApproveSpec}
-        onRejectSpec={quickRejectSpec}
-        onEnqueueMr={quickEnqueueMr}
-        onNavigateSpec={navigateToSpec}
-      />
-
-      <!-- Action needed banner (collapses when empty) -->
-      {#if actionableNotifications.length > 0}
-        <ActionNeeded
-          items={notifications}
-          onApproveSpec={handleApproveSpec}
-          onRejectSpec={handleRejectSpec}
-          onRetryGate={handleRetry}
-          onDismiss={handleDismiss}
-        />
       {/if}
 
       <!-- ── Repos (compact, full-width) ────────────────────────────── -->
@@ -1750,28 +1715,18 @@
     width: 100%;
   }
 
-  /* ── Status sentence ────────────────────────────────────────────── */
-  .ws-status-line {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    align-items: baseline;
+  /* ── Workspace pulse ────────────────────────────────────────────── */
+  .ws-pulse {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
     font-size: var(--text-sm);
-    color: var(--color-text-muted);
-    line-height: 1.4;
-    margin: calc(-1 * var(--space-2)) 0 0 0;
   }
 
-  .ws-status-text {
+  .ws-pulse-text {
     font-weight: 500;
     color: var(--color-text-secondary);
-  }
-
-  .ws-briefing-text {
-    font-style: italic;
-    color: var(--color-text-muted);
-    flex: 1;
-    min-width: 200px;
   }
 
   /* ── Repos section ──────────────────────────────────────────────── */
