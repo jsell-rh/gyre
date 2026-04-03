@@ -43,6 +43,7 @@
   const stages = $derived([
     {
       id: 'specs',
+      icon: 'spec',
       label: 'Specs',
       count: specs.total,
       detail: specs.pending > 0 ? `${specs.pending} pending` : specs.approved > 0 ? `${specs.approved} approved` : '',
@@ -56,9 +57,10 @@
     },
     {
       id: 'tasks',
+      icon: 'task',
       label: 'Tasks',
       count: tasks.total,
-      detail: tasks.blocked > 0 ? `${tasks.blocked} blocked` : tasks.in_progress > 0 ? `${tasks.in_progress} active` : tasks.done > 0 ? `${tasks.done} done` : '',
+      detail: tasks.blocked > 0 ? `${tasks.blocked} blocked` : tasks.in_progress > 0 ? `${tasks.in_progress} active` : tasks.done > 0 ? `${tasks.done}/${tasks.total} done` : '',
       tooltip: tasks.blocked > 0
         ? `${tasks.blocked} task(s) blocked — may need dependency resolution or spec changes`
         : tasks.in_progress > 0
@@ -71,6 +73,7 @@
     },
     {
       id: 'agents',
+      icon: 'agent',
       label: 'Agents',
       count: agents.total,
       detail: agents.active > 0 ? `${agents.active} running` : '',
@@ -85,6 +88,7 @@
     },
     {
       id: 'mrs',
+      icon: 'git-merge',
       label: 'MRs',
       count: mrs.total,
       detail: mrs.failed_gates > 0 ? `${mrs.failed_gates} failed` : mrs.open > 0 ? `${mrs.open} open` : '',
@@ -100,6 +104,7 @@
     },
     {
       id: 'merged',
+      icon: 'check',
       label: 'Merged',
       count: mrs.merged,
       detail: '',
@@ -132,6 +137,7 @@
         onclick={() => handleStageClick(stage.id)}
         title={stage.tooltip}
       >
+        <span class="stage-icon"><Icon name={stage.icon} size={14} /></span>
         <span class="stage-count" style={stage.alert ? `color: ${stage.alertColor}` : ''}>{stage.count}</span>
         <span class="stage-label">{stage.label}</span>
         {#if stage.detail}
@@ -209,6 +215,15 @@
   .pipeline-stage.has-highlight {
     background: color-mix(in srgb, var(--color-success) 6%, transparent);
   }
+
+  .stage-icon {
+    display: flex;
+    align-items: center;
+    color: var(--color-text-muted);
+  }
+
+  .has-alert .stage-icon { color: inherit; }
+  .has-highlight .stage-icon { color: var(--color-success); }
 
   .stage-count {
     font-size: var(--text-xl);
