@@ -3088,7 +3088,7 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    padding: 6px var(--space-3);
     background: transparent;
     border: none;
     border-bottom: 1px solid var(--color-border);
