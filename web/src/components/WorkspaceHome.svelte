@@ -645,6 +645,20 @@
   // ── Pipeline section collapse state ──────────────────────────────
   let pipelineExpandedSections = $state({ specs: true, tasks: true, mrs: true, agents: true });
 
+  // Auto-collapse empty sections once data loads (only once, don't override user clicks)
+  let pipelineAutoCollapseApplied = $state(false);
+  $effect(() => {
+    if (pipelineAutoCollapseApplied) return;
+    if (specsLoading || tasksLoading || mrsLoading || agentsLoading) return;
+    pipelineAutoCollapseApplied = true;
+    pipelineExpandedSections = {
+      specs: specs.length > 0,
+      tasks: wsTasks.length > 0,
+      mrs: wsMrs.length > 0,
+      agents: wsAgents.length > 0,
+    };
+  });
+
   // ── Entity table search ──────────────────────────────────────────────
   let entitySearch = $state('');
 
