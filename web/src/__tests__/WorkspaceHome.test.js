@@ -52,10 +52,10 @@ describe('WorkspaceHome', () => {
   it('shows key sections when workspace is provided', () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    // New streamlined layout: PipelineOverview, Repos, Activity feed
+    // Streamlined layout: PipelineOverview, Repos, Entity/Activity tabs
     expect(container.querySelector('[data-testid="pipeline-overview"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="ws-tabbed-panel"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="browse-panel"]')).toBeTruthy();
   });
 
   it('renders pipeline overview with stage buttons', () => {
