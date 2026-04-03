@@ -53,16 +53,27 @@
       {/if}
     </div>
 
-    <!-- Compact stats + status in one row -->
+    <!-- What's happening now -->
+    {#if statusSummary}
+      <div class="repo-card-activity">
+        <span class="repo-activity-text repo-activity-{statusSummary.variant}">{statusSummary.text}</span>
+        {#if activeAgentNames.length > 0}
+          <span class="repo-activity-detail">{activeAgentNames.slice(0, 2).join(', ')}{activeAgentNames.length > 2 ? ` +${activeAgentNames.length - 2}` : ''}</span>
+        {/if}
+        {#if latestMr && latestMr.status === 'open'}
+          <span class="repo-activity-detail">MR: {latestMr.title ?? 'Untitled'}</span>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Compact stats -->
     <div class="repo-card-stats">
       {#if stats.specs > 0}<span class="repo-stat"><Icon name="spec" size={10} /> {stats.specs}</span>{/if}
       {#if stats.tasks > 0}<span class="repo-stat"><Icon name="task" size={10} /> {stats.tasks}</span>{/if}
       {#if stats.agents > 0}<span class="repo-stat repo-stat-active"><Icon name="agent" size={10} /> {stats.agents}</span>{/if}
       {#if stats.openMrs > 0}<span class="repo-stat"><Icon name="git-merge" size={10} /> {stats.openMrs}</span>{/if}
+      {#if stats.mrs > 0 && stats.openMrs === 0}<span class="repo-stat"><Icon name="git-merge" size={10} /> {stats.mrs} merged</span>{/if}
       {#if stats.failedGates > 0}<span class="repo-stat repo-stat-danger">&#10007; {stats.failedGates} gate{stats.failedGates !== 1 ? 's' : ''}</span>{/if}
-      {#if statusSummary}
-        <span class="repo-stat-summary repo-stat-{statusSummary.variant}">{statusSummary.text}</span>
-      {/if}
     </div>
   </button>
 {/if}
@@ -133,6 +144,30 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  /* Activity summary */
+  .repo-card-activity {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    font-size: 10px;
+  }
+
+  .repo-activity-text {
+    font-weight: 600;
+  }
+
+  .repo-activity-success { color: var(--color-success); }
+  .repo-activity-danger { color: var(--color-danger); }
+  .repo-activity-warning { color: var(--color-warning); }
+  .repo-activity-info { color: var(--color-info, #1e90ff); }
+
+  .repo-activity-detail {
+    color: var(--color-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
