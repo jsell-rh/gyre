@@ -969,7 +969,26 @@
     const mergedMrs = wsMrs.filter(m => m.status === 'merged').length;
     const openMrs = wsMrs.filter(m => m.status === 'open').length;
     const inProgressTasks = wsTasks.filter(t => t.status === 'in_progress').length;
-    return { approved, pending, activeAgentCount, mergedMrs, openMrs, inProgressTasks, totalTasks: wsTasks.length };
+    const failedGates = wsMrs.filter(m => m._gates?.failed > 0).length;
+    return { approved, pending, activeAgentCount, mergedMrs, openMrs, failedGates, inProgressTasks, totalTasks: wsTasks.length };
+  });
+
+  // ── Natural language status sentence ───────────────────────────────────
+  let statusSentence = $derived.by(() => {
+    const s = provenanceSummary;
+    const parts = [];
+    if (s.failedGates > 0) parts.push(`${s.failedGates} MR${s.failedGates !== 1 ? 's have' : ' has'} failed gates`);
+    if (s.pending > 0) parts.push(`${s.pending} spec${s.pending !== 1 ? 's need' : ' needs'} approval`);
+    if (s.openMrs > 0 && s.failedGates === 0) parts.push(`${s.openMrs} MR${s.openMrs !== 1 ? 's' : ''} ready to merge`);
+    if (s.activeAgentCount > 0) parts.push(`${s.activeAgentCount} agent${s.activeAgentCount !== 1 ? 's' : ''} implementing code`);
+    if (s.mergedMrs > 0 && parts.length < 3) parts.push(`${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged`);
+    if (parts.length === 0) {
+      if (specs.length === 0 && repos.length === 0) return 'Get started by creating a repo and pushing specs.';
+      if (specs.length === 0) return 'Push specs to your repo to start the autonomous pipeline.';
+      if (s.approved > 0 && s.totalTasks === 0) return 'Specs approved — waiting for task creation.';
+      return 'System idle — no active work.';
+    }
+    return parts.join('. ') + '.';
   });
 
   // ── Recent completions: merged MRs with provenance chain ──────────────
@@ -1066,6 +1085,11 @@
           {/if}
         </div>
       </header>
+
+      <!-- ── Status sentence — tells the user what matters right now ── -->
+      {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
+        <p class="ws-status-sentence" data-testid="status-sentence">{statusSentence}</p>
+      {/if}
 
       <!-- ── Pipeline + Actions: compact top bar ────────────────────── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
@@ -2077,6 +2101,14 @@
     background: var(--color-surface-elevated);
     border-color: var(--color-border-strong);
     color: var(--color-text);
+  }
+
+  /* ── Status sentence ────────────────────────────────────────────── */
+  .ws-status-sentence {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.4;
   }
 
   /* ── Two-column layout ──────────────────────────────────────────── */
