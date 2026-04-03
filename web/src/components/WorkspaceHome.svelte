@@ -1296,15 +1296,28 @@
                         return (order[a.status] ?? 3) - (order[b.status] ?? 3);
                       }) as task}
                         {@const taskStatus = task.status ?? 'backlog'}
+                        {@const taskAgent = wsAgents.find(a => (a.task_id ?? a.current_task_id) === task.id)}
                         <tr class="ws-entity-row" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })}>
                           <td class="entity-name-cell">
                             <Icon name="task" size={12} />
                             <span class="entity-primary-name">{task.title ?? 'Untitled'}</span>
                           </td>
                           <td>
-                            <span class="status-pill status-pill-{taskStatus}" title={taskStatusTooltip(taskStatus)}>
-                              {taskStatus}
-                            </span>
+                            <div class="status-with-context">
+                              <span class="status-pill status-pill-{taskStatus}" title={taskStatusTooltip(taskStatus)}>
+                                {taskStatus}
+                              </span>
+                              {#if taskStatus === 'in_progress' && taskAgent}
+                                <span class="status-context">Agent: {taskAgent.name ?? shortId(taskAgent.id)}</span>
+                              {:else if taskStatus === 'done'}
+                                {@const taskMr = wsMrs.find(m => m.task_id === task.id || m.spec_ref?.includes(task.spec_path))}
+                                {#if taskMr}
+                                  <span class="status-context">MR {taskMr.status}</span>
+                                {/if}
+                              {:else if taskStatus === 'blocked'}
+                                <span class="status-context">Waiting for dependency</span>
+                              {/if}
+                            </div>
                           </td>
                           <td>
                             {#if task.priority}
@@ -1362,13 +1375,24 @@
                             {/if}
                           </td>
                           <td>
-                            <span class="status-pill status-pill-{mrStatus}" title={mrStatusTooltip(mrStatus)}>
-                              {mrStatus}
-                            </span>
+                            <div class="status-with-context">
+                              <span class="status-pill status-pill-{mrStatus}" title={mrStatusTooltip(mrStatus)}>
+                                {mrStatus}
+                              </span>
+                              {#if mrStatus === 'open' && gates?.failed > 0}
+                                <span class="status-context status-context-danger">{gates.failed} gate{gates.failed !== 1 ? 's' : ''} failed</span>
+                              {:else if mrStatus === 'open' && mr.queue_position != null}
+                                <span class="status-context">Queue #{mr.queue_position + 1}</span>
+                              {:else if mrStatus === 'merged' && mr.merged_at}
+                                <span class="status-context">{relTime(mr.merged_at)}</span>
+                              {:else if mrStatus === 'open' && gates?.passed === gates?.total && gates?.total > 0}
+                                <span class="status-context status-context-success">All gates passed</span>
+                              {/if}
+                            </div>
                           </td>
                           <td>
                             {#if gates && gates.total > 0}
-                              <span class="gates-mini">
+                              <span class="gates-mini" title="{gates.passed} passed, {gates.failed} failed of {gates.total} gates">
                                 {#if gates.failed > 0}<span class="gate-fail-count">&#10007;{gates.failed}</span>{/if}
                                 {#if gates.passed > 0}<span class="gate-pass-count">&#10003;{gates.passed}</span>{/if}
                                 <span class="gate-total-count">/{gates.total}</span>
@@ -1431,10 +1455,24 @@
                             <span class="entity-primary-name">{agent.name ?? shortId(agent.id)}</span>
                           </td>
                           <td>
-                            <span class="status-pill status-pill-{agStatus}" title={agentStatusTooltip(agStatus)}>
-                              {#if agStatus === 'active'}<span class="status-pulse"></span>{/if}
-                              {agStatus}
-                            </span>
+                            <div class="status-with-context">
+                              <span class="status-pill status-pill-{agStatus}" title={agentStatusTooltip(agStatus)}>
+                                {#if agStatus === 'active'}<span class="status-pulse"></span>{/if}
+                                {agStatus}
+                              </span>
+                              {#if agStatus === 'idle'}
+                                {@const agentMr = wsMrs.find(m => m.author_agent_id === agent.id)}
+                                {#if agentMr}
+                                  <span class="status-context">MR: {agentMr.status}</span>
+                                {:else}
+                                  <span class="status-context">Work complete</span>
+                                {/if}
+                              {:else if agStatus === 'failed'}
+                                <span class="status-context status-context-danger">Check logs for details</span>
+                              {:else if agStatus === 'active' && agent.branch}
+                                <span class="status-context">on {agent.branch}</span>
+                              {/if}
+                            </div>
                           </td>
                           <td>
                             {#if agent.task_id ?? agent.current_task_id}
@@ -2232,6 +2270,25 @@
   .inline-action-rejected { color: var(--color-text-muted); }
 
   .inline-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* ── Status with context ───────────────────────────────────────────── */
+  .status-with-context {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .status-context {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+  }
+
+  .status-context-danger { color: var(--color-danger); }
+  .status-context-success { color: var(--color-success); }
 
   /* Sidebar styles removed — entity summaries moved to PipelineOverview expansion */
 
