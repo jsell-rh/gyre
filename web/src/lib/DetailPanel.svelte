@@ -529,28 +529,32 @@
           mrDetail = { ...mrDetail, _statusStory: events };
         } else {
           // Fallback: synthesize journey from MR fields so it's always visible
-          const story = [{ label: 'Created', variant: 'info', time: d?.created_at }];
+          const agentName = d?.author_agent_id ? sharedEntityName('agent', d.author_agent_id) : null;
+          const specName = d?.spec_ref?.split('@')[0]?.split('/').pop()?.replace(/\.md$/, '') ?? null;
+          const story = [{ label: 'Created', variant: 'info', time: d?.created_at, why: agentName ? `${agentName} completed implementation${specName ? ` of "${specName}"` : ''}` : 'Merge request opened' }];
           if (enrichedGates.length > 0) {
             const failed = enrichedGates.filter(g => g.status === 'Failed' || g.status === 'failed').length;
             const passed = enrichedGates.filter(g => g.status === 'Passed' || g.status === 'passed').length;
             const total = enrichedGates.length;
+            const failedNames = enrichedGates.filter(g => g.status === 'Failed' || g.status === 'failed').map(g => g.name ?? g.gate_name).filter(Boolean);
             if (failed > 0) {
-              story.push({ label: `${failed}/${total} gates failed`, variant: 'danger', time: null });
+              story.push({ label: `${failed}/${total} gates failed`, variant: 'danger', time: null, why: failedNames.length > 0 ? `Failed: ${failedNames.join(', ')}` : 'Quality gate(s) failed — merge blocked' });
             } else if (passed === total && total > 0) {
-              story.push({ label: `${total} gates passed`, variant: 'success', time: null });
+              story.push({ label: `${total} gates passed`, variant: 'success', time: null, why: `All quality gates passed (${enrichedGates.map(g => g.name ?? g.gate_name).filter(Boolean).join(', ') || 'tests, lint'})` });
             } else {
-              story.push({ label: `Gates: ${passed}/${total}`, variant: 'warning', time: null });
+              story.push({ label: `Gates: ${passed}/${total}`, variant: 'warning', time: null, why: `${passed} of ${total} gates have run` });
             }
           }
           if (d?.queue_position != null) {
-            story.push({ label: `Queued (#${d.queue_position + 1})`, variant: 'warning', time: null });
+            story.push({ label: `Queued (#${d.queue_position + 1})`, variant: 'warning', time: null, why: `Position ${d.queue_position + 1} in merge queue` });
           }
           if (d?.status === 'merged') {
-            story.push({ label: 'Merged', variant: 'success', time: d?.merged_at });
+            const sha = d?.merge_commit_sha ? d.merge_commit_sha.slice(0, 7) : null;
+            story.push({ label: 'Merged', variant: 'success', time: d?.merged_at, why: `Merged${sha ? ` as ${sha}` : ''} with signed attestation` });
           } else if (d?.status === 'closed') {
-            story.push({ label: 'Closed', variant: 'danger', time: d?.updated_at });
+            story.push({ label: 'Closed', variant: 'danger', time: d?.updated_at, why: 'Closed without merging' });
           } else {
-            story.push({ label: 'Open', variant: 'info', time: null });
+            story.push({ label: 'Open', variant: 'info', time: null, why: 'Ready to enqueue for merge' });
           }
           mrDetail = { ...mrDetail, _statusStory: story };
         }
@@ -1825,11 +1829,14 @@
                       <button
                         class="status-journey-node status-journey-node-{step.variant}"
                         class:status-journey-clickable={stepTab}
-                        title={stepTab ? `Click to view ${stepTab}${step.time ? ' — ' + absoluteTime(step.time) : ''}` : (step.time ? absoluteTime(step.time) : '')}
+                        title={step.why ?? (stepTab ? `Click to view ${stepTab}` : '') + (step.time ? (step.why || stepTab ? ' — ' : '') + absoluteTime(step.time) : '')}
                         onclick={() => { if (stepTab) activeTab = stepTab; }}
                       >
                         <span class="status-journey-dot"></span>
                         <span class="status-journey-label">{step.label}</span>
+                        {#if step.why}
+                          <span class="status-journey-why">{step.why}</span>
+                        {/if}
                         {#if step.time}
                           <span class="status-journey-time">{relativeTime(step.time) || formatDate(step.time)}</span>
                         {/if}
@@ -2321,6 +2328,18 @@
                   <dt>Running</dt><dd>{elapsed < 60 ? `${elapsed}m` : `${Math.round(elapsed / 60)}h ${elapsed % 60}m`}</dd>
                 {/if}
               </dl>
+
+              <!-- Conversation provenance (agent reasoning trail) -->
+              {#if ag.conversation_sha}
+                <div class="agent-container-info agent-conversation-link">
+                  <span class="progress-section-label">Agent Reasoning</span>
+                  <button class="entity-link" onclick={() => { activeTab = 'ask-why'; }} title="View the full conversation transcript of this agent's work">
+                    <code class="sha-badge mono">{ag.conversation_sha.slice(0, 7)}</code>
+                    <span class="att-conv-arrow">View agent reasoning transcript</span>
+                  </button>
+                  <p class="agent-conversation-desc">This agent's full LLM conversation is preserved for provenance and can be replayed.</p>
+                </div>
+              {/if}
 
               <!-- Task description (why this agent exists) -->
               {#if ag._taskTitle || ag._taskDescription}
@@ -7728,6 +7747,17 @@
     white-space: nowrap;
   }
 
+  .status-journey-why {
+    font-size: 10px;
+    color: var(--color-text-secondary);
+    text-align: center;
+    font-style: italic;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .status-journey-time {
     font-size: 10px;
     color: var(--color-text-muted);
@@ -7785,6 +7815,13 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+  }
+
+  .agent-conversation-desc {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
   }
 
   .trace-list-compact {
