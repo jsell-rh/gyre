@@ -44,9 +44,9 @@
 </script>
 
 {#if repo}
-  <button class="repo-card" class:repo-card-active={health === 'healthy'} class:repo-card-alert={health === 'gate' || health === 'gate_failure'} onclick={onclick} data-testid="repo-card">
+  <button class="repo-card" class:repo-card-active={health === 'healthy'} class:repo-card-alert={health === 'gate' || health === 'gate_failure'} onclick={onclick} data-testid="repo-card" title={statusSummary ? `${statusSummary.text}\n${statusSummary.why}` : h.label}>
     <div class="repo-card-header">
-      <span class="repo-card-health" style="color: {h.color}" title={h.label} aria-label={h.label}>{h.dot}</span>
+      <span class="repo-card-health" style="color: {h.color}" aria-label={h.label}>{h.dot}</span>
       <span class="repo-card-name">{repo.name}</span>
       {#if stats.last_activity}
         <span class="repo-card-time">{relativeTime(stats.last_activity)}</span>
@@ -60,8 +60,8 @@
       {#if stats.agents > 0}<span class="repo-stat repo-stat-active"><Icon name="agent" size={10} /> {stats.agents}</span>{/if}
       {#if stats.openMrs > 0}<span class="repo-stat"><Icon name="git-merge" size={10} /> {stats.openMrs}</span>{/if}
       {#if stats.failedGates > 0}<span class="repo-stat repo-stat-danger">&#10007; {stats.failedGates} gate{stats.failedGates !== 1 ? 's' : ''}</span>{/if}
-      {#if statusSummary && !stats.failedGates && !stats.agents}
-        <span class="repo-stat repo-stat-{statusSummary.variant}">{statusSummary.text}</span>
+      {#if statusSummary}
+        <span class="repo-stat-summary repo-stat-{statusSummary.variant}">{statusSummary.text}</span>
       {/if}
     </div>
   </button>
@@ -158,4 +158,10 @@
   .repo-stat-warning { color: var(--color-warning); }
   .repo-stat-info { color: var(--color-info, #1e90ff); }
   .repo-stat-success { color: var(--color-success); }
+
+  .repo-stat-summary {
+    font-size: 10px;
+    font-weight: 500;
+    margin-left: auto;
+  }
 </style>
