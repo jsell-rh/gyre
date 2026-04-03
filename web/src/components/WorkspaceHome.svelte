@@ -1020,9 +1020,40 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Status sentence: one-line "what's happening" ─────────── -->
-      {#if !specsLoading && !tasksLoading && statusSentence}
-        <p class="ws-status-sentence" data-testid="ws-status-sentence">{statusSentence}</p>
+      <!-- ── Pipeline progress: visual flow showing autonomous dev lifecycle ── -->
+      {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
+        <div class="pipeline-progress" data-testid="pipeline-progress">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { wsTab = 'specs'; userSelectedTab = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
+            <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
+            <span class="pipeline-stage-label">Specs</span>
+            {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
+          </button>
+          <span class="pipeline-arrow">→</span>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
+            <span class="pipeline-stage-count">{pipelineTasks.total}</span>
+            <span class="pipeline-stage-label">Tasks</span>
+            {#if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge">{pipelineTasks.in_progress} active</span>{/if}
+            {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked} blocked</span>{/if}
+          </button>
+          <span class="pipeline-arrow">→</span>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => { wsTab = 'agents'; userSelectedTab = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
+            <span class="pipeline-stage-count">{pipelineAgents.total}</span>
+            <span class="pipeline-stage-label">Agents</span>
+            {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active} running</span>{/if}
+          </button>
+          <span class="pipeline-arrow">→</span>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-warn={pipelineMrs.failed_gates > 0} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
+            <span class="pipeline-stage-count">{pipelineMrs.total}</span>
+            <span class="pipeline-stage-label">MRs</span>
+            {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates} failed</span>
+            {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge">{pipelineMrs.open} open</span>{/if}
+          </button>
+          <span class="pipeline-arrow">→</span>
+          <div class="pipeline-stage pipeline-stage-done pipeline-stage-terminal">
+            <span class="pipeline-stage-count">{pipelineMrs.merged}</span>
+            <span class="pipeline-stage-label">Merged</span>
+          </div>
+        </div>
       {/if}
 
       <!-- ── Decisions / Action Needed (top — most important) ──────── -->
@@ -1851,13 +1882,107 @@
     text-align: center;
   }
 
-  /* ── Status sentence ──────────────────────────────────────────── */
-  .ws-status-sentence {
+  /* ── Pipeline progress bar ─────────────────────────────────────── */
+  .pipeline-progress {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow-x: auto;
+  }
+
+  .pipeline-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: all var(--transition-fast);
+    min-width: 60px;
+    position: relative;
+  }
+
+  .pipeline-stage:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+  }
+
+  .pipeline-stage-terminal {
+    cursor: default;
+  }
+
+  .pipeline-stage-terminal:hover {
+    background: transparent;
+    border-color: transparent;
+  }
+
+  .pipeline-stage-count {
+    font-size: var(--text-lg);
+    font-weight: 700;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    line-height: 1;
+  }
+
+  .pipeline-stage-active .pipeline-stage-count {
+    color: var(--color-primary);
+  }
+
+  .pipeline-stage-done .pipeline-stage-count {
+    color: var(--color-success);
+  }
+
+  .pipeline-stage-warn .pipeline-stage-count {
+    color: var(--color-danger);
+  }
+
+  .pipeline-stage-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .pipeline-stage-badge {
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .pipeline-badge-warn {
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  }
+
+  .pipeline-badge-danger {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  }
+
+  .pipeline-badge-success {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 12%, transparent);
+  }
+
+  .pipeline-arrow {
+    color: var(--color-text-muted);
     font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-    margin: 0;
-    padding: var(--space-1) 0;
-    line-height: 1.4;
+    flex-shrink: 0;
+    padding: 0 2px;
+    opacity: 0.5;
   }
 
   /* ── Workspace briefing (inline) ─────────────────────────────────── */
