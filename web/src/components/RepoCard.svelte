@@ -6,9 +6,12 @@
    * Enhanced: shows latest activity summary and active work context.
    * Click navigates to repo mode.
    */
+  import { getContext } from 'svelte';
   import { relativeTime } from '../lib/timeFormat.js';
   import Badge from '../lib/Badge.svelte';
   import { entityName, shortId } from '../lib/entityNames.svelte.js';
+
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
   let {
     repo = null,
@@ -45,6 +48,15 @@
     <div class="repo-card-header">
       <span class="repo-card-health" style="color: {h.color}" title={h.label} aria-label={h.label}>{h.dot}</span>
       <span class="repo-card-name">{repo.name}</span>
+      <span class="repo-card-health-text" style="color: {h.color}">
+        {#if stats.failedGates > 0}
+          {stats.failedGates} gate failure{stats.failedGates !== 1 ? 's' : ''}
+        {:else if stats.agents > 0}
+          {stats.agents} agent{stats.agents !== 1 ? 's' : ''} running
+        {:else}
+          No activity
+        {/if}
+      </span>
       {#if stats.last_activity}
         <span class="repo-card-time">{relativeTime(stats.last_activity)}</span>
       {/if}
@@ -64,11 +76,30 @@
       </div>
     {/if}
 
+    <!-- Spec breakdown — show spec pipeline health -->
+    {#if specBreakdown && (specBreakdown.pending > 0 || specBreakdown.approved > 0 || specBreakdown.draft > 0)}
+      <div class="repo-card-spec-breakdown">
+        {#if specBreakdown.pending > 0}
+          <span class="spec-count spec-count-pending">{specBreakdown.pending} pending</span>
+        {/if}
+        {#if specBreakdown.approved > 0}
+          <span class="spec-count spec-count-approved">{specBreakdown.approved} approved</span>
+        {/if}
+        {#if specBreakdown.draft > 0}
+          <span class="spec-count spec-count-draft">{specBreakdown.draft} draft</span>
+        {/if}
+      </div>
+    {/if}
+
     <!-- Active agent names — show what agents are doing -->
     {#if activeAgentNames.length > 0}
       <div class="repo-card-agents">
         {#each activeAgentNames.slice(0, 3) as name}
-          <span class="agent-chip">{name}</span>
+          {#if goToEntityDetail}
+            <button class="agent-chip agent-chip-link" onclick={(e) => { e.stopPropagation(); goToEntityDetail('agent', name, { name }); }}>{name}</button>
+          {:else}
+            <span class="agent-chip">{name}</span>
+          {/if}
         {/each}
         {#if activeAgentNames.length > 3}
           <span class="agent-chip agent-chip-more">+{activeAgentNames.length - 3}</span>
@@ -80,26 +111,28 @@
     {#if latestMr}
       <div class="repo-card-latest">
         <Badge value={latestMr.status ?? 'open'} variant={latestMr.status === 'merged' ? 'success' : latestMr.status === 'closed' ? 'muted' : 'info'} />
-        <span class="latest-title">{latestMr.title ?? 'Untitled MR'}</span>
+        {#if goToEntityDetail}
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <span class="latest-title latest-title-link" role="link" tabindex="0" onclick={(e) => { e.stopPropagation(); goToEntityDetail('mr', latestMr.id, latestMr); }}>{latestMr.title ?? 'Untitled MR'}</span>
+        {:else}
+          <span class="latest-title">{latestMr.title ?? 'Untitled MR'}</span>
+        {/if}
+        {#if latestMr.gate_status}
+          <span class="latest-gate latest-gate-{latestMr.gate_status}">{latestMr.gate_status}</span>
+        {/if}
       </div>
     {/if}
 
     <!-- Compact stats row -->
     <div class="repo-card-stats">
       {#if stats.specs != null && stats.specs > 0}
-        <span class="stat-chip" title="{stats.specs} specs{specBreakdown?.approved ? `, ${specBreakdown.approved} approved` : ''}">
-          <span class="stat-icon" aria-hidden="true">S</span>{stats.specs}
-        </span>
+        <span class="stat-chip">{stats.specs} spec{stats.specs !== 1 ? 's' : ''}</span>
       {/if}
       {#if stats.tasks != null && stats.tasks > 0}
-        <span class="stat-chip" title="{stats.tasks} tasks">
-          <span class="stat-icon" aria-hidden="true">T</span>{stats.tasks}
-        </span>
+        <span class="stat-chip">{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}</span>
       {/if}
       {#if stats.mrs != null && stats.mrs > 0}
-        <span class="stat-chip" title="{stats.mrs} merge requests">
-          <span class="stat-icon" aria-hidden="true">M</span>{stats.mrs}
-        </span>
+        <span class="stat-chip">{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}</span>
       {/if}
     </div>
   </button>
@@ -160,6 +193,13 @@
     flex: 1;
   }
 
+  .repo-card-health-text {
+    font-size: 10px;
+    font-weight: 500;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
   .repo-card-time {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
@@ -213,6 +253,31 @@
     background: color-mix(in srgb, var(--color-info, #1e90ff) 8%, transparent);
   }
 
+  /* Spec breakdown */
+  .repo-card-spec-breakdown {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: 10px;
+    font-weight: 500;
+  }
+
+  .spec-count {
+    white-space: nowrap;
+  }
+
+  .spec-count-pending {
+    color: var(--color-warning);
+  }
+
+  .spec-count-approved {
+    color: var(--color-success);
+  }
+
+  .spec-count-draft {
+    color: var(--color-text-muted);
+  }
+
   /* Active agent chips */
   .repo-card-agents {
     display: flex;
@@ -231,6 +296,17 @@
     max-width: 120px;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .agent-chip-link {
+    cursor: pointer;
+    border: none;
+    font-family: inherit;
+  }
+
+  .agent-chip-link:hover {
+    background: color-mix(in srgb, var(--color-success) 20%, transparent);
+    text-decoration: underline;
   }
 
   .agent-chip-more {
@@ -256,6 +332,39 @@
     flex: 1;
   }
 
+  .latest-title-link {
+    cursor: pointer;
+  }
+
+  .latest-title-link:hover {
+    color: var(--color-primary);
+    text-decoration: underline;
+  }
+
+  .latest-gate {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .latest-gate-passed {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  }
+
+  .latest-gate-failed {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  }
+
+  .latest-gate-pending {
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  }
+
   /* Compact stats */
   .repo-card-stats {
     display: flex;
@@ -266,14 +375,7 @@
   .stat-chip {
     display: inline-flex;
     align-items: center;
-    gap: 2px;
     font-size: var(--text-xs);
     color: var(--color-text-muted);
-  }
-
-  .stat-icon {
-    font-size: 10px;
-    font-weight: 700;
-    opacity: 0.6;
   }
 </style>
