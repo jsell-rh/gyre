@@ -636,16 +636,7 @@
   // ── Activity filter + pagination ──────────────────────────────────────
   let activityFilter = $state('');
   let activityLimit = $state(10);
-  let browseExpanded = $state(false);
-  // Auto-expand browse when there are actionable items
-  $effect(() => {
-    if (browseExpanded) return; // don't collapse if user already expanded
-    if (specsLoading || tasksLoading || mrsLoading) return;
-    // Auto-expand if there are pending specs or failed gates — these need attention
-    if (pipelineSpecs.pending > 1 || pipelineMrs.failed_gates > 1 || pipelineTasks.blocked > 0) {
-      browseExpanded = true;
-    }
-  });
+  // browseExpanded removed — entity tabs are always visible
 
   let filteredActivity = $derived.by(() => {
     if (!activityFilter) return activityEvents;
@@ -1050,20 +1041,20 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Pipeline progress: visual flow showing autonomous dev lifecycle ── -->
+      <!-- ── Pipeline + Actions: compact top bar ────────────────────── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
         <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => {
             const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
             if (pendingSpecs.length === 1) { navigateToSpec(pendingSpecs[0]); return; }
-            wsTab = 'specs'; userSelectedTab = true; browseExpanded = true; setTimeout(() => document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }), 50);
+            wsTab = 'specs'; userSelectedTab = true;
           }}>
             <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
             <span class="pipeline-stage-label">Specs</span>
             {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; browseExpanded = true; setTimeout(() => document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }), 50); }}>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
             <span class="pipeline-stage-count">{pipelineTasks.total}</span>
             <span class="pipeline-stage-label">Tasks</span>
             {#if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge">{pipelineTasks.in_progress} active</span>{/if}
@@ -1073,7 +1064,7 @@
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => {
             const activeAgentList = wsAgents.filter(a => a.status === 'active');
             if (activeAgentList.length === 1) { nav('agent', activeAgentList[0].id, { repo_id: activeAgentList[0].repo_id, name: activeAgentList[0].name }); return; }
-            wsTab = 'agents'; userSelectedTab = true; browseExpanded = true; setTimeout(() => document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }), 50);
+            wsTab = 'agents'; userSelectedTab = true;
           }}>
             <span class="pipeline-stage-count">{pipelineAgents.total}</span>
             <span class="pipeline-stage-label">Agents</span>
@@ -1085,7 +1076,7 @@
             if (failedMrs.length === 1) { nav('mr', failedMrs[0].id, { repo_id: failedMrs[0].repository_id ?? failedMrs[0].repo_id, title: failedMrs[0].title, _openTab: 'gates' }); return; }
             const openMrs = wsMrs.filter(m => m.status === 'open');
             if (openMrs.length === 1 && failedMrs.length === 0) { nav('mr', openMrs[0].id, { repo_id: openMrs[0].repository_id ?? openMrs[0].repo_id, title: openMrs[0].title }); return; }
-            wsTab = 'mrs'; userSelectedTab = true; browseExpanded = true; setTimeout(() => document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }), 50);
+            wsTab = 'mrs'; userSelectedTab = true;
           }}>
             <span class="pipeline-stage-count">{pipelineMrs.total}</span>
             <span class="pipeline-stage-label">MRs</span>
@@ -1107,7 +1098,7 @@
         </div>
       {/if}
 
-      <!-- ── Decisions / Action Needed (top — most important) ──────── -->
+      <!-- ── Decisions / Action Needed (compact, inline) ────────────── -->
       {#if !decisionsLoading && actionableNotifications.length > 0}
         <section class="ws-decisions-section" data-testid="section-decisions">
           <div class="decisions-header">
@@ -1168,113 +1159,114 @@
         </section>
       {/if}
 
-      <!-- ── Briefing (LLM summary of recent changes) ──────────────── -->
-      {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
-        <section class="ws-briefing-section">
-          <div class="ws-briefing-body">
-            {#if briefingData.summary}
-              <p class="ws-briefing-text">{briefingData.summary}</p>
+      <!-- ── Main dashboard: two-column layout ─────────────────────── -->
+      <div class="dashboard-two-col">
+
+        <!-- Left: Repos + Recent Completions -->
+        <div class="dashboard-primary">
+          <!-- ── Briefing (LLM summary of recent changes) ──────────────── -->
+          {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
+            <section class="ws-briefing-section">
+              <div class="ws-briefing-body">
+                {#if briefingData.summary}
+                  <p class="ws-briefing-text">{briefingData.summary}</p>
+                {/if}
+                {#if briefingData.narrative && briefingData.narrative !== briefingData.summary}
+                  <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
+                {/if}
+              </div>
+            </section>
+          {/if}
+
+          <!-- ── Repos ────────────────────────────────────────────────── -->
+          <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
+            <div class="section-header">
+              <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
+              <div class="repo-header-actions">
+                <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
+                <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
+              </div>
+            </div>
+            {#if reposLoading}
+              <div class="skeleton-row"></div>
+            {:else if reposError}
+              <div class="error-row" role="alert">
+                <p class="error-text">{reposError}</p>
+                <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
+              </div>
+            {:else if repos.length === 0}
+              <div class="empty-state-guided" data-testid="repos-empty">
+                <p class="empty-text">{$t('workspace_home.repos_empty')}</p>
+                <div class="pipeline-guide">
+                  <span class="pipeline-step">1. Create a repo</span>
+                  <span class="pipeline-arrow">→</span>
+                  <span class="pipeline-step">2. Push specs</span>
+                  <span class="pipeline-arrow">→</span>
+                  <span class="pipeline-step">3. Approve specs</span>
+                  <span class="pipeline-arrow">→</span>
+                  <span class="pipeline-step">4. Agents implement</span>
+                  <span class="pipeline-arrow">→</span>
+                  <span class="pipeline-step">5. Gates verify & merge</span>
+                </div>
+              </div>
+            {:else}
+              <div class="repo-cards-grid">
+                {#each repos.slice().sort((a, b) => {
+                  const aStats = repoStats(a);
+                  const bStats = repoStats(b);
+                  if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
+                  const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
+                  const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
+                  return bTime - aTime;
+                }) as repo (repo.id)}
+                  <RepoCard
+                    {repo}
+                    health={repoHealth(repo)}
+                    stats={repoStats(repo)}
+                    activeAgentNames={repoActiveAgentNames(repo)}
+                    specBreakdown={repoSpecBreakdown(repo)}
+                    latestMr={repoLatestMr(repo)}
+                    onclick={() => onSelectRepo?.(repo)}
+                    onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
+                  />
+                {/each}
+              </div>
             {/if}
-            {#if briefingData.narrative && briefingData.narrative !== briefingData.summary}
-              <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
+
+            {#if newRepoOpen}
+              <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
+                <div class="inline-form-header">
+                  <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
+                  <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
+                </div>
+                <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
+                <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
+                {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
+                <div class="inline-form-actions">
+                  <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
+                  <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
+                </div>
+              </form>
             {/if}
-          </div>
-        </section>
-      {/if}
 
-      <!-- ── Repos: primary navigation ────────────────────────────── -->
-      <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
-        <div class="section-header">
-          <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
-          <div class="repo-header-actions">
-            <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
-            <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
-          </div>
-        </div>
-                {#if reposLoading}
-                  <div class="skeleton-row"></div>
-                {:else if reposError}
-                  <div class="error-row" role="alert">
-                    <p class="error-text">{reposError}</p>
-                    <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
-                  </div>
-                {:else if repos.length === 0}
-                  <div class="empty-state-guided" data-testid="repos-empty">
-                    <p class="empty-text">{$t('workspace_home.repos_empty')}</p>
-                    <div class="pipeline-guide">
-                      <span class="pipeline-step">1. Create a repo</span>
-                      <span class="pipeline-arrow">→</span>
-                      <span class="pipeline-step">2. Push specs</span>
-                      <span class="pipeline-arrow">→</span>
-                      <span class="pipeline-step">3. Approve specs</span>
-                      <span class="pipeline-arrow">→</span>
-                      <span class="pipeline-step">4. Agents implement</span>
-                      <span class="pipeline-arrow">→</span>
-                      <span class="pipeline-step">5. Gates verify & merge</span>
-                    </div>
-                  </div>
-                {:else}
-                  <div class="repo-cards-grid">
-                    {#each repos.slice().sort((a, b) => {
-                      const aStats = repoStats(a);
-                      const bStats = repoStats(b);
-                      if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
-                      const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
-                      const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
-                      return bTime - aTime;
-                    }) as repo (repo.id)}
-                      <RepoCard
-                        {repo}
-                        health={repoHealth(repo)}
-                        stats={repoStats(repo)}
-                        activeAgentNames={repoActiveAgentNames(repo)}
-                        specBreakdown={repoSpecBreakdown(repo)}
-                        latestMr={repoLatestMr(repo)}
-                        onclick={() => onSelectRepo?.(repo)}
-                        onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
-                      />
-                    {/each}
-                  </div>
-                {/if}
+            {#if importOpen}
+              <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
+                <div class="inline-form-header">
+                  <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
+                  <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
+                </div>
+                <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
+                <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
+                {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
+                <div class="inline-form-actions">
+                  <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
+                  <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
+                </div>
+              </form>
+            {/if}
+          </section>
 
-                {#if newRepoOpen}
-                  <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
-                    <div class="inline-form-header">
-                      <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
-                      <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
-                    </div>
-                    <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
-                    <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
-                    {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
-                    <div class="inline-form-actions">
-                      <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
-                      <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
-                    </div>
-                  </form>
-                {/if}
-
-                {#if importOpen}
-                  <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
-                    <div class="inline-form-header">
-                      <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
-                      <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
-                    </div>
-                    <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
-                    <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
-                    {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
-                    <div class="inline-form-actions">
-                      <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
-                      <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
-                    </div>
-                  </form>
-                {/if}
-
-      </section>
-
-      <!-- ── Two-column layout: Repos primary, Activity/Completions secondary ── -->
-      <div class="dashboard-columns">
-        <!-- Left column: Activity feed + Recent completions -->
-        <aside class="dashboard-sidebar">
+          <!-- ── Recent Completions (provenance chain) ──────────────── -->
           {#if !mrsLoading && recentCompletions.length > 0}
             <section class="ws-completions-section">
               <h3 class="completions-title">Recent Completions</h3>
@@ -1310,7 +1302,10 @@
               </div>
             </section>
           {/if}
-          <!-- Inline activity feed (replaces buried Activity tab) -->
+        </div>
+
+        <!-- Right: Activity feed (always visible) -->
+        <aside class="dashboard-sidebar">
           <section class="ws-activity-sidebar">
             <h3 class="completions-title">Activity</h3>
             {#if activityLoading}
@@ -1319,7 +1314,7 @@
               <p class="empty-text-compact">No recent activity</p>
             {:else}
               <div class="activity-timeline activity-timeline-compact">
-                {#each activityEvents.slice(0, 8) as event, i}
+                {#each activityEvents.slice(0, 12) as event, i}
                   {@const variant = activityVariant(event)}
                   {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
                   {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
@@ -1333,7 +1328,7 @@
                     }}
                   >
                     <div class="activity-dot activity-dot-{variant}"></div>
-                    {#if i < 7}<div class="activity-line"></div>{/if}
+                    {#if i < 11}<div class="activity-line"></div>{/if}
                     <div class="activity-content">
                       <div class="activity-main-row">
                         <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
@@ -1349,8 +1344,8 @@
                   </button>
                 {/each}
               </div>
-              {#if activityEvents.length > 8}
-                <button class="show-more-btn-compact" onclick={() => { wsTab = 'activity'; userSelectedTab = true; browseExpanded = true; browseExpanded = true; setTimeout(() => document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }), 50); }}>
+              {#if activityEvents.length > 12}
+                <button class="show-more-btn-compact" onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
                   View all activity ({activityEvents.length})
                 </button>
               {/if}
@@ -1359,53 +1354,42 @@
         </aside>
       </div>
 
-      <!-- ── Cross-repo browse: entity tabs (collapsible) ─────────────── -->
-      <div class="dashboard-flow">
-        <div class="ws-main-content" data-testid="browse-panel">
-          <button class="browse-toggle" onclick={() => { browseExpanded = !browseExpanded; }} aria-expanded={browseExpanded}>
-            <span class="browse-toggle-label">Explore workspace</span>
-            {#if !browseExpanded}
-              <span class="browse-toggle-counts">
-                {specs.length} specs · {wsTasks.length} tasks · {wsMrs.length} MRs · {wsAgents.length} agents
-              </span>
-            {/if}
-            <span class="browse-toggle-icon">{browseExpanded ? '−' : '+'}</span>
+      <!-- ── Cross-repo entity browse (always visible tabs) ──────────── -->
+      <div class="dashboard-flow" data-testid="browse-panel">
+        <nav class="ws-tab-bar" aria-label="Browse workspace entities">
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
+            Specs
+            {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
+            {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
           </button>
-          {#if browseExpanded}
-          <nav class="ws-tab-bar ws-tab-bar-secondary" aria-label="Browse workspace entities">
-            <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
-              Specs
-              {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
-              {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
+            Tasks
+            {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
+            {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
+            {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
+          </button>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
+            MRs
+            {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
+            {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
+            {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
+          </button>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
+            Agents
+            {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
+            {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
+          </button>
+          {#if mergeQueueItems.length > 0}
+            <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; }}>
+              Queue
+              <span class="ws-tab-badge ws-tab-badge-warn">{mergeQueueItems.length}</span>
             </button>
-            <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
-              Tasks
-              {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
-              {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
-              {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
-            </button>
-            <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
-              MRs
-              {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
-              {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
-              {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
-            </button>
-            <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
-              Agents
-              {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
-              {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
-            </button>
-            {#if mergeQueueItems.length > 0}
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; }}>
-                Queue
-                <span class="ws-tab-badge ws-tab-badge-warn">{mergeQueueItems.length}</span>
-              </button>
-            {/if}
-            <span class="ws-tab-spacer"></span>
-            <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
-              Activity
-            </button>
-          </nav>
+          {/if}
+          <span class="ws-tab-spacer"></span>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
+            Activity
+          </button>
+        </nav>
 
             <!-- ── Specs tab ──────────────────────────────────────────── -->
             {#if wsTab === 'specs'}
@@ -1959,8 +1943,6 @@
               </div>
             {/if}
 
-          {/if}<!-- browseExpanded -->
-        </div><!-- .ws-main-content -->
       </div><!-- .dashboard-flow -->
 
     </div><!-- .focused-dashboard -->
@@ -2018,16 +2000,23 @@
   }
 
   /* ── Two-column layout ──────────────────────────────────────────── */
-  .dashboard-columns {
+  .dashboard-two-col {
     display: grid;
     grid-template-columns: 1fr;
     gap: var(--space-3);
   }
 
   @media (min-width: 900px) {
-    .dashboard-columns {
-      grid-template-columns: 1fr;
+    .dashboard-two-col {
+      grid-template-columns: 1fr 280px;
     }
+  }
+
+  .dashboard-primary {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
   }
 
   .dashboard-sidebar {
@@ -2078,48 +2067,7 @@
     background: var(--color-surface-elevated);
   }
 
-  /* ── Browse toggle ────────────────────────────────────────────── */
-  .browse-toggle {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    cursor: pointer;
-    font-family: var(--font-body);
-    transition: all var(--transition-fast);
-  }
-
-  .browse-toggle:hover {
-    background: var(--color-surface-elevated);
-    border-color: var(--color-border-strong);
-  }
-
-  .browse-toggle-label {
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text-secondary);
-  }
-
-  .browse-toggle-counts {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-weight: 400;
-    flex: 1;
-    text-align: right;
-    padding-right: var(--space-2);
-  }
-
-  .browse-toggle-icon {
-    font-size: var(--text-base);
-    color: var(--color-text-muted);
-    font-weight: 700;
-    width: 20px;
-    text-align: center;
-  }
+  /* browse-toggle removed — entity tabs are always visible */
 
   /* ── Pipeline progress bar ─────────────────────────────────────── */
   .pipeline-progress {
