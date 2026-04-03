@@ -212,6 +212,14 @@
     return relativeTime(ts);
   }
 
+  function absTime(ts) {
+    if (!ts) return '';
+    try {
+      const d = new Date(typeof ts === 'number' ? (ts < 1e12 ? ts * 1000 : ts) : ts);
+      return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    } catch { return ''; }
+  }
+
   // Entity name resolution uses shared singleton cache
   function resolveEntityName(type, id) {
     return entityName(type, id);
@@ -810,7 +818,7 @@
                     <span class="ws-recent-event">
                       <span class="ws-recent-icon">{activityIcon(evt)}</span>
                       <span class="ws-recent-label">{activityLabel(evt)}</span>
-                      <span class="ws-recent-time">{relTime(evt.timestamp ?? evt.created_at)}</span>
+                      <span class="ws-recent-time" title={absTime(evt.timestamp ?? evt.created_at)}>{relTime(evt.timestamp ?? evt.created_at)}</span>
                     </span>
                   {/each}
                 </div>
@@ -870,7 +878,7 @@
                 <button class="cwh-activity-ws-badge cwh-activity-ws-link" onclick={(e) => { e.stopPropagation(); const ws = workspaces.find(w => w.id === event.workspace_id); if (ws) onSelectWorkspace?.(ws); }} title="Go to {wsName}">{wsName}</button>
               {/if}
               {#if event.timestamp ?? event.created_at}
-                <span class="cwh-activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                <span class="cwh-activity-time" title={absTime(event.timestamp ?? event.created_at)}>{relTime(event.timestamp ?? event.created_at)}</span>
               {/if}
             </div>
           </div>
@@ -951,7 +959,7 @@
                   <span class="secondary">—</span>
                 {/if}
               </td>
-              <td class="spec-activity">{relTime(spec.updated_at)}</td>
+              <td class="spec-activity" title={absTime(spec.updated_at)}>{relTime(spec.updated_at)}</td>
             </tr>
           {/each}
         </tbody>
