@@ -1020,14 +1020,16 @@
   {:else}
     <div class="focused-dashboard">
 
+      <!-- ── Status sentence: one-line "what's happening" ─────────── -->
+      {#if !specsLoading && !tasksLoading && statusSentence}
+        <p class="ws-status-sentence" data-testid="ws-status-sentence">{statusSentence}</p>
+      {/if}
+
       <!-- ── Decisions / Action Needed (top — most important) ──────── -->
       {#if !decisionsLoading && actionableNotifications.length > 0}
         <section class="ws-decisions-section" data-testid="section-decisions">
           <div class="decisions-header">
             <h2 class="decisions-title">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-                <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/>
-              </svg>
               Needs your attention
               <span class="decisions-count-badge">{actionableNotifications.length}</span>
             </h2>
@@ -1082,48 +1084,6 @@
             {/each}
           </div>
         </section>
-      {/if}
-
-      <!-- Workspace summary stats: compact overview of pipeline health -->
-      {#if !specsLoading && !tasksLoading && !agentsLoading && !mrsLoading}
-        <div class="ws-stats-row" data-testid="ws-stats-row">
-          <div class="ws-stat" title="{repos.length} repositories in this workspace">
-            <span class="ws-stat-value">{repos.length}</span>
-            <span class="ws-stat-label">Repos</span>
-          </div>
-          <div class="ws-stat" title="{pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending approval">
-            <span class="ws-stat-value">{specs.length}</span>
-            <span class="ws-stat-label">Specs</span>
-            {#if pipelineSpecs.pending > 0}<span class="ws-stat-alert">{pipelineSpecs.pending} pending</span>{/if}
-          </div>
-          <div class="ws-stat" title="{pipelineTasks.in_progress} in progress, {pipelineTasks.done} done of {wsTasks.length} total">
-            <span class="ws-stat-value">{wsTasks.length}</span>
-            <span class="ws-stat-label">Tasks</span>
-            {#if pipelineTasks.blocked > 0}<span class="ws-stat-danger">{pipelineTasks.blocked} blocked</span>{/if}
-          </div>
-          <div class="ws-stat" title="{pipelineAgents.active} active agents">
-            <span class="ws-stat-value">{wsAgents.length}</span>
-            <span class="ws-stat-label">Agents</span>
-            {#if pipelineAgents.active > 0}<span class="ws-stat-success">{pipelineAgents.active} running</span>{/if}
-          </div>
-          <div class="ws-stat" title="{pipelineMrs.merged} merged, {pipelineMrs.open} open">
-            <span class="ws-stat-value">{wsMrs.length}</span>
-            <span class="ws-stat-label">MRs</span>
-            {#if pipelineMrs.failed_gates > 0}<span class="ws-stat-danger">{pipelineMrs.failed_gates} failed gates</span>
-            {:else if pipelineMrs.merged > 0}<span class="ws-stat-success">{pipelineMrs.merged} merged</span>{/if}
-          </div>
-          {#if budgetData}
-            {@const budgetPct = budgetData.total_credits ? Math.round((budgetData.used_credits ?? 0) / budgetData.total_credits * 100) : null}
-            {#if budgetPct !== null}
-              <div class="ws-stat" title="Budget: {budgetPct}% used ({budgetData.used_credits} of {budgetData.total_credits} credits)">
-                <span class="ws-stat-value">{budgetPct}%</span>
-                <span class="ws-stat-label">Budget</span>
-                {#if budgetPct > 90}<span class="ws-stat-danger">critical</span>
-                {:else if budgetPct > 70}<span class="ws-stat-alert">high</span>{/if}
-              </div>
-            {/if}
-          {/if}
-        </div>
       {/if}
 
       <!-- ── Repos (compact, full-width) ────────────────────────────── -->
@@ -1224,45 +1184,35 @@
           <section class="ws-feed-panel" data-testid="browse-panel">
             <nav class="ws-tab-bar" aria-label="Development pipeline">
               <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
-                <Icon name="spec" size={12} />
                 Specs
                 {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
-                {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
+                {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
               </button>
-              <span class="ws-tab-arrow" aria-hidden="true">›</span>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
-                <Icon name="task" size={12} />
                 Tasks
                 {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
-                {#if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress} active</span>{/if}
-                {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked} blocked</span>{/if}
+                {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
+                {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
               </button>
-              <span class="ws-tab-arrow" aria-hidden="true">›</span>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
-                <Icon name="agent" size={12} />
                 Agents
                 {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
-                {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active} running</span>{/if}
+                {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
               </button>
-              <span class="ws-tab-arrow" aria-hidden="true">›</span>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
-                <Icon name="git-merge" size={12} />
                 MRs
                 {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
-                {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates} failed</span>
-                {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open} open</span>{/if}
+                {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
+                {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
               </button>
               {#if mergeQueueItems.length > 0}
-                <span class="ws-tab-arrow" aria-hidden="true">›</span>
                 <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; }}>
-                  <Icon name="git-merge" size={12} />
                   Queue
                   <span class="ws-tab-badge ws-tab-badge-warn">{mergeQueueItems.length}</span>
                 </button>
               {/if}
               <span class="ws-tab-spacer"></span>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
-                <Icon name="activity" size={12} />
                 Activity
               </button>
             </nav>
@@ -1888,58 +1838,13 @@
     width: 100%;
   }
 
-  /* ── Workspace stats row ────────────────────────────────────────── */
-  .ws-stats-row {
-    display: flex;
-    gap: var(--space-1);
-    flex-wrap: wrap;
-  }
-
-  .ws-stat {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-1);
-    padding: var(--space-1) var(--space-3);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    font-size: var(--text-xs);
-    flex: 1;
-    min-width: 80px;
-    white-space: nowrap;
-  }
-
-  .ws-stat-value {
-    font-weight: 700;
-    font-family: var(--font-mono);
-    color: var(--color-text);
+  /* ── Status sentence ──────────────────────────────────────────── */
+  .ws-status-sentence {
     font-size: var(--text-sm);
-  }
-
-  .ws-stat-label {
-    color: var(--color-text-muted);
-    font-weight: 500;
-  }
-
-  .ws-stat-alert {
-    color: var(--color-warning);
-    font-weight: 600;
-    font-size: 10px;
-    margin-left: auto;
-  }
-
-  .ws-stat-danger {
-    color: var(--color-danger);
-    font-weight: 600;
-    font-size: 10px;
-    margin-left: auto;
-  }
-
-  .ws-stat-success {
-    color: var(--color-success);
-    font-weight: 600;
-    font-size: 10px;
-    margin-left: auto;
+    color: var(--color-text-secondary);
+    margin: 0;
+    padding: var(--space-1) 0;
+    line-height: 1.4;
   }
 
   /* ── Workspace briefing (collapsible) ────────────────────────────── */
@@ -2549,15 +2454,6 @@
   .ws-tab-badge-warn { background: var(--color-warning); }
   .ws-tab-badge-danger { background: var(--color-danger); }
   .ws-tab-badge-success { background: var(--color-success); }
-
-  .ws-tab-arrow {
-    color: var(--color-text-muted);
-    font-size: var(--text-sm);
-    padding: 0 2px;
-    opacity: 0.4;
-    user-select: none;
-    flex-shrink: 0;
-  }
 
   .ws-tab-spacer {
     flex: 1;
