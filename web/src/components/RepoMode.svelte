@@ -575,32 +575,30 @@
                   <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<EntityLink type="spec" id={specPath} data={{ path: specPath, repo_id: mr.repository_id ?? repo?.id }} />{/if}</td>
                   <td>
                     {#if mr._gates?.total > 0}
-                      <button class="gate-cell-repo gate-cell-clickable" title={mr._gates.details?.map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}${g.duration_ms ? ' · ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}`).join('\n') ?? ''} onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
-                        <span class="gate-summary-compact">
-                          {#if mr._gates.failed > 0}
-                            <span class="gate-fail-compact">✗{mr._gates.failed}</span>
-                          {/if}
-                          {#if mr._gates.passed > 0}
-                            <span class="gate-pass-compact">✓{mr._gates.passed}</span>
-                          {/if}
-                          {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}
-                            <span class="gate-pending-compact">○{mr._gates.total - mr._gates.passed - mr._gates.failed}</span>
-                          {/if}
-                        </span>
-                        {#if mr._gates.details?.length > 0}
-                          <span class="gate-names-repo">
-                            {#each mr._gates.details as g}
-                              <span class="gate-tag gate-tag-{g.status}" title="{g.name}{g.command ? '\nCommand: ' + g.command : ''}{g.output ? '\nOutput: ' + g.output.slice(0, 200) : ''}">{g.name}{#if g.duration_ms} <span class="gate-duration-inline">{g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's'}</span>{/if}{#if g.required === false} <span class="gate-advisory-inline">(advisory)</span>{/if}</span>
-                            {/each}
-                          </span>
-                          {#if mr._gates.failed > 0}
-                            {@const failedGate = mr._gates.details.find(g => g.status === 'failed')}
-                            {#if failedGate?.output}
-                              <span class="gate-error-preview" title="Click to see full gate details">{failedGate.output.split('\n')[0]?.slice(0, 80)}{failedGate.output.length > 80 ? '...' : ''}</span>
-                            {/if}
-                          {/if}
+                      {@const sortedGates = [...(mr._gates.details ?? [])].sort((a, b) => {
+                        const order = { failed: 0, pending: 1, running: 1, passed: 2 };
+                        return (order[a.status] ?? 1) - (order[b.status] ?? 1);
+                      })}
+                      {@const visibleGates = sortedGates.slice(0, 3)}
+                      {@const overflowCount = sortedGates.length - 3}
+                      <span class="gate-names-repo">
+                        {#each visibleGates as g}
+                          <button class="gate-badge gate-badge-{g.status}" title="{g.name}{g.required === false ? ' (advisory)' : ''}{g.command ? '\nCommand: ' + g.command : ''}{g.output ? '\nOutput: ' + g.output.slice(0, 200) : ''}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
+                            <span class="gate-badge-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
+                            <span class="gate-badge-name">{g.name}</span>
+                            {#if g.required === false}<span class="gate-advisory-inline">(adv)</span>{/if}
+                          </button>
+                        {/each}
+                        {#if overflowCount > 0}
+                          <button class="gate-badge gate-badge-more" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }} title="{overflowCount} more gate{overflowCount > 1 ? 's' : ''}">+{overflowCount}</button>
                         {/if}
-                      </button>
+                      </span>
+                      {#if mr._gates.failed > 0}
+                        {@const failedGate = mr._gates.details?.find(g => g.status === 'failed')}
+                        {#if failedGate?.output}
+                          <span class="gate-error-preview" title="Click to see full gate details">{failedGate.output.split('\n')[0]?.slice(0, 80)}{failedGate.output.length > 80 ? '...' : ''}</span>
+                        {/if}
+                      {/if}
                     {/if}
                   </td>
                   <td>
@@ -1446,23 +1444,7 @@
   .diff-ins { color: var(--color-success); font-weight: 600; }
   .diff-del { color: var(--color-danger); font-weight: 600; }
 
-  /* Gate summary in MR table */
-  .gate-summary-compact {
-    display: inline-flex;
-    gap: var(--space-1);
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    white-space: nowrap;
-  }
-
-  .gate-pass-compact { color: var(--color-success); font-weight: 600; }
-  .gate-fail-compact { color: var(--color-danger); font-weight: 600; }
-  .gate-pending-compact { color: var(--color-text-muted); }
-
-  .gate-cell-repo { display: flex; flex-direction: column; gap: 2px; }
-  .gate-cell-clickable { background: none; border: 1px solid transparent; padding: var(--space-1); border-radius: var(--radius-sm); cursor: pointer; text-align: left; font: inherit; color: inherit; transition: border-color var(--transition-fast), background var(--transition-fast); }
-  .gate-cell-clickable:hover { border-color: var(--color-border); background: var(--color-surface-hover, rgba(0,0,0,0.03)); }
-  .gate-cell-clickable:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+  /* Gate badges in MR table */
 
   .th-action { width: 80px; }
   .cell-action { text-align: right; }
@@ -1493,17 +1475,35 @@
     font-weight: 600;
     font-family: var(--font-mono);
   }
-  .gate-names-repo { display: flex; flex-wrap: wrap; gap: 2px; }
-  .gate-tag {
-    font-size: 10px;
-    padding: 0 3px;
-    border-radius: var(--radius);
+  .gate-names-repo { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+  .gate-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
     white-space: nowrap;
-    line-height: 1.4;
+    line-height: 1.5;
+    border: 1px solid transparent;
+    background: none;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
   }
-  .gate-tag-passed { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
-  .gate-tag-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
-  .gate-tag-pending { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+  .gate-badge:hover { border-color: var(--color-border); }
+  .gate-badge:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+  .gate-badge-icon { font-weight: 700; }
+  .gate-badge-name { font-weight: 500; }
+  .gate-badge-passed { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .gate-badge-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .gate-badge-pending, .gate-badge-running { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+  .gate-badge-more {
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    font-size: 10px;
+    font-weight: 600;
+  }
 
   .gate-advisory-inline {
     font-size: 0.7em;
