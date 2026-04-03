@@ -968,6 +968,17 @@
     return { approved, pending, activeAgentCount, mergedMrs, openMrs, inProgressTasks, totalTasks: wsTasks.length };
   });
 
+  // ── Status sentence: one-line summary of workspace state ───────────────
+  let statusSentence = $derived.by(() => {
+    const parts = [];
+    if (pipelineSpecs.pending > 0) parts.push(`${pipelineSpecs.pending} spec${pipelineSpecs.pending !== 1 ? 's' : ''} awaiting approval`);
+    if (pipelineMrs.failed_gates > 0) parts.push(`${pipelineMrs.failed_gates} MR${pipelineMrs.failed_gates !== 1 ? 's' : ''} with failed gates`);
+    if (pipelineAgents.active > 0) parts.push(`${pipelineAgents.active} agent${pipelineAgents.active !== 1 ? 's' : ''} running`);
+    if (pipelineMrs.open > 0 && pipelineMrs.failed_gates === 0) parts.push(`${pipelineMrs.open} open MR${pipelineMrs.open !== 1 ? 's' : ''}`);
+    if (pipelineTasks.blocked > 0) parts.push(`${pipelineTasks.blocked} blocked task${pipelineTasks.blocked !== 1 ? 's' : ''}`);
+    return parts.join(' · ');
+  });
+
   // ── Load all data when workspace changes ───────────────────────────────
   $effect(() => {
     void workspace?.id;
@@ -1007,17 +1018,10 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Status sentence: one-line summary of workspace state ──── -->
-      {@const statusParts = []}
-      {@const _s1 = pipelineSpecs.pending > 0 ? statusParts.push(`${pipelineSpecs.pending} spec${pipelineSpecs.pending !== 1 ? 's' : ''} awaiting approval`) : 0}
-      {@const _s2 = pipelineMrs.failed_gates > 0 ? statusParts.push(`${pipelineMrs.failed_gates} MR${pipelineMrs.failed_gates !== 1 ? 's' : ''} with failed gates`) : 0}
-      {@const _s3 = pipelineAgents.active > 0 ? statusParts.push(`${pipelineAgents.active} agent${pipelineAgents.active !== 1 ? 's' : ''} running`) : 0}
-      {@const _s4 = pipelineMrs.open > 0 && pipelineMrs.failed_gates === 0 ? statusParts.push(`${pipelineMrs.open} open MR${pipelineMrs.open !== 1 ? 's' : ''}`) : 0}
-      {@const _s5 = pipelineTasks.blocked > 0 ? statusParts.push(`${pipelineTasks.blocked} blocked task${pipelineTasks.blocked !== 1 ? 's' : ''}`) : 0}
-      {#if statusParts.length > 0 || (briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative))}
+      {#if statusSentence || (briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative))}
         <div class="ws-status-line">
-          {#if statusParts.length > 0}
-            <span class="ws-status-text">{statusParts.join(' · ')}</span>
+          {#if statusSentence}
+            <span class="ws-status-text">{statusSentence}</span>
           {/if}
           {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
             <span class="ws-briefing-text">{briefingData.summary ?? briefingData.narrative ?? ''}</span>
