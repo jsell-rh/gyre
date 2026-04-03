@@ -1389,16 +1389,22 @@
 
       <!-- ── Cross-repo entity browse (collapsible — opens on pipeline click) ── -->
       <div class="dashboard-flow" class:dashboard-flow-collapsed={!browseExpanded} data-testid="browse-panel">
-        <button class="browse-section-toggle" onclick={() => { browseExpanded = !browseExpanded; }} aria-expanded={browseExpanded}>
+        <button class="browse-section-toggle" onclick={() => { browseExpanded = !browseExpanded; }} aria-expanded={browseExpanded} title="Browse all specs, tasks, MRs, and agents across repos">
           <span class="browse-toggle-chevron" class:browse-toggle-open={browseExpanded}>&#9656;</span>
-          <span class="browse-toggle-label">Cross-repo details</span>
+          <span class="browse-toggle-label">All entities</span>
           {#if !browseExpanded}
-            <span class="browse-toggle-hint">
-              {#if pipelineSpecs.pending > 0}{pipelineSpecs.pending} specs pending{/if}
-              {#if pipelineAgents.active > 0}{pipelineAgents.active > 0 && pipelineSpecs.pending > 0 ? ' · ' : ''}{pipelineAgents.active} agents active{/if}
-              {#if pipelineMrs.failed_gates > 0}{(pipelineAgents.active > 0 || pipelineSpecs.pending > 0) ? ' · ' : ''}{pipelineMrs.failed_gates} gates failed{/if}
-              {#if pipelineMrs.open > 0 && pipelineMrs.failed_gates === 0}{(pipelineAgents.active > 0 || pipelineSpecs.pending > 0) ? ' · ' : ''}{pipelineMrs.open} MRs open{/if}
-            </span>
+            {@const hints = []}
+            {@const _ = (() => {
+              if (pipelineSpecs.pending > 0) hints.push(`${pipelineSpecs.pending} specs pending`);
+              if (pipelineAgents.active > 0) hints.push(`${pipelineAgents.active} agents active`);
+              if (pipelineMrs.failed_gates > 0) hints.push(`${pipelineMrs.failed_gates} gates failed`);
+              if (pipelineMrs.open > 0 && pipelineMrs.failed_gates === 0) hints.push(`${pipelineMrs.open} MRs open`);
+            })()}
+            {#if hints.length > 0}
+              <span class="browse-toggle-hint">{hints.join(' · ')}</span>
+            {:else}
+              <span class="browse-toggle-hint browse-toggle-hint-muted">{specs.length} specs · {wsTasks.length} tasks · {wsMrs.length} MRs · {wsAgents.length} agents</span>
+            {/if}
           {/if}
         </button>
         {#if browseExpanded}
@@ -2652,6 +2658,10 @@
     font-weight: 400;
     color: var(--color-text-muted);
     margin-left: auto;
+  }
+
+  .browse-toggle-hint-muted {
+    opacity: 0.6;
   }
 
   /* ── Queue list (inline in entity panel tab) ──────────────────────── */
