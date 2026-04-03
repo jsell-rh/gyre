@@ -13,6 +13,7 @@
   import { api } from '../lib/api.js';
   import { entityName, shortId } from '../lib/entityNames.svelte.js';
   import { relativeTime } from '../lib/timeFormat.js';
+  import { taskStatusTooltip, mrStatusTooltip, agentStatusTooltip } from '../lib/statusTooltips.js';
   import Badge from '../lib/Badge.svelte';
   import EntityLink from '../lib/EntityLink.svelte';
   import ExplorerView from './ExplorerView.svelte';
@@ -558,7 +559,7 @@
             <tbody>
               {#each sortedFilteredTasks as task}
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('task', task.id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('task', task.id, task); }}>
-                  <td title={task.status === 'blocked' ? `Blocked${task.depends_on?.length ? ` by ${task.depends_on.length} task(s)` : ''}` : task.status === 'in_progress' && task.assigned_to ? `In progress — assigned to agent` : task.status === 'done' ? 'Completed' : task.status === 'backlog' ? 'Awaiting assignment' : ''}><Badge value={task.status ?? 'backlog'} variant={taskStatusVariant(task.status)} /></td>
+                  <td title={taskStatusTooltip(task)}><Badge value={task.status ?? 'backlog'} variant={taskStatusVariant(task.status)} /></td>
                   <td class="cell-title">{task.title ?? 'Untitled task'}</td>
                   <td>{#if task.priority}<Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />{/if}</td>
                   <td class="cell-type">{task.task_type ?? ''}</td>
@@ -632,7 +633,7 @@
             <tbody>
               {#each repoMrs as mr}
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('mr', mr.id, mr); }}>
-                  <td title={mr.queue_position != null ? `Position ${mr.queue_position + 1} in merge queue — gates will run before merge` : mr.status === 'merged' ? `Merged${mr.merge_commit_sha ? ' at ' + mr.merge_commit_sha.slice(0, 7) : ''}` : mr.status === 'open' ? 'Open — ready to enqueue for merge' : mr.status === 'closed' ? 'Closed without merging' : ''}><Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} />{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
+                  <td title={mrStatusTooltip(mr)}><Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} />{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
                   <td class="cell-title">{mr.title ?? 'Untitled MR'}</td>
                   <td class="cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
                   <td class="cell-mono">{#if mr.author_agent_id}<EntityLink type="agent" id={mr.author_agent_id} />{:else}{''}{/if}</td>
@@ -719,7 +720,7 @@
                 {@const elapsedSec = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
                 {@const totalTokens = (agent.usage?.input_tokens ?? 0) + (agent.usage?.output_tokens ?? 0) + (agent.tokens_used ?? 0)}
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('agent', agent.id, agent); }}>
-                  <td>
+                  <td title={agentStatusTooltip(agent)}>
                     <Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : (agent.status === 'failed' || agent.status === 'dead') ? 'danger' : 'muted'} />
                     <span class="agent-status-explain">{#if agent.status === 'active' && elapsedSec != null}Running for {humanDuration(elapsedSec)}{:else if (agent.status === 'completed' || agent.status === 'idle') && completedDur != null}Completed in {humanDuration(completedDur)}{:else if agent.status === 'failed' && completedDur != null}Failed after {humanDuration(completedDur)}{/if}</span>
                   </td>
