@@ -1432,6 +1432,7 @@
                         <th>Diff</th>
                         <th>Spec</th>
                         <th>Updated</th>
+                        <th class="th-actions"></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1457,7 +1458,7 @@
                           </td>
                           <td>
                             <div class="status-with-context">
-                              <span class="status-pill status-pill-{mrStatus}" title={mrStatusTooltip(mrStatus)}>
+                              <span class="status-pill status-pill-{mrStatus}" title={mrStatusTooltip(mr)}>
                                 {mrStatus}
                               </span>
                               {#if mrStatus === 'open' && gates?.failed > 0}
@@ -1501,6 +1502,13 @@
                             {/if}
                           </td>
                           <td class="entity-time">{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
+                          <td class="td-actions">
+                            {#if mrStatus === 'open' && mr.queue_position == null && mrEnqueueStates[mr.id] !== 'queued'}
+                              <button class="inline-action-btn inline-action-approve" onclick={(e) => quickEnqueueMr(mr, e)} disabled={mrEnqueueStates[mr.id] === 'loading'} title="Enqueue for merge">Enqueue</button>
+                            {:else if mrEnqueueStates[mr.id] === 'queued'}
+                              <span class="inline-action-done">Queued</span>
+                            {/if}
+                          </td>
                         </tr>
                       {/each}
                     </tbody>
