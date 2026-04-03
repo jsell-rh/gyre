@@ -607,10 +607,8 @@
   });
 
   // ── Workspace-level entity tab ──────────────────────────────────────
-  // Default to specs tab — the starting point of the autonomous dev pipeline
-  let wsTab = $state('specs');
-  // Entity tables are always visible — they ARE the workspace home
-  let browseExpanded = $state(true);
+  // Default to overview tab — shows repos, briefing, and completions
+  let wsTab = $state('overview');
   // Track whether user has manually selected a tab (don't auto-switch after that)
   let userSelectedTab = $state(false);
 
@@ -619,11 +617,13 @@
     if (userSelectedTab) return;
     // Wait until at least specs+tasks are loaded
     if (specsLoading || tasksLoading) return;
+    // If there are actionable items, jump to the relevant tab
     if (pipelineSpecs.pending > 0) wsTab = 'specs';
-    else if (pipelineMrs.open > 0 || pipelineMrs.failed_gates > 0) wsTab = 'mrs';
-    else if (pipelineTasks.in_progress > 0 || pipelineTasks.blocked > 0) wsTab = 'tasks';
+    else if (pipelineMrs.failed_gates > 0) wsTab = 'mrs';
     else if (pipelineAgents.active > 0) wsTab = 'agents';
-    // else leave on default (specs)
+    else if (pipelineMrs.open > 0) wsTab = 'mrs';
+    else if (pipelineTasks.in_progress > 0 || pipelineTasks.blocked > 0) wsTab = 'tasks';
+    // else stay on overview
   });
 
   // ── Activity filter + pagination ──────────────────────────────────────
@@ -1150,165 +1150,13 @@
         </section>
       {/if}
 
-      <!-- ── Repos (compact, full-width) ────────────────────────────── -->
-      <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
-        <div class="section-header">
-          <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
-          <div class="repo-header-actions">
-            <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
-            <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
-            {#if goToAgentRules}
-              <button class="section-btn section-btn-subtle" onclick={goToAgentRules} title="Configure agent personas, principles, and standards">Agent Rules</button>
-            {/if}
-            {#if goToWorkspaceSettings}
-              <button class="section-btn section-btn-subtle" onclick={goToWorkspaceSettings} title="Workspace settings: trust level, budget, members">Settings</button>
-            {/if}
-          </div>
-        </div>
-        {#if reposLoading}
-          <div class="skeleton-row"></div>
-        {:else if reposError}
-          <div class="error-row" role="alert">
-            <p class="error-text">{reposError}</p>
-            <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
-          </div>
-        {:else if repos.length === 0}
-          <div class="empty-state-guided" data-testid="repos-empty">
-            <p class="empty-text">{$t('workspace_home.repos_empty')}</p>
-            <div class="pipeline-guide">
-              <span class="pipeline-step">1. Create a repo</span>
-              <span class="pipeline-arrow">→</span>
-              <span class="pipeline-step">2. Push specs</span>
-              <span class="pipeline-arrow">→</span>
-              <span class="pipeline-step">3. Approve specs</span>
-              <span class="pipeline-arrow">→</span>
-              <span class="pipeline-step">4. Agents implement</span>
-              <span class="pipeline-arrow">→</span>
-              <span class="pipeline-step">5. Gates verify & merge</span>
-            </div>
-          </div>
-        {:else}
-          <div class="repo-cards-grid">
-            {#each repos.slice().sort((a, b) => {
-              const aStats = repoStats(a);
-              const bStats = repoStats(b);
-              if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
-              const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
-              const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
-              return bTime - aTime;
-            }) as repo (repo.id)}
-              <RepoCard
-                {repo}
-                health={repoHealth(repo)}
-                stats={repoStats(repo)}
-                activeAgentNames={repoActiveAgentNames(repo)}
-                specBreakdown={repoSpecBreakdown(repo)}
-                latestMr={repoLatestMr(repo)}
-                onclick={() => onSelectRepo?.(repo)}
-                onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
-              />
-            {/each}
-          </div>
-        {/if}
-
-        {#if newRepoOpen}
-          <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
-            <div class="inline-form-header">
-              <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
-              <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
-            </div>
-            <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
-            <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
-            {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
-            <div class="inline-form-actions">
-              <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
-              <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
-            </div>
-          </form>
-        {/if}
-
-        {#if importOpen}
-          <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
-            <div class="inline-form-header">
-              <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
-              <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
-            </div>
-            <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
-            <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
-            {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
-            <div class="inline-form-actions">
-              <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
-              <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
-            </div>
-          </form>
-        {/if}
-      </section>
-
-      <!-- Workspace briefing (AI-generated summary) — shown above entity tables for visibility -->
-      {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
-        <section class="ws-briefing-section">
-          <div class="ws-briefing-body">
-            {#if briefingData.summary}
-              <p class="ws-briefing-text">{briefingData.summary}</p>
-            {/if}
-            {#if briefingData.narrative && briefingData.narrative !== briefingData.summary}
-              <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
-            {/if}
-          </div>
-        </section>
-      {/if}
-
-      <!-- ── Recent Completions: end-to-end provenance chains ── -->
-      {#if !mrsLoading && recentCompletions.length > 0}
-        <section class="ws-completions-section">
-          <h3 class="completions-title">Recent Completions</h3>
-          <div class="completions-list">
-            {#each recentCompletions as c}
-              <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
-                <div class="completion-chain">
-                  {#if c.specName}
-                    <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
-                    <span class="completion-arrow">→</span>
-                  {/if}
-                  {#if c.agentName}
-                    <span class="completion-node completion-agent" title="Agent: {c.agentName}">{c.agentName}</span>
-                    <span class="completion-arrow">→</span>
-                  {/if}
-                  <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title?.length > 40 ? c.mr.title.slice(0, 37) + '...' : c.mr.title ?? 'Untitled'}</span>
-                  <span class="completion-arrow">→</span>
-                  <span class="completion-node completion-merged">Merged</span>
-                </div>
-                <div class="completion-meta">
-                  {#if c.gates?.total > 0}
-                    <span class="completion-gates">{c.gates.passed}/{c.gates.total} gates</span>
-                  {/if}
-                  {#if c.repoName}
-                    <span class="completion-repo">{c.repoName}</span>
-                  {/if}
-                  {#if c.mergedAt}
-                    <span class="completion-time">{relTime(c.mergedAt)}</span>
-                  {/if}
-                </div>
-              </button>
-            {/each}
-          </div>
-        </section>
-      {/if}
-
-      <!-- ── Entity tables + Activity + Merge Queue (collapsible) ── -->
+      <!-- ── Main content: tabbed navigation ── -->
       <div class="dashboard-flow">
-          <details class="ws-feed-details" data-testid="browse-panel" open={repos.length === 0 || actionableNotifications.length > 0 || pipelineAgents.active > 0 || pipelineMrs.failed_gates > 0}>
-            <summary class="ws-feed-summary">
-              <span class="ws-feed-summary-title">Pipeline Details</span>
-              <span class="ws-feed-summary-counts">
-                {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending} pending specs</span>{/if}
-                {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active} agents</span>{/if}
-                {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates} failed gates</span>{/if}
-                {#if pipelineMrs.open > 0}<span class="pipeline-stage-badge">{pipelineMrs.open} open MRs</span>{/if}
-              </span>
-            </summary>
-          <section class="ws-feed-panel">
-            <nav class="ws-tab-bar" aria-label="Development pipeline">
+          <div class="ws-main-content" data-testid="browse-panel">
+            <nav class="ws-tab-bar" aria-label="Workspace navigation">
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'overview'} onclick={() => { wsTab = 'overview'; userSelectedTab = true; }} title="Repos, briefing, and recent completions">
+                Overview
+              </button>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }} title="Specifications define what agents build. Approve specs to start the pipeline.">
                 Specs
                 {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
@@ -1343,8 +1191,159 @@
               </button>
             </nav>
 
+            <!-- ── Overview tab ──────────────────────────────────────── -->
+            {#if wsTab === 'overview'}
+              <div class="feed-body overview-body">
+                {#if !decisionsLoading && actionableNotifications.length === 0 && !specsLoading && (specs.length > 0 || wsTasks.length > 0)}
+                  <div class="ws-all-clear" data-testid="all-clear">All clear — no items need your attention</div>
+                {/if}
+
+                {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
+                  <section class="ws-briefing-section">
+                    <div class="ws-briefing-body">
+                      {#if briefingData.summary}
+                        <p class="ws-briefing-text">{briefingData.summary}</p>
+                      {/if}
+                      {#if briefingData.narrative && briefingData.narrative !== briefingData.summary}
+                        <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
+                      {/if}
+                    </div>
+                  </section>
+                {/if}
+
+                {#if !mrsLoading && recentCompletions.length > 0}
+                  <section class="ws-completions-section">
+                    <h3 class="completions-title">Recent Completions</h3>
+                    <div class="completions-list">
+                      {#each recentCompletions as c}
+                        <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
+                          <div class="completion-chain">
+                            {#if c.specName}
+                              <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
+                              <span class="completion-arrow">→</span>
+                            {/if}
+                            {#if c.agentName}
+                              <span class="completion-node completion-agent" title="Agent: {c.agentName}">{c.agentName}</span>
+                              <span class="completion-arrow">→</span>
+                            {/if}
+                            <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title?.length > 40 ? c.mr.title.slice(0, 37) + '...' : c.mr.title ?? 'Untitled'}</span>
+                            <span class="completion-arrow">→</span>
+                            <span class="completion-node completion-merged">Merged</span>
+                          </div>
+                          <div class="completion-meta">
+                            {#if c.gates?.total > 0}
+                              <span class="completion-gates">{c.gates.passed}/{c.gates.total} gates</span>
+                            {/if}
+                            {#if c.repoName}
+                              <span class="completion-repo">{c.repoName}</span>
+                            {/if}
+                            {#if c.mergedAt}
+                              <span class="completion-time">{relTime(c.mergedAt)}</span>
+                            {/if}
+                          </div>
+                        </button>
+                      {/each}
+                    </div>
+                  </section>
+                {/if}
+
+              <!-- ── Repos (compact, full-width) ────────────────────────────── -->
+              <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
+                <div class="section-header">
+                  <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
+                  <div class="repo-header-actions">
+                    <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
+                    <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
+                    {#if goToAgentRules}
+                      <button class="section-btn section-btn-subtle" onclick={goToAgentRules} title="Configure agent personas, principles, and standards">Agent Rules</button>
+                    {/if}
+                    {#if goToWorkspaceSettings}
+                      <button class="section-btn section-btn-subtle" onclick={goToWorkspaceSettings} title="Workspace settings: trust level, budget, members">Settings</button>
+                    {/if}
+                  </div>
+                </div>
+                {#if reposLoading}
+                  <div class="skeleton-row"></div>
+                {:else if reposError}
+                  <div class="error-row" role="alert">
+                    <p class="error-text">{reposError}</p>
+                    <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
+                  </div>
+                {:else if repos.length === 0}
+                  <div class="empty-state-guided" data-testid="repos-empty">
+                    <p class="empty-text">{$t('workspace_home.repos_empty')}</p>
+                    <div class="pipeline-guide">
+                      <span class="pipeline-step">1. Create a repo</span>
+                      <span class="pipeline-arrow">→</span>
+                      <span class="pipeline-step">2. Push specs</span>
+                      <span class="pipeline-arrow">→</span>
+                      <span class="pipeline-step">3. Approve specs</span>
+                      <span class="pipeline-arrow">→</span>
+                      <span class="pipeline-step">4. Agents implement</span>
+                      <span class="pipeline-arrow">→</span>
+                      <span class="pipeline-step">5. Gates verify & merge</span>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="repo-cards-grid">
+                    {#each repos.slice().sort((a, b) => {
+                      const aStats = repoStats(a);
+                      const bStats = repoStats(b);
+                      if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
+                      const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
+                      const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
+                      return bTime - aTime;
+                    }) as repo (repo.id)}
+                      <RepoCard
+                        {repo}
+                        health={repoHealth(repo)}
+                        stats={repoStats(repo)}
+                        activeAgentNames={repoActiveAgentNames(repo)}
+                        specBreakdown={repoSpecBreakdown(repo)}
+                        latestMr={repoLatestMr(repo)}
+                        onclick={() => onSelectRepo?.(repo)}
+                        onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
+                      />
+                    {/each}
+                  </div>
+                {/if}
+
+                {#if newRepoOpen}
+                  <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
+                    <div class="inline-form-header">
+                      <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
+                      <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
+                    </div>
+                    <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
+                    <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
+                    {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
+                    <div class="inline-form-actions">
+                      <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
+                      <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
+                    </div>
+                  </form>
+                {/if}
+
+                {#if importOpen}
+                  <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
+                    <div class="inline-form-header">
+                      <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
+                      <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
+                    </div>
+                    <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
+                    <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
+                    {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
+                    <div class="inline-form-actions">
+                      <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
+                      <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
+                    </div>
+                  </form>
+                {/if}
+              </section>
+              </div>
+
             <!-- ── Specs tab ──────────────────────────────────────────── -->
-            {#if wsTab === 'specs'}
+            {:else if wsTab === 'specs'}
               <div class="feed-body">
                 {#if specsLoading}
                   <div class="skeleton-row"></div>
@@ -1891,9 +1890,8 @@
                 {/if}
               </div>
             {/if}
-          </section>
 
-        </details>
+        </div><!-- .ws-main-content -->
       </div><!-- .dashboard-flow -->
 
     </div><!-- .focused-dashboard -->
@@ -2647,55 +2645,21 @@
   }
 
 
-  /* ── Collapsible feed details ────────────────────── */
-  .ws-feed-details {
+  /* ── Main content area (always visible) ────────────────────── */
+  .ws-main-content {
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     background: var(--color-surface);
     overflow: hidden;
+    flex: 1;
+    min-height: 0;
   }
 
-  .ws-feed-summary {
+  .overview-body {
     display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    cursor: pointer;
-    user-select: none;
-    list-style: none;
-    background: var(--color-surface-elevated);
-    transition: background var(--transition-fast);
-  }
-
-  .ws-feed-summary::-webkit-details-marker { display: none; }
-
-  .ws-feed-summary::before {
-    content: '▸';
-    font-size: 10px;
-    color: var(--color-text-muted);
-    transition: transform var(--transition-fast);
-    flex-shrink: 0;
-  }
-
-  .ws-feed-details[open] > .ws-feed-summary::before {
-    transform: rotate(90deg);
-  }
-
-  .ws-feed-summary:hover {
-    background: color-mix(in srgb, var(--color-primary) 4%, var(--color-surface-elevated));
-  }
-
-  .ws-feed-summary-title {
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text);
-  }
-
-  .ws-feed-summary-counts {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    margin-left: auto;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-3);
   }
 
   /* ── Activity feed (full-width) ──────────────────── */
