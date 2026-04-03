@@ -1830,8 +1830,8 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-4);
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-6);
     max-width: 1200px;
     margin: 0 auto;
     width: 100%;
@@ -2377,7 +2377,8 @@
   }
 
   .feed-body {
-    max-height: calc(100vh - 320px);
+    max-height: calc(100vh - 280px);
+    min-height: 200px;
     overflow-y: auto;
   }
 
