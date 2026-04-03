@@ -623,16 +623,15 @@
   });
 
   // ── Workspace-level entity tab ──────────────────────────────────────
-  // Default to specs tab for cross-repo browsing
-  let wsTab = $state('specs');
+  // Default to repos tab — the primary view for workspace home
+  let wsTab = $state('repos');
   // Track whether user has manually selected a tab (don't auto-switch after that)
   let userSelectedTab = $state(false);
-  // Entity browse section starts collapsed — opens when user clicks pipeline stage or tab
-  let browseExpanded = $state(false);
+  // Browse section is always expanded — no toggle needed
+  let browseExpanded = $state(true);
 
-  // Auto-select the most relevant tab for when the user opens the browse section,
-  // but do NOT auto-expand — the pipeline + decisions already surface actionable items,
-  // and auto-expanding pushes repos (the most important content) off-screen.
+  // Auto-select the most relevant tab, but only before user interacts.
+  // Repos is the default for a calm state; switch to actionable tabs when needed.
   $effect(() => {
     if (userSelectedTab) return;
     if (specsLoading || tasksLoading) return;
@@ -641,6 +640,7 @@
     else if (pipelineAgents.active > 0) { wsTab = 'agents'; }
     else if (pipelineMrs.open > 0) { wsTab = 'mrs'; }
     else if (pipelineTasks.in_progress > 0 || pipelineTasks.blocked > 0) { wsTab = 'tasks'; }
+    else { wsTab = 'repos'; }
   });
 
   // ── Entity table search ──────────────────────────────────────────────
@@ -1121,14 +1121,14 @@
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} title="{pipelineSpecs.total} total: {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending{pipelineSpecs.pending > 0 ? ' — click to review' : ''}" onclick={() => {
             const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
             if (pendingSpecs.length === 1) { navigateToSpec(pendingSpecs[0]); return; }
-            wsTab = 'specs'; userSelectedTab = true; browseExpanded = true;
+            wsTab = 'specs'; userSelectedTab = true;
           }}>
             <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
             <span class="pipeline-stage-label">Specs</span>
             {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} title="{pipelineTasks.total} total: {pipelineTasks.done} done, {pipelineTasks.in_progress} active, {pipelineTasks.blocked} blocked" onclick={() => { wsTab = 'tasks'; userSelectedTab = true; browseExpanded = true; }}>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} title="{pipelineTasks.total} total: {pipelineTasks.done} done, {pipelineTasks.in_progress} active, {pipelineTasks.blocked} blocked" onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
             <span class="pipeline-stage-count">{pipelineTasks.total}</span>
             <span class="pipeline-stage-label">Tasks</span>
             {#if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge">{pipelineTasks.in_progress} active</span>{/if}
@@ -1138,7 +1138,7 @@
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} title="{pipelineAgents.total} total: {pipelineAgents.active} running{pipelineAgents.active > 0 ? ' — click to see agent details' : ''}" onclick={() => {
             const activeAgentList = wsAgents.filter(a => a.status === 'active');
             if (activeAgentList.length === 1) { nav('agent', activeAgentList[0].id, { repo_id: activeAgentList[0].repo_id, name: activeAgentList[0].name }); return; }
-            wsTab = 'agents'; userSelectedTab = true; browseExpanded = true;
+            wsTab = 'agents'; userSelectedTab = true;
           }}>
             <span class="pipeline-stage-count">{pipelineAgents.total}</span>
             <span class="pipeline-stage-label">Agents</span>
@@ -1150,7 +1150,7 @@
             if (failedMrs.length === 1) { nav('mr', failedMrs[0].id, { repo_id: failedMrs[0].repository_id ?? failedMrs[0].repo_id, title: failedMrs[0].title, _openTab: 'gates' }); return; }
             const openMrs = wsMrs.filter(m => m.status === 'open');
             if (openMrs.length === 1 && failedMrs.length === 0) { nav('mr', openMrs[0].id, { repo_id: openMrs[0].repository_id ?? openMrs[0].repo_id, title: openMrs[0].title }); return; }
-            wsTab = 'mrs'; userSelectedTab = true; browseExpanded = true;
+            wsTab = 'mrs'; userSelectedTab = true;
           }}>
             <span class="pipeline-stage-count">{pipelineMrs.total}</span>
             <span class="pipeline-stage-label">MRs</span>
@@ -1254,150 +1254,40 @@
         </section>
       {/if}
 
-      <!-- ── Main dashboard: single-column layout ──────────────────── -->
-      <div class="dashboard-main">
-
-          <!-- ── Repos ────────────────────────────────────────────────── -->
-          <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
-            <div class="section-header section-header-repos">
-              <h2 class="section-title section-title-sm" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
-              <div class="repo-header-actions">
-                <button class="section-btn section-btn-compact" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">+ New</button>
-                <button class="section-btn section-btn-compact" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">Import</button>
-              </div>
-            </div>
-            {#if reposLoading}
-              <div class="skeleton-row"></div>
-            {:else if reposError}
-              <div class="error-row" role="alert">
-                <p class="error-text">{reposError}</p>
-                <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
-              </div>
-            {:else if repos.length === 0}
-              <div class="empty-state-guided" data-testid="repos-empty">
-                <p class="empty-text">{$t('workspace_home.repos_empty')}</p>
-                <div class="pipeline-guide">
-                  <span class="pipeline-step">1. Create a repo</span>
-                  <span class="pipeline-arrow">→</span>
-                  <span class="pipeline-step">2. Push specs</span>
-                  <span class="pipeline-arrow">→</span>
-                  <span class="pipeline-step">3. Approve specs</span>
-                  <span class="pipeline-arrow">→</span>
-                  <span class="pipeline-step">4. Agents implement</span>
-                  <span class="pipeline-arrow">→</span>
-                  <span class="pipeline-step">5. Gates verify & merge</span>
-                </div>
-              </div>
-            {:else}
-              <div class="repo-cards-grid">
-                {#each repos.slice().sort((a, b) => {
-                  const aStats = repoStats(a);
-                  const bStats = repoStats(b);
-                  if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
-                  const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
-                  const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
-                  return bTime - aTime;
-                }) as repo (repo.id)}
-                  <RepoCard
-                    {repo}
-                    health={repoHealth(repo)}
-                    stats={repoStats(repo)}
-                    activeAgentNames={repoActiveAgentNames(repo)}
-                    activeAgents={wsAgents.filter(a => a.repo_id === repo.id && a.status === 'active')}
-                    failedMrs={wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m._gates?.failed > 0)}
-                    specBreakdown={repoSpecBreakdown(repo)}
-                    latestMr={repoLatestMr(repo)}
-                    onclick={() => onSelectRepo?.(repo)}
-                    onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
-                  />
-                {/each}
-              </div>
-            {/if}
-
-            {#if newRepoOpen}
-              <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
-                <div class="inline-form-header">
-                  <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
-                  <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
-                </div>
-                <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
-                <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
-                {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
-                <div class="inline-form-actions">
-                  <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
-                  <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
-                </div>
-              </form>
-            {/if}
-
-            {#if importOpen}
-              <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
-                <div class="inline-form-header">
-                  <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
-                  <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
-                </div>
-                <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
-                <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
-                {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
-                <div class="inline-form-actions">
-                  <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
-                  <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
-                </div>
-              </form>
-            {/if}
-          </section>
-
-      </div>
-
-      <!-- ── Cross-repo entity browse (collapsible — opens on pipeline click) ── -->
-      <div class="dashboard-flow" class:dashboard-flow-collapsed={!browseExpanded} data-testid="browse-panel">
-        <button class="browse-section-toggle" onclick={() => { browseExpanded = !browseExpanded; }} aria-expanded={browseExpanded} title="Browse all specs, tasks, MRs, and agents across repos">
-          <span class="browse-toggle-chevron" class:browse-toggle-open={browseExpanded}>&#9656;</span>
-          <span class="browse-toggle-label">Browse workspace</span>
-          {#if !browseExpanded}
-            {@const hints = []}
-            {@const _ = (() => {
-              if (pipelineSpecs.pending > 0) hints.push(`${pipelineSpecs.pending} specs pending`);
-              if (pipelineAgents.active > 0) hints.push(`${pipelineAgents.active} agents active`);
-              if (pipelineMrs.failed_gates > 0) hints.push(`${pipelineMrs.failed_gates} gates failed`);
-              if (pipelineMrs.open > 0 && pipelineMrs.failed_gates === 0) hints.push(`${pipelineMrs.open} MRs open`);
-            })()}
-            {#if hints.length > 0}
-              <span class="browse-toggle-hint">{hints.join(' · ')}</span>
-            {:else}
-              <span class="browse-toggle-hint browse-toggle-hint-muted">{specs.length} specs · {wsTasks.length} tasks · {wsMrs.length} MRs · {wsAgents.length} agents</span>
-            {/if}
-          {/if}
-        </button>
-        {#if browseExpanded}
-        <nav class="ws-tab-bar" aria-label="Browse workspace entities">
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; browseExpanded = true; }}>
+      <!-- ── Main workspace content: tabbed view (repos + entity browse) ── -->
+      <div class="dashboard-flow" data-testid="browse-panel">
+        <nav class="ws-tab-bar" aria-label="Workspace navigation" data-testid="section-repos">
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'repos'} onclick={() => { wsTab = 'repos'; userSelectedTab = true; }}>
+            Repos
+            {#if !reposLoading}<span class="ws-tab-count">{repos.length}</span>{/if}
+          </button>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
             Specs
             {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
             {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; browseExpanded = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
             Tasks
             {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
             {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
             {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; browseExpanded = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
             MRs
             {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
             {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
             {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; browseExpanded = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
             Agents
             {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
             {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
           </button>
           <span class="ws-tab-spacer"></span>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; browseExpanded = true; }}>
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
             Activity
           </button>
-          {#if wsTab !== 'activity' && wsTab !== 'queue'}
+          {#if wsTab !== 'activity' && wsTab !== 'queue' && wsTab !== 'repos'}
             <input
               class="entity-search-input"
               type="text"
@@ -1407,6 +1297,94 @@
             />
           {/if}
         </nav>
+
+            <!-- ── Repos tab ──────────────────────────────────────────── -->
+            {#if wsTab === 'repos'}
+              <div class="feed-body">
+                {#if reposLoading}
+                  <div class="skeleton-row"></div>
+                {:else if reposError}
+                  <div class="error-row" role="alert">
+                    <p class="error-text">{reposError}</p>
+                    <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
+                  </div>
+                {:else if repos.length === 0}
+                  <div class="empty-state-guided" data-testid="repos-empty">
+                    <p class="empty-text">{$t('workspace_home.repos_empty')}</p>
+                    <div class="pipeline-guide">
+                      <span class="pipeline-step">1. Create a repo</span>
+                      <span class="pipeline-arrow">→</span>
+                      <span class="pipeline-step">2. Push specs</span>
+                      <span class="pipeline-arrow">→</span>
+                      <span class="pipeline-step">3. Approve specs</span>
+                      <span class="pipeline-arrow">→</span>
+                      <span class="pipeline-step">4. Agents implement</span>
+                      <span class="pipeline-arrow">→</span>
+                      <span class="pipeline-step">5. Gates verify & merge</span>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="repo-header-actions">
+                    <button class="section-btn section-btn-compact" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">+ New</button>
+                    <button class="section-btn section-btn-compact" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">Import</button>
+                  </div>
+                  <div class="repo-cards-grid">
+                    {#each repos.slice().sort((a, b) => {
+                      const aStats = repoStats(a);
+                      const bStats = repoStats(b);
+                      if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
+                      const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
+                      const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
+                      return bTime - aTime;
+                    }) as repo (repo.id)}
+                      <RepoCard
+                        {repo}
+                        health={repoHealth(repo)}
+                        stats={repoStats(repo)}
+                        activeAgentNames={repoActiveAgentNames(repo)}
+                        activeAgents={wsAgents.filter(a => a.repo_id === repo.id && a.status === 'active')}
+                        failedMrs={wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m._gates?.failed > 0)}
+                        specBreakdown={repoSpecBreakdown(repo)}
+                        latestMr={repoLatestMr(repo)}
+                        onclick={() => onSelectRepo?.(repo)}
+                        onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
+                      />
+                    {/each}
+                  </div>
+                {/if}
+
+                {#if newRepoOpen}
+                  <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
+                    <div class="inline-form-header">
+                      <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
+                      <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
+                    </div>
+                    <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
+                    <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
+                    {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
+                    <div class="inline-form-actions">
+                      <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
+                      <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
+                    </div>
+                  </form>
+                {/if}
+
+                {#if importOpen}
+                  <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
+                    <div class="inline-form-header">
+                      <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
+                      <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
+                    </div>
+                    <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
+                    <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
+                    {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
+                    <div class="inline-form-actions">
+                      <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
+                      <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
+                    </div>
+                  </form>
+                {/if}
+              </div>
 
             <!-- ── Specs tab ──────────────────────────────────────────── -->
             {#if wsTab === 'specs'}
