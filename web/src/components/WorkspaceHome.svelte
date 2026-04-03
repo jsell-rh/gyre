@@ -1382,6 +1382,36 @@
             {:else if wsTab === 'pipeline'}
               <div class="pipeline-flow">
 
+              <!-- Pipeline progress bar — compact visual of where work stands -->
+              <div class="pipeline-progress-bar">
+                <div class="pipeline-progress-stage" class:pipeline-progress-active={pipelineSpecs.pending > 0} class:pipeline-progress-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0}>
+                  <span class="pipeline-progress-count">{specs.length}</span>
+                  <span class="pipeline-progress-label">Specs</span>
+                  {#if pipelineSpecs.pending > 0}<span class="pipeline-progress-sub">{pipelineSpecs.pending} pending</span>{/if}
+                </div>
+                <span class="pipeline-progress-arrow">→</span>
+                <div class="pipeline-progress-stage" class:pipeline-progress-active={pipelineTasks.in_progress > 0} class:pipeline-progress-warn={pipelineTasks.blocked > 0}>
+                  <span class="pipeline-progress-count">{wsTasks.length}</span>
+                  <span class="pipeline-progress-label">Tasks</span>
+                  {#if pipelineTasks.in_progress > 0}<span class="pipeline-progress-sub">{pipelineTasks.in_progress} active</span>
+                  {:else if pipelineTasks.blocked > 0}<span class="pipeline-progress-sub">{pipelineTasks.blocked} blocked</span>{/if}
+                </div>
+                <span class="pipeline-progress-arrow">→</span>
+                <div class="pipeline-progress-stage" class:pipeline-progress-active={pipelineAgents.active > 0}>
+                  <span class="pipeline-progress-count">{wsAgents.length}</span>
+                  <span class="pipeline-progress-label">Agents</span>
+                  {#if pipelineAgents.active > 0}<span class="pipeline-progress-sub">{pipelineAgents.active} running</span>{/if}
+                </div>
+                <span class="pipeline-progress-arrow">→</span>
+                <div class="pipeline-progress-stage" class:pipeline-progress-warn={pipelineMrs.failed_gates > 0} class:pipeline-progress-done={pipelineMrs.merged > 0 && pipelineMrs.failed_gates === 0 && pipelineMrs.open === 0}>
+                  <span class="pipeline-progress-count">{wsMrs.length}</span>
+                  <span class="pipeline-progress-label">MRs</span>
+                  {#if pipelineMrs.failed_gates > 0}<span class="pipeline-progress-sub">{pipelineMrs.failed_gates} failed</span>
+                  {:else if pipelineMrs.open > 0}<span class="pipeline-progress-sub">{pipelineMrs.open} open</span>
+                  {:else if pipelineMrs.merged > 0}<span class="pipeline-progress-sub">{pipelineMrs.merged} merged</span>{/if}
+                </div>
+              </div>
+
               <!-- ── Specs section ──────────────────────────────────────── -->
               <div class="pipeline-section" class:pipeline-section-collapsed={!pipelineExpandedSections.specs}>
                 <button class="pipeline-section-header" onclick={() => { pipelineExpandedSections = { ...pipelineExpandedSections, specs: !pipelineExpandedSections.specs }; }}>
@@ -1983,6 +2013,60 @@
 
   .pipeline-section .feed-body {
     border-top: 1px solid var(--color-border);
+  }
+
+  /* ── Pipeline progress bar ─────────────────────────────────────── */
+  .pipeline-progress-bar {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow-x: auto;
+  }
+
+  .pipeline-progress-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    padding: var(--space-1) var(--space-3);
+    flex: 1;
+    min-width: 60px;
+  }
+
+  .pipeline-progress-count {
+    font-size: var(--text-base);
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+  }
+
+  .pipeline-progress-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+  }
+
+  .pipeline-progress-sub {
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .pipeline-progress-active .pipeline-progress-count { color: var(--color-primary); }
+  .pipeline-progress-active .pipeline-progress-sub { color: var(--color-primary); }
+  .pipeline-progress-done .pipeline-progress-count { color: var(--color-success); }
+  .pipeline-progress-done .pipeline-progress-sub { color: var(--color-success); }
+  .pipeline-progress-warn .pipeline-progress-count { color: var(--color-danger); }
+  .pipeline-progress-warn .pipeline-progress-sub { color: var(--color-danger); }
+
+  .pipeline-progress-arrow {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    opacity: 0.4;
+    flex-shrink: 0;
   }
 
   /* ═══ Focused Dashboard ═══════════════════════════════════════════════ */
