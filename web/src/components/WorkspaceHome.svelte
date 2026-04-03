@@ -1151,8 +1151,8 @@
                   {TYPE_ICONS[nt] ?? '?'}
                 </div>
                 <button class="decision-body" onclick={() => {
-                  if (body.mr_id) nav('mr', body.mr_id, { repo_id: n.repo_id });
-                  else if (body.agent_id) nav('agent', body.agent_id, { repo_id: n.repo_id });
+                  if (body.mr_id) nav('mr', body.mr_id, { repo_id: n.repo_id, _openTab: nt === 'gate_failure' ? 'gates' : undefined });
+                  else if (body.agent_id) nav('agent', body.agent_id, { repo_id: n.repo_id, _openTab: nt === 'agent_failed' ? 'history' : undefined });
                   else if (body.task_id) nav('task', body.task_id, { repo_id: n.repo_id });
                   else if (body.spec_path) {
                     const sp = normalizeSpecPath(body.spec_path);
