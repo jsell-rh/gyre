@@ -23,6 +23,8 @@
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+  const goToAgentRules = getContext('goToAgentRules') ?? null;
+  const goToWorkspaceSettings = getContext('goToWorkspaceSettings') ?? null;
 
   /** Navigate to full-page entity detail view (falls back to side panel) */
   function nav(type, id, data) {
@@ -1131,6 +1133,12 @@
           <div class="repo-header-actions">
             <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
             <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
+            {#if goToAgentRules}
+              <button class="section-btn section-btn-subtle" onclick={goToAgentRules} title="Configure agent personas, principles, and standards">Agent Rules</button>
+            {/if}
+            {#if goToWorkspaceSettings}
+              <button class="section-btn section-btn-subtle" onclick={goToWorkspaceSettings} title="Workspace settings: trust level, budget, members">Settings</button>
+            {/if}
           </div>
         </div>
         {#if reposLoading}
@@ -3870,6 +3878,19 @@
   .section-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  .section-btn-subtle {
+    background: transparent;
+    border-color: transparent;
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+  }
+
+  .section-btn-subtle:hover:not(:disabled) {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+    color: var(--color-text-secondary);
   }
 
   .section-btn.primary {
