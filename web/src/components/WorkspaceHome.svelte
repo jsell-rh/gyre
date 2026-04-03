@@ -1058,23 +1058,28 @@
               <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
                 <Icon name="spec" size={12} />
                 Specs
-                {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
+                {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
+                {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
               </button>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
                 <Icon name="task" size={12} />
                 Tasks
-                {#if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
+                {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
+                {#if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress} active</span>{/if}
+                {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked} blocked</span>{/if}
               </button>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
                 <Icon name="git-merge" size={12} />
                 MRs
-                {#if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>
-                {:else if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>{/if}
+                {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
+                {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates} failed</span>
+                {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open} open</span>{/if}
               </button>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
                 <Icon name="agent" size={12} />
                 Agents
-                {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
+                {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
+                {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active} running</span>{/if}
               </button>
             </nav>
 
@@ -2211,6 +2216,13 @@
     color: var(--color-primary);
     border-bottom-color: var(--color-primary);
     font-weight: 600;
+  }
+
+  .ws-tab-count {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    margin-left: -2px;
   }
 
   .ws-tab-badge {
