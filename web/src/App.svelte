@@ -317,6 +317,8 @@
     if (!currentWorkspace) return;
     const d = data ?? {};
     const parentTab = entityType === 'mr' ? 'mrs' : entityType === 'task' ? 'tasks' : entityType === 'agent' ? 'agents' : 'specs';
+    // Capture previous mode before we change it (used in history state for back nav)
+    const prevMode = mode;
 
     // If we're not in repo mode or the entity belongs to a different repo, resolve context
     const entityRepoId = d.repo_id ?? d.repository_id;
@@ -391,7 +393,7 @@
       entityId,
       entityTitle: name ?? null,
       entityRepoId: currentRepo?.id ?? entityRepoId ?? null,
-      previousMode: mode === 'workspace_home' ? 'workspace_home' : null,
+      previousMode: prevMode === 'workspace_home' ? 'workspace_home' : null,
     };
     window.history.pushState(stateObj, '', urlFor(parsed));
   }
