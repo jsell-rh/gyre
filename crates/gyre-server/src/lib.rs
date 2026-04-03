@@ -46,6 +46,7 @@ pub mod trust_suggestion;
 pub(crate) mod tty;
 pub mod version_compute;
 pub mod workload_attestation;
+pub(crate) mod explorer_ws;
 pub(crate) mod ws;
 
 use axum::{routing::get, Router};
@@ -608,6 +609,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/.well-known/jwks.json", get(oidc::jwks))
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
+        // Explorer WebSocket (explorer-implementation.md)
+        .route(
+            "/api/v1/repos/:repo_id/explorer",
+            get(explorer_ws::explorer_ws),
+        )
         // Git smart HTTP -- auth enforced per-handler via AuthenticatedAgent extractor.
         // M34 Slice 6: workspace-slug/repo-name URL format.
         .route(

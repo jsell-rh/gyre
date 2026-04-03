@@ -272,6 +272,7 @@ mod tests {
             teams: base.teams.clone(),
             notifications: base.notifications.clone(),
             graph_store: base.graph_store.clone(),
+            saved_views: base.saved_views.clone(),
             wg_config: base.wg_config.clone(),
             meta_spec_sets: base.meta_spec_sets.clone(),
             messages: base.messages.clone(),

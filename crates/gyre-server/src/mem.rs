@@ -2834,6 +2834,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
+        saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
         wg_config: crate::WireGuardConfig::from_env(),
         meta_specs: Arc::new(MemMetaSpecRepository::default()),
         meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
