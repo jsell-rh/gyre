@@ -1856,45 +1856,6 @@
                 </div>
               {/if}
 
-              <!-- Quick Actions — prominent, discoverable -->
-              <div class="mr-quick-links mr-quick-links-top">
-                <button class="mr-explore-btn mr-explore-primary" onclick={() => { activeTab = 'diff'; }} title="View code changes">
-                  <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8.75 1.75a.75.75 0 0 0-1.5 0V5H3.5a.75.75 0 0 0 0 1.5h3.75v3.25a.75.75 0 0 0 1.5 0V6.5H12.5a.75.75 0 0 0 0-1.5H8.75V1.75Z"/><path d="M3.5 11a.75.75 0 0 0 0 1.5h9a.75.75 0 0 0 0-1.5h-9Z"/></svg>
-                  View Diff
-                </button>
-                <button class="mr-explore-btn" onclick={() => { activeTab = 'gates'; }} title="View quality gate results and logs">
-                  <svg viewBox="0 0 16 16" fill="currentColor" width="14" height="14"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM6.5 7.5a.75.75 0 0 0 0 1.5h3a.75.75 0 0 0 0-1.5h-3Z"/></svg>
-                  Gates
-                  {#if mr._gateSummary}
-                    <span class="mr-quick-badge mr-quick-badge-{mr._gateSummary.failed > 0 ? 'danger' : 'success'}">
-                      {mr._gateSummary.failed > 0 ? `${mr._gateSummary.failed} failed` : `${mr._gateSummary.passed} passed`}
-                    </span>
-                  {/if}
-                </button>
-                <button class="mr-explore-btn" onclick={() => { activeTab = 'timeline'; }} title="View full event timeline">Timeline</button>
-                {#if mr.status === 'merged'}
-                  <button class="mr-explore-btn" onclick={() => { activeTab = 'attestation'; }} title="View signed merge attestation">Attestation</button>
-                {/if}
-                <button class="mr-explore-btn" onclick={() => { activeTab = 'ask-why'; }} title="Explore agent reasoning and conversation history">Ask Why</button>
-              </div>
-
-              <!-- Status Journey Stepper -->
-              {@const journey = mrStatusJourney(mr)}
-              {#if journey.length > 1}
-                <div class="status-journey">
-                  {#each journey as step, i}
-                    <div class="journey-step journey-step-{step.status}">
-                      <span class="journey-dot">{step.status === 'done' ? '✓' : step.status === 'failed' ? '✗' : step.status === 'active' ? '●' : '○'}</span>
-                      <span class="journey-label">{step.step}</span>
-                      {#if step.detail}<span class="journey-detail">{step.detail}</span>{/if}
-                    </div>
-                    {#if i < journey.length - 1}
-                      <span class="journey-connector" class:journey-connector-done={step.status === 'done'}></span>
-                    {/if}
-                  {/each}
-                </div>
-              {/if}
-
               <dl class="entity-meta">
                 <dt>Title</dt><dd>{mr.title ?? '—'}</dd>
                 <dt>Status</dt>
