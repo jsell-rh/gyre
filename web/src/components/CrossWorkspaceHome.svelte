@@ -475,6 +475,41 @@
     }
     return groups;
   });
+
+  // Sort workspaces by urgency: gate failures first, then pending decisions, then active agents, then alphabetical
+  let sortedWorkspaces = $derived.by(() => {
+    return [...workspaces].sort((a, b) => {
+      const aGates = notifications.filter(n => n.workspace_id === a.id && n.notification_type === 'gate_failure').length;
+      const bGates = notifications.filter(n => n.workspace_id === b.id && n.notification_type === 'gate_failure').length;
+      if (aGates !== bGates) return bGates - aGates;
+      const aDecisions = notifications.filter(n => n.workspace_id === a.id).length;
+      const bDecisions = notifications.filter(n => n.workspace_id === b.id).length;
+      if (aDecisions !== bDecisions) return bDecisions - aDecisions;
+      const aAgents = allAgents.filter(ag => ag.workspace_id === a.id).length;
+      const bAgents = allAgents.filter(ag => ag.workspace_id === b.id).length;
+      if (aAgents !== bAgents) return bAgents - aAgents;
+      return (a.name ?? '').localeCompare(b.name ?? '');
+    });
+  });
+
+  // Compute workspace health status for color-coded borders
+  function wsHealthStatus(wsId) {
+    const gateFailures = notifications.filter(n => n.workspace_id === wsId && n.notification_type === 'gate_failure').length;
+    if (gateFailures > 0) return 'critical';
+    const pending = notifications.filter(n => n.workspace_id === wsId).length;
+    if (pending > 0) return 'warning';
+    const active = allAgents.filter(a => a.workspace_id === wsId).length;
+    if (active > 0) return 'active';
+    return 'idle';
+  }
+
+  // Count workspaces needing attention
+  let workspacesNeedingAttention = $derived(
+    workspaces.filter(ws => {
+      const wsNotifs = notifications.filter(n => n.workspace_id === ws.id);
+      return wsNotifs.length > 0;
+    }).length
+  );
 </script>
 
 <div class="cross-workspace-home" data-testid="cross-workspace-home">
@@ -502,6 +537,13 @@
   <!-- ── Aggregate Stat Cards ───────────────────────────────────────────── -->
   <div class="cwh-stat-cards" data-testid="stat-cards">
     <div class="cwh-stat-card">
+      <span class="cwh-stat-value">{workspacesLoading ? '...' : workspaces.length}</span>
+      <span class="cwh-stat-label">Workspaces</span>
+      {#if !workspacesLoading && workspacesNeedingAttention > 0}
+        <span class="cwh-stat-sub cwh-stat-warn">{workspacesNeedingAttention} need attention</span>
+      {/if}
+    </div>
+    <div class="cwh-stat-card">
       <span class="cwh-stat-value">{statsLoading ? '...' : totalRepos}</span>
       <span class="cwh-stat-label">Repos</span>
     </div>
@@ -527,6 +569,15 @@
       <div class="cwh-stat-card cwh-stat-card-alert">
         <span class="cwh-stat-value">{notifications.length}</span>
         <span class="cwh-stat-label">Pending Decisions</span>
+      </div>
+    {/if}
+    {#if !budgetSummaryLoading && budgetSummary?.total_cost_today != null}
+      <div class="cwh-stat-card">
+        <span class="cwh-stat-value">${budgetSummary.total_cost_today.toFixed(2)}</span>
+        <span class="cwh-stat-label">Cost Today</span>
+        {#if budgetSummary.total_tokens_today != null}
+          <span class="cwh-stat-sub">{budgetSummary.total_tokens_today.toLocaleString()} tokens</span>
+        {/if}
       </div>
     {/if}
   </div>
@@ -613,7 +664,7 @@
       <p class="section-empty">{$t('cross_workspace.workspaces_empty')}</p>
     {:else}
       <ul class="workspace-list" role="list">
-        {#each workspaces as ws (ws.id)}
+        {#each sortedWorkspaces as ws (ws.id)}
           {@const wsSpecs = specs.filter(s => s.workspace_id === ws.id)}
           {@const wsNotifs = notifications.filter(n => n.workspace_id === ws.id)}
           {@const wsPendingSpecs = wsSpecs.filter(s => (s.approval_status ?? s.status) === 'pending').length}
@@ -624,7 +675,8 @@
           {@const wsGateFailures = wsNotifs.filter(n => n.notification_type === 'gate_failure')}
           {@const wsPendingDecisions = wsNotifs.filter(n => n.notification_type === 'spec_approval' || n.notification_type === 'agent_clarification')}
           {@const wsRecentEvents = activityEvents.filter(e => e.workspace_id === ws.id).slice(0, 3)}
-          <li class="workspace-row">
+          {@const health = wsHealthStatus(ws.id)}
+          <li class="workspace-row ws-health-{health}">
             <button
               class="workspace-btn"
               onclick={() => onSelectWorkspace?.(ws)}
@@ -1340,6 +1392,11 @@
 
   .workspace-row:last-child { border-bottom: none; }
 
+  .workspace-row.ws-health-critical { border-left: 3px solid var(--color-danger); }
+  .workspace-row.ws-health-warning { border-left: 3px solid var(--color-warning); }
+  .workspace-row.ws-health-active { border-left: 3px solid var(--color-success); }
+  .workspace-row.ws-health-idle { border-left: 3px solid transparent; }
+
   .workspace-btn {
     display: flex;
     flex-direction: column;
@@ -1831,7 +1888,7 @@
   /* ── Aggregate Stat Cards ──────────────────────────────────────────── */
   .cwh-stat-cards {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
     gap: var(--space-3);
   }
 
@@ -1879,6 +1936,12 @@
   @media (max-width: 768px) {
     .cwh-stat-cards {
       grid-template-columns: repeat(2, 1fr);
+    }
+    .workspace-row.ws-health-critical,
+    .workspace-row.ws-health-warning,
+    .workspace-row.ws-health-active,
+    .workspace-row.ws-health-idle {
+      border-left-width: 3px;
     }
   }
 
