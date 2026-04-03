@@ -623,7 +623,7 @@
   });
 
   // ── Workspace-level entity tab ──────────────────────────────────────
-  // Default to repos tab — the primary view for workspace home
+  // 3 tabs: repos (default), pipeline (combined work), activity
   let wsTab = $state('repos');
   // Track whether user has manually selected a tab (don't auto-switch after that)
   let userSelectedTab = $state(false);
@@ -631,17 +631,19 @@
   let browseExpanded = $state(true);
 
   // Auto-select the most relevant tab, but only before user interacts.
-  // Repos is the default for a calm state; switch to actionable tabs when needed.
+  // Repos is default; switch to pipeline when there's active work needing attention.
   $effect(() => {
     if (userSelectedTab) return;
     if (specsLoading || tasksLoading) return;
-    if (pipelineSpecs.pending > 0) { wsTab = 'specs'; }
-    else if (pipelineMrs.failed_gates > 0) { wsTab = 'mrs'; }
-    else if (pipelineAgents.active > 0) { wsTab = 'agents'; }
-    else if (pipelineMrs.open > 0) { wsTab = 'mrs'; }
-    else if (pipelineTasks.in_progress > 0 || pipelineTasks.blocked > 0) { wsTab = 'tasks'; }
-    else { wsTab = 'repos'; }
+    if (pipelineSpecs.pending > 0 || pipelineMrs.failed_gates > 0 || pipelineAgents.active > 0) {
+      wsTab = 'pipeline';
+    } else {
+      wsTab = 'repos';
+    }
   });
+
+  // ── Pipeline section collapse state ──────────────────────────────
+  let pipelineExpandedSections = $state({ specs: true, tasks: true, mrs: true, agents: true });
 
   // ── Entity table search ──────────────────────────────────────────────
   let entitySearch = $state('');
@@ -1244,51 +1246,26 @@
         </section>
       {/if}
 
-      <!-- ── Main workspace content: tabbed view (repos + entity browse) ── -->
+      <!-- ── Main workspace content: 3-tab layout ── -->
       <div class="dashboard-flow" data-testid="browse-panel">
         <nav class="ws-tab-bar" aria-label="Workspace navigation" data-testid="section-repos">
           <button class="ws-tab" class:ws-tab-active={wsTab === 'repos'} onclick={() => { wsTab = 'repos'; userSelectedTab = true; }}>
             Repos
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => {
-            const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
-            if (pendingSpecs.length === 1 && wsTab !== 'specs') { navigateToSpec(pendingSpecs[0]); return; }
-            wsTab = 'specs'; userSelectedTab = true;
-          }}>
-            Specs
-            {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
-          </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
-            Tasks
-            {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked} blocked</span>
-            {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress} active</span>{/if}
-          </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => {
-            const failedMrs = wsMrs.filter(m => m._gates?.failed > 0);
-            if (failedMrs.length === 1 && wsTab !== 'mrs') { nav('mr', failedMrs[0].id, { repo_id: failedMrs[0].repository_id ?? failedMrs[0].repo_id, title: failedMrs[0].title, _openTab: 'gates' }); return; }
-            wsTab = 'mrs'; userSelectedTab = true;
-          }}>
-            MRs
-            {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates} failed</span>
-            {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open} open</span>{/if}
-          </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => {
-            const activeAgentList = wsAgents.filter(a => a.status === 'active');
-            if (activeAgentList.length === 1 && wsTab !== 'agents') { nav('agent', activeAgentList[0].id, { repo_id: activeAgentList[0].repo_id, name: activeAgentList[0].name }); return; }
-            wsTab = 'agents'; userSelectedTab = true;
-          }}>
-            Agents
-            {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active} active</span>{/if}
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'pipeline'} onclick={() => { wsTab = 'pipeline'; userSelectedTab = true; }}>
+            Pipeline
+            {#if pipelineSpecs.pending + pipelineMrs.failed_gates + pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending + pipelineMrs.failed_gates + pipelineTasks.blocked} need attention</span>
+            {:else if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active} active</span>{/if}
           </button>
           <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
             Activity
           </button>
           <span class="ws-tab-spacer"></span>
-          {#if wsTab !== 'activity' && wsTab !== 'queue' && wsTab !== 'repos'}
+          {#if wsTab === 'pipeline'}
             <input
               class="entity-search-input"
               type="text"
-              placeholder="Filter {wsTab}..."
+              placeholder="Filter pipeline..."
               bind:value={entitySearch}
               aria-label="Filter entities"
             />
@@ -1387,8 +1364,20 @@
                 {/if}
               </div>
 
-            <!-- ── Specs tab ──────────────────────────────────────────── -->
-            {#if wsTab === 'specs'}
+            <!-- ── Pipeline tab (combined specs → tasks → MRs → agents) ── -->
+            {:else if wsTab === 'pipeline'}
+              <div class="pipeline-flow">
+
+              <!-- ── Specs section ──────────────────────────────────────── -->
+              <div class="pipeline-section" class:pipeline-section-collapsed={!pipelineExpandedSections.specs}>
+                <button class="pipeline-section-header" onclick={() => { pipelineExpandedSections = { ...pipelineExpandedSections, specs: !pipelineExpandedSections.specs }; }}>
+                  <Icon name="spec" size={14} />
+                  <span class="pipeline-section-title">Specs</span>
+                  {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending} pending</span>
+                  {:else}<span class="pipeline-section-count">{specs.length}</span>{/if}
+                  <span class="pipeline-section-chevron">{pipelineExpandedSections.specs ? '▾' : '▸'}</span>
+                </button>
+              {#if pipelineExpandedSections.specs}
               <div class="feed-body">
                 {#if specsLoading}
                   <div class="skeleton-row"></div>
@@ -1484,9 +1473,20 @@
                   </div>
                 {/if}
               </div>
+              {/if}
+              </div><!-- /pipeline-section specs -->
 
-            <!-- ── Tasks tab ──────────────────────────────────────────── -->
-            {:else if wsTab === 'tasks'}
+            <!-- ── Tasks section ──────────────────────────────────────── -->
+              <div class="pipeline-section" class:pipeline-section-collapsed={!pipelineExpandedSections.tasks}>
+                <button class="pipeline-section-header" onclick={() => { pipelineExpandedSections = { ...pipelineExpandedSections, tasks: !pipelineExpandedSections.tasks }; }}>
+                  <Icon name="task" size={14} />
+                  <span class="pipeline-section-title">Tasks</span>
+                  {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked} blocked</span>
+                  {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress} active</span>
+                  {:else}<span class="pipeline-section-count">{wsTasks.length}</span>{/if}
+                  <span class="pipeline-section-chevron">{pipelineExpandedSections.tasks ? '▾' : '▸'}</span>
+                </button>
+              {#if pipelineExpandedSections.tasks}
               <div class="feed-body">
                 {#if tasksLoading}
                   <div class="skeleton-row"></div>
@@ -1549,9 +1549,20 @@
                   </div>
                 {/if}
               </div>
+              {/if}
+              </div><!-- /pipeline-section tasks -->
 
-            <!-- ── MRs tab ────────────────────────────────────────────── -->
-            {:else if wsTab === 'mrs'}
+            <!-- ── MRs section ────────────────────────────────────────── -->
+              <div class="pipeline-section" class:pipeline-section-collapsed={!pipelineExpandedSections.mrs}>
+                <button class="pipeline-section-header" onclick={() => { pipelineExpandedSections = { ...pipelineExpandedSections, mrs: !pipelineExpandedSections.mrs }; }}>
+                  <Icon name="git-merge" size={14} />
+                  <span class="pipeline-section-title">Merge Requests</span>
+                  {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates} failed</span>
+                  {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open} open</span>
+                  {:else}<span class="pipeline-section-count">{wsMrs.length}</span>{/if}
+                  <span class="pipeline-section-chevron">{pipelineExpandedSections.mrs ? '▾' : '▸'}</span>
+                </button>
+              {#if pipelineExpandedSections.mrs}
               <div class="feed-body">
                 {#if !mergeQueueLoading && mergeQueueItems.length > 0}
                   <div class="ws-merge-queue-inline">
@@ -1678,9 +1689,19 @@
                   </div>
                 {/if}
               </div>
+              {/if}
+              </div><!-- /pipeline-section mrs -->
 
-            <!-- ── Agents tab ─────────────────────────────────────────── -->
-            {:else if wsTab === 'agents'}
+            <!-- ── Agents section ─────────────────────────────────────── -->
+              <div class="pipeline-section" class:pipeline-section-collapsed={!pipelineExpandedSections.agents}>
+                <button class="pipeline-section-header" onclick={() => { pipelineExpandedSections = { ...pipelineExpandedSections, agents: !pipelineExpandedSections.agents }; }}>
+                  <Icon name="agent" size={14} />
+                  <span class="pipeline-section-title">Agents</span>
+                  {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active} active</span>
+                  {:else}<span class="pipeline-section-count">{wsAgents.length}</span>{/if}
+                  <span class="pipeline-section-chevron">{pipelineExpandedSections.agents ? '▾' : '▸'}</span>
+                </button>
+              {#if pipelineExpandedSections.agents}
               <div class="feed-body">
                 {#if agentsLoading}
                   <div class="skeleton-row"></div>
@@ -1758,6 +1779,10 @@
                   </div>
                 {/if}
               </div>
+              {/if}
+              </div><!-- /pipeline-section agents -->
+
+              </div><!-- /pipeline-flow -->
 
             <!-- ── Activity tab ──────────────────────────────────────────── -->
             {:else if wsTab === 'activity'}
@@ -1844,7 +1869,6 @@
               </div>
             {/if}
 
-        {/if}
       </div><!-- .dashboard-flow -->
 
       </div><!-- .ws-main-col -->
@@ -1886,6 +1910,67 @@
 </Modal>
 
 <style>
+  /* ═══ Pipeline flow sections ═══════════════════════════════════════════ */
+  .pipeline-flow {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .pipeline-section {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .pipeline-section-collapsed {
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .pipeline-section-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    width: 100%;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    text-align: left;
+    transition: background var(--transition-fast);
+  }
+
+  .pipeline-section-header:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .pipeline-section-title {
+    font-weight: 600;
+    flex: 1;
+  }
+
+  .pipeline-section-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .pipeline-section-chevron {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    width: 16px;
+    text-align: center;
+  }
+
+  .pipeline-section .feed-body {
+    border-top: 1px solid var(--color-border);
+  }
+
   /* ═══ Focused Dashboard ═══════════════════════════════════════════════ */
   .workspace-home {
     overflow-y: auto;
