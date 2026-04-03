@@ -1180,7 +1180,8 @@
 
       <!-- ── Decisions / Action Needed (compact, inline) ────────────── -->
       {#if !decisionsLoading && actionableNotifications.length > 0}
-        <section class="ws-decisions-section" data-testid="section-decisions">
+        {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
+        <section class="ws-decisions-section" class:decisions-danger={hasDangerDecision} data-testid="section-decisions">
           <div class="decisions-header">
             <h2 class="decisions-title">
               Needs your attention
@@ -3794,6 +3795,20 @@
     border-radius: var(--radius);
     background: color-mix(in srgb, var(--color-warning) 3%, var(--color-surface));
     overflow: hidden;
+  }
+
+  .ws-decisions-section.decisions-danger {
+    border-color: var(--color-danger);
+    border-left-color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 3%, var(--color-surface));
+  }
+
+  .decisions-danger .decisions-header {
+    background: color-mix(in srgb, var(--color-danger) 6%, var(--color-surface-elevated));
+  }
+
+  .decisions-danger .decisions-count-badge {
+    background: var(--color-danger);
   }
 
   .decisions-header {
