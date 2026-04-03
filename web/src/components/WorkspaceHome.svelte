@@ -1400,7 +1400,8 @@
                   <div class="entity-list">
                     {#each filteredSpecs as spec}
                       {@const status = spec.approval_status ?? spec.status ?? 'pending'}
-                      {@const specName = spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}
+                      {@const specFileName = spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}
+                      {@const specName = spec.title && spec.title !== specFileName ? spec.title : specFileName}
                       {@const specDir = spec.path?.includes('/') ? spec.path.split('/').slice(0, -1).join('/') : ''}
                       {@const specTasks = wsTasks.filter(t => t.spec_path === spec.path)}
                       {@const doneTasks = specTasks.filter(t => t.status === 'done').length}
@@ -1426,7 +1427,10 @@
                                 {SPEC_STATUS_ICONS[status] ?? ''} {status}
                               </span>
                               {#if status === 'pending'}
-                                <span class="entity-list-context entity-list-context-action">needs review</span>
+                                {@const pendingSince = spec.created_at ? Math.round((Date.now() / 1000) - (typeof spec.created_at === 'number' && spec.created_at < 1e12 ? spec.created_at : new Date(spec.created_at).getTime() / 1000)) : 0}
+                                <span class="entity-list-context entity-list-context-action" class:entity-list-context-danger={pendingSince > 86400}>
+                                  needs review{#if pendingSince > 3600} · waiting {pendingSince > 86400 ? Math.round(pendingSince / 86400) + 'd' : Math.round(pendingSince / 3600) + 'h'}{/if}
+                                </span>
                               {:else if status === 'approved' && activeAgent}
                                 <span class="entity-list-context entity-list-context-success">agent working</span>
                               {:else if status === 'approved' && doneTasks === totalTasks && totalTasks > 0}
