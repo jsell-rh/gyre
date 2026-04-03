@@ -302,6 +302,7 @@ pub fn resolve_scope(
         Scope::Filter {
             node_types,
             computed,
+            name_pattern,
         } => {
             // If computed expression, try to evaluate it.
             if let Some(expr) = computed {
@@ -311,15 +312,19 @@ pub fn resolve_scope(
                     .iter()
                     .filter_map(|s| parse_node_type(s))
                     .collect();
-                if types.is_empty() {
-                    all_ids
-                } else {
-                    active_nodes
-                        .iter()
-                        .filter(|n| types.contains(&n.node_type))
-                        .map(|n| n.id.to_string())
-                        .collect()
-                }
+                let pattern = name_pattern.as_ref().map(|p| p.to_lowercase());
+                active_nodes
+                    .iter()
+                    .filter(|n| {
+                        let type_match = types.is_empty() || types.contains(&n.node_type);
+                        let name_match = pattern.as_ref().map_or(true, |p| {
+                            n.name.to_lowercase().contains(p)
+                                || n.qualified_name.to_lowercase().contains(p)
+                        });
+                        type_match && name_match
+                    })
+                    .map(|n| n.id.to_string())
+                    .collect()
             }
         }
 
@@ -937,6 +942,7 @@ mod tests {
             &Scope::Filter {
                 node_types: vec!["type".to_string()],
                 computed: None,
+                name_pattern: None,
             },
             &nodes,
             &[],
@@ -945,6 +951,29 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert!(result.contains("n1"));
         assert!(result.contains("n3"));
+    }
+
+    #[test]
+    fn test_scope_filter_by_name_pattern() {
+        let nodes = vec![
+            make_node("n1", "AuthService", NodeType::Type),
+            make_node("n2", "auth_handler", NodeType::Function),
+            make_node("n3", "UserRepo", NodeType::Type),
+        ];
+        let result = resolve_scope(
+            &Scope::Filter {
+                node_types: vec![],
+                computed: None,
+                name_pattern: Some("auth".to_string()),
+            },
+            &nodes,
+            &[],
+            None,
+        );
+        assert_eq!(result.len(), 2);
+        assert!(result.contains("n1")); // AuthService
+        assert!(result.contains("n2")); // auth_handler
+        assert!(!result.contains("n3")); // UserRepo
     }
 
     #[test]

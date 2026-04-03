@@ -24,12 +24,14 @@ pub enum Scope {
         #[serde(default = "default_depth")]
         depth: u32,
     },
-    /// Show nodes matching node_types or a computed set.
+    /// Show nodes matching node_types, name pattern, or a computed set.
     Filter {
         #[serde(default)]
         node_types: Vec<String>,
         /// Computed expression like "$intersect($where(complexity, '>', 20), $test_unreachable)".
         computed: Option<String>,
+        /// Substring match on name or qualified_name (case-insensitive).
+        name_pattern: Option<String>,
     },
     /// Nodes NOT reachable from any test function.
     TestGaps,

@@ -272,6 +272,18 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
                 }
             }),
         },
+        ToolDefinition {
+            name: "search".to_string(),
+            description: "Full-text search across the knowledge graph. Searches node names, qualified names, doc comments, file paths, and spec paths.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search term (case-insensitive substring match)" },
+                    "limit": { "type": "integer", "description": "Max results to return (default 30)" }
+                },
+                "required": ["query"]
+            }),
+        },
     ]
 }
 
@@ -554,6 +566,53 @@ async fn execute_tool(
                 serde_json::to_string_pretty(&filtered).unwrap_or_default()
             )
         }
+        "search" => {
+            let query = tool_call
+                .input
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let limit = tool_call
+                .input
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(30) as usize;
+
+            let results: Vec<serde_json::Value> = nodes
+                .iter()
+                .filter(|n| n.deleted_at.is_none())
+                .filter(|n| {
+                    n.name.to_lowercase().contains(&query)
+                        || n.qualified_name.to_lowercase().contains(&query)
+                        || n.file_path.to_lowercase().contains(&query)
+                        || n.doc_comment
+                            .as_ref()
+                            .map_or(false, |d| d.to_lowercase().contains(&query))
+                        || n.spec_path
+                            .as_ref()
+                            .map_or(false, |s| s.to_lowercase().contains(&query))
+                })
+                .take(limit)
+                .map(|n| {
+                    json!({
+                        "id": n.id.to_string(),
+                        "name": n.name,
+                        "qualified_name": n.qualified_name,
+                        "node_type": format!("{:?}", n.node_type).to_lowercase(),
+                        "file_path": n.file_path,
+                        "spec_path": n.spec_path,
+                        "doc_comment": n.doc_comment.as_deref().map(|d| if d.len() > 100 { &d[..100] } else { d }),
+                    })
+                })
+                .collect();
+
+            format!(
+                "{} results:\n{}",
+                results.len(),
+                serde_json::to_string_pretty(&results).unwrap_or_default()
+            )
+        }
         other => format!("Unknown tool: {other}"),
     }
 }
@@ -687,12 +746,13 @@ This shows all callers of TaskPort."#;
     #[test]
     fn test_explorer_tools_are_defined() {
         let tools = explorer_tool_definitions();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"graph_summary"));
         assert!(names.contains(&"graph_query_dryrun"));
         assert!(names.contains(&"graph_nodes"));
         assert!(names.contains(&"graph_edges"));
+        assert!(names.contains(&"search"));
     }
 
     #[test]
