@@ -33,6 +33,7 @@ export function taskStatusTooltip(task) {
   switch (status) {
     case 'backlog': return `Waiting to be assigned${specName ? ` (from spec: ${specName})` : ''}`;
     case 'in_progress': return `${agentName ?? 'Agent'} is working on this${specName ? ` (spec: ${specName})` : ''}`;
+    case 'review': return `Agent completed — awaiting review${specName ? ` of ${specName}` : ''}`;
     case 'done': return `Completed${specName ? ` — implemented ${specName}` : ''}`;
     case 'blocked': return 'Blocked by a dependency or external factor';
     case 'cancelled': return 'Cancelled — linked spec may have been rejected';
