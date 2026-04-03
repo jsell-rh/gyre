@@ -3301,9 +3301,9 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 10px;
+    font-size: var(--text-xs);
     font-weight: 600;
-    padding: 1px 6px;
+    padding: 2px 8px;
     border-radius: var(--radius-sm);
     white-space: nowrap;
     text-transform: capitalize;
@@ -3375,10 +3375,10 @@
   .gate-chip {
     display: inline-flex;
     align-items: center;
-    gap: 2px;
-    font-size: 10px;
+    gap: 3px;
+    font-size: var(--text-xs);
     font-weight: 500;
-    padding: 1px 5px;
+    padding: 2px 6px;
     border-radius: var(--radius-sm);
     white-space: nowrap;
   }
@@ -3562,9 +3562,9 @@
 
   .inline-action-btn {
     font-family: var(--font-body);
-    font-size: 10px;
+    font-size: var(--text-xs);
     font-weight: 600;
-    padding: 2px 8px;
+    padding: 3px 10px;
     border-radius: var(--radius-sm);
     cursor: pointer;
     border: none;
