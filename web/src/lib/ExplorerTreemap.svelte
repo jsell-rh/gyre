@@ -75,6 +75,13 @@
   let tooltipNode = $state(null);
   let tooltipPos = $state({ x: 0, y: 0 });
 
+  // Context menu state
+  let contextMenu = $state(null); // { x, y, node }
+
+  // Inertial zoom velocity
+  let zoomVelocity = 0;
+  let zoomDecayFrame = null;
+
   // ── Coordinate transforms ────────────────────────────────────────────
   function worldToScreen(wx, wy) {
     return { x: (wx - cam.x) * cam.zoom + W / 2, y: (wy - cam.y) * cam.zoom + H / 2 };
@@ -745,6 +752,48 @@
       return matched.size > 0 ? matched : null;
     }
 
+    // Concept scope: start from seed nodes, expand along edges
+    if (scope.type === 'concept') {
+      const seeds = scope.seed_nodes ?? [];
+      const expandEdges = new Set((scope.expand_edges ?? ['calls']).map(e => e.toLowerCase()));
+      const maxDepth = scope.expand_depth ?? 2;
+      const dm = new Map();
+
+      for (const seedName of seeds) {
+        const seedNode = nodes.find(n =>
+          n.name === seedName || n.qualified_name === seedName || n.id === seedName
+        );
+        if (!seedNode || dm.has(seedNode.id)) continue;
+        dm.set(seedNode.id, 0);
+        const q = [{ id: seedNode.id, depth: 0 }];
+        while (q.length > 0) {
+          const { id, depth } = q.shift();
+          if (depth >= maxDepth) continue;
+          for (const nb of (adjacency.get(id) ?? [])) {
+            if (dm.has(nb.targetId)) continue;
+            if (!expandEdges.has(nb.edgeType)) continue;
+            dm.set(nb.targetId, depth + 1);
+            q.push({ id: nb.targetId, depth: depth + 1 });
+          }
+        }
+      }
+      return dm.size > 0 ? dm : null;
+    }
+
+    // Diff scope: highlight nodes changed between two commits
+    if (scope.type === 'diff') {
+      // Diff requires commit_sha on nodes; filter to nodes changed since scope.from_commit
+      const fromCommit = scope.from_commit;
+      if (!fromCommit) return null;
+      const matched = new Map();
+      for (const n of nodes) {
+        if (n.last_commit_sha && n.last_commit_sha !== fromCommit) {
+          matched.set(n.id, 0);
+        }
+      }
+      return matched.size > 0 ? matched : null;
+    }
+
     return null;
   });
 
@@ -780,8 +829,44 @@
   }
 
   function queryNodeColor(ln) {
-    if (!queryMatchedIds || !activeQuery) return null;
+    if (!activeQuery) return null;
     const nodeId = ln.node?.id ?? ln.id;
+    const node = ln.node ?? nodes.find(n => n.id === nodeId);
+
+    // Heat map: color ALL nodes by metric value using a palette
+    const heat = activeQuery.emphasis?.heat;
+    if (heat?.metric && node) {
+      const metric = heat.metric;
+      // Compute metric value for this node
+      let value = 0;
+      if (metric === 'incoming_calls') {
+        for (const e of edges) {
+          const tgt = e.target_id ?? e.to_node_id ?? e.to;
+          if (tgt === nodeId && (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls') value++;
+        }
+      } else if (metric === 'complexity') {
+        value = node.complexity ?? 0;
+      } else if (metric === 'churn') {
+        value = node.churn ?? 0;
+      } else if (metric === 'test_fragility') {
+        // Count distinct test paths reaching this node
+        for (const e of edges) {
+          const tgt = e.target_id ?? e.to_node_id ?? e.to;
+          if (tgt === nodeId && (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls') {
+            const src = e.source_id ?? e.from_node_id ?? e.from;
+            const srcNode = nodes.find(n => n.id === src);
+            if (srcNode?.test_node) value++;
+          }
+        }
+      }
+      if (value === 0) return null;
+      // Normalize: find max across all nodes (cached in the query resolver)
+      const maxVal = heatMaxValues.get(metric) ?? 1;
+      const t = Math.min(1, value / maxVal);
+      return heatColor(t, heat.palette ?? 'blue-red');
+    }
+
+    if (!queryMatchedIds) return null;
     if (!queryMatchedIds.has(nodeId)) return null;
     const tc = activeQuery.emphasis?.tiered_colors;
     if (tc?.length && queryMatchedWithDepth) {
@@ -790,6 +875,42 @@
     }
     return activeQuery.emphasis?.highlight?.matched?.color ?? '#fbbf24';
   }
+
+  // Heat map color interpolation
+  function heatColor(t, palette) {
+    if (palette === 'blue-red' || !palette) {
+      // Blue (0) → Cyan → Yellow → Red (1)
+      if (t < 0.33) { const u = t / 0.33; return `hsl(${210 - u * 30}, 70%, ${40 + u * 5}%)`; }
+      if (t < 0.66) { const u = (t - 0.33) / 0.33; return `hsl(${180 - u * 140}, 70%, ${45 + u * 5}%)`; }
+      const u = (t - 0.66) / 0.34;
+      return `hsl(${40 - u * 40}, ${70 + u * 15}%, ${50 - u * 10}%)`;
+    }
+    return `hsl(${(1 - t) * 240}, 70%, 45%)`;
+  }
+
+  // Pre-compute heat map max values for normalization
+  let heatMaxValues = $derived.by(() => {
+    const map = new Map();
+    if (!activeQuery?.emphasis?.heat?.metric) return map;
+    const metric = activeQuery.emphasis.heat.metric;
+    let max = 0;
+    for (const node of nodes) {
+      let v = 0;
+      if (metric === 'incoming_calls') {
+        for (const e of edges) {
+          const tgt = e.target_id ?? e.to_node_id ?? e.to;
+          if (tgt === node.id && (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls') v++;
+        }
+      } else if (metric === 'complexity') {
+        v = node.complexity ?? 0;
+      } else if (metric === 'churn') {
+        v = node.churn ?? 0;
+      }
+      if (v > max) max = v;
+    }
+    map.set(metric, max || 1);
+    return map;
+  });
 
   // ── Connected highlight (when a node is selected, highlight connected nodes) ──
   let connectedHighlight = $derived.by(() => {
@@ -1474,27 +1595,55 @@
     scheduleRedraw();
   }
 
+  // Last mouse position for inertial zoom
+  let lastWheelMouse = { x: 0, y: 0 };
+
   function onWheel(e) {
     e.preventDefault();
-    const factor = e.deltaY > 0 ? 0.88 : 1.14;
-    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * factor));
 
-    // Zoom toward mouse position — compute in targetCam space so lerp converges correctly
+    // Accumulate velocity for inertial zoom
+    const impulse = e.deltaY > 0 ? -0.08 : 0.08;
+    zoomVelocity += impulse;
+    // Clamp velocity to prevent extreme zoom
+    zoomVelocity = Math.max(-0.5, Math.min(0.5, zoomVelocity));
+
     const rect = canvasEl?.getBoundingClientRect();
     if (rect) {
-      const sx = e.clientX - rect.left;
-      const sy = e.clientY - rect.top;
-      // World point under mouse using TARGET camera (not current lerped cam)
-      const worldX = (sx - W / 2) / targetCam.zoom + targetCam.x;
-      const worldY = (sy - H / 2) / targetCam.zoom + targetCam.y;
-      // After zoom change, adjust camera so the same world point stays under mouse
-      targetCam.x = worldX - (sx - W / 2) / newZoom;
-      targetCam.y = worldY - (sy - H / 2) / newZoom;
-      targetCam.zoom = newZoom;
-    } else {
-      targetCam.zoom = newZoom;
+      lastWheelMouse.x = e.clientX - rect.left;
+      lastWheelMouse.y = e.clientY - rect.top;
     }
+
+    // Apply immediate zoom step
+    applyZoomAtMouse(zoomVelocity * 0.6);
+
+    // Start inertial decay loop
+    if (!zoomDecayFrame) {
+      zoomDecayFrame = requestAnimationFrame(zoomDecayLoop);
+    }
+  }
+
+  function applyZoomAtMouse(delta) {
+    const factor = 1 + delta;
+    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * factor));
+    const sx = lastWheelMouse.x;
+    const sy = lastWheelMouse.y;
+    const worldX = (sx - W / 2) / targetCam.zoom + targetCam.x;
+    const worldY = (sy - H / 2) / targetCam.zoom + targetCam.y;
+    targetCam.x = worldX - (sx - W / 2) / newZoom;
+    targetCam.y = worldY - (sy - H / 2) / newZoom;
+    targetCam.zoom = newZoom;
     scheduleRedraw();
+  }
+
+  function zoomDecayLoop() {
+    zoomVelocity *= 0.85; // Exponential decay
+    if (Math.abs(zoomVelocity) < 0.001) {
+      zoomVelocity = 0;
+      zoomDecayFrame = null;
+      return;
+    }
+    applyZoomAtMouse(zoomVelocity * 0.3);
+    zoomDecayFrame = requestAnimationFrame(zoomDecayLoop);
   }
 
   function onClick(e) {
@@ -1543,19 +1692,98 @@
     }
   }
 
+  // Context menu
+  function onContextMenu(e) {
+    e.preventDefault();
+    const hit = hitTest(e.clientX, e.clientY);
+    if (!hit) {
+      contextMenu = null;
+      return;
+    }
+    const rect = containerEl?.getBoundingClientRect();
+    contextMenu = {
+      x: e.clientX - (rect?.left ?? 0),
+      y: e.clientY - (rect?.top ?? 0),
+      node: hit.node,
+      hit,
+    };
+  }
+
+  function contextMenuAction(action) {
+    if (!contextMenu) return;
+    const node = contextMenu.node;
+    contextMenu = null;
+    if (action === 'trace') {
+      // Trace from here: activate a blast-radius query centered on this node
+      activeQuery = {
+        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'implements'], direction: 'both', depth: 10 },
+        emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#94a3b8'], dim_unmatched: 0.12 },
+        edges: { filter: ['calls', 'implements'] },
+        zoom: 'fit',
+        annotation: { title: `Trace from: ${node.name}`, description: `Showing all connected nodes via calls/implements edges` },
+      };
+    } else if (action === 'blast') {
+      activeQuery = {
+        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'implements', 'field_of', 'depends_on'], direction: 'incoming', depth: 10 },
+        emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'], dim_unmatched: 0.12 },
+        edges: { filter: ['calls', 'implements', 'field_of', 'depends_on'] },
+        zoom: 'fit',
+        annotation: { title: `Blast radius: ${node.name}`, description: `What would break if this changes?` },
+      };
+    } else if (action === 'callers') {
+      activeQuery = {
+        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls'], direction: 'incoming', depth: 5 },
+        emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'], dim_unmatched: 0.12 },
+        edges: { filter: ['calls'] },
+        zoom: 'fit',
+        annotation: { title: `Callers of: ${node.name}`, description: `Who calls this?` },
+      };
+    } else if (action === 'callees') {
+      activeQuery = {
+        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls'], direction: 'outgoing', depth: 5 },
+        emphasis: { tiered_colors: ['#3b82f6', '#60a5fa', '#93c5fd', '#94a3b8'], dim_unmatched: 0.12 },
+        edges: { filter: ['calls'] },
+        zoom: 'fit',
+        annotation: { title: `Callees of: ${node.name}`, description: `What does this call?` },
+      };
+    } else if (action === 'spec') {
+      if (node.spec_path) {
+        onNodeDetail({ ...node, _action: 'view_spec' });
+      }
+    } else if (action === 'detail') {
+      selectedNodeId = node.id;
+      onNodeDetail(node);
+    }
+  }
+
   // Keyboard: Escape to zoom out to root
   function onKeyDown(e) {
     if (e.key === 'Escape') {
+      if (contextMenu) {
+        contextMenu = null;
+        return;
+      }
+      if (activeQuery) {
+        activeQuery = null;
+        return;
+      }
       if (breadcrumb.length > 0) {
         breadcrumb = [];
         selectedNodeId = null;
         canvasState = { ...canvasState, selectedNode: null, breadcrumb: [] };
         onNodeDetail(null);
-        // Layout will rebuild via $effect
       } else {
         // Fit all
         targetCam = { x: 0, y: 0, zoom: cam.zoom };
         scheduleRedraw();
+      }
+    }
+    // / key focuses search (if chat panel exists)
+    if (e.key === '/' && !e.ctrlKey && !e.metaKey) {
+      const chatInput = document.querySelector('.explorer-chat-input');
+      if (chatInput) {
+        e.preventDefault();
+        chatInput.focus();
       }
     }
   }
@@ -1631,6 +1859,7 @@
 
   onDestroy(() => {
     if (animFrame) cancelAnimationFrame(animFrame);
+    if (zoomDecayFrame) cancelAnimationFrame(zoomDecayFrame);
   });
 
   const legendItems = [
@@ -1704,8 +1933,9 @@
         onmouseup={onMouseUp}
         onmouseleave={onMouseLeave}
         onwheel={onWheel}
-        onclick={onClick}
+        onclick={(e) => { contextMenu = null; onClick(e); }}
         ondblclick={onDblClick}
+        oncontextmenu={onContextMenu}
         onkeydown={onKeyDown}
         ontouchstart={onTouchStart}
         ontouchmove={onTouchMove}
@@ -1740,6 +1970,47 @@
       <div class="treemap-minimap" aria-hidden="true">
         <canvas bind:this={minimapEl} style="width: {MINIMAP_W}px; height: {MINIMAP_H}px"></canvas>
       </div>
+
+      <!-- Context menu -->
+      {#if contextMenu}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="ctx-menu-backdrop" onclick={() => { contextMenu = null; }} oncontextmenu={(e) => { e.preventDefault(); contextMenu = null; }}></div>
+        <div class="ctx-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px" role="menu">
+          <div class="ctx-menu-header">
+            <span class="ctx-node-type">{contextMenu.node.node_type}</span>
+            <span class="ctx-node-name">{contextMenu.node.name}</span>
+          </div>
+          <div class="ctx-sep"></div>
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            Trace from here
+          </button>
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('blast')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+            Blast radius
+          </button>
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('callers')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 004 4h12"/></svg>
+            Show callers
+          </button>
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('callees')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg>
+            Show callees
+          </button>
+          {#if contextMenu.node.spec_path}
+            <div class="ctx-sep"></div>
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('spec')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              View spec
+            </button>
+          {/if}
+          <div class="ctx-sep"></div>
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('detail')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            View details
+          </button>
+        </div>
+      {/if}
     {/if}
   </div>
 
@@ -1844,6 +2115,43 @@
     border-radius: 4px; color: #94a3b8; cursor: pointer;
   }
   .annotation-clear:hover { background: #1e293b; color: #e2e8f0; }
+
+  /* Context menu */
+  .ctx-menu-backdrop {
+    position: absolute; inset: 0; z-index: 39;
+  }
+  .ctx-menu {
+    position: absolute; z-index: 40; min-width: 200px;
+    background: rgba(15, 15, 26, 0.97); border: 1px solid #334155;
+    border-radius: 10px; padding: 4px; backdrop-filter: blur(16px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  }
+  .ctx-menu-header {
+    padding: 8px 12px 4px; display: flex; flex-direction: column; gap: 2px;
+  }
+  .ctx-node-type {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px; color: #64748b;
+  }
+  .ctx-node-name {
+    font-size: 13px; font-weight: 600; color: #e2e8f0;
+    font-family: 'SF Mono', Menlo, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ctx-sep {
+    height: 1px; background: #1e293b; margin: 4px 8px;
+  }
+  .ctx-item {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; padding: 8px 12px; border: none; border-radius: 6px;
+    background: transparent; color: #cbd5e1; font-size: 13px;
+    cursor: pointer; transition: background 0.1s;
+    font-family: system-ui, -apple-system, sans-serif;
+    text-align: left;
+  }
+  .ctx-item:hover { background: #1e293b; color: #f1f5f9; }
+  .ctx-item svg { flex-shrink: 0; color: #64748b; }
+  .ctx-item:hover svg { color: #94a3b8; }
 
   @media (prefers-reduced-motion: reduce) {
     .tb-btn, .breadcrumb-item, .treemap-minimap { transition: none; }
