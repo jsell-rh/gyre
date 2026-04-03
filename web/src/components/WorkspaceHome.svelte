@@ -1213,9 +1213,19 @@
         {/if}
       </section>
 
-      <!-- ── Entity tables + Activity + Merge Queue (tabbed, full-width) ── -->
+      <!-- ── Entity tables + Activity + Merge Queue (collapsible) ── -->
       <div class="dashboard-flow">
-          <section class="ws-feed-panel" data-testid="browse-panel">
+          <details class="ws-feed-details" data-testid="browse-panel" open={repos.length === 0 || actionableNotifications.length > 0 || pipelineAgents.active > 0 || pipelineMrs.failed_gates > 0}>
+            <summary class="ws-feed-summary">
+              <span class="ws-feed-summary-title">Pipeline Details</span>
+              <span class="ws-feed-summary-counts">
+                {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending} pending specs</span>{/if}
+                {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active} agents</span>{/if}
+                {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates} failed gates</span>{/if}
+                {#if pipelineMrs.open > 0}<span class="pipeline-stage-badge">{pipelineMrs.open} open MRs</span>{/if}
+              </span>
+            </summary>
+          <section class="ws-feed-panel">
             <nav class="ws-tab-bar" aria-label="Development pipeline">
               <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }} title="Specifications define what agents build. Approve specs to start the pipeline.">
                 Specs
@@ -1801,6 +1811,7 @@
             {/if}
           </section>
 
+        </details>
       </div><!-- .dashboard-flow -->
 
       <!-- Workspace briefing (AI-generated summary) — shown inline when available -->
@@ -2487,10 +2498,59 @@
     margin-left: auto;
   }
 
-  /* ── Activity feed (full-width) ──────────────────── */
-  .ws-feed-panel {
+  /* ── Collapsible feed details ────────────────────── */
+  .ws-feed-details {
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .ws-feed-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    background: var(--color-surface-elevated);
+    transition: background var(--transition-fast);
+  }
+
+  .ws-feed-summary::-webkit-details-marker { display: none; }
+
+  .ws-feed-summary::before {
+    content: '▸';
+    font-size: 10px;
+    color: var(--color-text-muted);
+    transition: transform var(--transition-fast);
+    flex-shrink: 0;
+  }
+
+  .ws-feed-details[open] > .ws-feed-summary::before {
+    transform: rotate(90deg);
+  }
+
+  .ws-feed-summary:hover {
+    background: color-mix(in srgb, var(--color-primary) 4%, var(--color-surface-elevated));
+  }
+
+  .ws-feed-summary-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .ws-feed-summary-counts {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: auto;
+  }
+
+  /* ── Activity feed (full-width) ──────────────────── */
+  .ws-feed-panel {
     background: var(--color-surface);
     overflow: hidden;
   }
