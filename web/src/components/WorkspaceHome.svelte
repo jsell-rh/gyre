@@ -1129,7 +1129,7 @@
       <!-- ── Pipeline progress: the primary status summary ────────── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
         <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => {
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} title="{pipelineSpecs.total} total: {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending{pipelineSpecs.pending > 0 ? ' — click to review' : ''}" onclick={() => {
             const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
             if (pendingSpecs.length === 1) { navigateToSpec(pendingSpecs[0]); return; }
             wsTab = 'specs'; userSelectedTab = true; browseExpanded = true;
@@ -1139,14 +1139,14 @@
             {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; browseExpanded = true; }}>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} title="{pipelineTasks.total} total: {pipelineTasks.done} done, {pipelineTasks.in_progress} active, {pipelineTasks.blocked} blocked" onclick={() => { wsTab = 'tasks'; userSelectedTab = true; browseExpanded = true; }}>
             <span class="pipeline-stage-count">{pipelineTasks.total}</span>
             <span class="pipeline-stage-label">Tasks</span>
             {#if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge">{pipelineTasks.in_progress} active</span>{/if}
             {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked} blocked</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => {
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} title="{pipelineAgents.total} total: {pipelineAgents.active} running{pipelineAgents.active > 0 ? ' — click to see agent details' : ''}" onclick={() => {
             const activeAgentList = wsAgents.filter(a => a.status === 'active');
             if (activeAgentList.length === 1) { nav('agent', activeAgentList[0].id, { repo_id: activeAgentList[0].repo_id, name: activeAgentList[0].name }); return; }
             wsTab = 'agents'; userSelectedTab = true; browseExpanded = true;
@@ -1156,7 +1156,7 @@
             {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active} running</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-warn={pipelineMrs.failed_gates > 0} onclick={() => {
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-warn={pipelineMrs.failed_gates > 0} title="{pipelineMrs.total} total: {pipelineMrs.open} open, {pipelineMrs.merged} merged{pipelineMrs.failed_gates > 0 ? ', ' + pipelineMrs.failed_gates + ' with failed gates' : ''}" onclick={() => {
             const failedMrs = wsMrs.filter(m => m._gates?.failed > 0);
             if (failedMrs.length === 1) { nav('mr', failedMrs[0].id, { repo_id: failedMrs[0].repository_id ?? failedMrs[0].repo_id, title: failedMrs[0].title, _openTab: 'gates' }); return; }
             const openMrs = wsMrs.filter(m => m.status === 'open');
@@ -1169,7 +1169,7 @@
             {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge">{pipelineMrs.open} open</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <div class="pipeline-stage pipeline-stage-done pipeline-stage-terminal">
+          <div class="pipeline-stage pipeline-stage-done pipeline-stage-terminal" title="{pipelineMrs.merged} merge requests have passed all gates and been merged">
             <span class="pipeline-stage-count">{pipelineMrs.merged}</span>
             <span class="pipeline-stage-label">Merged</span>
           </div>
