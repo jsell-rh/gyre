@@ -22,7 +22,17 @@
     latestMr = null,
     latestAgent = null,
     onclick = undefined,
+    onStatClick = undefined,
   } = $props();
+
+  function handleStatClick(tab, e) {
+    e.stopPropagation();
+    if (onStatClick) {
+      onStatClick(repo, tab);
+    } else if (onclick) {
+      onclick();
+    }
+  }
 
   const HEALTH = {
     healthy: { color: 'var(--color-success)', dot: '\u25CF', label: 'Active — agents are implementing code' },
@@ -65,13 +75,13 @@
       </div>
     {/if}
 
-    <!-- Compact stats — only show non-zero, meaningful counts -->
+    <!-- Compact stats — clickable to navigate to repo tab -->
     <div class="repo-card-stats">
-      {#if stats.specs > 0}<span class="repo-stat">{stats.specs} spec{stats.specs !== 1 ? 's' : ''}</span>{/if}
-      {#if stats.tasks > 0}<span class="repo-stat">{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}</span>{/if}
-      {#if stats.agents > 0}<span class="repo-stat repo-stat-active">{stats.agents} agent{stats.agents !== 1 ? 's' : ''}</span>{/if}
-      {#if stats.mrs > 0}<span class="repo-stat">{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{#if stats.openMrs > 0} ({stats.openMrs} open){/if}</span>{/if}
-      {#if stats.failedGates > 0}<span class="repo-stat repo-stat-danger">{stats.failedGates} failed gate{stats.failedGates !== 1 ? 's' : ''}</span>{/if}
+      {#if stats.specs > 0}<button class="repo-stat repo-stat-btn" onclick={(e) => handleStatClick('specs', e)} title="View specs">{stats.specs} spec{stats.specs !== 1 ? 's' : ''}</button>{/if}
+      {#if stats.tasks > 0}<button class="repo-stat repo-stat-btn" onclick={(e) => handleStatClick('tasks', e)} title="View tasks">{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}</button>{/if}
+      {#if stats.agents > 0}<button class="repo-stat repo-stat-btn repo-stat-active" onclick={(e) => handleStatClick('agents', e)} title="View agents">{stats.agents} agent{stats.agents !== 1 ? 's' : ''}</button>{/if}
+      {#if stats.mrs > 0}<button class="repo-stat repo-stat-btn" onclick={(e) => handleStatClick('mrs', e)} title="View merge requests">{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{#if stats.openMrs > 0} ({stats.openMrs} open){/if}</button>{/if}
+      {#if stats.failedGates > 0}<button class="repo-stat repo-stat-btn repo-stat-danger" onclick={(e) => handleStatClick('mrs', e)} title="View failed gates">{stats.failedGates} failed gate{stats.failedGates !== 1 ? 's' : ''}</button>{/if}
     </div>
   </button>
 {/if}
@@ -186,6 +196,24 @@
     align-items: center;
     gap: 2px;
     font-weight: 500;
+  }
+
+  .repo-stat-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    padding: 0 2px;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .repo-stat-btn:hover {
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    text-decoration: underline;
   }
 
   .repo-stat-active { color: var(--color-success); }
