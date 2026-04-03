@@ -1080,8 +1080,8 @@
         </section>
       {/if}
 
-      <!-- Workspace pulse: compact one-line summary of what needs attention -->
-      {#if statusSentence}
+      <!-- Workspace pulse: compact one-line summary (hidden when decisions section is showing) -->
+      {#if statusSentence && actionableNotifications.length === 0}
         <div class="ws-pulse" data-testid="ws-pulse">
           <span class="ws-pulse-text">{statusSentence}</span>
         </div>
