@@ -582,6 +582,15 @@
     return relativeTime(ts);
   }
 
+  /** Format an absolute timestamp for tooltip display */
+  function absTime(ts) {
+    if (!ts) return '';
+    try {
+      const d = new Date(typeof ts === 'number' ? (ts < 1e12 ? ts * 1000 : ts) : ts);
+      return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    } catch { return ''; }
+  }
+
   // Entity name resolution + time formatting imported from shared modules.
   // Seed repo names from loaded data so they're immediately available.
   function seedRepoNames() {
@@ -975,22 +984,27 @@
     return { approved, pending, activeAgentCount, mergedMrs, openMrs, failedGates, inProgressTasks, totalTasks: wsTasks.length };
   });
 
-  // ── Natural language status sentence ───────────────────────────────────
-  let statusSentence = $derived.by(() => {
+  // ── Structured status items (each clickable) ───────────────────────────
+  let statusItems = $derived.by(() => {
     const s = provenanceSummary;
-    const parts = [];
-    if (s.failedGates > 0) parts.push(`${s.failedGates} MR${s.failedGates !== 1 ? 's have' : ' has'} failed gates`);
-    if (s.pending > 0) parts.push(`${s.pending} spec${s.pending !== 1 ? 's need' : ' needs'} approval`);
-    if (s.openMrs > 0 && s.failedGates === 0) parts.push(`${s.openMrs} MR${s.openMrs !== 1 ? 's' : ''} ready to merge`);
-    if (s.activeAgentCount > 0) parts.push(`${s.activeAgentCount} agent${s.activeAgentCount !== 1 ? 's' : ''} implementing code`);
-    if (s.mergedMrs > 0 && parts.length < 3) parts.push(`${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged`);
-    if (parts.length === 0) {
+    const items = [];
+    if (s.failedGates > 0) items.push({ text: `${s.failedGates} MR${s.failedGates !== 1 ? 's have' : ' has'} failed gates`, variant: 'danger', tab: 'mrs', icon: '✗' });
+    if (s.pending > 0) items.push({ text: `${s.pending} spec${s.pending !== 1 ? 's need' : ' needs'} approval`, variant: 'warning', tab: 'specs', icon: '!' });
+    if (s.openMrs > 0 && s.failedGates === 0) items.push({ text: `${s.openMrs} MR${s.openMrs !== 1 ? 's' : ''} ready to merge`, variant: 'info', tab: 'mrs', icon: '→' });
+    if (s.activeAgentCount > 0) items.push({ text: `${s.activeAgentCount} agent${s.activeAgentCount !== 1 ? 's' : ''} implementing code`, variant: 'success', tab: 'agents', icon: '⚙' });
+    if (s.mergedMrs > 0 && items.length < 3) items.push({ text: `${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged`, variant: 'muted', tab: 'mrs', icon: '✓' });
+    return items;
+  });
+
+  let statusSentence = $derived.by(() => {
+    if (statusItems.length === 0) {
+      const s = provenanceSummary;
       if (specs.length === 0 && repos.length === 0) return 'Get started by creating a repo and pushing specs.';
       if (specs.length === 0) return 'Push specs to your repo to start the autonomous pipeline.';
       if (s.approved > 0 && s.totalTasks === 0) return 'Specs approved — waiting for task creation.';
       return 'System idle — no active work.';
     }
-    return parts.join('. ') + '.';
+    return statusItems.map(i => i.text).join('. ') + '.';
   });
 
   // ── Recent completions: merged MRs with provenance chain ──────────────
@@ -1062,10 +1076,21 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Status hero — the single most important thing on the page ── -->
+      <!-- ── Status hero — clickable status chips ── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
         <div class="ws-status-hero" data-testid="status-sentence">
-          <p class="ws-status-sentence">{statusSentence}</p>
+          {#if statusItems.length > 0}
+            <div class="status-chips">
+              {#each statusItems as item}
+                <button class="status-chip status-chip-{item.variant}" onclick={() => { wsTab = item.tab; userSelectedTab = true; browseExpanded = true; }}>
+                  <span class="status-chip-icon">{item.icon}</span>
+                  {item.text}
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <p class="ws-status-sentence">{statusSentence}</p>
+          {/if}
           {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
             <p class="ws-briefing-inline">{briefingData.summary ?? briefingData.narrative}</p>
           {/if}
@@ -1479,7 +1504,7 @@
                               </button>
                             {/if}
                           </td>
-                          <td class="entity-time">{relTime(spec.updated_at ?? spec.created_at)}</td>
+                          <td class="entity-time" title={absTime(spec.updated_at ?? spec.created_at)}>{relTime(spec.updated_at ?? spec.created_at)}</td>
                           <td class="td-actions">
                             {#if status === 'pending' && specActionStates[spec.path] !== 'approved'}
                               <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'} title="Approve this spec">Approve</button>
@@ -1578,7 +1603,7 @@
                               </button>
                             {/if}
                           </td>
-                          <td class="entity-time">{relTime(task.updated_at ?? task.created_at)}</td>
+                          <td class="entity-time" title={absTime(task.updated_at ?? task.created_at)}>{relTime(task.updated_at ?? task.created_at)}</td>
                         </tr>
                       {/each}
                     </tbody>
@@ -1712,7 +1737,7 @@
                               </button>
                             {/if}
                           </td>
-                          <td class="entity-time">{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
+                          <td class="entity-time" title={absTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}>{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
                           <td class="td-actions td-actions-mr">
                             {#if ds}
                               <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'diff' }); }} title="View code changes">Diff</button>
@@ -2029,6 +2054,67 @@
     line-height: 1.4;
     font-style: italic;
     max-width: 700px;
+  }
+
+  /* ── Status chips (clickable status items) ── */
+  .status-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    font-family: var(--font-body);
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all var(--transition-fast);
+    line-height: 1.4;
+  }
+
+  .status-chip:hover {
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+  }
+
+  .status-chip-icon {
+    font-size: 11px;
+  }
+
+  .status-chip-danger {
+    background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+    color: var(--color-danger);
+    border-color: color-mix(in srgb, var(--color-danger) 30%, transparent);
+  }
+
+  .status-chip-warning {
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    color: var(--color-warning);
+    border-color: color-mix(in srgb, var(--color-warning) 30%, transparent);
+  }
+
+  .status-chip-success {
+    background: color-mix(in srgb, var(--color-success) 15%, transparent);
+    color: var(--color-success);
+    border-color: color-mix(in srgb, var(--color-success) 30%, transparent);
+  }
+
+  .status-chip-info {
+    background: color-mix(in srgb, var(--color-info, #1e90ff) 15%, transparent);
+    color: var(--color-info, #1e90ff);
+    border-color: color-mix(in srgb, var(--color-info, #1e90ff) 30%, transparent);
+  }
+
+  .status-chip-muted {
+    background: var(--color-surface-elevated);
+    color: var(--color-text-muted);
+    border-color: var(--color-border);
   }
 
   /* ── Main layout ────────────────────────────────────────────────── */
