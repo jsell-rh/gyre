@@ -1052,7 +1052,11 @@
       if (specs.length === 0) return 'Push specs to your repo to start the autonomous pipeline.';
       if (s.approved > 0 && s.totalTasks === 0) return 'Specs approved — waiting for task creation.';
       if (s.mergedMrs > 0 && s.activeAgentCount === 0 && s.openMrs === 0 && s.pending === 0) {
-        return `All clear — ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with signed attestation, ${s.approved} spec${s.approved !== 1 ? 's' : ''} implemented.`;
+        const parts = [];
+        parts.push(`${s.approved} spec${s.approved !== 1 ? 's' : ''} implemented`);
+        if (s.totalTasks > 0) parts.push(`${s.totalTasks} task${s.totalTasks !== 1 ? 's' : ''} completed`);
+        parts.push(`${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with signed attestation`);
+        return `All clear. ${parts.join(', ')}.`;
       }
       return 'System idle — no active work.';
     }
@@ -1162,6 +1166,13 @@
 
       <!-- ── Main content ──────────────────────────────────────────── -->
       <div class="ws-main-col">
+
+      <!-- ── Workspace briefing (AI-generated summary) ──────── -->
+      {#if !briefingLoading && briefingData?.summary}
+        <div class="ws-briefing-compact">
+          <p class="ws-briefing-summary">{briefingData.summary}</p>
+        </div>
+      {/if}
 
       <!-- ── Action Needed (compact, dismissible) ──────────── -->
       {#if !decisionsLoading && actionableNotifications.length > 0}
@@ -2336,6 +2347,22 @@
   .pipeline-budget-label.budget-danger { color: var(--color-danger); }
 
   /* ── Workspace briefing (inline) ─────────────────────────────────── */
+  /* ── Compact workspace briefing ────────────────────────────────── */
+  .ws-briefing-compact {
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-primary) 3%, var(--color-surface));
+    border: 1px solid color-mix(in srgb, var(--color-primary) 15%, var(--color-border));
+    border-radius: var(--radius);
+    border-left: 3px solid var(--color-primary);
+  }
+
+  .ws-briefing-summary {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    line-height: 1.5;
+  }
+
   .ws-briefing-section {
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
