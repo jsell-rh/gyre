@@ -1213,57 +1213,17 @@
                   </section>
                 {/if}
 
-                {#if !mrsLoading && recentCompletions.length > 0}
-                  <section class="ws-completions-section">
-                    <h3 class="completions-title">Recent Completions</h3>
-                    <div class="completions-list">
-                      {#each recentCompletions as c}
-                        <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
-                          <div class="completion-chain">
-                            {#if c.specName}
-                              <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
-                              <span class="completion-arrow">→</span>
-                            {/if}
-                            {#if c.agentName}
-                              <span class="completion-node completion-agent" title="Agent: {c.agentName}">{c.agentName}</span>
-                              <span class="completion-arrow">→</span>
-                            {/if}
-                            <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title?.length > 40 ? c.mr.title.slice(0, 37) + '...' : c.mr.title ?? 'Untitled'}</span>
-                            <span class="completion-arrow">→</span>
-                            <span class="completion-node completion-merged">Merged</span>
-                          </div>
-                          <div class="completion-meta">
-                            {#if c.gates?.total > 0}
-                              <span class="completion-gates">{c.gates.passed}/{c.gates.total} gates</span>
-                            {/if}
-                            {#if c.repoName}
-                              <span class="completion-repo">{c.repoName}</span>
-                            {/if}
-                            {#if c.mergedAt}
-                              <span class="completion-time">{relTime(c.mergedAt)}</span>
-                            {/if}
-                          </div>
-                        </button>
-                      {/each}
+                <!-- Two-column layout: repos + activity -->
+                <div class="overview-columns">
+                  <!-- Left: Repos -->
+                  <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
+                    <div class="section-header">
+                      <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
+                      <div class="repo-header-actions">
+                        <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
+                        <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
+                      </div>
                     </div>
-                  </section>
-                {/if}
-
-              <!-- ── Repos (compact, full-width) ────────────────────────────── -->
-              <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
-                <div class="section-header">
-                  <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
-                  <div class="repo-header-actions">
-                    <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
-                    <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
-                    {#if goToAgentRules}
-                      <button class="section-btn section-btn-subtle" onclick={goToAgentRules} title="Configure agent personas, principles, and standards">Agent Rules</button>
-                    {/if}
-                    {#if goToWorkspaceSettings}
-                      <button class="section-btn section-btn-subtle" onclick={goToWorkspaceSettings} title="Workspace settings: trust level, budget, members">Settings</button>
-                    {/if}
-                  </div>
-                </div>
                 {#if reposLoading}
                   <div class="skeleton-row"></div>
                 {:else if reposError}
@@ -1341,7 +1301,100 @@
                     </div>
                   </form>
                 {/if}
-              </section>
+
+                    <!-- Workspace quick links (below repos) -->
+                    <div class="ws-quick-links">
+                      {#if goToAgentRules}
+                        <button class="ws-quick-link" onclick={goToAgentRules} title="Configure agent personas, principles, and standards">
+                          <Icon name="settings" size={12} /> Agent Rules
+                        </button>
+                      {/if}
+                      {#if goToWorkspaceSettings}
+                        <button class="ws-quick-link" onclick={goToWorkspaceSettings} title="Workspace settings: trust level, budget, members">
+                          <Icon name="settings" size={12} /> Settings
+                        </button>
+                      {/if}
+                    </div>
+                  </section>
+
+                  <!-- Right: Recent activity + completions sidebar -->
+                  <aside class="overview-sidebar">
+                    {#if !mrsLoading && recentCompletions.length > 0}
+                      <section class="ws-completions-section">
+                        <h3 class="completions-title">Recent Completions</h3>
+                        <div class="completions-list">
+                          {#each recentCompletions as c}
+                            <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
+                              <div class="completion-chain">
+                                {#if c.specName}
+                                  <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
+                                  <span class="completion-arrow">→</span>
+                                {/if}
+                                {#if c.agentName}
+                                  <span class="completion-node completion-agent" title="Agent: {c.agentName}">{c.agentName}</span>
+                                  <span class="completion-arrow">→</span>
+                                {/if}
+                                <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title?.length > 30 ? c.mr.title.slice(0, 27) + '...' : c.mr.title ?? 'Untitled'}</span>
+                                <span class="completion-arrow">→</span>
+                                <span class="completion-node completion-merged">Merged</span>
+                              </div>
+                              <div class="completion-meta">
+                                {#if c.gates?.total > 0}
+                                  <span class="completion-gates">{c.gates.passed}/{c.gates.total} gates</span>
+                                {/if}
+                                {#if c.repoName}
+                                  <span class="completion-repo">{c.repoName}</span>
+                                {/if}
+                                {#if c.mergedAt}
+                                  <span class="completion-time">{relTime(c.mergedAt)}</span>
+                                {/if}
+                              </div>
+                            </button>
+                          {/each}
+                        </div>
+                      </section>
+                    {/if}
+
+                    {#if !activityLoading && activityEvents.length > 0}
+                      <section class="overview-activity-section">
+                        <h3 class="completions-title">Recent Activity</h3>
+                        <div class="activity-timeline activity-timeline-compact">
+                          {#each activityEvents.slice(0, 8) as event, i}
+                            {@const variant = activityVariant(event)}
+                            {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                            {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                            <button
+                              class="activity-item activity-item-clickable"
+                              onclick={() => {
+                                if (primaryType && primaryId) {
+                                  const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                                  nav(primaryType, primaryId, data);
+                                }
+                              }}
+                            >
+                              <div class="activity-dot activity-dot-{variant}"></div>
+                              {#if i < 7}<div class="activity-line"></div>{/if}
+                              <div class="activity-content">
+                                <div class="activity-main-row">
+                                  <span class="activity-icon"><Icon name={activityIconName(event)} size={10} /></span>
+                                  <span class="activity-label">{activityLabel(event)}</span>
+                                  {#if event.timestamp ?? event.created_at}
+                                    <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                                  {/if}
+                                </div>
+                              </div>
+                            </button>
+                          {/each}
+                        </div>
+                        {#if activityEvents.length > 8}
+                          <button class="overview-activity-more" onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
+                            View all activity ({activityEvents.length})
+                          </button>
+                        {/if}
+                      </section>
+                    {/if}
+                  </aside>
+                </div><!-- .overview-columns -->
               </div>
 
             <!-- ── Specs tab ──────────────────────────────────────────── -->
@@ -2669,6 +2722,86 @@
     gap: var(--space-3);
     padding: var(--space-3);
   }
+
+  /* ── Two-column overview layout ──────────────────────────────── */
+  .overview-columns {
+    display: grid;
+    grid-template-columns: 1fr 300px;
+    gap: var(--space-3);
+    align-items: start;
+  }
+
+  @media (max-width: 900px) {
+    .overview-columns {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .overview-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  /* ── Workspace quick links ──────────────────────────────────── */
+  .ws-quick-links {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+  }
+
+  .ws-quick-link {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    transition: all var(--transition-fast);
+  }
+
+  .ws-quick-link:hover {
+    color: var(--color-primary);
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
+  }
+
+  /* ── Overview inline activity ─────────────────────────────────── */
+  .overview-activity-section {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .activity-timeline-compact .activity-item {
+    padding: var(--space-1) 0;
+  }
+
+  .activity-timeline-compact .activity-main-row {
+    font-size: 11px;
+  }
+
+  .overview-activity-more {
+    display: block;
+    width: 100%;
+    padding: var(--space-1);
+    background: transparent;
+    border: none;
+    color: var(--color-link);
+    font-size: 10px;
+    cursor: pointer;
+    text-align: center;
+    font-family: var(--font-body);
+    margin-top: var(--space-1);
+  }
+
+  .overview-activity-more:hover { text-decoration: underline; }
 
   /* ── Activity feed (full-width) ──────────────────── */
   .ws-feed-panel {
