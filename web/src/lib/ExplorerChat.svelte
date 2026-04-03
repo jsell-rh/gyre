@@ -146,9 +146,16 @@
         break;
       }
       case 'error': {
-        messages = [...messages, { role: 'assistant', content: msg.message ?? $t('explorer_chat.error_occurred'), timestamp: Date.now(), isError: true }];
+        const errorMsg = msg.message ?? $t('explorer_chat.error_occurred');
+        messages = [...messages, { role: 'assistant', content: errorMsg, timestamp: Date.now(), isError: true }];
         streamingText = '';
-        status = 'ready';
+        // Session limit reached — mark as disconnected so user knows to reconnect
+        if (errorMsg.includes('Session message limit')) {
+          status = 'disconnected';
+          if (ws) { ws.onclose = null; ws.close(); ws = null; }
+        } else {
+          status = 'ready';
+        }
         scrollToBottom();
         break;
       }
