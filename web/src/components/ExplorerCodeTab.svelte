@@ -463,6 +463,13 @@
       ]);
       blameData = blame;
       reviewRouting = Array.isArray(routing) ? routing : [];
+      // Auto-switch to blame view when agent attribution is present —
+      // this is Gyre's unique value proposition for code exploration
+      const blameLines = Array.isArray(blame) ? blame : (blame?.lines ?? blame?.blame ?? []);
+      const hasAgentAttribution = blameLines.some(l => l.agent_id ?? l.agent);
+      if (hasAgentAttribution) {
+        fileViewMode = 'blame';
+      }
     } catch {
       blameData = null;
     } finally {
