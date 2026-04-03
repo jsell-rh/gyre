@@ -54,63 +54,24 @@
       {/if}
     </div>
 
-    {#if repo.description}
-      <p class="repo-card-desc">{repo.description}</p>
-    {/if}
-
-    <!-- Mini pipeline: Specs → Tasks → Agents → MRs → Merged -->
-    <div class="repo-card-pipeline" title="Pipeline: Specs → Tasks → Agents → MRs → Merged">
-      <span class="pipe-stage" class:pipe-stage-active={stats.specs > 0} class:pipe-stage-warn={specBreakdown?.pending > 0}>
-        <Icon name="spec" size={10} />
-        <span class="pipe-count">{stats.specs ?? 0}</span>
-      </span>
-      <span class="pipe-arrow">→</span>
-      <span class="pipe-stage" class:pipe-stage-active={stats.tasks > 0}>
-        <Icon name="task" size={10} />
-        <span class="pipe-count">{stats.tasks ?? 0}</span>
-      </span>
-      <span class="pipe-arrow">→</span>
-      <span class="pipe-stage" class:pipe-stage-active={stats.agents > 0} class:pipe-stage-success={stats.agents > 0}>
-        <Icon name="agent" size={10} />
-        <span class="pipe-count">{stats.agents ?? 0}</span>
-      </span>
-      <span class="pipe-arrow">→</span>
-      <span class="pipe-stage" class:pipe-stage-active={stats.openMrs > 0} class:pipe-stage-danger={stats.failedGates > 0}>
-        <Icon name="git-merge" size={10} />
-        <span class="pipe-count">{stats.openMrs ?? 0}</span>
-      </span>
-      <span class="pipe-arrow">→</span>
-      <span class="pipe-stage" class:pipe-stage-active={(stats.mrs ?? 0) - (stats.openMrs ?? 0) > 0}>
-        <Icon name="check" size={10} />
-        <span class="pipe-count">{(stats.mrs ?? 0) - (stats.openMrs ?? 0)}</span>
-      </span>
-    </div>
-
     <!-- Status summary — the ONE most important thing about this repo right now -->
     {#if statusSummary}
       <div class="repo-card-status repo-card-status-{statusSummary.variant}">
         <span class="status-text">{statusSummary.text}</span>
-        {#if statusSummary.why}
-          <span class="status-why">{statusSummary.why}</span>
-        {/if}
+        <span class="status-why">{statusSummary.why}</span>
       </div>
+    {:else if repo.description}
+      <p class="repo-card-desc">{repo.description}</p>
     {/if}
 
-    <!-- Active agent names — show what agents are doing -->
-    {#if activeAgentNames.length > 0}
-      <div class="repo-card-agents">
-        {#each activeAgentNames.slice(0, 3) as name}
-          {#if goToEntityDetail}
-            <button class="agent-chip agent-chip-link" onclick={(e) => { e.stopPropagation(); goToEntityDetail('agent', name, { name }); }}>{name}</button>
-          {:else}
-            <span class="agent-chip">{name}</span>
-          {/if}
-        {/each}
-        {#if activeAgentNames.length > 3}
-          <span class="agent-chip agent-chip-more">+{activeAgentNames.length - 3}</span>
-        {/if}
-      </div>
-    {/if}
+    <!-- Compact stats bar -->
+    <div class="repo-card-stats">
+      {#if stats.specs > 0}<span class="repo-stat"><Icon name="spec" size={10} /> {stats.specs}</span>{/if}
+      {#if stats.tasks > 0}<span class="repo-stat"><Icon name="task" size={10} /> {stats.tasks}</span>{/if}
+      {#if stats.agents > 0}<span class="repo-stat repo-stat-active"><Icon name="agent" size={10} /> {stats.agents} active</span>{/if}
+      {#if stats.openMrs > 0}<span class="repo-stat"><Icon name="git-merge" size={10} /> {stats.openMrs} open</span>{/if}
+      {#if stats.failedGates > 0}<span class="repo-stat repo-stat-danger">{stats.failedGates} gate fail</span>{/if}
+    </div>
 
     <!-- Latest MR (if any) — shows recent output -->
     {#if latestMr}
@@ -222,37 +183,25 @@
     white-space: nowrap;
   }
 
-  /* Mini pipeline indicator */
-  .repo-card-pipeline {
+  /* Compact stats bar */
+  .repo-card-stats {
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: var(--space-2);
+    flex-wrap: wrap;
     font-size: 10px;
     color: var(--color-text-muted);
   }
 
-  .pipe-stage {
+  .repo-stat {
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    padding: 1px 4px;
-    border-radius: var(--radius-sm);
-    opacity: 0.5;
-    transition: opacity var(--transition-fast);
+    font-weight: 500;
   }
 
-  .pipe-stage-active { opacity: 1; }
-  .pipe-stage-warn { color: var(--color-warning); opacity: 1; }
-  .pipe-stage-success { color: var(--color-success); opacity: 1; }
-  .pipe-stage-danger { color: var(--color-danger); opacity: 1; }
-
-  .pipe-count { font-weight: 600; }
-
-  .pipe-arrow {
-    font-size: 9px;
-    color: var(--color-text-muted);
-    opacity: 0.4;
-  }
+  .repo-stat-active { color: var(--color-success); }
+  .repo-stat-danger { color: var(--color-danger); font-weight: 600; }
 
   /* Status summary — prominent one-liner with WHY sub-text */
   .repo-card-status {
@@ -289,42 +238,6 @@
   .repo-card-status-info {
     color: var(--color-info, #1e90ff);
     background: color-mix(in srgb, var(--color-info, #1e90ff) 8%, transparent);
-  }
-
-  /* Active agent chips */
-  .repo-card-agents {
-    display: flex;
-    gap: var(--space-1);
-    flex-wrap: wrap;
-  }
-
-  .agent-chip {
-    font-size: 10px;
-    font-weight: 500;
-    color: var(--color-success);
-    background: color-mix(in srgb, var(--color-success) 10%, transparent);
-    padding: 1px 6px;
-    border-radius: var(--radius-sm);
-    white-space: nowrap;
-    max-width: 120px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .agent-chip-link {
-    cursor: pointer;
-    border: none;
-    font-family: inherit;
-  }
-
-  .agent-chip-link:hover {
-    background: color-mix(in srgb, var(--color-success) 20%, transparent);
-    text-decoration: underline;
-  }
-
-  .agent-chip-more {
-    color: var(--color-text-muted);
-    background: var(--color-surface-elevated);
   }
 
   /* Latest MR preview */
