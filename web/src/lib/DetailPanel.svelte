@@ -99,8 +99,9 @@
     const result = [{ id: 'info', label: $t('detail_panel.tabs.info') }];
 
     if (type === 'mr') {
+      const diffLabel = data?.diff_stats ? `${$t('detail_panel.tabs.diff')} (+${data.diff_stats.insertions ?? 0} -${data.diff_stats.deletions ?? 0})` : $t('detail_panel.tabs.diff');
       result.push(
-        { id: 'diff',        label: $t('detail_panel.tabs.diff') },
+        { id: 'diff',        label: diffLabel },
         { id: 'commits',     label: 'Commits' },
         { id: 'timeline',    label: 'Timeline' },
         { id: 'gates',       label: $t('detail_panel.tabs.gates') },
