@@ -1196,6 +1196,13 @@
                 }}>
                   <span class="decision-type">{typeLabel(nt)}{#if n.repo_id && repoMap[n.repo_id]} · {repoMap[n.repo_id].name}{/if}</span>
                   <span class="decision-title">{n.title ?? n.message ?? ''}</span>
+                  {#if nt === 'gate_failure' && body.gate_name}
+                    <span class="decision-detail">Gate: {body.gate_name}</span>
+                  {:else if nt === 'agent_failed' && body.agent_name}
+                    <span class="decision-detail">Agent: {body.agent_name}</span>
+                  {:else if nt === 'spec_approval' && body.spec_path}
+                    <span class="decision-detail">{body.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>
+                  {/if}
                   {#if n.created_at}
                     <span class="decision-time">{relTime(n.created_at)}</span>
                   {/if}
@@ -3876,6 +3883,15 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+  }
+
+  .decision-detail {
+    font-size: 10px;
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .decision-time {
