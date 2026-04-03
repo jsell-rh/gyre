@@ -82,6 +82,7 @@
       {#if stats.agents > 0}<span class="repo-stat repo-stat-btn repo-stat-active" role="link" tabindex="0" onclick={(e) => handleStatClick('agents', e)} onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('agents', e); }} title="View agents">{stats.agents} agent{stats.agents !== 1 ? 's' : ''}</span>{/if}
       {#if stats.mrs > 0}<span class="repo-stat repo-stat-btn" role="link" tabindex="0" onclick={(e) => handleStatClick('mrs', e)} onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('mrs', e); }} title="View merge requests">{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{#if stats.openMrs > 0} ({stats.openMrs} open){/if}</span>{/if}
       {#if stats.failedGates > 0}<span class="repo-stat repo-stat-btn repo-stat-danger" role="link" tabindex="0" onclick={(e) => handleStatClick('mrs', e)} onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('mrs', e); }} title="View failed gates">{stats.failedGates} failed gate{stats.failedGates !== 1 ? 's' : ''}</span>{/if}
+      {#if stats.mrs > 0 || stats.specs > 0}<span class="repo-stat repo-stat-btn" role="link" tabindex="0" onclick={(e) => handleStatClick('code', e)} onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('code', e); }} title="Browse code with agent attribution">code</span>{/if}
     </div>
   </button>
 {/if}
