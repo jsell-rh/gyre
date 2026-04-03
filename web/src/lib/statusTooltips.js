@@ -86,37 +86,84 @@ export function agentStatusTooltip(agent) {
 
 /**
  * Build a status journey array from MR timeline events.
- * Returns [{step, status, timestamp, detail}] for rendering a stepper.
+ * Returns [{step, status, timestamp, detail, why}] for rendering a stepper.
+ * Each step includes a "why" explaining how the MR got to this state.
  */
 export function mrStatusJourney(mr, timelineEvents) {
+  const agentName = mr?.author_agent_id ? entityName('agent', mr.author_agent_id) : null;
+  const specRef = mr?.spec_ref?.split('@')[0]?.split('/').pop()?.replace(/\.md$/, '') ?? null;
+
   const steps = [
-    { step: 'Created', status: 'done', timestamp: mr?.created_at },
+    {
+      step: 'Created',
+      status: 'done',
+      timestamp: mr?.created_at,
+      why: agentName
+        ? `${agentName} completed implementation${specRef ? ` of "${specRef}"` : ''}`
+        : 'Merge request opened',
+    },
   ];
 
   // Gates
-  const gates = mr?._gates ?? {};
+  const gates = mr?._gates ?? mr?._gateSummary ?? {};
   if (gates.total > 0) {
+    const failedNames = (gates.gates ?? [])
+      .filter(g => g.status === 'Failed' || g.status === 'failed')
+      .map(g => g.name)
+      .filter(Boolean);
     if (gates.failed > 0) {
-      steps.push({ step: 'Gates', status: 'failed', detail: `${gates.failed} failed` });
+      steps.push({
+        step: 'Gates',
+        status: 'failed',
+        detail: `${gates.failed} failed`,
+        why: failedNames.length > 0
+          ? `Failed: ${failedNames.join(', ')} — merge blocked until fixed`
+          : `${gates.failed} quality gate(s) failed — merge blocked`,
+      });
     } else if (gates.passed === gates.total) {
-      steps.push({ step: 'Gates', status: 'done', detail: `${gates.passed} passed` });
+      steps.push({
+        step: 'Gates',
+        status: 'done',
+        detail: `${gates.passed} passed`,
+        why: `All ${gates.total} quality gate(s) passed (tests, lint, traces)`,
+      });
     } else {
-      steps.push({ step: 'Gates', status: 'pending', detail: `${gates.passed}/${gates.total}` });
+      steps.push({
+        step: 'Gates',
+        status: 'pending',
+        detail: `${gates.passed}/${gates.total}`,
+        why: `${gates.passed} of ${gates.total} gates have run — waiting for remaining`,
+      });
     }
   }
 
   // Queue
   if (mr?.queue_position != null) {
-    steps.push({ step: 'Queued', status: 'active', detail: `#${mr.queue_position + 1}` });
+    steps.push({
+      step: 'Queued',
+      status: 'active',
+      detail: `#${mr.queue_position + 1}`,
+      why: `Position ${mr.queue_position + 1} in merge queue — processing in order`,
+    });
   } else if (mr?.status === 'merged') {
-    steps.push({ step: 'Queued', status: 'done' });
+    steps.push({ step: 'Queued', status: 'done', why: 'Passed through merge queue' });
   }
 
   // Merged
   if (mr?.status === 'merged') {
-    steps.push({ step: 'Merged', status: 'done', timestamp: mr?.merged_at });
+    const sha = mr?.merge_commit_sha ? mr.merge_commit_sha.slice(0, 7) : null;
+    steps.push({
+      step: 'Merged',
+      status: 'done',
+      timestamp: mr?.merged_at,
+      why: `Merged${sha ? ` as ${sha}` : ''} with signed attestation`,
+    });
   } else if (mr?.status === 'closed') {
-    steps.push({ step: 'Closed', status: 'failed' });
+    steps.push({
+      step: 'Closed',
+      status: 'failed',
+      why: 'MR closed without merging — may have failed gates or been superseded',
+    });
   }
 
   return steps;
