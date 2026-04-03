@@ -81,6 +81,42 @@
   // Evaluative lens metric mode
   let evaluativeMetric = $state('complexity'); // 'complexity' | 'churn' | 'incoming_calls' | 'test_coverage'
 
+  // Timeline scrubber state
+  let timelineEnabled = $state(false);
+  let timelineRange = $state([0, 100]); // percentage range [from, to]
+  let timelineNodes = $derived.by(() => {
+    if (!timelineEnabled || !nodes.length) return null;
+    const allTimes = nodes.filter(n => n.first_seen_at).map(n => n.first_seen_at);
+    if (allTimes.length === 0) return null;
+    const minT = Math.min(...allTimes);
+    const maxT = Math.max(...allTimes);
+    if (maxT === minT) return null;
+    const fromT = minT + (maxT - minT) * (timelineRange[0] / 100);
+    const toT = minT + (maxT - minT) * (timelineRange[1] / 100);
+    const visibleIds = new Set();
+    for (const n of nodes) {
+      const t = n.first_seen_at || 0;
+      if (t >= fromT && t <= toT && !n.deleted_at) visibleIds.add(n.id);
+    }
+    return { visibleIds, minT, maxT, fromT, toT };
+  });
+
+  // Canvas-scoped search state
+  let searchOpen = $state(false);
+  let searchQuery = $state('');
+  let searchResults = $derived.by(() => {
+    if (!searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase();
+    return nodes.filter(n =>
+      n.name?.toLowerCase().includes(q) ||
+      n.qualified_name?.toLowerCase().includes(q) ||
+      n.node_type?.toLowerCase().includes(q) ||
+      n.spec_path?.toLowerCase().includes(q)
+    ).slice(0, 20);
+  });
+  let searchHighlightIds = $derived(new Set(searchResults.map(n => n.id)));
+  let searchInputEl = $state(null);
+
   function onLensChange(newLens) {
     if (newLens === 'evaluative') {
       // When switching to evaluative lens, apply a heat map query
@@ -866,9 +902,18 @@
   }
 
   function queryNodeOpacity(ln) {
+    const nodeId = ln.node?.id ?? ln.id;
+    // Timeline filtering: dim nodes outside the time range
+    if (timelineNodes && ln.kind !== 'tree-group') {
+      if (!timelineNodes.visibleIds.has(nodeId)) return 0.08;
+    }
+    // Search highlighting: dim non-matching nodes
+    if (searchOpen && searchQuery.trim() && searchHighlightIds.size > 0) {
+      if (ln.kind === 'tree-group') return 0.6;
+      return searchHighlightIds.has(nodeId) ? 1.0 : 0.1;
+    }
     if (!queryMatchedIds) return 1.0;
     if (ln.kind === 'tree-group') return treeGroupHasMatch(ln) ? 1.0 : 0.15;
-    const nodeId = ln.node?.id ?? ln.id;
     return queryMatchedIds.has(nodeId) ? 1.0 : (activeQuery?.emphasis?.dim_unmatched ?? 0.12);
   }
 
@@ -1342,6 +1387,53 @@
         ctx.fillStyle = '#64748b';
         ctx.font = `400 ${typeSize}px system-ui`;
         ctx.fillText(n?.node_type ?? '', s.x, s.y + fontSize * 0.7 + 2);
+      }
+    }
+
+    // Badge rendering (from view query emphasis.badges or evaluative metrics)
+    if (sw > 40 && sh > 25) {
+      const badges = activeQuery?.emphasis?.badges;
+      if (badges?.metric && n) {
+        let badgeValue = 0;
+        if (badges.metric === 'incoming_calls') {
+          badgeValue = edges.filter(e => (e.target_id ?? e.to_node_id ?? e.to) === n.id && (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls').length;
+        } else if (badges.metric === 'complexity') badgeValue = n.complexity ?? 0;
+        else if (badges.metric === 'churn') badgeValue = n.churn_count_30d ?? 0;
+        else if (badges.metric === 'test_coverage') badgeValue = n.test_coverage != null ? Math.round(n.test_coverage * 100) : 0;
+        if (badgeValue > 0) {
+          const badgeText = (badges.template ?? '{{count}}').replace('{{count}}', String(badgeValue));
+          const bx = s.x + sw / 2 - 4;
+          const by = s.y - sh / 2 + 4;
+          const bfs = Math.max(7, Math.min(10, sw * 0.1));
+          ctx.save();
+          ctx.font = `700 ${bfs}px 'SF Mono', Menlo, monospace`;
+          const bw = measureText(ctx, badgeText, ctx.font) + 6;
+          ctx.fillStyle = '#1e293b';
+          ctx.beginPath();
+          ctx.roundRect(bx - bw, by - 2, bw, bfs + 4, 3);
+          ctx.fill();
+          ctx.fillStyle = '#94a3b8';
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'top';
+          ctx.fillText(badgeText, bx - 3, by);
+          ctx.restore();
+        }
+      }
+      // Test node badge
+      if (n?.test_node && sw > 50 && sh > 30) {
+        const bx = s.x - sw / 2 + 4;
+        const by = s.y - sh / 2 + 4;
+        ctx.save();
+        ctx.font = 'bold 8px system-ui';
+        ctx.fillStyle = '#166534';
+        ctx.beginPath();
+        ctx.roundRect(bx, by - 1, 26, 11, 3);
+        ctx.fill();
+        ctx.fillStyle = '#bbf7d0';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText('TEST', bx + 2, by + 1);
+        ctx.restore();
       }
     }
 
@@ -1841,9 +1933,17 @@
     }
   }
 
-  // Keyboard: Escape to zoom out to root
+  // Keyboard: Escape to zoom out to root, / to search
   function onKeyDown(e) {
+    if (e.key === '/' && !searchOpen) {
+      e.preventDefault();
+      searchOpen = true;
+      searchQuery = '';
+      requestAnimationFrame(() => searchInputEl?.focus());
+      return;
+    }
     if (e.key === 'Escape') {
+      if (searchOpen) { searchOpen = false; searchQuery = ''; return; }
       if (contextMenu) {
         contextMenu = null;
         return;
@@ -2007,6 +2107,11 @@
       {/each}
     </div>
 
+    <button class="tb-btn" class:active={timelineEnabled} onclick={() => { timelineEnabled = !timelineEnabled; scheduleRedraw(); }} title="Toggle architecture timeline" type="button" aria-pressed={timelineEnabled}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      Timeline
+    </button>
+
     <span class="zoom-ind">{cam.zoom.toFixed(2)}x</span>
     <span class="treemap-stats">{nodes.length} nodes</span>
   </div>
@@ -2056,6 +2161,14 @@
           {/if}
           {#if tooltipNode.spec_path}
             <span class="tooltip-spec">spec: {tooltipNode.spec_path}</span>
+          {/if}
+          {#if lens === 'evaluative'}
+            <div class="tooltip-eval">
+              {#if tooltipNode.complexity != null}<span>complexity: {tooltipNode.complexity}</span>{/if}
+              {#if tooltipNode.churn_count_30d != null}<span>churn/30d: {tooltipNode.churn_count_30d}</span>{/if}
+              {#if tooltipNode.test_coverage != null}<span>test coverage: {Math.round(tooltipNode.test_coverage * 100)}%</span>{/if}
+              {#if tooltipNode.test_node}<span class="tooltip-test-badge">test function</span>{/if}
+            </div>
           {/if}
         </div>
       {/if}
@@ -2122,6 +2235,99 @@
     {/if}
   </div>
 
+  <!-- Canvas-scoped search overlay -->
+  {#if searchOpen}
+    <div class="canvas-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input
+        bind:this={searchInputEl}
+        type="text"
+        class="canvas-search-input"
+        placeholder="Search entities..."
+        value={searchQuery}
+        oninput={(e) => { searchQuery = e.target.value; scheduleRedraw(); }}
+        onkeydown={(e) => {
+          if (e.key === 'Escape') { searchOpen = false; searchQuery = ''; scheduleRedraw(); }
+          if (e.key === 'Enter' && searchResults.length > 0) {
+            const hit = searchResults[0];
+            selectedNodeId = hit.id;
+            canvasState = { ...canvasState, selectedNode: { id: hit.id, name: hit.name, node_type: hit.node_type, qualified_name: hit.qualified_name } };
+            onNodeDetail(hit);
+            // Pan to the node
+            const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === hit.id);
+            if (ln) { targetCam.x = ln.x; targetCam.y = ln.y; targetCam.zoom = Math.max(cam.zoom, 2); }
+            searchOpen = false; searchQuery = '';
+            scheduleRedraw();
+          }
+        }}
+        aria-label="Search entities"
+      />
+      {#if searchResults.length > 0}
+        <span class="canvas-search-count">{searchResults.length} matches</span>
+      {/if}
+      <button class="canvas-search-close" onclick={() => { searchOpen = false; searchQuery = ''; scheduleRedraw(); }} aria-label="Close search" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    {#if searchResults.length > 0}
+      <div class="canvas-search-results" role="listbox" aria-label="Search results">
+        {#each searchResults.slice(0, 8) as result}
+          <button class="search-result-item" role="option"
+            onclick={() => {
+              selectedNodeId = result.id;
+              canvasState = { ...canvasState, selectedNode: { id: result.id, name: result.name, node_type: result.node_type, qualified_name: result.qualified_name } };
+              onNodeDetail(result);
+              const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === result.id);
+              if (ln) { targetCam.x = ln.x; targetCam.y = ln.y; targetCam.zoom = Math.max(cam.zoom, 2); }
+              searchOpen = false; searchQuery = '';
+              scheduleRedraw();
+            }}
+            type="button"
+          >
+            <span class="sr-type" style="color: {specBorderColor(result)}">{result.node_type}</span>
+            <span class="sr-name">{result.name}</span>
+            {#if result.file_path}<span class="sr-file">{result.file_path}</span>{/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
+  {/if}
+
+  <!-- Timeline scrubber -->
+  {#if timelineEnabled}
+    <div class="timeline-scrubber" role="group" aria-label="Architecture timeline">
+      <button class="timeline-close" onclick={() => { timelineEnabled = false; scheduleRedraw(); }} title="Close timeline" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+      <span class="timeline-label">
+        {#if timelineNodes}
+          {new Date(timelineNodes.fromT * 1000).toLocaleDateString()} — {new Date(timelineNodes.toT * 1000).toLocaleDateString()}
+        {:else}
+          Timeline
+        {/if}
+      </span>
+      <input
+        type="range"
+        class="timeline-slider"
+        min="0" max="100"
+        value={timelineRange[0]}
+        oninput={(e) => { timelineRange = [Number(e.target.value), timelineRange[1]]; scheduleRedraw(); }}
+        aria-label="Timeline start"
+      />
+      <input
+        type="range"
+        class="timeline-slider"
+        min="0" max="100"
+        value={timelineRange[1]}
+        oninput={(e) => { timelineRange = [timelineRange[0], Number(e.target.value)]; scheduleRedraw(); }}
+        aria-label="Timeline end"
+      />
+      {#if timelineNodes}
+        <span class="timeline-count">{timelineNodes.visibleIds.size} nodes visible</span>
+      {/if}
+    </div>
+  {/if}
+
   <!-- Breadcrumb -->
   {#if breadcrumb.length > 0}
     <div class="treemap-breadcrumb" role="navigation" aria-label="Drill-down path">
@@ -2187,6 +2393,9 @@
   .tooltip-qname { font-size: 10px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-file { font-size: 10px; color: #475569; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-count, .tooltip-spec { font-size: 10px; color: #64748b; }
+  .tooltip-eval { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; border-top: 1px solid #1e293b; padding-top: 4px; }
+  .tooltip-eval span { font-size: 10px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace; }
+  .tooltip-test-badge { color: #22c55e !important; font-weight: 600; }
 
   .treemap-minimap {
     position: absolute; bottom: 12px; right: 12px; border: 1px solid #334155;
@@ -2262,6 +2471,68 @@
   .ctx-item:hover { background: #1e293b; color: #f1f5f9; }
   .ctx-item svg { flex-shrink: 0; color: #64748b; }
   .ctx-item:hover svg { color: #94a3b8; }
+
+  /* Canvas search overlay */
+  .canvas-search {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px; background: rgba(15,15,26,0.97);
+    border-bottom: 1px solid #334155; flex-shrink: 0;
+  }
+  .canvas-search svg { color: #64748b; flex-shrink: 0; }
+  .canvas-search-input {
+    flex: 1; background: transparent; border: none; outline: none;
+    color: #e2e8f0; font-size: 14px; font-family: 'SF Mono', Menlo, monospace;
+  }
+  .canvas-search-input::placeholder { color: #475569; }
+  .canvas-search-count { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; }
+  .canvas-search-close {
+    display: flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; background: transparent; border: none;
+    border-radius: 4px; color: #94a3b8; cursor: pointer;
+  }
+  .canvas-search-close:hover { background: #1e293b; color: #e2e8f0; }
+
+  .canvas-search-results {
+    position: absolute; top: auto; left: 12px; right: 12px; z-index: 50;
+    background: rgba(15,15,26,0.97); border: 1px solid #334155;
+    border-radius: 8px; padding: 4px; max-height: 280px; overflow-y: auto;
+    backdrop-filter: blur(16px); box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  }
+  .search-result-item {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 8px 12px; border: none; border-radius: 6px; background: transparent;
+    color: #cbd5e1; font-size: 13px; cursor: pointer; text-align: left;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  .search-result-item:hover { background: #1e293b; color: #f1f5f9; }
+  .sr-type { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; width: 60px; flex-shrink: 0; }
+  .sr-name { font-weight: 600; font-family: 'SF Mono', Menlo, monospace; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sr-file { font-size: 10px; color: #475569; font-family: 'SF Mono', Menlo, monospace; margin-left: auto; flex-shrink: 0; }
+
+  /* Timeline scrubber */
+  .timeline-scrubber {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; background: rgba(15,15,26,0.95);
+    border-top: 1px solid #1e293b; flex-shrink: 0;
+  }
+  .timeline-close {
+    display: flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; background: transparent; border: none;
+    border-radius: 4px; color: #64748b; cursor: pointer;
+  }
+  .timeline-close:hover { background: #1e293b; color: #e2e8f0; }
+  .timeline-label {
+    font-size: 11px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace;
+    min-width: 180px;
+  }
+  .timeline-slider {
+    flex: 1; height: 4px; accent-color: #ef4444;
+    appearance: auto; cursor: pointer;
+  }
+  .timeline-count {
+    font-size: 10px; color: #64748b; font-family: 'SF Mono', Menlo, monospace;
+    white-space: nowrap;
+  }
 
   @media (prefers-reduced-motion: reduce) {
     .tb-btn, .breadcrumb-item, .treemap-minimap { transition: none; }
