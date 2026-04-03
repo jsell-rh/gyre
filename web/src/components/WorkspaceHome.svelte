@@ -1399,7 +1399,7 @@
                           </td>
                           <td>
                             <div class="status-with-context">
-                              <span class="status-pill status-pill-{taskStatus}" title={taskStatusTooltip(taskStatus)}>
+                              <span class="status-pill status-pill-{taskStatus}" title={taskStatusTooltip(task)}>
                                 {taskStatus}
                               </span>
                               {#if taskStatus === 'in_progress' && taskAgent}
@@ -1567,7 +1567,7 @@
                           </td>
                           <td>
                             <div class="status-with-context">
-                              <span class="status-pill status-pill-{agStatus}" title={agentStatusTooltip(agStatus)}>
+                              <span class="status-pill status-pill-{agStatus}" title={agentStatusTooltip(agent)}>
                                 {#if agStatus === 'active'}<span class="status-pulse"></span>{/if}
                                 {agStatus}
                               </span>
