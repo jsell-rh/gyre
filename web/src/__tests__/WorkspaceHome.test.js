@@ -49,33 +49,20 @@ describe('WorkspaceHome', () => {
     expect(getByText('Select a workspace')).toBeTruthy();
   });
 
-  it('shows all six sections when workspace is provided', () => {
+  it('shows key sections when workspace is provided', () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    expect(container.querySelector('[data-testid="section-decisions"]')).toBeTruthy();
+    // New streamlined layout: PipelineOverview, Repos, Activity feed
+    expect(container.querySelector('[data-testid="pipeline-overview"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="section-architecture"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="section-briefing"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="section-specs"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="section-agent-rules"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="ws-tabbed-panel"]')).toBeTruthy();
   });
 
-  // Decisions badge with real notifications is tested comprehensively in WorkspaceHomeSections.test.js
-
-  it('does not show decisions badge when there are no notifications', async () => {
+  it('renders pipeline overview with stage buttons', () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    await waitFor(() => {
-      expect(container.querySelector('[data-testid="section-decisions"] .section-badge')).toBeNull();
-    });
-  });
-
-  it('shows empty state message when no notifications', async () => {
-    const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
-    const { getByTestId } = render(WorkspaceHome, { props: { workspace: ws } });
-    await waitFor(() => {
-      expect(getByTestId('decisions-empty').textContent).toContain('No pending decisions');
-    });
+    const stages = container.querySelectorAll('.pipeline-stage');
+    expect(stages.length).toBe(5); // Specs, Tasks, Agents, MRs, Merged
   });
 
   it('each section has correct aria-labelledby', () => {
@@ -87,22 +74,5 @@ describe('WorkspaceHome', () => {
       expect(labelledBy).toBeTruthy();
       expect(container.querySelector(`#${labelledBy}`)).toBeTruthy();
     });
-  });
-
-  it('Manage rules link is rendered as a button', () => {
-    const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
-    const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    const btn = container.querySelector('[data-testid="manage-rules-link"]');
-    expect(btn).toBeTruthy();
-    expect(btn.tagName).toBe('BUTTON');
-    expect(btn.textContent.trim()).toBe('Manage rules');
-  });
-
-  it('renders manage rules button even when slug is missing', () => {
-    const ws = { id: 'ws-1', name: 'Test' };
-    const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    const btn = container.querySelector('[data-testid="manage-rules-link"]');
-    expect(btn).toBeTruthy();
-    expect(btn.textContent.trim()).toBe('Manage rules');
   });
 });
