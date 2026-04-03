@@ -359,7 +359,7 @@
   let graphTimeline = $state(null);
 
   $effect(() => {
-    if (!selectedRepoId || explorerTab !== 'architecture') return;
+    if (!selectedRepoId) return;
     if (repoDeps !== null) return; // already loaded
     repoDepsLoading = true;
     repoRisksLoading = true;
@@ -801,8 +801,8 @@
           </div>
         {/if}
 
-        <!-- Repo dependencies, risks, types, modules, timeline — hidden when graph canvas is active (canvas fills viewport) -->
-        {#if selectedRepoId && explorerTab === 'architecture' && !loading && !graph && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
+        <!-- Repo dependencies, risks, types, modules, timeline — shown as collapsible section both before and alongside graph -->
+        {#if selectedRepoId && explorerTab === 'architecture' && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
           <div class="arch-insights-toggle">
             <button
               class="arch-insights-btn"

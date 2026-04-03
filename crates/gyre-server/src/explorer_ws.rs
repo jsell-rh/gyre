@@ -7,8 +7,18 @@
 //! graph_edges, search), streams text responses and view queries back.
 //! Also handles saved view CRUD over the same WebSocket.
 //!
-//! Auth: Bearer token in initial HTTP upgrade (via AuthenticatedAgent extractor).
-//! The WebSocket itself does NOT handle auth messages.
+//! Auth: Bearer token in initial HTTP upgrade (via AuthenticatedAgent extractor
+//! or ?token= query parameter). The WebSocket itself does NOT handle auth messages.
+//!
+//! ## Architecture Note: LLM Port vs Claude Agent SDK
+//!
+//! The spec recommends Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`), but
+//! that's a Node.js package. Our server is Rust, so we use the internal `llm_port`
+//! abstraction which provides the same conversation-with-tools pattern. The tools
+//! (graph_summary, graph_query_dryrun, etc.) execute locally against in-memory
+//! graph data — no MCP round-trip — providing lower latency for interactive
+//! exploration. The self-check loop, refinement budget, and conversation history
+//! management are functionally equivalent to what the SDK provides.
 
 use axum::{
     extract::{
