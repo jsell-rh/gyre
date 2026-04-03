@@ -1308,9 +1308,24 @@
                             {#if specDir}<span class="entity-secondary-path">{specDir}/</span>{/if}
                           </td>
                           <td>
-                            <span class="status-pill status-pill-{status}" title={specStatusTooltip(status)}>
-                              {SPEC_STATUS_ICONS[status] ?? ''} {status}
-                            </span>
+                            <div class="status-with-context">
+                              <span class="status-pill status-pill-{status}" title={specStatusTooltip(status)}>
+                                {SPEC_STATUS_ICONS[status] ?? ''} {status}
+                              </span>
+                              {#if status === 'pending'}
+                                <span class="status-context status-context-action">needs review</span>
+                              {:else if status === 'approved' && totalTasks === 0}
+                                <span class="status-context">awaiting task creation</span>
+                              {:else if status === 'approved' && specAgents.length === 0 && doneTasks < totalTasks}
+                                <span class="status-context">awaiting agent</span>
+                              {:else if status === 'approved' && specAgents.some(a => a.status === 'active')}
+                                <span class="status-context status-context-success">agent working</span>
+                              {:else if status === 'approved' && doneTasks === totalTasks && totalTasks > 0}
+                                <span class="status-context status-context-success">fully implemented</span>
+                              {:else if status === 'rejected'}
+                                <span class="status-context status-context-danger">blocked</span>
+                              {/if}
+                            </div>
                           </td>
                           <td class="progress-cell">
                             {#if totalTasks > 0}
