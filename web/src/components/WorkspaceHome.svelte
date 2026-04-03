@@ -1052,7 +1052,7 @@
       if (specs.length === 0) return 'Push specs to your repo to start the autonomous pipeline.';
       if (s.approved > 0 && s.totalTasks === 0) return 'Specs approved — waiting for task creation.';
       if (s.mergedMrs > 0 && s.activeAgentCount === 0 && s.openMrs === 0 && s.pending === 0) {
-        return `Pipeline complete: ${s.approved} spec${s.approved !== 1 ? 's' : ''} approved, ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with attestation.`;
+        return `All clear — ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with signed attestation, ${s.approved} spec${s.approved !== 1 ? 's' : ''} implemented. Browse workspace to inspect the provenance chain.`;
       }
       return 'System idle — no active work.';
     }
