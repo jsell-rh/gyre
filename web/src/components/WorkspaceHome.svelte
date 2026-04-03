@@ -1194,31 +1194,33 @@
           <h2 class="completions-title">Recent completions</h2>
           <div class="completions-list">
             {#each recentCompletions as c}
-              <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
+              <div class="completion-item">
                 <div class="completion-chain">
                   {#if c.specName}
-                    <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
+                    <button class="completion-node completion-spec completion-clickable" title="View spec: {c.specPath}" onclick={() => nav('spec', c.specPath, { path: c.specPath, repo_id: c.mr.repository_id ?? c.mr.repo_id })}>{c.specName}</button>
                     <span class="completion-arrow">→</span>
                   {/if}
                   {#if c.taskTitle}
-                    <span class="completion-node completion-task" title="Task">{c.taskTitle.length > 30 ? c.taskTitle.slice(0, 27) + '...' : c.taskTitle}</span>
+                    <button class="completion-node completion-task completion-clickable" title="View task" onclick={() => { if (c.task) nav('task', c.task.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.taskTitle }); }}>{c.taskTitle.length > 30 ? c.taskTitle.slice(0, 27) + '...' : c.taskTitle}</button>
                     <span class="completion-arrow">→</span>
                   {/if}
                   {#if c.agentName}
-                    <span class="completion-node completion-agent" title="Agent">{c.agentName}</span>
+                    <button class="completion-node completion-agent completion-clickable" title="View agent: {c.agentName}" onclick={() => { if (c.agent) nav('agent', c.agent.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, name: c.agentName }); }}>{c.agentName}</button>
                     <span class="completion-arrow">→</span>
                   {/if}
-                  <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title ?? 'MR'}</span>
+                  <button class="completion-node completion-mr completion-clickable" title="View MR: {c.mr.title ?? ''}" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>{c.mr.title ?? 'MR'}</button>
                   <span class="completion-arrow">→</span>
-                  <span class="completion-node completion-merged">merged</span>
+                  <button class="completion-node completion-merged completion-clickable" title="View attestation" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title, _openTab: 'attestation' })}>merged</button>
                 </div>
                 <div class="completion-meta">
-                  {#if c.gates?.passed > 0}<span class="completion-gates">{c.gates.passed} gate{c.gates.passed !== 1 ? 's' : ''} passed</span>{/if}
+                  {#if c.gates?.passed > 0}
+                    <button class="completion-gates completion-meta-link" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title, _openTab: 'gates' })} title="View gate results">{c.gates.passed} gate{c.gates.passed !== 1 ? 's' : ''} passed</button>
+                  {/if}
                   {#if c.mr.merge_commit_sha}<code class="completion-sha">{c.mr.merge_commit_sha.slice(0, 7)}</code>{/if}
                   {#if c.repoName}<span>{c.repoName}</span>{/if}
                   {#if c.mergedAt}<span>{relTime(c.mergedAt)}</span>{/if}
                 </div>
-              </button>
+              </div>
             {/each}
           </div>
         </section>
@@ -2204,6 +2206,38 @@
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 200px;
+  }
+
+  .completion-clickable {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: inherit;
+    padding: 2px 4px;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast), text-decoration var(--transition-fast);
+  }
+
+  .completion-clickable:hover {
+    text-decoration: underline;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+  }
+
+  .completion-meta-link {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    padding: 0;
+  }
+
+  .completion-meta-link:hover {
+    color: var(--color-primary);
+    text-decoration: underline;
   }
 
   .completion-spec { color: var(--color-info, #1e90ff); }
