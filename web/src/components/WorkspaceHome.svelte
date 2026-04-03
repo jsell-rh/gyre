@@ -1088,7 +1088,12 @@
 
       <!-- ── Status sentence — tells the user what matters right now ── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-        <p class="ws-status-sentence" data-testid="status-sentence">{statusSentence}</p>
+        <div class="ws-status-area">
+          <p class="ws-status-sentence" data-testid="status-sentence">{statusSentence}</p>
+          {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
+            <p class="ws-briefing-inline">{briefingData.summary ?? briefingData.narrative}</p>
+          {/if}
+        </div>
       {/if}
 
       <!-- ── Pipeline + Actions: compact top bar ────────────────────── -->
@@ -1209,24 +1214,8 @@
         </section>
       {/if}
 
-      <!-- ── Main dashboard: two-column layout ─────────────────────── -->
-      <div class="dashboard-two-col">
-
-        <!-- Left: Repos + Recent Completions -->
-        <div class="dashboard-primary">
-          <!-- ── Briefing (LLM summary of recent changes) ──────────────── -->
-          {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
-            <section class="ws-briefing-section">
-              <div class="ws-briefing-body">
-                {#if briefingData.summary}
-                  <p class="ws-briefing-text">{briefingData.summary}</p>
-                {/if}
-                {#if briefingData.narrative && briefingData.narrative !== briefingData.summary}
-                  <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
-                {/if}
-              </div>
-            </section>
-          {/if}
+      <!-- ── Main dashboard: single-column layout ──────────────────── -->
+      <div class="dashboard-main">
 
           <!-- ── Repos ────────────────────────────────────────────────── -->
           <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
@@ -1316,92 +1305,6 @@
             {/if}
           </section>
 
-          <!-- ── Recent Completions (provenance chain) ──────────────── -->
-          {#if !mrsLoading && recentCompletions.length > 0}
-            <section class="ws-completions-section">
-              <h3 class="completions-title">Recent Completions</h3>
-              <div class="completions-list">
-                {#each recentCompletions as c}
-                  <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
-                    <div class="completion-chain">
-                      {#if c.specName}
-                        <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
-                        <span class="completion-arrow">→</span>
-                      {/if}
-                      {#if c.agentName}
-                        <span class="completion-node completion-agent" title="Agent: {c.agentName}">{c.agentName}</span>
-                        <span class="completion-arrow">→</span>
-                      {/if}
-                      <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title?.length > 30 ? c.mr.title.slice(0, 27) + '...' : c.mr.title ?? 'Untitled'}</span>
-                      <span class="completion-arrow">→</span>
-                      <span class="completion-node completion-merged">Merged</span>
-                    </div>
-                    <div class="completion-meta">
-                      {#if c.gates?.total > 0}
-                        <span class="completion-gates">{c.gates.passed}/{c.gates.total} gates</span>
-                      {/if}
-                      {#if c.repoName}
-                        <span class="completion-repo">{c.repoName}</span>
-                      {/if}
-                      {#if c.mergedAt}
-                        <span class="completion-time">{relTime(c.mergedAt)}</span>
-                      {/if}
-                    </div>
-                  </button>
-                {/each}
-              </div>
-            </section>
-          {/if}
-        </div>
-
-        <!-- Right: Activity feed (always visible) -->
-        <aside class="dashboard-sidebar">
-          <section class="ws-activity-sidebar">
-            <h3 class="completions-title">Activity</h3>
-            {#if activityLoading}
-              <div class="skeleton-row"></div>
-            {:else if activityEvents.length === 0}
-              <p class="empty-text-compact">No recent activity</p>
-            {:else}
-              <div class="activity-timeline activity-timeline-compact">
-                {#each activityEvents.slice(0, 12) as event, i}
-                  {@const variant = activityVariant(event)}
-                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                  <button
-                    class="activity-item activity-item-clickable"
-                    onclick={() => {
-                      if (primaryType && primaryId) {
-                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                        nav(primaryType, primaryId, data);
-                      }
-                    }}
-                  >
-                    <div class="activity-dot activity-dot-{variant}"></div>
-                    {#if i < 11}<div class="activity-line"></div>{/if}
-                    <div class="activity-content">
-                      <div class="activity-main-row">
-                        <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
-                        <span class="activity-label">{activityLabel(event)}</span>
-                        {#if event.entity_name ?? event.title}
-                          <span class="activity-detail">{(event.entity_name ?? event.title ?? '').slice(0, 40)}</span>
-                        {/if}
-                      </div>
-                      {#if event.timestamp ?? event.created_at}
-                        <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                      {/if}
-                    </div>
-                  </button>
-                {/each}
-              </div>
-              {#if activityEvents.length > 12}
-                <button class="show-more-btn-compact" onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
-                  View all activity ({activityEvents.length})
-                </button>
-              {/if}
-            {/if}
-          </section>
-        </aside>
       </div>
 
       <!-- ── Cross-repo entity browse (always visible tabs) ──────────── -->
@@ -2103,7 +2006,13 @@
     color: var(--color-text);
   }
 
-  /* ── Status sentence ────────────────────────────────────────────── */
+  /* ── Status area ────────────────────────────────────────────────── */
+  .ws-status-area {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
   .ws-status-sentence {
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
@@ -2111,72 +2020,24 @@
     line-height: 1.4;
   }
 
-  /* ── Two-column layout ──────────────────────────────────────────── */
-  .dashboard-two-col {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: var(--space-3);
-  }
-
-  @media (min-width: 900px) {
-    .dashboard-two-col {
-      grid-template-columns: 1fr 280px;
-    }
-  }
-
-  .dashboard-primary {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    min-width: 0;
-  }
-
-  .dashboard-sidebar {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    min-width: 0;
-  }
-
-  .ws-activity-sidebar {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    background: var(--color-surface);
-    padding: var(--space-2) var(--space-3);
-  }
-
-  .activity-timeline-compact .activity-item {
-    padding: var(--space-1) 0;
-  }
-
-  .activity-timeline-compact .activity-content {
-    gap: 2px;
-  }
-
-  .empty-text-compact {
+  .ws-briefing-inline {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
-    padding: var(--space-2);
-    text-align: center;
+    margin: 0;
+    line-height: 1.4;
+    font-style: italic;
+    max-width: 600px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .show-more-btn-compact {
-    display: block;
-    width: 100%;
-    padding: var(--space-1) var(--space-2);
-    background: transparent;
-    border: none;
-    border-top: 1px solid var(--color-border);
-    color: var(--color-link);
-    font-size: var(--text-xs);
-    cursor: pointer;
-    font-family: var(--font-body);
-    text-align: center;
-    margin-top: var(--space-1);
-  }
-
-  .show-more-btn-compact:hover {
-    background: var(--color-surface-elevated);
+  /* ── Main layout ────────────────────────────────────────────────── */
+  .dashboard-main {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
   }
 
   /* browse-toggle removed — entity tabs are always visible */
