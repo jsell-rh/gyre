@@ -537,7 +537,7 @@
               aria-label="{$t('spec_dashboard.title')}: {spec.path}"
             >
               <td class="col-path">
-                <span class="spec-path" title={spec.path}>{spec.path}</span>
+                <span class="spec-path" title={spec.path}>{#if spec.path?.includes('/')}<span class="spec-dir">{spec.path.slice(0, spec.path.lastIndexOf('/') + 1)}</span>{/if}{spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</span>
               </td>
               <td>
                 <Badge
@@ -615,7 +615,7 @@
               aria-label={$t('spec_dashboard.spec_label', { values: { path: spec.path } })}
             >
               <td class="col-path">
-                <span class="spec-path" title={spec.path}>{spec.path}</span>
+                <span class="spec-path" title={spec.path}>{#if spec.path?.includes('/')}<span class="spec-dir">{spec.path.slice(0, spec.path.lastIndexOf('/') + 1)}</span>{/if}{spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</span>
               </td>
               <td>
                 <Badge
@@ -906,11 +906,17 @@
   .spec-path {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--color-text-secondary);
+    color: var(--color-text);
+    font-weight: 500;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     display: block;
+  }
+
+  .spec-dir {
+    color: var(--color-text-muted);
+    font-weight: 400;
   }
 
   .col-kind,
