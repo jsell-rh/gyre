@@ -925,41 +925,52 @@
       // Frustum cull
       if (!isVisible(ln)) return;
 
-      // Opacity check — if this node is invisible, skip it AND all children
       let op = nodeOpacity(ln);
-      if (op < 0.01) return;
 
-      op *= filterOpacity(ln);
-      if (op < 0.01) return;
+      // For tree-groups: even if the group itself is transparent (zoomed in
+      // past it), we still need to draw its children. Only skip leaf nodes
+      // and tree-groups that are too small to see.
+      const isTreeGroup = ln.kind === 'tree-group';
+      const ss = isTreeGroup ? Math.min(ln.w * cam.zoom, ln.h * cam.zoom) : 0;
 
-      if (activeQuery) {
-        const qOp = queryNodeOpacity(ln);
-        if (qOp >= 0.8) op = Math.max(op, qOp);
-        else op *= qOp;
+      // Too small to see at all — skip this node and all children
+      if (ss > 0 && ss < 10) return;
+      if (!isTreeGroup && op < 0.01) return;
+
+      // Draw this node if it has any opacity
+      if (op > 0.01) {
+        let drawOp = op * filterOpacity(ln);
+
+        if (activeQuery && drawOp > 0.01) {
+          const qOp = queryNodeOpacity(ln);
+          if (qOp >= 0.8) drawOp = Math.max(drawOp, qOp);
+          else drawOp *= qOp;
+        }
+
+        if (connectedHighlight && ln.node) {
+          if (!connectedHighlight.has(ln.node.id)) drawOp *= 0.2;
+        }
+
+        if (drawOp > 0.01) {
+          ctx.save();
+          ctx.globalAlpha = drawOp;
+
+          const s = worldToScreen(ln.x, ln.y);
+          const sw = ln.w * cam.zoom;
+          const sh = ln.h * cam.zoom;
+
+          if (isTreeGroup) {
+            drawTreeGroup(ctx, ln, s, sw, sh, drawOp);
+          } else {
+            drawLeafNode(ctx, ln, s, sw, sh, drawOp);
+          }
+
+          ctx.restore();
+        }
       }
 
-      if (connectedHighlight && ln.node) {
-        if (!connectedHighlight.has(ln.node.id)) op *= 0.2;
-      }
-
-      ctx.save();
-      ctx.globalAlpha = op;
-
-      const s = worldToScreen(ln.x, ln.y);
-      const sw = ln.w * cam.zoom;
-      const sh = ln.h * cam.zoom;
-
-      if (ln.kind === 'tree-group') {
-        drawTreeGroup(ctx, ln, s, sw, sh, op);
-      } else {
-        drawLeafNode(ctx, ln, s, sw, sh, op);
-      }
-
-      ctx.restore();
-
-      // Recursively draw children — only if this node is in container mode
-      // (children are visible inside it). If in summary mode, children are hidden.
-      if (ln.kind === 'tree-group' && !isSummaryMode(ln)) {
+      // Recursively draw children if this tree-group is in container mode
+      if (isTreeGroup && !isSummaryMode(ln)) {
         const children = childrenIndex.get(ln.id);
         if (children) {
           for (const child of children) {
@@ -1385,20 +1396,33 @@
     const sy = clientY - rect.top;
     const world = screenToWorld(sx, sy);
 
-    // Find deepest node containing point
-    let best = null;
-    for (const ln of layoutNodes) {
-      const op = nodeOpacity(ln);
-      if (op < 0.05) continue;
-      const l = ln.x - ln.w / 2, r = ln.x + ln.w / 2;
-      const t = ln.y - ln.h / 2, b = ln.y + ln.h / 2;
-      if (world.x >= l && world.x <= r && world.y >= t && world.y <= b) {
-        if (!best || ln.treeDepth > best.treeDepth || (ln.treeDepth === best.treeDepth && ln.kind !== 'tree-group')) {
-          best = ln;
+    // Hierarchical hit test — only descend into visible containers
+    function hitRecursive(nodes) {
+      let best = null;
+      for (const ln of nodes) {
+        const l = ln.x - ln.w / 2, r = ln.x + ln.w / 2;
+        const t = ln.y - ln.h / 2, b = ln.y + ln.h / 2;
+        if (world.x < l || world.x > r || world.y < t || world.y > b) continue;
+
+        // This node contains the point
+        const op = nodeOpacity(ln);
+        if (op < 0.05) continue;
+
+        best = ln;
+
+        // If it's a tree-group in container mode, check children for deeper hit
+        if (ln.kind === 'tree-group' && !isSummaryMode(ln)) {
+          const children = childrenIndex.get(ln.id);
+          if (children) {
+            const childHit = hitRecursive(children);
+            if (childHit) best = childHit;
+          }
         }
       }
+      return best;
     }
-    return best;
+
+    return hitRecursive(rootLayoutNodes);
   }
 
   function onMouseDown(e) {
@@ -1592,9 +1616,9 @@
     return () => ro.disconnect();
   });
 
-  // Trigger redraws on reactive state changes
+  // Trigger redraws on reactive state changes (NOT hoveredNodeId — that triggers scheduleRedraw directly)
   $effect(() => {
-    const _ = [hoveredNodeId, selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens];
+    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens];
     scheduleRedraw();
   });
 
