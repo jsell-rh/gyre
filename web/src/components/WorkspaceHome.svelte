@@ -644,10 +644,60 @@
     // else stay collapsed — repos are the primary content
   });
 
+  // ── Entity table search ──────────────────────────────────────────────
+  let entitySearch = $state('');
+
+  // Clear search when switching tabs
+  $effect(() => {
+    void wsTab;
+    entitySearch = '';
+  });
+
+  let filteredSpecs = $derived.by(() => {
+    if (!entitySearch) return specs;
+    const q = entitySearch.toLowerCase();
+    return specs.filter(s => {
+      const name = s.path?.toLowerCase() ?? '';
+      const status = (s.approval_status ?? s.status ?? '').toLowerCase();
+      return name.includes(q) || status.includes(q);
+    });
+  });
+
+  let filteredTasks = $derived.by(() => {
+    if (!entitySearch) return wsTasks;
+    const q = entitySearch.toLowerCase();
+    return wsTasks.filter(t => {
+      const title = (t.title ?? '').toLowerCase();
+      const status = (t.status ?? '').toLowerCase();
+      return title.includes(q) || status.includes(q);
+    });
+  });
+
+  let filteredMrs = $derived.by(() => {
+    if (!entitySearch) return wsMrs;
+    const q = entitySearch.toLowerCase();
+    return wsMrs.filter(m => {
+      const title = (m.title ?? '').toLowerCase();
+      const branch = (m.source_branch ?? '').toLowerCase();
+      const status = (m.status ?? '').toLowerCase();
+      return title.includes(q) || branch.includes(q) || status.includes(q);
+    });
+  });
+
+  let filteredAgents = $derived.by(() => {
+    if (!entitySearch) return wsAgents;
+    const q = entitySearch.toLowerCase();
+    return wsAgents.filter(a => {
+      const name = (a.name ?? '').toLowerCase();
+      const status = (a.status ?? '').toLowerCase();
+      const branch = (a.branch ?? '').toLowerCase();
+      return name.includes(q) || status.includes(q) || branch.includes(q);
+    });
+  });
+
   // ── Activity filter + pagination ──────────────────────────────────────
   let activityFilter = $state('');
   let activityLimit = $state(10);
-  // browseExpanded removed — entity tabs are always visible
 
   let filteredActivity = $derived.by(() => {
     if (!activityFilter) return activityEvents;
@@ -1399,6 +1449,15 @@
           <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; browseExpanded = true; }}>
             Activity
           </button>
+          {#if wsTab !== 'activity' && wsTab !== 'queue'}
+            <input
+              class="entity-search-input"
+              type="text"
+              placeholder="Filter {wsTab}..."
+              bind:value={entitySearch}
+              aria-label="Filter entities"
+            />
+          {/if}
         </nav>
 
             <!-- ── Specs tab ──────────────────────────────────────────── -->
@@ -1411,6 +1470,8 @@
                     <p class="empty-text">No specs yet</p>
                     <p class="empty-guide">Create <code>specs/manifest.yaml</code> in your repo and push. Specs are the starting point — they define what agents build.</p>
                   </div>
+                {:else if filteredSpecs.length === 0}
+                  <p class="empty-text">No specs matching "{entitySearch}"</p>
                 {:else}
                   <table class="ws-entity-table">
                     <thead>
@@ -1425,7 +1486,7 @@
                       </tr>
                     </thead>
                     <tbody>
-                      {#each specs as spec}
+                      {#each filteredSpecs as spec}
                         {@const status = spec.approval_status ?? spec.status ?? 'pending'}
                         {@const specName = spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}
                         {@const specDir = spec.path?.includes('/') ? spec.path.split('/').slice(0, -1).join('/') : ''}
@@ -1532,6 +1593,8 @@
                     <p class="empty-text">No tasks yet.</p>
                     <p class="empty-guide">Tasks are created automatically when you approve specs. Each approved spec generates implementation tasks for agents to work on.</p>
                   </div>
+                {:else if filteredTasks.length === 0}
+                  <p class="empty-text">No tasks matching "{entitySearch}"</p>
                 {:else}
                   <table class="ws-entity-table">
                     <thead>
@@ -1546,7 +1609,7 @@
                       </tr>
                     </thead>
                     <tbody>
-                      {#each wsTasks.sort((a, b) => {
+                      {#each filteredTasks.sort((a, b) => {
                         const order = { blocked: 0, in_progress: 1, review: 2, backlog: 3, done: 4, cancelled: 5 };
                         return (order[a.status] ?? 3) - (order[b.status] ?? 3);
                       }) as task}
@@ -1621,6 +1684,8 @@
                     <p class="empty-text">No merge requests yet.</p>
                     <p class="empty-guide">MRs are created when agents complete their implementation. Each MR runs through quality gates before merging and produces a signed attestation bundle.</p>
                   </div>
+                {:else if filteredMrs.length === 0}
+                  <p class="empty-text">No MRs matching "{entitySearch}"</p>
                 {:else}
                   <table class="ws-entity-table">
                     <thead>
@@ -1636,7 +1701,7 @@
                       </tr>
                     </thead>
                     <tbody>
-                      {#each wsMrs.sort((a, b) => {
+                      {#each filteredMrs.sort((a, b) => {
                         const order = { open: 0, queued: 1, merged: 2, closed: 3 };
                         return (order[a.status] ?? 2) - (order[b.status] ?? 2);
                       }) as mr}
@@ -1768,6 +1833,8 @@
                     <p class="empty-text">No agents yet.</p>
                     <p class="empty-guide">Agents are spawned to work on tasks. Each agent gets its own branch, writes code, runs tests, and creates a merge request when done.</p>
                   </div>
+                {:else if filteredAgents.length === 0}
+                  <p class="empty-text">No agents matching "{entitySearch}"</p>
                 {:else}
                   <table class="ws-entity-table">
                     <thead>
@@ -1782,7 +1849,7 @@
                       </tr>
                     </thead>
                     <tbody>
-                      {#each wsAgents.sort((a, b) => {
+                      {#each filteredAgents.sort((a, b) => {
                         const order = { active: 0, spawning: 1, idle: 2, completed: 3, failed: 4, dead: 5 };
                         return (order[a.status] ?? 3) - (order[b.status] ?? 3);
                       }) as agent}
@@ -3129,6 +3196,29 @@
 
   .ws-tab-spacer {
     flex: 1;
+  }
+
+  .entity-search-input {
+    padding: 3px 10px;
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    color: var(--color-text);
+    width: 140px;
+    margin-left: var(--space-1);
+  }
+
+  .entity-search-input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    width: 200px;
+    transition: width var(--transition-fast);
+  }
+
+  .entity-search-input::placeholder {
+    color: var(--color-text-muted);
   }
 
   .ws-tab-toolbar {
