@@ -1016,10 +1016,97 @@
   {:else}
     <div class="focused-dashboard">
 
+      <!-- ── Decisions / Action Needed (top — most important) ──────── -->
+      {#if !decisionsLoading && actionableNotifications.length > 0}
+        <section class="ws-decisions-section" data-testid="section-decisions">
+          <div class="decisions-header">
+            <h2 class="decisions-title">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+                <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/>
+              </svg>
+              Needs your attention
+              <span class="decisions-count-badge">{actionableNotifications.length}</span>
+            </h2>
+            {#if actionableNotifications.length > 3}
+              <button class="section-btn" onclick={() => showAllDecisions = !showAllDecisions}>
+                {showAllDecisions ? 'Show less' : `Show all (${actionableNotifications.length})`}
+              </button>
+            {/if}
+          </div>
+          <div class="decisions-list">
+            {#each (showAllDecisions ? actionableNotifications : actionableNotifications.slice(0, 3)) as n (n.id)}
+              {@const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type}
+              {@const body = getBody(n)}
+              {@const aState = actionStates[n.id]}
+              <div class="decision-item" class:decision-resolved={aState?.success}>
+                <div class="decision-icon decision-icon-{nt === 'gate_failure' || nt === 'agent_failed' ? 'danger' : nt === 'spec_approval' || nt === 'mr_needs_review' ? 'action' : 'warn'}">
+                  {TYPE_ICONS[nt] ?? '?'}
+                </div>
+                <div class="decision-body">
+                  <span class="decision-type">{typeLabel(nt)}</span>
+                  <span class="decision-title">{n.title ?? n.message ?? ''}</span>
+                  {#if n.created_at}
+                    <span class="decision-time">{relTime(n.created_at)}</span>
+                  {/if}
+                </div>
+                <div class="decision-actions">
+                  {#if aState?.success}
+                    <span class="decision-done">{aState.message}</span>
+                  {:else if aState?.loading}
+                    <span class="decision-loading">...</span>
+                  {:else}
+                    {#if nt === 'spec_approval'}
+                      <button class="inline-action-btn inline-action-approve" onclick={() => handleApproveSpec(n)}>Approve</button>
+                      <button class="inline-action-btn inline-action-reject" onclick={() => handleRejectSpec(n)}>Reject</button>
+                    {:else if nt === 'gate_failure'}
+                      <button class="inline-action-btn inline-action-approve" onclick={() => handleRetry(n)}>Retry</button>
+                    {:else if nt === 'mr_needs_review'}
+                      <button class="inline-action-btn inline-action-approve" onclick={() => { const mrId = body.mr_id; if (mrId) nav('mr', mrId, { repo_id: n.repo_id }); }}>Review</button>
+                    {/if}
+                    <button class="inline-action-btn inline-action-reject" onclick={() => handleDismiss(n)} title="Dismiss">✕</button>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        </section>
+      {/if}
+
       <!-- Workspace pulse: compact one-line summary of what needs attention -->
       {#if statusSentence}
-        <div class="ws-pulse">
+        <div class="ws-pulse" data-testid="ws-pulse">
           <span class="ws-pulse-text">{statusSentence}</span>
+        </div>
+      {/if}
+
+      <!-- ── Provenance flow: visual pipeline summary ──────────────── -->
+      {#if !specsLoading && !tasksLoading && !agentsLoading && !mrsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
+        <div class="provenance-flow" data-testid="provenance-flow">
+          <button class="flow-stage" class:flow-stage-active={pipelineSpecs.pending > 0} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
+            <span class="flow-stage-count">{specs.length}</span>
+            <span class="flow-stage-label">Specs</span>
+            {#if pipelineSpecs.pending > 0}<span class="flow-stage-badge flow-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
+          </button>
+          <span class="flow-arrow" aria-hidden="true">→</span>
+          <button class="flow-stage" class:flow-stage-active={pipelineTasks.in_progress > 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
+            <span class="flow-stage-count">{wsTasks.length}</span>
+            <span class="flow-stage-label">Tasks</span>
+            {#if pipelineTasks.in_progress > 0}<span class="flow-stage-badge">{pipelineTasks.in_progress} active</span>{/if}
+          </button>
+          <span class="flow-arrow" aria-hidden="true">→</span>
+          <button class="flow-stage" class:flow-stage-active={pipelineAgents.active > 0} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
+            <span class="flow-stage-count">{wsAgents.length}</span>
+            <span class="flow-stage-label">Agents</span>
+            {#if pipelineAgents.active > 0}<span class="flow-stage-badge flow-badge-success">{pipelineAgents.active} running</span>{/if}
+          </button>
+          <span class="flow-arrow" aria-hidden="true">→</span>
+          <button class="flow-stage" class:flow-stage-active={pipelineMrs.open > 0 || pipelineMrs.failed_gates > 0} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
+            <span class="flow-stage-count">{wsMrs.length}</span>
+            <span class="flow-stage-label">MRs</span>
+            {#if pipelineMrs.failed_gates > 0}<span class="flow-stage-badge flow-badge-danger">{pipelineMrs.failed_gates} failed</span>
+            {:else if pipelineMrs.open > 0}<span class="flow-stage-badge">{pipelineMrs.open} open</span>
+            {:else if pipelineMrs.merged > 0}<span class="flow-stage-badge flow-badge-success">{pipelineMrs.merged} merged</span>{/if}
+          </button>
         </div>
       {/if}
 
@@ -2988,6 +3075,214 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+
+  /* ── Decisions / Action Needed section ────────────────────────────── */
+  .ws-decisions-section {
+    border: 1px solid var(--color-warning);
+    border-left: 3px solid var(--color-warning);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--color-warning) 3%, var(--color-surface));
+    overflow: hidden;
+  }
+
+  .decisions-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-warning) 6%, var(--color-surface-elevated));
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .decisions-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .decisions-count-badge {
+    font-size: 10px;
+    font-weight: 700;
+    background: var(--color-warning);
+    color: var(--color-text-inverse);
+    border-radius: 8px;
+    padding: 0 5px;
+    min-width: 14px;
+    text-align: center;
+    line-height: 16px;
+  }
+
+  .decisions-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .decision-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    transition: background var(--transition-fast), opacity var(--transition-fast);
+  }
+
+  .decision-item:last-child { border-bottom: none; }
+  .decision-item:hover { background: color-mix(in srgb, var(--color-warning) 4%, transparent); }
+  .decision-resolved { opacity: 0.5; }
+
+  .decision-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  .decision-icon-action {
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  }
+
+  .decision-icon-danger {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  }
+
+  .decision-icon-warn {
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+  }
+
+  .decision-body {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .decision-type {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  .decision-title {
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .decision-time {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    margin-left: auto;
+  }
+
+  .decision-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .decision-done {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-success);
+  }
+
+  .decision-loading {
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  /* ── Provenance flow (visual pipeline) ─────────────────────────────── */
+  .provenance-flow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow-x: auto;
+  }
+
+  .flow-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: all var(--transition-fast);
+    min-width: 60px;
+  }
+
+  .flow-stage:hover {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
+  }
+
+  .flow-stage-active {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+  }
+
+  .flow-stage-count {
+    font-size: var(--text-lg);
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--color-text);
+    line-height: 1;
+  }
+
+  .flow-stage-label {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .flow-stage-badge {
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--color-warning);
+    white-space: nowrap;
+  }
+
+  .flow-badge-warn { color: var(--color-warning); }
+  .flow-badge-danger { color: var(--color-danger); }
+  .flow-badge-success { color: var(--color-success); }
+
+  .flow-arrow {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    flex-shrink: 0;
   }
 
   /* ── Skeleton ───────────────────────────────────────────────────────── */
