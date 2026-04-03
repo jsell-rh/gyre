@@ -1795,6 +1795,26 @@
                           {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
                             <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
                           {/if}
+                          <!-- Secondary entity links for cross-referencing -->
+                          {#if (event.agent_id && primaryType !== 'agent') || (event.mr_id && primaryType !== 'mr') || (event.spec_path && primaryType !== 'spec')}
+                            <div class="activity-refs">
+                              {#if event.agent_id && primaryType !== 'agent'}
+                                <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }}>
+                                  <Icon name="agent" size={10} /> {entityName('agent', event.agent_id)}
+                                </button>
+                              {/if}
+                              {#if event.mr_id && primaryType !== 'mr'}
+                                <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }}>
+                                  <Icon name="git-merge" size={10} /> {entityName('mr', event.mr_id)}
+                                </button>
+                              {/if}
+                              {#if event.spec_path && primaryType !== 'spec'}
+                                <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }}>
+                                  <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                                </button>
+                              {/if}
+                            </div>
+                          {/if}
                         </div>
                       </button>
                     {/each}
@@ -5247,6 +5267,34 @@
     color: var(--color-text-muted);
     line-height: 1.4;
     padding-left: calc(16px + var(--space-2));
+  }
+
+  .activity-refs {
+    display: flex;
+    gap: 4px;
+    padding-left: calc(16px + var(--space-2));
+    flex-wrap: wrap;
+  }
+
+  .activity-ref-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: 10px;
+    color: var(--color-text-secondary);
+    transition: all var(--transition-fast);
+  }
+
+  .activity-ref-chip:hover {
+    color: var(--color-primary);
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 5%, transparent);
   }
 
   .activity-icon {
