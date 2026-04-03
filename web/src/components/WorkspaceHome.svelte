@@ -2893,6 +2893,7 @@
 
   .status-context-danger { color: var(--color-danger); }
   .status-context-success { color: var(--color-success); }
+  .status-context-action { color: var(--color-warning); font-weight: 600; }
 
   .status-context-link {
     background: transparent;
