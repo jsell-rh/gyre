@@ -1203,10 +1203,10 @@ pub async fn predict_graph(
         .replace("{{edges}}", &edges_json);
 
     // Build user prompt based on whether spec context is provided
-    let user_prompt = if let (Some(spec_path), Some(draft)) =
-        (&req.spec_path, &req.draft_content)
-    {
-        system_prompt.push_str("\n\nThe user is editing a spec and wants to understand the structural impact.");
+    let user_prompt = if let (Some(spec_path), Some(draft)) = (&req.spec_path, &req.draft_content) {
+        system_prompt.push_str(
+            "\n\nThe user is editing a spec and wants to understand the structural impact.",
+        );
         format!(
             "Predict what would change in the codebase if this spec is implemented:\n\nSpec: {spec_path}\n\nContent:\n{draft}"
         )

@@ -78,14 +78,7 @@ async fn handle_explorer_session(
                 send_status(&mut sender, "thinking").await;
 
                 // Run the agent loop
-                match run_explorer_agent(
-                    &state,
-                    &repo_id,
-                    &text,
-                    &canvas_state,
-                    &mut sender,
-                )
-                .await
+                match run_explorer_agent(&state, &repo_id, &text, &canvas_state, &mut sender).await
                 {
                     Ok(()) => {}
                     Err(e) => {
@@ -304,14 +297,16 @@ async fn run_explorer_agent(
                 done: true,
             };
             sender
-                .send(Message::Text(serde_json::to_string(&text_msg).unwrap().into()))
+                .send(Message::Text(
+                    serde_json::to_string(&text_msg).unwrap().into(),
+                ))
                 .await?;
             return Ok(());
         }
     };
 
-    let model = std::env::var("GYRE_EXPLORER_MODEL")
-        .unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+    let model =
+        std::env::var("GYRE_EXPLORER_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
     let llm_port = llm.for_model(&model);
 
     // Load graph data once for tool execution
@@ -332,9 +327,8 @@ async fn run_explorer_agent(
 
     // Build initial user message with canvas context
     let canvas_json = serde_json::to_string(canvas_state).unwrap_or_else(|_| "{}".to_string());
-    let user_content = format!(
-        "Canvas state:\n```json\n{canvas_json}\n```\n\nUser question: {user_question}"
-    );
+    let user_content =
+        format!("Canvas state:\n```json\n{canvas_json}\n```\n\nUser question: {user_question}");
 
     let mut messages = vec![ConversationMessage {
         role: "user".to_string(),
@@ -356,7 +350,9 @@ async fn run_explorer_agent(
                 done: response.tool_calls.is_empty() && response.stop_reason != "tool_use",
             };
             sender
-                .send(Message::Text(serde_json::to_string(&text_msg).unwrap().into()))
+                .send(Message::Text(
+                    serde_json::to_string(&text_msg).unwrap().into(),
+                ))
                 .await?;
         }
 
@@ -365,11 +361,11 @@ async fn run_explorer_agent(
 
         if let Some(query_json) = view_query {
             // Send the extracted view query to the frontend
-            let view_msg = ExplorerServerMessage::ViewQuery {
-                query: query_json,
-            };
+            let view_msg = ExplorerServerMessage::ViewQuery { query: query_json };
             sender
-                .send(Message::Text(serde_json::to_string(&view_msg).unwrap().into()))
+                .send(Message::Text(
+                    serde_json::to_string(&view_msg).unwrap().into(),
+                ))
                 .await?;
         }
 
@@ -435,9 +431,8 @@ async fn execute_tool(
 ) -> String {
     match tool_call.name.as_str() {
         "graph_summary" => {
-            let summary = gyre_domain::view_query_resolver::compute_graph_summary(
-                repo_id, nodes, edges,
-            );
+            let summary =
+                gyre_domain::view_query_resolver::compute_graph_summary(repo_id, nodes, edges);
             serde_json::to_string_pretty(&summary).unwrap_or_else(|e| format!("Error: {e}"))
         }
         "graph_query_dryrun" => {
@@ -450,8 +445,7 @@ async fn execute_tool(
                         edges,
                         selected_node_id,
                     );
-                    serde_json::to_string_pretty(&result)
-                        .unwrap_or_else(|e| format!("Error: {e}"))
+                    serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {e}"))
                 }
                 Err(e) => format!("Invalid view query: {e}"),
             }
@@ -759,7 +753,10 @@ This shows all callers of TaskPort."#;
     fn test_system_prompt_contains_key_instructions() {
         let prompt = build_system_prompt();
         assert!(prompt.contains("graph_summary"), "missing graph_summary");
-        assert!(prompt.contains("graph_query_dryrun"), "missing graph_query_dryrun");
+        assert!(
+            prompt.contains("graph_query_dryrun"),
+            "missing graph_query_dryrun"
+        );
         assert!(prompt.contains("view_query"), "missing view_query");
         assert!(prompt.contains("Scope"), "missing Scope");
         assert!(prompt.contains("Emphasis"), "missing Emphasis");

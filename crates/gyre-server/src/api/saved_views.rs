@@ -48,8 +48,8 @@ pub struct ViewResponse {
 
 impl From<SavedView> for ViewResponse {
     fn from(v: SavedView) -> Self {
-        let query =
-            serde_json::from_str(&v.query_json).unwrap_or(serde_json::Value::Object(Default::default()));
+        let query = serde_json::from_str(&v.query_json)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
         Self {
             id: v.id.to_string(),
             repo_id: v.repo_id.to_string(),
@@ -103,14 +103,19 @@ pub async fn list_views(
                 format!("Failed to list views: {e}"),
             )
         })?;
-        return Ok(Json(refreshed.into_iter().map(ViewResponse::from).collect()));
+        return Ok(Json(
+            refreshed.into_iter().map(ViewResponse::from).collect(),
+        ));
     }
 
     Ok(Json(views.into_iter().map(ViewResponse::from).collect()))
 }
 
 /// System default views per the explorer-implementation.md spec.
-fn system_default_views(_repo_id: &str, _tenant_id: &str) -> Vec<(&'static str, &'static str, &'static str)> {
+fn system_default_views(
+    _repo_id: &str,
+    _tenant_id: &str,
+) -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
         (
             "Architecture Overview",

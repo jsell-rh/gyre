@@ -1650,8 +1650,14 @@ async fn test_saved_views_crud() {
     let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
     assert_eq!(resp.status(), 200);
     let views: Vec<Value> = resp.json().await.unwrap();
-    let system_count = views.iter().filter(|v| v["is_system"].as_bool() == Some(true)).count();
-    assert!(system_count >= 4, "Expected at least 4 system default views, got {system_count}");
+    let system_count = views
+        .iter()
+        .filter(|v| v["is_system"].as_bool() == Some(true))
+        .count();
+    assert!(
+        system_count >= 4,
+        "Expected at least 4 system default views, got {system_count}"
+    );
 
     // Create a view
     let resp = ctx
@@ -1677,7 +1683,10 @@ async fn test_saved_views_crud() {
     // List — should have system defaults + our new view
     let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
     let views: Vec<Value> = resp.json().await.unwrap();
-    let user_views: Vec<&Value> = views.iter().filter(|v| v["is_system"].as_bool() != Some(true)).collect();
+    let user_views: Vec<&Value> = views
+        .iter()
+        .filter(|v| v["is_system"].as_bool() != Some(true))
+        .collect();
     assert_eq!(user_views.len(), 1);
 
     // Get by ID
@@ -1717,7 +1726,10 @@ async fn test_saved_views_crud() {
     // List — user view deleted, only system defaults remain
     let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
     let views: Vec<Value> = resp.json().await.unwrap();
-    let user_views: Vec<&Value> = views.iter().filter(|v| v["is_system"].as_bool() != Some(true)).collect();
+    let user_views: Vec<&Value> = views
+        .iter()
+        .filter(|v| v["is_system"].as_bool() != Some(true))
+        .collect();
     assert!(user_views.is_empty(), "Expected no user views after delete");
 }
 
@@ -1754,12 +1766,19 @@ async fn test_mcp_graph_summary() {
         .await;
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    let content = body["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or("");
-    assert!(content.contains("type"), "summary should include type counts");
-    assert!(content.contains("function"), "summary should include function counts");
-    assert!(content.contains("calls"), "summary should include edge counts");
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        content.contains("type"),
+        "summary should include type counts"
+    );
+    assert!(
+        content.contains("function"),
+        "summary should include function counts"
+    );
+    assert!(
+        content.contains("calls"),
+        "summary should include edge counts"
+    );
 }
 
 /// MCP graph_query_dryrun tool validates view queries.
@@ -1801,9 +1820,7 @@ async fn test_mcp_graph_query_dryrun() {
         .await;
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    let content = body["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or("");
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
     assert!(
         content.contains("matched_nodes"),
         "dryrun should return matched_nodes"
@@ -1838,8 +1855,6 @@ async fn test_mcp_graph_nodes() {
         .await;
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
-    let content = body["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or("");
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
     assert!(content.contains("AuthService"));
 }
