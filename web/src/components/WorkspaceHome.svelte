@@ -1041,6 +1041,32 @@
   {:else}
     <div class="focused-dashboard">
 
+      <!-- ── Workspace header ───────────────────────────────────────── -->
+      <header class="ws-header">
+        <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
+        {#if workspace.description}
+          <p class="ws-header-desc">{workspace.description}</p>
+        {/if}
+        <div class="ws-header-actions">
+          {#if goToWorkspaceSettings}
+            <button class="ws-header-settings" onclick={() => goToWorkspaceSettings()} title="Workspace settings">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16" aria-hidden="true">
+                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+              </svg>
+              Settings
+            </button>
+          {/if}
+          {#if goToAgentRules}
+            <button class="ws-header-settings" onclick={() => goToAgentRules()} title="Agent rules (personas, principles, standards)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16" aria-hidden="true">
+                <path d="M12 2L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5L12 2z"/>
+              </svg>
+              Agent Rules
+            </button>
+          {/if}
+        </div>
+      </header>
+
       <!-- ── Pipeline + Actions: compact top bar ────────────────────── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
         <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
@@ -1997,6 +2023,59 @@
     max-width: 1200px;
     margin: 0 auto;
     width: 100%;
+  }
+
+  /* ── Workspace header ──────────────────────────────────────────── */
+  .ws-header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .ws-header-name {
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    font-weight: 700;
+    color: var(--color-text);
+    margin: 0;
+    line-height: 1.2;
+  }
+
+  .ws-header-desc {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin: 0;
+    flex: 1;
+    min-width: 120px;
+  }
+
+  .ws-header-actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .ws-header-settings {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 4px 8px;
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .ws-header-settings:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border-strong);
+    color: var(--color-text);
   }
 
   /* ── Two-column layout ──────────────────────────────────────────── */
