@@ -138,6 +138,10 @@
 
     if (type === 'task') {
       result.push({ id: 'activity', label: 'Activity' });
+      // Show ask-why if task has an assigned agent (conversation provenance)
+      if (data.assigned_to) {
+        result.push({ id: 'ask-why', label: $t('detail_panel.tabs.ask_why') });
+      }
       return result;
     }
 
@@ -873,8 +877,8 @@
               return;
             }
           }
-          // Try via agent
-          const agentId = entity?.data?.author_agent_id ?? mrDetail?.author_agent_id ?? agentDetail?.id;
+          // Try via agent (works for MRs, agents, and tasks with assigned agents)
+          const agentId = entity?.data?.author_agent_id ?? mrDetail?.author_agent_id ?? agentDetail?.id ?? (entity?.type === 'task' ? (taskDetail?.assigned_to ?? entity?.data?.assigned_to) : null);
           if (agentId) {
             const ag = agentDetail ?? await api.agent(agentId).catch(() => null);
             if (ag?.conversation_sha) {
