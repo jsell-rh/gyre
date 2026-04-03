@@ -3867,33 +3867,56 @@
               {/if}
             </div>
             {#if spans.length > 0}
-              <div class="trace-spans">
-                {#each spans as span}
-                  {@const durUs = span.duration_us ?? 0}
-                  {@const durMs = durUs > 0 ? Math.round(durUs / 1000) : ((span.end_ms && span.start_ms) ? span.end_ms - span.start_ms : null)}
-                  <div class="trace-span" class:trace-span-root={!span.parent_span_id}>
-                    <div class="trace-span-header">
+              {@const spanTree = (() => {
+                // Build hierarchical tree from flat span list
+                const byId = new Map(spans.map(s => [s.span_id ?? s.id, s]));
+                const children = new Map();
+                const roots = [];
+                for (const s of spans) {
+                  const pid = s.parent_span_id;
+                  if (pid && byId.has(pid)) {
+                    if (!children.has(pid)) children.set(pid, []);
+                    children.get(pid).push(s);
+                  } else {
+                    roots.push(s);
+                  }
+                }
+                // Compute max duration for waterfall bar scaling
+                const maxDur = Math.max(...spans.map(s => s.duration_us ?? 0), 1);
+                // Flatten tree into display list with depth
+                const flat = [];
+                function walk(node, depth) {
+                  const durUs = node.duration_us ?? 0;
+                  const durMs = durUs > 0 ? Math.round(durUs / 1000) : ((node.end_ms && node.start_ms) ? node.end_ms - node.start_ms : null);
+                  flat.push({ ...node, _depth: depth, _durMs: durMs, _pct: Math.max((durUs / maxDur) * 100, 2) });
+                  const kids = children.get(node.span_id ?? node.id) ?? [];
+                  kids.forEach(c => walk(c, depth + 1));
+                }
+                roots.forEach(r => walk(r, 0));
+                return flat;
+              })()}
+              <div class="trace-waterfall">
+                {#each spanTree as span}
+                  {@const isRoot = span._depth === 0}
+                  {@const statusColor = span.status === 'error' ? 'var(--color-danger)' : span.graph_node_id ? 'var(--color-primary)' : 'var(--color-success)'}
+                  <div class="trace-waterfall-row" class:trace-waterfall-root={isRoot} style="padding-left: {span._depth * 20 + 8}px">
+                    <div class="trace-waterfall-info">
+                      {#if span._depth > 0}<span class="trace-tree-guide" aria-hidden="true"></span>{/if}
                       <span class="trace-span-name">{span.operation_name ?? span.name ?? 'span'}</span>
                       {#if span.service_name}
-                        <span class="gate-type-badge">{span.service_name}</span>
-                      {/if}
-                      {#if durMs != null && durMs > 0}
-                        <span class="trace-span-dur">{durMs < 1000 ? durMs + 'ms' : (durMs / 1000).toFixed(1) + 's'}</span>
+                        <span class="trace-service-tag">{span.service_name}</span>
                       {/if}
                       {#if span.graph_node_id}
-                        <button class="entity-link mono" onclick={() => navigateTo('node', span.graph_node_id, { id: span.graph_node_id })} title="Linked to graph node: {span.graph_node_id}">graph</button>
+                        <button class="entity-link mono trace-graph-link" onclick={() => navigateTo('node', span.graph_node_id, { id: span.graph_node_id })} title="Linked to graph node: {span.graph_node_id}">
+                          <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M6 6l4 4"/></svg>
+                          graph
+                        </button>
                       {/if}
                     </div>
-                    {#if span.attributes}
-                      {@const attrs = typeof span.attributes === 'string' ? (() => { try { return JSON.parse(span.attributes); } catch { return {}; } })() : span.attributes}
-                      {#if Object.keys(attrs).length > 0}
-                        <div class="trace-span-attrs">
-                          {#each Object.entries(attrs).slice(0, 8) as [key, val]}
-                            <span class="trace-span-attr"><span class="trace-attr-key">{key}:</span> <span class="trace-attr-val">{typeof val === 'object' ? JSON.stringify(val) : String(val)}</span></span>
-                          {/each}
-                        </div>
-                      {/if}
-                    {/if}
+                    <div class="trace-waterfall-bar-container">
+                      <div class="trace-waterfall-bar" style="width: {span._pct}%; background: {statusColor}"></div>
+                    </div>
+                    <span class="trace-waterfall-dur">{span._durMs != null ? (span._durMs < 1000 ? span._durMs + 'ms' : (span._durMs / 1000).toFixed(1) + 's') : ''}</span>
                   </div>
                 {/each}
               </div>
@@ -6310,12 +6333,102 @@
     font-weight: 500;
     color: var(--color-text);
     font-family: var(--font-mono);
+    font-size: var(--text-xs);
   }
 
   .trace-span-dur {
     color: var(--color-text-muted);
     font-family: var(--font-mono);
     flex-shrink: 0;
+  }
+
+  /* ── Trace waterfall (hierarchical flame graph style) ───────────────── */
+  .trace-waterfall {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .trace-waterfall-row {
+    display: grid;
+    grid-template-columns: minmax(180px, 40%) 1fr 60px;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+    transition: background var(--transition-fast);
+  }
+
+  .trace-waterfall-row:last-child { border-bottom: none; }
+  .trace-waterfall-row:hover { background: var(--color-surface-elevated); }
+
+  .trace-waterfall-root {
+    background: color-mix(in srgb, var(--color-success) 4%, transparent);
+    font-weight: 500;
+  }
+
+  .trace-waterfall-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .trace-tree-guide {
+    display: inline-block;
+    width: 8px;
+    height: 12px;
+    border-left: 1px solid var(--color-border-strong);
+    border-bottom: 1px solid var(--color-border-strong);
+    margin-right: 2px;
+    flex-shrink: 0;
+  }
+
+  .trace-service-tag {
+    font-size: 9px;
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .trace-graph-link {
+    font-size: 9px;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 3px;
+    flex-shrink: 0;
+  }
+
+  .trace-waterfall-bar-container {
+    height: 14px;
+    background: var(--color-surface-elevated);
+    border-radius: 2px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .trace-waterfall-bar {
+    height: 100%;
+    border-radius: 2px;
+    min-width: 2px;
+    opacity: 0.7;
+    transition: width var(--transition-fast);
+  }
+
+  .trace-waterfall-dur {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    text-align: right;
+    white-space: nowrap;
   }
 
   .trace-span-attrs {
