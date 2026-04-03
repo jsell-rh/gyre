@@ -1642,9 +1642,9 @@
                                 {agStatus}
                               </span>
                               {#if agStatus === 'active'}
-                                <span class="status-context status-context-success">implementing code</span>
+                                <span class="status-context status-context-success">{agent.spec_path ? `implementing ${agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}` : 'implementing code'}</span>
                               {:else if agStatus === 'idle' || agStatus === 'completed'}
-                                <span class="status-context">work complete</span>
+                                <span class="status-context">work complete{agent.spec_path ? ` (${agent.spec_path.split('/').pop()?.replace(/\.md$/, '')})` : ''}</span>
                               {:else if agStatus === 'failed'}
                                 <span class="status-context status-context-danger">failed — click for logs</span>
                               {:else if agStatus === 'dead'}
