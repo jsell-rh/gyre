@@ -465,6 +465,183 @@ fn resolve_computed_expression(
         }
     }
 
+    // $callers(node, depth?) — nodes with incoming Calls edges transitively
+    if trimmed.starts_with("$callers(") && trimmed.ends_with(')') {
+        let inner = &trimmed[9..trimmed.len() - 1];
+        let parts: Vec<&str> = inner.splitn(2, ',').map(|s| s.trim()).collect();
+        let node_name = parts[0].trim_matches('\'').trim_matches('"');
+        let depth: u32 = parts.get(1).and_then(|d| d.parse().ok()).unwrap_or(10);
+        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
+        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+            return bfs_traverse(
+                &found.id.to_string(),
+                &[EdgeType::Calls],
+                "incoming",
+                depth,
+                outgoing,
+                _incoming,
+            );
+        }
+        return HashSet::new();
+    }
+
+    // $callees(node, depth?) — nodes with outgoing Calls edges transitively
+    if trimmed.starts_with("$callees(") && trimmed.ends_with(')') {
+        let inner = &trimmed[9..trimmed.len() - 1];
+        let parts: Vec<&str> = inner.splitn(2, ',').map(|s| s.trim()).collect();
+        let node_name = parts[0].trim_matches('\'').trim_matches('"');
+        let depth: u32 = parts.get(1).and_then(|d| d.parse().ok()).unwrap_or(10);
+        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
+        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+            return bfs_traverse(
+                &found.id.to_string(),
+                &[EdgeType::Calls],
+                "outgoing",
+                depth,
+                outgoing,
+                _incoming,
+            );
+        }
+        return HashSet::new();
+    }
+
+    // $implementors(node) — types with Implements edges TO this node
+    if trimmed.starts_with("$implementors(") && trimmed.ends_with(')') {
+        let node_name = trimmed[14..trimmed.len() - 1].trim().trim_matches('\'').trim_matches('"');
+        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
+        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+            let found_id = found.id.to_string();
+            return _incoming.get(&found_id)
+                .map(|neighbors| {
+                    neighbors.iter()
+                        .filter(|(_, et)| *et == EdgeType::Implements)
+                        .map(|(id, _)| id.clone())
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default();
+        }
+        return HashSet::new();
+    }
+
+    // $fields(node) — nodes with FieldOf edges TO this node
+    if trimmed.starts_with("$fields(") && trimmed.ends_with(')') {
+        let node_name = trimmed[8..trimmed.len() - 1].trim().trim_matches('\'').trim_matches('"');
+        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
+        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+            let found_id = found.id.to_string();
+            // FieldOf: source is the field, target is the parent type
+            return _incoming.get(&found_id)
+                .map(|neighbors| {
+                    neighbors.iter()
+                        .filter(|(_, et)| *et == EdgeType::FieldOf)
+                        .map(|(id, _)| id.clone())
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default();
+        }
+        return HashSet::new();
+    }
+
+    // $descendants(node) — all children via Contains edges recursively
+    if trimmed.starts_with("$descendants(") && trimmed.ends_with(')') {
+        let node_name = trimmed[13..trimmed.len() - 1].trim().trim_matches('\'').trim_matches('"');
+        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
+        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+            return bfs_traverse(
+                &found.id.to_string(),
+                &[EdgeType::Contains],
+                "outgoing",
+                100,
+                outgoing,
+                _incoming,
+            );
+        }
+        return HashSet::new();
+    }
+
+    // $ancestors(node) — parent chain via Contains edges to root
+    if trimmed.starts_with("$ancestors(") && trimmed.ends_with(')') {
+        let node_name = trimmed[11..trimmed.len() - 1].trim().trim_matches('\'').trim_matches('"');
+        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
+        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+            return bfs_traverse(
+                &found.id.to_string(),
+                &[EdgeType::Contains],
+                "incoming",
+                100,
+                outgoing,
+                _incoming,
+            );
+        }
+        return HashSet::new();
+    }
+
+    // $governed_by(spec_path) — nodes linked to a spec via GovernedBy
+    if trimmed.starts_with("$governed_by(") && trimmed.ends_with(')') {
+        let spec_path = trimmed[13..trimmed.len() - 1].trim().trim_matches('\'').trim_matches('"');
+        let lower = spec_path.to_lowercase();
+        return active_nodes
+            .iter()
+            .filter(|n| {
+                n.spec_path.as_ref().map_or(false, |sp| sp.to_lowercase().contains(&lower))
+            })
+            .map(|n| n.id.to_string())
+            .collect();
+    }
+
+    // $test_fragility(node) — count of distinct test paths reaching this node (returns as single-item set for use in intersect)
+    if trimmed.starts_with("$test_fragility(") && trimmed.ends_with(')') {
+        let node_name = trimmed[16..trimmed.len() - 1].trim().trim_matches('\'').trim_matches('"');
+        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
+        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+            let found_id = found.id.to_string();
+            // Count how many test nodes can reach this node
+            let test_ids: Vec<String> = active_nodes
+                .iter()
+                .filter(|n| n.test_node)
+                .map(|n| n.id.to_string())
+                .collect();
+            let mut count = 0;
+            for tid in &test_ids {
+                let reached = bfs_traverse(tid, &[EdgeType::Calls], "outgoing", 100, outgoing, _incoming);
+                if reached.contains(&found_id) {
+                    count += 1;
+                }
+            }
+            // Return the node itself if it has any test coverage
+            if count > 0 {
+                let mut result = HashSet::new();
+                result.insert(found_id);
+                return result;
+            }
+        }
+        return HashSet::new();
+    }
+
+    // $reachable(node, edge_types, direction, depth) — general BFS
+    if trimmed.starts_with("$reachable(") && trimmed.ends_with(')') {
+        let inner = &trimmed[11..trimmed.len() - 1];
+        let parts: Vec<&str> = inner.splitn(4, ',').map(|s| s.trim()).collect();
+        if parts.len() >= 2 {
+            let node_name = parts[0].trim_matches('\'').trim_matches('"');
+            let edge_types_str = parts.get(1).unwrap_or(&"");
+            let direction = parts.get(2).map(|s| s.trim_matches('\'').trim_matches('"')).unwrap_or("outgoing");
+            let depth: u32 = parts.get(3).and_then(|d| d.parse().ok()).unwrap_or(10);
+
+            let edge_types: Vec<EdgeType> = edge_types_str
+                .trim_matches(|c: char| c == '[' || c == ']')
+                .split(',')
+                .filter_map(|s| parse_edge_type(s.trim().trim_matches('\'').trim_matches('"')))
+                .collect();
+
+            let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
+            if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+                return bfs_traverse(&found.id.to_string(), &edge_types, direction, depth, outgoing, _incoming);
+            }
+        }
+        return HashSet::new();
+    }
+
     // Fallback: empty set
     HashSet::new()
 }
@@ -988,6 +1165,152 @@ mod tests {
         assert_eq!(*summary.edge_counts.get("calls").unwrap_or(&0), 2);
         assert_eq!(summary.test_coverage.test_functions, 1);
         assert_eq!(summary.modules.len(), 1);
+    }
+
+    #[test]
+    fn test_computed_callers() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+            make_node("n3", "C", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n3", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Calls),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression("$callers(C)", &active, &edges, &outgoing, &incoming);
+        assert!(result.contains("n1"));
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3")); // start node
+    }
+
+    #[test]
+    fn test_computed_callees() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+            make_node("n3", "C", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Calls),
+            make_edge("e2", "n1", "n3", EdgeType::Calls),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression("$callees(A)", &active, &edges, &outgoing, &incoming);
+        assert!(result.contains("n1")); // start node
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3"));
+    }
+
+    #[test]
+    fn test_computed_implementors() {
+        let nodes = vec![
+            make_node("n1", "MyTrait", NodeType::Interface),
+            make_node("n2", "ImplA", NodeType::Type),
+            make_node("n3", "ImplB", NodeType::Type),
+        ];
+        let edges = vec![
+            make_edge("e1", "n2", "n1", EdgeType::Implements),
+            make_edge("e2", "n3", "n1", EdgeType::Implements),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression("$implementors(MyTrait)", &active, &edges, &outgoing, &incoming);
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3"));
+        assert!(!result.contains("n1"));
+    }
+
+    #[test]
+    fn test_computed_descendants() {
+        let nodes = vec![
+            make_node("n1", "root_mod", NodeType::Module),
+            make_node("n2", "child_fn", NodeType::Function),
+            make_node("n3", "grandchild", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Contains),
+            make_edge("e2", "n2", "n3", EdgeType::Contains),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression("$descendants(root_mod)", &active, &edges, &outgoing, &incoming);
+        assert!(result.contains("n1")); // start
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3"));
+    }
+
+    #[test]
+    fn test_computed_governed_by() {
+        let mut nodes = vec![
+            make_node("n1", "Governed", NodeType::Type),
+            make_node("n2", "Ungoverned", NodeType::Type),
+        ];
+        nodes[0].spec_path = Some("specs/search.md".to_string());
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&[]);
+        let result = resolve_computed_expression("$governed_by(search.md)", &active, &[], &outgoing, &incoming);
+        assert!(result.contains("n1"));
+        assert!(!result.contains("n2"));
+    }
+
+    #[test]
+    fn test_computed_union_and_diff() {
+        let nodes = vec![
+            make_node("n1", "TypeA", NodeType::Type),
+            make_node("n2", "FuncB", NodeType::Function),
+            make_node("n3", "TypeC", NodeType::Type),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&[]);
+
+        // Union of types and functions = all
+        let union = resolve_computed_expression(
+            "$union($where(complexity, '>=', 0), $where(complexity, '<', 0))",
+            &active, &[], &outgoing, &incoming,
+        );
+        // $where(complexity >= 0) should match all (complexity=5 default)
+        assert!(union.contains("n1"));
+        assert!(union.contains("n2"));
+        assert!(union.contains("n3"));
+
+        // Diff: all - complex = simple
+        let mut nodes_varied = nodes.clone();
+        nodes_varied[0].complexity = Some(30);
+        nodes_varied[1].complexity = Some(3);
+        nodes_varied[2].complexity = Some(25);
+        let active2: Vec<&GraphNode> = nodes_varied.iter().collect();
+        let diff = resolve_computed_expression(
+            "$diff($where(complexity, '>', 0), $where(complexity, '>', 20))",
+            &active2, &[], &outgoing, &incoming,
+        );
+        assert!(diff.contains("n2")); // complexity 3, not > 20
+        assert!(!diff.contains("n1")); // complexity 30, > 20
+    }
+
+    #[test]
+    fn test_computed_reachable_general() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+            make_node("n3", "C", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Calls),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$reachable(A, [calls], outgoing, 5)",
+            &active, &edges, &outgoing, &incoming,
+        );
+        assert!(result.contains("n1"));
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3"));
     }
 
     #[test]
