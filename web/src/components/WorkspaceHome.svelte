@@ -1087,37 +1087,6 @@
         </div>
       {/if}
 
-      <!-- ── Provenance flow: visual pipeline summary ──────────────── -->
-      {#if !specsLoading && !tasksLoading && !agentsLoading && !mrsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
-        <div class="provenance-flow" data-testid="provenance-flow">
-          <button class="flow-stage" class:flow-stage-active={pipelineSpecs.pending > 0} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
-            <span class="flow-stage-count">{specs.length}</span>
-            <span class="flow-stage-label">Specs</span>
-            {#if pipelineSpecs.pending > 0}<span class="flow-stage-badge flow-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
-          </button>
-          <span class="flow-arrow" aria-hidden="true">→</span>
-          <button class="flow-stage" class:flow-stage-active={pipelineTasks.in_progress > 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
-            <span class="flow-stage-count">{wsTasks.length}</span>
-            <span class="flow-stage-label">Tasks</span>
-            {#if pipelineTasks.in_progress > 0}<span class="flow-stage-badge">{pipelineTasks.in_progress} active</span>{/if}
-          </button>
-          <span class="flow-arrow" aria-hidden="true">→</span>
-          <button class="flow-stage" class:flow-stage-active={pipelineAgents.active > 0} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
-            <span class="flow-stage-count">{wsAgents.length}</span>
-            <span class="flow-stage-label">Agents</span>
-            {#if pipelineAgents.active > 0}<span class="flow-stage-badge flow-badge-success">{pipelineAgents.active} running</span>{/if}
-          </button>
-          <span class="flow-arrow" aria-hidden="true">→</span>
-          <button class="flow-stage" class:flow-stage-active={pipelineMrs.open > 0 || pipelineMrs.failed_gates > 0} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
-            <span class="flow-stage-count">{wsMrs.length}</span>
-            <span class="flow-stage-label">MRs</span>
-            {#if pipelineMrs.failed_gates > 0}<span class="flow-stage-badge flow-badge-danger">{pipelineMrs.failed_gates} failed</span>
-            {:else if pipelineMrs.open > 0}<span class="flow-stage-badge">{pipelineMrs.open} open</span>
-            {:else if pipelineMrs.merged > 0}<span class="flow-stage-badge flow-badge-success">{pipelineMrs.merged} merged</span>{/if}
-          </button>
-        </div>
-      {/if}
-
       <!-- ── Repos (compact, full-width) ────────────────────────────── -->
       <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
         <div class="section-header">
@@ -1195,13 +1164,14 @@
       <!-- ── Entity tables + Activity + Merge Queue (tabbed, full-width) ── -->
       <div class="dashboard-flow">
           <section class="ws-feed-panel" data-testid="browse-panel">
-            <nav class="ws-tab-bar" aria-label="Browse entities">
+            <nav class="ws-tab-bar" aria-label="Development pipeline">
               <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
                 <Icon name="spec" size={12} />
                 Specs
                 {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
                 {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
               </button>
+              <span class="ws-tab-arrow" aria-hidden="true">›</span>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
                 <Icon name="task" size={12} />
                 Tasks
@@ -1209,6 +1179,14 @@
                 {#if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress} active</span>{/if}
                 {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked} blocked</span>{/if}
               </button>
+              <span class="ws-tab-arrow" aria-hidden="true">›</span>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
+                <Icon name="agent" size={12} />
+                Agents
+                {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
+                {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active} running</span>{/if}
+              </button>
+              <span class="ws-tab-arrow" aria-hidden="true">›</span>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
                 <Icon name="git-merge" size={12} />
                 MRs
@@ -1216,19 +1194,15 @@
                 {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates} failed</span>
                 {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open} open</span>{/if}
               </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
-                <Icon name="agent" size={12} />
-                Agents
-                {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
-                {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active} running</span>{/if}
-              </button>
               {#if mergeQueueItems.length > 0}
+                <span class="ws-tab-arrow" aria-hidden="true">›</span>
                 <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; }}>
                   <Icon name="git-merge" size={12} />
                   Queue
                   <span class="ws-tab-badge ws-tab-badge-warn">{mergeQueueItems.length}</span>
                 </button>
               {/if}
+              <span class="ws-tab-spacer"></span>
               <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
                 <Icon name="activity" size={12} />
                 Activity
@@ -2456,6 +2430,19 @@
   .ws-tab-badge-warn { background: var(--color-warning); }
   .ws-tab-badge-danger { background: var(--color-danger); }
   .ws-tab-badge-success { background: var(--color-success); }
+
+  .ws-tab-arrow {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    padding: 0 2px;
+    opacity: 0.4;
+    user-select: none;
+    flex-shrink: 0;
+  }
+
+  .ws-tab-spacer {
+    flex: 1;
+  }
 
   .ws-tab-toolbar {
     display: flex;
