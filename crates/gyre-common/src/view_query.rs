@@ -47,6 +47,9 @@ pub enum Scope {
         expand_edges: Vec<String>,
         #[serde(default = "default_concept_depth")]
         expand_depth: u32,
+        /// Expansion direction: "outgoing", "incoming", or "both" (default: "outgoing").
+        #[serde(default = "default_concept_direction")]
+        expand_direction: String,
     },
 }
 
@@ -58,6 +61,9 @@ fn default_depth() -> u32 {
 }
 fn default_concept_depth() -> u32 {
     2
+}
+fn default_concept_direction() -> String {
+    "outgoing".to_string()
 }
 
 // ── Emphasis ─────────────────────────────────────────────────────────────────

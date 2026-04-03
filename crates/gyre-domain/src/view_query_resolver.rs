@@ -223,7 +223,18 @@ fn find_node_by_name<'a>(nodes: &'a [GraphNode], name: &str) -> Option<&'a Graph
         })
 }
 
-/// Compute the set of nodes reachable from test functions via Calls edges.
+/// Edge types traversed for test reachability analysis.
+/// Tests can reach code via direct calls, trait dispatch (Implements),
+/// HTTP endpoint tests (RoutesTo), and module-level integration (Contains).
+const TEST_REACHABILITY_EDGES: &[EdgeType] = &[
+    EdgeType::Calls,
+    EdgeType::Implements,
+    EdgeType::RoutesTo,
+    EdgeType::Contains,
+];
+
+/// Compute the set of nodes reachable from test functions.
+/// Pre-computes a single BFS from all test nodes for O(T + N + M) total.
 fn compute_test_reachable(
     nodes: &[GraphNode],
     outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
@@ -234,22 +245,33 @@ fn compute_test_reachable(
         .map(|n| n.id.to_string())
         .collect();
 
+    // Multi-source BFS: start from ALL test nodes simultaneously.
+    // This is O(N + M) instead of O(T * (N + M)).
     let mut reachable = HashSet::new();
-    for test_id in &test_node_ids {
-        let reached = bfs_traverse(
-            test_id,
-            &[EdgeType::Calls],
-            "outgoing",
-            100,
-            outgoing,
-            &HashMap::new(),
-        );
-        reachable.extend(reached);
+    let mut queue: std::collections::VecDeque<(String, u32)> = test_node_ids
+        .iter()
+        .map(|id| (id.clone(), 0))
+        .collect();
+    while let Some((current, depth)) = queue.pop_front() {
+        if depth > 100 {
+            continue;
+        }
+        if !reachable.insert(current.clone()) {
+            continue;
+        }
+        if let Some(neighbors) = outgoing.get(&current) {
+            for (next, et) in neighbors {
+                if TEST_REACHABILITY_EDGES.contains(et) && !reachable.contains(next) {
+                    queue.push_back((next.clone(), depth + 1));
+                }
+            }
+        }
     }
     reachable
 }
 
-/// Compute the number of test paths reaching a node (test fragility metric).
+/// Compute the number of distinct tests that can reach a node (test fragility).
+/// Uses per-test BFS but with depth limit of 20 for performance.
 fn compute_test_fragility_count(
     node_id: &str,
     nodes: &[GraphNode],
@@ -263,7 +285,15 @@ fn compute_test_fragility_count(
         .collect();
     let mut count = 0;
     for tid in &test_ids {
-        let reached = bfs_traverse(tid, &[EdgeType::Calls], "outgoing", 100, outgoing, incoming);
+        // Depth-limited BFS per test (20 hops is sufficient for fragility)
+        let reached = bfs_traverse(
+            tid,
+            TEST_REACHABILITY_EDGES,
+            "outgoing",
+            20,
+            outgoing,
+            incoming,
+        );
         if reached.contains(node_id) {
             count += 1;
         }
@@ -470,12 +500,18 @@ pub fn resolve_scope(
             seed_nodes,
             expand_edges,
             expand_depth,
+            expand_direction,
         } => {
             let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
             let edge_types: Vec<EdgeType> = expand_edges
                 .iter()
                 .filter_map(|s| parse_edge_type(s))
                 .collect();
+            let direction = if expand_direction.is_empty() {
+                "outgoing"
+            } else {
+                expand_direction.as_str()
+            };
             let mut result = HashSet::new();
 
             for seed_name in seed_nodes {
@@ -483,7 +519,7 @@ pub fn resolve_scope(
                     let reached = bfs_traverse(
                         &seed.id.to_string(),
                         &edge_types,
-                        "both",
+                        direction,
                         *expand_depth,
                         &outgoing,
                         &incoming,
@@ -561,12 +597,21 @@ fn resolve_computed_expression(
                         "outgoing_calls" => Some(count_outgoing_calls(&nid, outgoing) as f64),
                         "field_count" => Some(count_fields(&nid, incoming) as f64),
                         "test_fragility" => {
-                            let all_nodes: Vec<GraphNode> =
-                                active_nodes.iter().map(|nn| (*nn).clone()).collect();
-                            Some(
-                                compute_test_fragility_count(&nid, &all_nodes, outgoing, incoming)
-                                    as f64,
-                            )
+                            // For test_fragility in $where, we use a simpler metric:
+                            // count of incoming Calls edges from test functions (direct test coverage).
+                            // This avoids the expensive per-node BFS.
+                            let test_callers = incoming.get(&nid).map_or(0, |neighbors| {
+                                neighbors
+                                    .iter()
+                                    .filter(|(caller_id, et)| {
+                                        *et == EdgeType::Calls
+                                            && active_nodes
+                                                .iter()
+                                                .any(|n| n.id.to_string() == *caller_id && n.test_node)
+                                    })
+                                    .count()
+                            });
+                            Some(test_callers as f64)
                         }
                         _ => None,
                     };
@@ -1488,6 +1533,7 @@ mod tests {
                 seed_nodes: vec!["AuthService".to_string()],
                 expand_edges: vec!["calls".to_string()],
                 expand_depth: 2,
+                expand_direction: "both".to_string(),
             },
             &nodes,
             &edges,
