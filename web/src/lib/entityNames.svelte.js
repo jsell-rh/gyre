@@ -88,11 +88,11 @@ export function entityName(type, id) {
 /**
  * Format an entity ID for display with a type prefix.
  * Used when showing IDs in contexts where the type isn't otherwise visible.
- * Returns "MR-abc123…" style strings.
+ * Returns human-friendly short IDs like "MR #abc1234" or the cached name.
  */
 export function formatId(type, id) {
   if (!id) return '';
-  const prefixes = { mr: 'MR', task: 'T', agent: 'AG', spec: 'S', repo: 'R' };
+  const prefixes = { mr: 'MR', task: 'Task', agent: 'Agent', spec: 'Spec', repo: 'Repo' };
   const prefix = prefixes[type] ?? '';
   // Check cache directly (avoid recursion through entityName)
   const key = `${type}:${id}`;
@@ -100,7 +100,7 @@ export function formatId(type, id) {
   if (cached && cached !== null) {
     return cached.length > 35 ? cached.slice(0, 32) + '\u2026' : cached;
   }
-  return prefix ? `${prefix}-${id.slice(0, 7)}` : shortId(id);
+  return prefix ? `${prefix} #${id.slice(0, 7)}` : shortId(id);
 }
 
 /**
