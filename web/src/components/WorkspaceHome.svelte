@@ -637,6 +637,15 @@
   let activityFilter = $state('');
   let activityLimit = $state(10);
   let browseExpanded = $state(false);
+  // Auto-expand browse when there are actionable items
+  $effect(() => {
+    if (browseExpanded) return; // don't collapse if user already expanded
+    if (specsLoading || tasksLoading || mrsLoading) return;
+    // Auto-expand if there are pending specs or failed gates — these need attention
+    if (pipelineSpecs.pending > 1 || pipelineMrs.failed_gates > 1 || pipelineTasks.blocked > 0) {
+      browseExpanded = true;
+    }
+  });
 
   let filteredActivity = $derived.by(() => {
     if (!activityFilter) return activityEvents;
@@ -1355,6 +1364,11 @@
         <div class="ws-main-content" data-testid="browse-panel">
           <button class="browse-toggle" onclick={() => { browseExpanded = !browseExpanded; }} aria-expanded={browseExpanded}>
             <span class="browse-toggle-label">Explore workspace</span>
+            {#if !browseExpanded}
+              <span class="browse-toggle-counts">
+                {specs.length} specs · {wsTasks.length} tasks · {wsMrs.length} MRs · {wsAgents.length} agents
+              </span>
+            {/if}
             <span class="browse-toggle-icon">{browseExpanded ? '−' : '+'}</span>
           </button>
           {#if browseExpanded}
@@ -2088,6 +2102,15 @@
     font-size: var(--text-sm);
     font-weight: 600;
     color: var(--color-text-secondary);
+  }
+
+  .browse-toggle-counts {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-weight: 400;
+    flex: 1;
+    text-align: right;
+    padding-right: var(--space-2);
   }
 
   .browse-toggle-icon {
