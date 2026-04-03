@@ -54,16 +54,33 @@ export function absoluteTime(ts) {
 }
 
 /**
- * Format a duration between two timestamps.
- * Returns "45s", "3m", "1h 20m", etc.
+ * Format a duration.
+ * Accepts either:
+ *   - A single number (raw seconds, e.g., 45 → "45s")
+ *   - Two timestamps (start, end) to compute the difference
+ * Returns "45s", "3m 20s", "1h 20m", etc.
  */
 export function formatDuration(startTs, endTs) {
-  const start = toEpochSec(startTs);
-  const end = toEpochSec(endTs);
-  if (start == null || end == null) return '';
-  const sec = Math.round(Math.abs(end - start));
+  let sec;
+  if (endTs === undefined || endTs === null) {
+    // Single argument: treat as raw seconds
+    if (typeof startTs === 'number') {
+      sec = Math.round(Math.abs(startTs));
+    } else {
+      return '';
+    }
+  } else {
+    const start = toEpochSec(startTs);
+    const end = toEpochSec(endTs);
+    if (start == null || end == null) return '';
+    sec = Math.round(Math.abs(end - start));
+  }
   if (sec < 60) return `${sec}s`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 3600) {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  }
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
