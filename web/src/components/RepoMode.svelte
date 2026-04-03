@@ -564,7 +564,18 @@
               <p>No tasks match filter "{taskStatusFilter}"</p>
             {:else}
               <p>No tasks yet</p>
-              <p class="list-empty-hint">Push spec → Approve → <strong>Tasks generated</strong> → Agent implements → MR → Merge</p>
+              <p class="list-empty-hint">Tasks are auto-created when you approve a spec. The flow:</p>
+              <div class="pipeline-guide-mini">
+                <span class="guide-step">Push spec</span>
+                <span class="guide-arrow">→</span>
+                <span class="guide-step guide-step-active">Approve</span>
+                <span class="guide-arrow">→</span>
+                <span class="guide-step guide-step-highlight">Tasks created</span>
+                <span class="guide-arrow">→</span>
+                <span class="guide-step">Agent implements</span>
+                <span class="guide-arrow">→</span>
+                <span class="guide-step">MR + Merge</span>
+              </div>
             {/if}
           </div>
         {:else}
@@ -649,7 +660,18 @@
         {:else if repoMrs.length === 0}
           <div class="list-empty">
             <p>No merge requests yet</p>
-            <p class="list-empty-hint">When an agent finishes its task, it creates an MR. The merge queue runs configured quality gates (tests, lint, traces). On success, the MR is merged with a signed attestation.</p>
+            <p class="list-empty-hint">MRs are created when agents complete tasks. The flow:</p>
+            <div class="pipeline-guide-mini">
+              <span class="guide-step">Agent completes</span>
+              <span class="guide-arrow">→</span>
+              <span class="guide-step guide-step-highlight">MR created</span>
+              <span class="guide-arrow">→</span>
+              <span class="guide-step">Gates run</span>
+              <span class="guide-arrow">→</span>
+              <span class="guide-step">Signed attestation</span>
+              <span class="guide-arrow">→</span>
+              <span class="guide-step">Merged</span>
+            </div>
           </div>
         {:else}
           <table class="entity-table">
@@ -747,7 +769,16 @@
         {:else if allAgents.length === 0}
           <div class="list-empty">
             <p>No agents yet</p>
-            <p class="list-empty-hint">Agents are spawned to implement tasks from approved specs. Each agent works in an isolated branch, writing code and iterating until quality gates pass. You can view their logs, conversation history, and reasoning.</p>
+            <p class="list-empty-hint">Agents are spawned to implement tasks. Each works in an isolated branch, iterating until gates pass. The flow:</p>
+            <div class="pipeline-guide-mini">
+              <span class="guide-step">Task assigned</span>
+              <span class="guide-arrow">→</span>
+              <span class="guide-step guide-step-highlight">Agent spawned</span>
+              <span class="guide-arrow">→</span>
+              <span class="guide-step">Code → Test → Fix</span>
+              <span class="guide-arrow">→</span>
+              <span class="guide-step">MR created</span>
+            </div>
           </div>
         {:else}
           <table class="entity-table">
@@ -1427,6 +1458,45 @@
     font-size: var(--text-xs);
     margin-top: var(--space-2);
     opacity: 0.7;
+  }
+
+  .pipeline-guide-mini {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    margin-top: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .guide-step {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    white-space: nowrap;
+  }
+
+  .guide-step-active {
+    color: var(--color-primary);
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+  }
+
+  .guide-step-highlight {
+    color: var(--color-success);
+    border-color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
+    font-weight: 600;
+  }
+
+  .guide-arrow {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    opacity: 0.5;
   }
 
   .list-tab-header {
