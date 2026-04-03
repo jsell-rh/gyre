@@ -1175,6 +1175,7 @@
                 specBreakdown={repoSpecBreakdown(repo)}
                 latestMr={repoLatestMr(repo)}
                 onclick={() => onSelectRepo?.(repo)}
+                onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
               />
             {/each}
           </div>
