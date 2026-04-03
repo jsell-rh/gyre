@@ -713,7 +713,8 @@
                   </td>
                   <td>
                     {#if mr.diff_stats}
-                      <button class="diff-stat-compact diff-stat-link" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'diff' }); }} title="View code diff">
+                      <button class="diff-stat-compact diff-stat-link" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'diff' }); }} title="View code diff: {mr.diff_stats.files_changed ?? 0} files, +{mr.diff_stats.insertions ?? 0} -{mr.diff_stats.deletions ?? 0}">
+                        {#if mr.diff_stats.files_changed}<span class="diff-files">{mr.diff_stats.files_changed}f</span>{/if}
                         <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
                         <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
                       </button>
@@ -1598,6 +1599,7 @@
     gap: var(--space-1);
   }
 
+  .diff-files { color: var(--color-text-secondary); font-weight: 500; }
   .diff-ins { color: var(--color-success); font-weight: 600; }
   .diff-del { color: var(--color-danger); font-weight: 600; }
 
