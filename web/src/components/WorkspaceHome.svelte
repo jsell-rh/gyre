@@ -693,9 +693,13 @@
     const tabMap = { specs: 'specs', tasks: 'tasks', mrs: 'mrs', agents: 'agents', merged: 'mrs' };
     const tab = tabMap[stageId];
     if (!tab) return;
-    // Switch to the corresponding workspace tab and scroll into view
+    // Open the browse panel and switch to the corresponding tab
+    browseExpanded = true;
     wsTab = tab;
-    document.querySelector('[data-testid="ws-tabbed-panel"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // Scroll into view after DOM update
+    requestAnimationFrame(() => {
+      document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   }
 
   // ── Merge Queue state ───────────────────────────────────────────────────
