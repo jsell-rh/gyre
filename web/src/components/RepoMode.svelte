@@ -102,6 +102,36 @@
   let repoTasks = $state([]);
   let tasksLoading = $state(false);
   let tasksLoaded = $state(false);
+  let taskSortBy = $state('priority');   // 'priority' | 'status' | 'updated'
+  let taskStatusFilter = $state('all');  // 'all' | specific status
+
+  const PRIORITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
+  const STATUS_ORDER = { blocked: 0, in_progress: 1, review: 2, backlog: 3, done: 4 };
+
+  const sortedFilteredTasks = $derived.by(() => {
+    let tasks = repoTasks;
+    if (taskStatusFilter !== 'all') {
+      tasks = tasks.filter(t => t.status === taskStatusFilter);
+    }
+    return [...tasks].sort((a, b) => {
+      if (taskSortBy === 'priority') {
+        return (PRIORITY_ORDER[a.priority] ?? 9) - (PRIORITY_ORDER[b.priority] ?? 9);
+      }
+      if (taskSortBy === 'status') {
+        return (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9);
+      }
+      // updated
+      const aT = a.updated_at ?? a.created_at ?? 0;
+      const bT = b.updated_at ?? b.created_at ?? 0;
+      return bT - aT; // newest first
+    });
+  });
+
+  function specShortName(path) {
+    if (!path) return '';
+    const seg = path.split('/').pop();
+    return seg.endsWith('.md') ? seg.slice(0, -3) : seg;
+  }
 
   $effect(() => {
     if (activeTab !== 'tasks') return;
@@ -182,6 +212,21 @@
   });
 
   // Entity name resolution + time formatting imported from shared modules
+
+  /** Human-friendly duration from seconds, e.g. "2m 30s", "1h 15m" */
+  function humanDuration(seconds) {
+    if (seconds == null || seconds < 0) return '';
+    const s = Math.round(seconds);
+    if (s < 60) return `${s}s`;
+    if (s < 3600) {
+      const m = Math.floor(s / 60);
+      const rem = s % 60;
+      return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
+    }
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
 
   function taskStatusVariant(s) {
     if (s === 'done') return 'success';
@@ -443,6 +488,21 @@
     {:else if activeTab === 'tasks'}
       <div class="list-tab">
         <div class="list-tab-header">
+          <div class="list-tab-controls">
+            <select class="form-select form-select-sm" bind:value={taskStatusFilter} aria-label="Filter by status">
+              <option value="all">All statuses</option>
+              <option value="backlog">Backlog</option>
+              <option value="in_progress">In Progress</option>
+              <option value="blocked">Blocked</option>
+              <option value="review">Review</option>
+              <option value="done">Done</option>
+            </select>
+            <select class="form-select form-select-sm" bind:value={taskSortBy} aria-label="Sort by">
+              <option value="priority">Sort: Priority</option>
+              <option value="status">Sort: Status</option>
+              <option value="updated">Sort: Updated</option>
+            </select>
+          </div>
           <button class="create-entity-btn" onclick={() => { createTaskOpen = !createTaskOpen; }}>
             {createTaskOpen ? 'Cancel' : '+ New Task'}
           </button>
@@ -472,10 +532,14 @@
         {/if}
         {#if tasksLoading}
           <p class="list-loading">Loading tasks...</p>
-        {:else if repoTasks.length === 0 && !createTaskOpen}
+        {:else if sortedFilteredTasks.length === 0 && !createTaskOpen}
           <div class="list-empty">
-            <p>No tasks yet</p>
-            <p class="list-empty-hint">Tasks are created automatically when specs are approved, or you can create one manually above. The flow: <strong>Push spec</strong> → <strong>Approve</strong> → <strong>Tasks generated</strong> → Agents implement.</p>
+            {#if repoTasks.length > 0}
+              <p>No tasks match filter "{taskStatusFilter}"</p>
+            {:else}
+              <p>No tasks yet</p>
+              <p class="list-empty-hint">Tasks are created automatically when specs are approved, or you can create one manually above. The flow: <strong>Push spec</strong> → <strong>Approve</strong> → <strong>Tasks generated</strong> → Agents implement.</p>
+            {/if}
           </div>
         {:else}
           <table class="entity-table">
@@ -492,14 +556,14 @@
               </tr>
             </thead>
             <tbody>
-              {#each repoTasks as task}
+              {#each sortedFilteredTasks as task}
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('task', task.id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('task', task.id, task); }}>
                   <td title={task.status === 'blocked' ? `Blocked${task.depends_on?.length ? ` by ${task.depends_on.length} task(s)` : ''}` : task.status === 'in_progress' && task.assigned_to ? `In progress — assigned to agent` : task.status === 'done' ? 'Completed' : task.status === 'backlog' ? 'Awaiting assignment' : ''}><Badge value={task.status ?? 'backlog'} variant={taskStatusVariant(task.status)} /></td>
                   <td class="cell-title">{task.title ?? 'Untitled task'}</td>
                   <td>{#if task.priority}<Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />{/if}</td>
                   <td class="cell-type">{task.task_type ?? ''}</td>
-                  <td class="cell-mono">{#if task.spec_path}<EntityLink type="spec" id={task.spec_path} data={{ path: task.spec_path, repo_id: task.repo_id ?? repo?.id }} />{/if}</td>
-                  <td class="cell-mono">{#if task.assigned_to}<EntityLink type="agent" id={task.assigned_to} />{/if}</td>
+                  <td class="cell-mono">{#if task.spec_path}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id ?? repo?.id }); }} title={task.spec_path}>{specShortName(task.spec_path)}</button>{/if}</td>
+                  <td class="cell-mono">{#if task.assigned_to}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', task.assigned_to, {}); }} title={task.assigned_to}>{entityName('agent', task.assigned_to)}</button>{/if}</td>
                   <td class="cell-time">{relativeTime(task.updated_at ?? task.created_at)}</td>
                   <td class="cell-action">
                     {#if TASK_STATUS_TRANSITIONS[task.status]?.length}
@@ -644,19 +708,27 @@
                 <th>Branch</th>
                 <th>MR</th>
                 <th>Duration</th>
+                <th>Cost</th>
                 <th>Spawned</th>
               </tr>
             </thead>
             <tbody>
               {#each allAgents as agent}
-                {@const dur = (agent.completed_at && agent.created_at) ? Math.round(agent.completed_at - agent.created_at) : null}
+                {@const taskId = agent.task_id ?? agent.current_task_id}
+                {@const completedDur = (agent.completed_at && agent.created_at) ? Math.round(agent.completed_at - agent.created_at) : null}
+                {@const elapsedSec = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
+                {@const totalTokens = (agent.usage?.input_tokens ?? 0) + (agent.usage?.output_tokens ?? 0) + (agent.tokens_used ?? 0)}
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('agent', agent.id, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('agent', agent.id, agent); }}>
-                  <td title={agent.status === 'active' ? 'Currently working' : agent.status === 'idle' || agent.status === 'completed' ? 'Work complete' : agent.status === 'failed' ? 'Agent failed' : agent.status === 'dead' ? 'Agent died (killed or crashed)' : ''}><Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : (agent.status === 'failed' || agent.status === 'dead') ? 'danger' : 'muted'} /></td>
-                  <td class="cell-title">{agent.name ?? entityName('agent', agent.id)}</td>
-                  <td class="cell-mono">{#if agent.task_id ?? agent.current_task_id}<EntityLink type="task" id={agent.task_id ?? agent.current_task_id} />{/if}</td>
+                  <td>
+                    <Badge value={agent.status ?? 'active'} variant={agent.status === 'active' ? 'success' : (agent.status === 'idle' || agent.status === 'completed') ? 'info' : (agent.status === 'failed' || agent.status === 'dead') ? 'danger' : 'muted'} />
+                    <span class="agent-status-explain">{#if agent.status === 'active' && elapsedSec != null}Running for {humanDuration(elapsedSec)}{:else if (agent.status === 'completed' || agent.status === 'idle') && completedDur != null}Completed in {humanDuration(completedDur)}{:else if agent.status === 'failed' && completedDur != null}Failed after {humanDuration(completedDur)}{/if}</span>
+                  </td>
+                  <td class="cell-title"><button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', agent.id, agent); }}>{agent.name ?? entityName('agent', agent.id)}</button></td>
+                  <td class="cell-mono">{#if taskId}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('task', taskId, {}); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
                   <td class="cell-mono">{agent.branch ?? ''}</td>
-                  <td class="cell-mono">{#if agent.mr_id}<EntityLink type="mr" id={agent.mr_id} />{/if}</td>
-                  <td class="cell-time">{#if dur}{dur < 60 ? dur + 's' : dur < 3600 ? Math.round(dur / 60) + 'm' : Math.round(dur / 3600) + 'h'}{:else if agent.status === 'active' && agent.created_at}{@const elapsed = Math.round((Date.now() / 1000 - agent.created_at) / 60)}{elapsed}m{/if}</td>
+                  <td class="cell-mono">{#if agent.mr_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', agent.mr_id, {}); }}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
+                  <td class="cell-time">{#if completedDur != null}{humanDuration(completedDur)}{:else if agent.status === 'active' && elapsedSec != null}{humanDuration(elapsedSec)}{/if}</td>
+                  <td class="cell-mono">{#if totalTokens > 0}<span class="token-count" title="{totalTokens.toLocaleString()} tokens">{totalTokens > 999999 ? (totalTokens / 1000000).toFixed(1) + 'M' : totalTokens > 999 ? (totalTokens / 1000).toFixed(0) + 'k' : totalTokens}</span>{/if}</td>
                   <td class="cell-time">{relativeTime(agent.created_at)}</td>
                 </tr>
               {/each}
@@ -1308,8 +1380,36 @@
 
   .list-tab-header {
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
+    align-items: center;
     margin-bottom: var(--space-3);
+    gap: var(--space-2);
+  }
+
+  .list-tab-controls {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+  }
+
+  .form-select-sm {
+    padding: var(--space-1) var(--space-2);
+    font-size: var(--text-xs);
+    flex: none;
+    min-width: 0;
+  }
+
+  .agent-status-explain {
+    display: block;
+    font-size: 10px;
+    color: var(--color-text-muted);
+    margin-top: 2px;
+    white-space: nowrap;
+  }
+
+  .token-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
   }
 
   .create-entity-btn {
