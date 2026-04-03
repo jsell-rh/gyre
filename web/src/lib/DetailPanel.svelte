@@ -3373,8 +3373,8 @@
                         {:else}
                           <span class="history-user mono">--</span>
                         {/if}
-                        {@const evTs = ev.timestamp || ev.approved_at}
-                        {#if evTs}
+                        {#if ev.timestamp || ev.approved_at}
+                          {@const evTs = ev.timestamp || ev.approved_at}
                           <span class="history-time" title={formatDate(evTs)}>{relativeTime(evTs) || formatDate(evTs)}</span>
                         {:else}
                           <span class="history-time">--</span>
