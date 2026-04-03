@@ -1629,10 +1629,21 @@
     const detail = evt.detail ?? evt.details;
     if (!detail) return evt.message ?? null;
     if (typeof detail === 'string') return detail;
-    // GateResult events have {gate, status}
+    // GateResult events have {gate, status, gate_type, output, error}
     if (detail.gate) {
       const status = detail.status === 'pass' || detail.status === 'passed' ? 'passed' : detail.status === 'fail' || detail.status === 'failed' ? 'failed' : detail.status;
-      return `${detail.gate}: ${status}`;
+      const gateTypeDescs = {
+        test_command: 'test suite',
+        lint_command: 'code formatting',
+        build_command: 'build verification',
+        trace_capture: 'trace capture',
+        spec_compliance: 'spec compliance',
+        agent_review: 'AI code review',
+        agent_validation: 'acceptance criteria',
+      };
+      const gateTypeDesc = gateTypeDescs[detail.gate_type] ?? '';
+      const why = status === 'failed' && detail.error ? ` — ${detail.error.split('\n')[0]?.slice(0, 100)}` : '';
+      return `${detail.gate}${gateTypeDesc ? ` (${gateTypeDesc})` : ''}: ${status}${why}`;
     }
     // GitPush events have {branch, sha, ...}
     if (detail.branch) return `Branch: ${detail.branch}${detail.sha ? ' @ ' + detail.sha.slice(0, 7) : ''}`;
