@@ -66,7 +66,7 @@
     if (url.searchParams.has('detail') || url.searchParams.has('expanded')) {
       url.searchParams.delete('detail');
       url.searchParams.delete('expanded');
-      window.history.replaceState({}, '', url.toString());
+      window.history.replaceState(window.history.state, '', url.toString());
     }
   }
 
@@ -237,7 +237,7 @@
     if (url.searchParams.has('detail') || url.searchParams.has('expanded')) {
       url.searchParams.delete('detail');
       url.searchParams.delete('expanded');
-      window.history.replaceState({}, '', url.toString());
+      window.history.replaceState(window.history.state, '', url.toString());
     }
     onclose?.();
   }
@@ -255,7 +255,7 @@
         url.searchParams.delete('detail');
         url.searchParams.delete('expanded');
       }
-      window.history.replaceState({}, '', url.toString());
+      window.history.replaceState(window.history.state, '', url.toString());
     }
   }
 
