@@ -1099,6 +1099,13 @@
             <span class="pipeline-stage-count">{pipelineMrs.merged}</span>
             <span class="pipeline-stage-label">Merged</span>
           </div>
+          {#if budgetData?.config?.monthly_limit_usd}
+            {@const budgetPct = budgetData.usage?.total_cost_usd ? Math.round((budgetData.usage.total_cost_usd / budgetData.config.monthly_limit_usd) * 100) : 0}
+            <span class="pipeline-budget-indicator" title="Budget: ${budgetData.usage?.total_cost_usd?.toFixed(2) ?? '0'} / ${budgetData.config.monthly_limit_usd} ({budgetPct}% used)">
+              <span class="pipeline-budget-bar"><span class="pipeline-budget-fill" class:budget-warn={budgetPct > 75} class:budget-danger={budgetPct > 90} style="width: {Math.min(budgetPct, 100)}%"></span></span>
+              <span class="pipeline-budget-label" class:budget-warn={budgetPct > 75} class:budget-danger={budgetPct > 90}>{budgetPct}%</span>
+            </span>
+          {/if}
         </div>
       {/if}
 
@@ -2129,6 +2136,43 @@
     padding: 0 2px;
     opacity: 0.5;
   }
+
+  .pipeline-budget-indicator {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: auto;
+    padding: 0 var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .pipeline-budget-bar {
+    width: 40px;
+    height: 4px;
+    background: var(--color-border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .pipeline-budget-fill {
+    height: 100%;
+    background: var(--color-success);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .pipeline-budget-fill.budget-warn { background: var(--color-warning); }
+  .pipeline-budget-fill.budget-danger { background: var(--color-danger); }
+
+  .pipeline-budget-label {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+
+  .pipeline-budget-label.budget-warn { color: var(--color-warning); }
+  .pipeline-budget-label.budget-danger { color: var(--color-danger); }
 
   /* ── Recent Completions ────────────────────────────────────────── */
   .ws-completions-section {
