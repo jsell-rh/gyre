@@ -1464,10 +1464,11 @@
                           </td>
                           <td>
                             {#if ds}
-                              <span class="diff-stats-mini">
+                              <button class="diff-stats-mini diff-stats-link" title="View code diff" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'diff' }); }}>
+                                {#if ds.files_changed}<span class="diff-files-mini">{ds.files_changed} file{ds.files_changed !== 1 ? 's' : ''}</span>{/if}
                                 <span class="diff-ins-mini">+{ds.insertions ?? 0}</span>
                                 <span class="diff-del-mini">-{ds.deletions ?? 0}</span>
-                              </span>
+                              </button>
                             {/if}
                           </td>
                           <td>
@@ -2610,6 +2611,21 @@
     font-weight: 500;
   }
 
+  .diff-stats-link {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+  }
+
+  .diff-stats-link:hover {
+    background: var(--color-surface-elevated);
+    text-decoration: underline;
+  }
+
+  .diff-files-mini { color: var(--color-text-muted); }
   .diff-ins-mini { color: var(--color-success); }
   .diff-del-mini { color: var(--color-danger); }
 
