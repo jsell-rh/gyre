@@ -614,8 +614,8 @@
   });
 
   // ── Workspace-level entity tab ──────────────────────────────────────
-  // Default to overview tab — shows repos, briefing, and completions
-  let wsTab = $state('overview');
+  // Default to specs tab for cross-repo browsing
+  let wsTab = $state('specs');
   // Track whether user has manually selected a tab (don't auto-switch after that)
   let userSelectedTab = $state(false);
 
@@ -630,7 +630,7 @@
     else if (pipelineAgents.active > 0) wsTab = 'agents';
     else if (pipelineMrs.open > 0) wsTab = 'mrs';
     else if (pipelineTasks.in_progress > 0 || pipelineTasks.blocked > 0) wsTab = 'tasks';
-    // else stay on overview
+    // else stay on specs
   });
 
   // ── Activity filter + pagination ──────────────────────────────────────
@@ -1057,15 +1057,6 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Status sentence: one-line summary of workspace state ── -->
-      {#if !specsLoading && !tasksLoading}
-        {#if statusSentence}
-          <div class="ws-status-sentence">{statusSentence}</div>
-        {:else if !decisionsLoading && actionableNotifications.length === 0 && (specs.length > 0 || wsTasks.length > 0)}
-          <div class="ws-status-sentence ws-status-clear">All clear — no items need your attention</div>
-        {/if}
-      {/if}
-
       <!-- ── Pipeline progress: visual flow showing autonomous dev lifecycle ── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
         <div class="pipeline-progress" data-testid="pipeline-progress">
@@ -1170,74 +1161,15 @@
         </section>
       {/if}
 
-      <!-- ── Main content: tabbed navigation ── -->
-      <div class="dashboard-flow">
-          <div class="ws-main-content" data-testid="browse-panel">
-            <nav class="ws-tab-bar" aria-label="Workspace navigation">
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'overview'} onclick={() => { wsTab = 'overview'; userSelectedTab = true; }} title="Repos, briefing, and recent completions">
-                Overview
-              </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }} title="Specifications define what agents build. Approve specs to start the pipeline.">
-                Specs
-                {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
-                {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
-              </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }} title="Tasks are generated from approved specs. Agents claim tasks and implement them.">
-                Tasks
-                {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
-                {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
-                {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
-              </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }} title="Agents implement tasks autonomously. Each gets a branch and creates an MR when done.">
-                Agents
-                {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
-                {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
-              </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }} title="Merge requests are created by agents. Quality gates run before merging.">
-                MRs
-                {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
-                {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
-                {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
-              </button>
-              {#if mergeQueueItems.length > 0}
-                <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; }} title="MRs waiting to be merged. Gates must pass before merge.">
-                  Queue
-                  <span class="ws-tab-badge ws-tab-badge-warn">{mergeQueueItems.length}</span>
-                </button>
-              {/if}
-              <span class="ws-tab-spacer"></span>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }} title="Timeline of all events across repos — specs, agents, gates, merges.">
-                Activity
-              </button>
-            </nav>
-
-            <!-- ── Overview tab ──────────────────────────────────────── -->
-            {#if wsTab === 'overview'}
-              <div class="feed-body overview-body">
-                {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
-                  <section class="ws-briefing-section">
-                    <div class="ws-briefing-body">
-                      {#if briefingData.summary}
-                        <p class="ws-briefing-text">{briefingData.summary}</p>
-                      {/if}
-                      {#if briefingData.narrative && briefingData.narrative !== briefingData.summary}
-                        <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
-                      {/if}
-                    </div>
-                  </section>
-                {/if}
-
-                <!-- Two-column layout: repos + activity -->
-                <div class="overview-columns">
-                  <!-- Left: Repos -->
-                  <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
-                    <div class="section-header">
-                      <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
-                      <div class="repo-header-actions">
-                        <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
-                        <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
-                      </div>
-                    </div>
+      <!-- ── Repos: primary navigation ────────────────────────────── -->
+      <section class="ws-repos-section" aria-labelledby="section-repos" data-testid="section-repos">
+        <div class="section-header">
+          <h2 class="section-title" id="section-repos">{$t('workspace_home.sections.repos')}</h2>
+          <div class="repo-header-actions">
+            <button class="section-btn" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">{$t('workspace_home.new_repo')}</button>
+            <button class="section-btn" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">{$t('workspace_home.import')}</button>
+          </div>
+        </div>
                 {#if reposLoading}
                   <div class="skeleton-row"></div>
                 {:else if reposError}
@@ -1316,103 +1248,99 @@
                   </form>
                 {/if}
 
-                    <!-- Workspace quick links (below repos) -->
-                    <div class="ws-quick-links">
-                      {#if goToAgentRules}
-                        <button class="ws-quick-link" onclick={goToAgentRules} title="Configure agent personas, principles, and standards">
-                          <Icon name="settings" size={12} /> Agent Rules
-                        </button>
-                      {/if}
-                      {#if goToWorkspaceSettings}
-                        <button class="ws-quick-link" onclick={goToWorkspaceSettings} title="Workspace settings: trust level, budget, members">
-                          <Icon name="settings" size={12} /> Settings
-                        </button>
-                      {/if}
-                    </div>
-                  </section>
+        <!-- Workspace quick links -->
+        <div class="ws-quick-links">
+          {#if goToAgentRules}
+            <button class="ws-quick-link" onclick={goToAgentRules} title="Configure agent personas, principles, and standards">
+              <Icon name="settings" size={12} /> Agent Rules
+            </button>
+          {/if}
+          {#if goToWorkspaceSettings}
+            <button class="ws-quick-link" onclick={goToWorkspaceSettings} title="Workspace settings: trust level, budget, members">
+              <Icon name="settings" size={12} /> Settings
+            </button>
+          {/if}
+        </div>
+      </section>
 
-                  <!-- Right: Recent activity + completions sidebar -->
-                  <aside class="overview-sidebar">
-                    {#if !mrsLoading && recentCompletions.length > 0}
-                      <section class="ws-completions-section">
-                        <h3 class="completions-title">Recent Completions</h3>
-                        <div class="completions-list">
-                          {#each recentCompletions as c}
-                            <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
-                              <div class="completion-chain">
-                                {#if c.specName}
-                                  <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
-                                  <span class="completion-arrow">→</span>
-                                {/if}
-                                {#if c.agentName}
-                                  <span class="completion-node completion-agent" title="Agent: {c.agentName}">{c.agentName}</span>
-                                  <span class="completion-arrow">→</span>
-                                {/if}
-                                <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title?.length > 30 ? c.mr.title.slice(0, 27) + '...' : c.mr.title ?? 'Untitled'}</span>
-                                <span class="completion-arrow">→</span>
-                                <span class="completion-node completion-merged">Merged</span>
-                              </div>
-                              <div class="completion-meta">
-                                {#if c.gates?.total > 0}
-                                  <span class="completion-gates">{c.gates.passed}/{c.gates.total} gates</span>
-                                {/if}
-                                {#if c.repoName}
-                                  <span class="completion-repo">{c.repoName}</span>
-                                {/if}
-                                {#if c.mergedAt}
-                                  <span class="completion-time">{relTime(c.mergedAt)}</span>
-                                {/if}
-                              </div>
-                            </button>
-                          {/each}
-                        </div>
-                      </section>
-                    {/if}
+      <!-- ── Recent completions (compact provenance chains) ────────── -->
+      {#if !mrsLoading && recentCompletions.length > 0}
+        <section class="ws-completions-section">
+          <h3 class="completions-title">Recent Completions</h3>
+          <div class="completions-list">
+            {#each recentCompletions as c}
+              <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
+                <div class="completion-chain">
+                  {#if c.specName}
+                    <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
+                    <span class="completion-arrow">→</span>
+                  {/if}
+                  {#if c.agentName}
+                    <span class="completion-node completion-agent" title="Agent: {c.agentName}">{c.agentName}</span>
+                    <span class="completion-arrow">→</span>
+                  {/if}
+                  <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title?.length > 30 ? c.mr.title.slice(0, 27) + '...' : c.mr.title ?? 'Untitled'}</span>
+                  <span class="completion-arrow">→</span>
+                  <span class="completion-node completion-merged">Merged</span>
+                </div>
+                <div class="completion-meta">
+                  {#if c.gates?.total > 0}
+                    <span class="completion-gates">{c.gates.passed}/{c.gates.total} gates</span>
+                  {/if}
+                  {#if c.repoName}
+                    <span class="completion-repo">{c.repoName}</span>
+                  {/if}
+                  {#if c.mergedAt}
+                    <span class="completion-time">{relTime(c.mergedAt)}</span>
+                  {/if}
+                </div>
+              </button>
+            {/each}
+          </div>
+        </section>
+      {/if}
 
-                    {#if !activityLoading && activityEvents.length > 0}
-                      <section class="overview-activity-section">
-                        <h3 class="completions-title">Recent Activity</h3>
-                        <div class="activity-timeline activity-timeline-compact">
-                          {#each activityEvents.slice(0, 8) as event, i}
-                            {@const variant = activityVariant(event)}
-                            {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                            {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                            <button
-                              class="activity-item activity-item-clickable"
-                              onclick={() => {
-                                if (primaryType && primaryId) {
-                                  const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                                  nav(primaryType, primaryId, data);
-                                }
-                              }}
-                            >
-                              <div class="activity-dot activity-dot-{variant}"></div>
-                              {#if i < 7}<div class="activity-line"></div>{/if}
-                              <div class="activity-content">
-                                <div class="activity-main-row">
-                                  <span class="activity-icon"><Icon name={activityIconName(event)} size={10} /></span>
-                                  <span class="activity-label">{activityLabel(event)}</span>
-                                  {#if event.timestamp ?? event.created_at}
-                                    <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                                  {/if}
-                                </div>
-                              </div>
-                            </button>
-                          {/each}
-                        </div>
-                        {#if activityEvents.length > 8}
-                          <button class="overview-activity-more" onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
-                            View all activity ({activityEvents.length})
-                          </button>
-                        {/if}
-                      </section>
-                    {/if}
-                  </aside>
-                </div><!-- .overview-columns -->
-              </div>
+      <!-- ── Cross-repo browse: entity tabs ─────────────────────────── -->
+      <div class="dashboard-flow">
+        <div class="ws-main-content" data-testid="browse-panel">
+          <nav class="ws-tab-bar ws-tab-bar-secondary" aria-label="Browse workspace entities">
+            <span class="ws-tab-bar-label">Browse</span>
+            <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
+              Specs
+              {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
+              {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
+            </button>
+            <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
+              Tasks
+              {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
+              {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
+              {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
+            </button>
+            <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
+              MRs
+              {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
+              {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
+              {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
+            </button>
+            <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
+              Agents
+              {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
+              {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
+            </button>
+            {#if mergeQueueItems.length > 0}
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; }}>
+                Queue
+                <span class="ws-tab-badge ws-tab-badge-warn">{mergeQueueItems.length}</span>
+              </button>
+            {/if}
+            <span class="ws-tab-spacer"></span>
+            <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
+              Activity
+            </button>
+          </nav>
 
             <!-- ── Specs tab ──────────────────────────────────────────── -->
-            {:else if wsTab === 'specs'}
+            {#if wsTab === 'specs'}
               <div class="feed-body">
                 {#if specsLoading}
                   <div class="skeleton-row"></div>
@@ -2946,6 +2874,20 @@
   .ws-tab-badge-warn { background: var(--color-warning); }
   .ws-tab-badge-danger { background: var(--color-danger); }
   .ws-tab-badge-success { background: var(--color-success); }
+
+  .ws-tab-bar-secondary {
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .ws-tab-bar-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 6px var(--space-3) 6px var(--space-2);
+    flex-shrink: 0;
+  }
 
   .ws-tab-spacer {
     flex: 1;
