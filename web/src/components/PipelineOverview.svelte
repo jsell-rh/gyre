@@ -287,8 +287,8 @@
                       {#if mr._gates.passed > 0}<span class="gate-pass-inline">✓{mr._gates.passed}</span>{/if}
                     </span>
                   {/if}
-                  {@const diff = mr._diffStats ?? mr.diff_stats}
-                  {#if diff}
+                  {#if mr._diffStats ?? mr.diff_stats}
+                    {@const diff = mr._diffStats ?? mr.diff_stats}
                     <span class="expansion-diff-stats">
                       {#if diff.insertions != null}<span class="diff-add">+{diff.insertions}</span>{/if}
                       {#if diff.deletions != null}<span class="diff-del">-{diff.deletions}</span>{/if}
