@@ -749,7 +749,22 @@
       const data = await api.activity(30);
       const events = Array.isArray(data) ? data : [];
       if (events.length > 0) {
-        activityEvents = events;
+        // Sanitize: strip raw JSON from description fields — show human-readable text only
+        activityEvents = events.map(e => {
+          const desc = e.description ?? e.detail ?? '';
+          if (desc && (desc.startsWith('{') || desc.startsWith('['))) {
+            // Try to extract something useful from the JSON
+            try {
+              const parsed = JSON.parse(desc);
+              const agentName = parsed.agent_name ?? '';
+              const mrTitle = parsed.mr_title ?? '';
+              return { ...e, description: agentName ? `Agent: ${agentName}` : mrTitle ? `MR: ${mrTitle}` : '' };
+            } catch {
+              return { ...e, description: '' };
+            }
+          }
+          return e;
+        });
       } else {
         // Activity API may return empty — synthesize from notifications
         // which contain rich event data (agent completions, gate failures, etc.)
@@ -774,10 +789,15 @@
             'agent_clarification': 'agent_clarification',
             'budget_warning': 'budget_warning',
           };
+          // Build a human-readable description — never show raw JSON
+          const rawDesc = n.message ?? n.description ?? body.description ?? '';
+          const humanDesc = (rawDesc && !rawDesc.startsWith('{') && !rawDesc.startsWith('['))
+            ? rawDesc
+            : synthesizeDescription(n.notification_type, body);
           return {
             event_type: typeMap[n.notification_type] ?? n.notification_type,
             title: n.title ?? '',
-            description: n.message ?? n.description ?? body.description ?? '',
+            description: humanDesc,
             entity_type: body.mr_id ? 'mr' : body.agent_id ? 'agent' : body.spec_path ? 'spec' : body.task_id ? 'task' : null,
             entity_id: body.mr_id ?? body.agent_id ?? body.spec_path ?? body.task_id ?? n.entity_ref ?? null,
             entity_name: body.mr_title ?? body.agent_name ?? (body.spec_path ? body.spec_path.split('/').pop() : null),
@@ -794,6 +814,28 @@
       activityEvents = [];
     } finally {
       activityLoading = false;
+    }
+  }
+
+  /** Synthesize a human-readable description from notification type + parsed body */
+  function synthesizeDescription(notifType, body) {
+    const agentName = body.agent_name ?? '';
+    const mrTitle = body.mr_title ?? '';
+    const specPath = body.spec_path ? body.spec_path.split('/').pop()?.replace(/\.md$/, '') : '';
+    switch (notifType) {
+      case 'AgentCompleted': return agentName ? `Agent "${agentName}" finished implementing` : '';
+      case 'AgentFailed': return agentName ? `Agent "${agentName}" encountered an error` : '';
+      case 'MrMerged': return mrTitle ? `"${mrTitle}" passed all gates and was merged` : '';
+      case 'MrCreated': return mrTitle ? `"${mrTitle}" created from agent work` : '';
+      case 'MrNeedsReview': return mrTitle ? `"${mrTitle}" is ready for review` : '';
+      case 'SpecApproved': return specPath ? `"${specPath}" approved — agents can begin` : '';
+      case 'SpecRejected': return specPath ? `"${specPath}" rejected — implementation blocked` : '';
+      case 'SpecChanged': return specPath ? `"${specPath}" was updated` : '';
+      case 'GateFailure': return body.gate_name ? `Gate "${body.gate_name}" failed` : 'A quality gate failed';
+      case 'TaskCreated': return specPath ? `Task created from spec "${specPath}"` : '';
+      case 'SuggestedSpecLink': return mrTitle ? `MR "${mrTitle}" may relate to a spec` : '';
+      case 'BudgetWarning': return 'Budget threshold exceeded';
+      default: return '';
     }
   }
 
@@ -1157,7 +1199,7 @@
                         <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                       {/if}
                     </div>
-                    {#if event.description && event.description !== event.title && event.description !== event.entity_name}
+                    {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
                       <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 120) + '...' : event.description}</p>
                     {/if}
                   </div>
