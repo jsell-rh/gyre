@@ -15,7 +15,7 @@ let cache = $state({});
  */
 export function shortId(id) {
   if (!id) return '';
-  return id.length > 12 ? id.slice(0, 8) + '\u2026' : id;
+  return id.length > 12 ? id.slice(0, 8) : id;
 }
 
 /**
@@ -79,10 +79,10 @@ export function entityName(type, id) {
     // Truncate long names for display
     return cached.length > 35 ? cached.slice(0, 32) + '\u2026' : cached;
   }
-  // null means resolution in progress
-  if (cached === null) return '\u2026';
+  // null means resolution in progress — show type-prefixed short ID
+  if (cached === null) return formatId(type, id);
   queueNameResolution(type, id);
-  return shortId(id);
+  return formatId(type, id);
 }
 
 /**
@@ -94,10 +94,13 @@ export function formatId(type, id) {
   if (!id) return '';
   const prefixes = { mr: 'MR', task: 'T', agent: 'AG', spec: 'S', repo: 'R' };
   const prefix = prefixes[type] ?? '';
-  const name = entityName(type, id);
-  // If we got a resolved name (not a short ID), use it directly
-  if (name && !name.includes('\u2026') && name !== id) return name;
-  return prefix ? `${prefix}-${id.slice(0, 6)}` : shortId(id);
+  // Check cache directly (avoid recursion through entityName)
+  const key = `${type}:${id}`;
+  const cached = cache[key];
+  if (cached && cached !== null) {
+    return cached.length > 35 ? cached.slice(0, 32) + '\u2026' : cached;
+  }
+  return prefix ? `${prefix}-${id.slice(0, 7)}` : shortId(id);
 }
 
 /**
