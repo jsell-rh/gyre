@@ -135,8 +135,9 @@ pub fn extract_call_graph(
     let stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
 
-    // Per-query timeout: 10 seconds
+    // Per-query timeout: 10 seconds. Overall extraction timeout: 120 seconds.
     let query_timeout = Duration::from_secs(10);
+    let overall_deadline = Instant::now() + Duration::from_secs(120);
 
     // Initialize LSP
     let root_uri = format!("file://{repo_root_normalized}");
@@ -199,6 +200,14 @@ pub fn extract_call_graph(
     // No artificial cap — query all function nodes. For large repos
     // (~1800 nodes), this completes in ~20 seconds per the spec estimate.
     for (idx, func_node) in function_nodes.iter().enumerate() {
+        // Check overall deadline to prevent runaway extraction.
+        if Instant::now() > overall_deadline {
+            result.errors.push(format!(
+                "Overall extraction timeout after {} definitions",
+                result.definitions_queried
+            ));
+            break;
+        }
         result.definitions_queried += 1;
 
         // Normalize file path: strip leading "./" and ensure no double slashes.
@@ -399,6 +408,7 @@ fn read_lsp_response_with_timeout(
     deadline: Instant,
 ) -> std::io::Result<Option<Vec<serde_json::Value>>> {
     // Read messages until we get the response with our ID or timeout.
+    // Use a thread to avoid blocking indefinitely on read_line.
     for _ in 0..100 {
         if Instant::now() > deadline {
             return Err(std::io::Error::new(
@@ -406,6 +416,16 @@ fn read_lsp_response_with_timeout(
                 "LSP response timeout",
             ));
         }
+
+        // Read with a per-message timeout to avoid hanging on a stuck LSP.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "LSP response timeout",
+            ));
+        }
+
         match read_lsp_message(reader)? {
             Some(msg) => {
                 if let Some(id) = msg.get("id").and_then(|i| i.as_u64()) {

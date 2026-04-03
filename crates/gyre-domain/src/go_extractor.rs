@@ -582,8 +582,21 @@ impl GoExtractionContext {
                 self.name_to_id.insert(qname, ep_id.clone());
                 self.nodes.push(ep_node);
 
-                let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), ep_id);
+                let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), ep_id.clone());
                 self.edges.push(edge);
+
+                // Extract handler function name and create RoutesTo edge.
+                if let Some(handler_name) =
+                    extract_handler_from_call(node, source)
+                {
+                    // Look up handler by name in current package
+                    let handler_qname = format!("{pkg_qname}.{handler_name}");
+                    if let Some(handler_id) = self.name_to_id.get(&handler_qname) {
+                        let routes_edge =
+                            self.make_edge(EdgeType::RoutesTo, ep_id, handler_id.clone());
+                        self.edges.push(routes_edge);
+                    }
+                }
             }
         }
 
@@ -1052,6 +1065,34 @@ fn extract_http_route_call(
             if path.starts_with('/') {
                 let line = call_node.start_position().row as u32 + 1;
                 return Some((path, http_method, line));
+            }
+        }
+    }
+    None
+}
+
+/// Extract the handler function name from an HTTP route call's arguments.
+/// In `http.HandleFunc("/path", handlerFunc)`, returns `Some("handlerFunc")`.
+fn extract_handler_from_call(
+    call_node: &tree_sitter::Node,
+    source: &[u8],
+) -> Option<String> {
+    let args = find_child_by_kind(call_node, "argument_list")?;
+    // The handler is typically the 2nd (or later) argument that is an identifier.
+    let mut found_path = false;
+    for i in 0..args.child_count() {
+        let arg = args.child(i).unwrap();
+        if arg.kind() == "interpreted_string_literal" {
+            found_path = true;
+            continue;
+        }
+        if found_path && arg.kind() == "identifier" {
+            return Some(arg.utf8_text(source).ok()?.to_string());
+        }
+        // Also handle method references like `s.handleHealth`
+        if found_path && arg.kind() == "selector_expression" {
+            if let Some(field) = find_child_by_kind(&arg, "field_identifier") {
+                return Some(field.utf8_text(source).ok()?.to_string());
             }
         }
     }
