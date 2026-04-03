@@ -166,7 +166,7 @@
   }
 
   .repo-card-name {
-    font-size: var(--text-sm);
+    font-size: var(--text-base);
     font-weight: 600;
     color: var(--color-primary);
     overflow: hidden;
@@ -203,8 +203,8 @@
   .repo-card-activity {
     display: flex;
     flex-direction: column;
-    gap: 1px;
-    font-size: 10px;
+    gap: 2px;
+    font-size: var(--text-xs);
   }
 
   .repo-activity-text {
@@ -245,8 +245,11 @@
   .repo-card-pipeline {
     display: flex;
     align-items: center;
-    gap: 2px;
-    font-size: 10px;
+    gap: 3px;
+    font-size: var(--text-xs);
+    margin-top: var(--space-1);
+    padding-top: var(--space-1);
+    border-top: 1px solid var(--color-border);
   }
 
   .repo-pipe-stage {
@@ -270,7 +273,7 @@
   }
 
   .repo-pipe-count {
-    font-size: 11px;
+    font-size: var(--text-sm);
     font-weight: 700;
     font-family: var(--font-mono);
     color: var(--color-text-muted);
@@ -282,7 +285,7 @@
   .repo-pipe-warn .repo-pipe-count { color: var(--color-danger); }
 
   .repo-pipe-label {
-    font-size: 8px;
+    font-size: 9px;
     font-weight: 500;
     color: var(--color-text-muted);
     text-transform: uppercase;
