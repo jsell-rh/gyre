@@ -1044,26 +1044,40 @@
       <!-- ── Pipeline progress: visual flow showing autonomous dev lifecycle ── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
         <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { wsTab = 'specs'; userSelectedTab = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => {
+            const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
+            if (pendingSpecs.length === 1) { navigateToSpec(pendingSpecs[0]); return; }
+            wsTab = 'specs'; userSelectedTab = true; browseExpanded = true; setTimeout(() => document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }), 50);
+          }}>
             <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
             <span class="pipeline-stage-label">Specs</span>
             {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; browseExpanded = true; setTimeout(() => document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }), 50); }}>
             <span class="pipeline-stage-count">{pipelineTasks.total}</span>
             <span class="pipeline-stage-label">Tasks</span>
             {#if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge">{pipelineTasks.in_progress} active</span>{/if}
             {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked} blocked</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => { wsTab = 'agents'; userSelectedTab = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => {
+            const activeAgentList = wsAgents.filter(a => a.status === 'active');
+            if (activeAgentList.length === 1) { nav('agent', activeAgentList[0].id, { repo_id: activeAgentList[0].repo_id, name: activeAgentList[0].name }); return; }
+            wsTab = 'agents'; userSelectedTab = true; browseExpanded = true; setTimeout(() => document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }), 50);
+          }}>
             <span class="pipeline-stage-count">{pipelineAgents.total}</span>
             <span class="pipeline-stage-label">Agents</span>
             {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active} running</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-warn={pipelineMrs.failed_gates > 0} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-warn={pipelineMrs.failed_gates > 0} onclick={() => {
+            const failedMrs = wsMrs.filter(m => m._gates?.failed > 0);
+            if (failedMrs.length === 1) { nav('mr', failedMrs[0].id, { repo_id: failedMrs[0].repository_id ?? failedMrs[0].repo_id, title: failedMrs[0].title, _openTab: 'gates' }); return; }
+            const openMrs = wsMrs.filter(m => m.status === 'open');
+            if (openMrs.length === 1 && failedMrs.length === 0) { nav('mr', openMrs[0].id, { repo_id: openMrs[0].repository_id ?? openMrs[0].repo_id, title: openMrs[0].title }); return; }
+            wsTab = 'mrs'; userSelectedTab = true; browseExpanded = true; setTimeout(() => document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }), 50);
+          }}>
             <span class="pipeline-stage-count">{pipelineMrs.total}</span>
             <span class="pipeline-stage-label">MRs</span>
             {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates} failed</span>
@@ -1327,7 +1341,7 @@
                 {/each}
               </div>
               {#if activityEvents.length > 8}
-                <button class="show-more-btn-compact" onclick={() => { wsTab = 'activity'; userSelectedTab = true; browseExpanded = true; document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }); }}>
+                <button class="show-more-btn-compact" onclick={() => { wsTab = 'activity'; userSelectedTab = true; browseExpanded = true; browseExpanded = true; setTimeout(() => document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth' }), 50); }}>
                   View all activity ({activityEvents.length})
                 </button>
               {/if}
