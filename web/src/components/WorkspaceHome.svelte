@@ -1149,7 +1149,20 @@
             <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
           </div>
         {:else if repos.length === 0}
-          <p class="empty-text" data-testid="repos-empty">{$t('workspace_home.repos_empty')}</p>
+          <div class="empty-state-guided" data-testid="repos-empty">
+            <p class="empty-text">{$t('workspace_home.repos_empty')}</p>
+            <div class="pipeline-guide">
+              <span class="pipeline-step">1. Create a repo</span>
+              <span class="pipeline-arrow">→</span>
+              <span class="pipeline-step">2. Push specs</span>
+              <span class="pipeline-arrow">→</span>
+              <span class="pipeline-step">3. Approve specs</span>
+              <span class="pipeline-arrow">→</span>
+              <span class="pipeline-step">4. Agents implement</span>
+              <span class="pipeline-arrow">→</span>
+              <span class="pipeline-step">5. Gates verify & merge</span>
+            </div>
+          </div>
         {:else}
           <div class="repo-cards-grid">
             {#each repos.slice().sort((a, b) => {
@@ -2883,6 +2896,31 @@
     padding: 0;
     font-weight: 500;
     color: var(--color-text-secondary);
+  }
+
+  .pipeline-guide {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+    margin-top: var(--space-2);
+    font-size: var(--text-xs);
+  }
+
+  .pipeline-step {
+    color: var(--color-text-secondary);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 2px 8px;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+
+  .pipeline-arrow {
+    color: var(--color-text-muted);
+    opacity: 0.5;
+    flex-shrink: 0;
   }
 
   .empty-guide {
