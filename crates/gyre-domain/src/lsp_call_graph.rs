@@ -55,7 +55,7 @@ pub fn extract_call_graph(
     nodes: &[GraphNode],
     existing_edges: &[GraphEdge],
     repo_id: &Id,
-    commit_sha: &str,
+    _commit_sha: &str,
 ) -> LspCallGraphResult {
     let mut result = LspCallGraphResult {
         edges: Vec::new(),
