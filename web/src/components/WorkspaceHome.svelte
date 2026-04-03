@@ -952,14 +952,22 @@
         onDismiss={handleDismiss}
       />
 
-      <!-- Zone 2: Pipeline Overview -->
+      <!-- Zone 2: Pipeline Overview (expandable hero — replaces old sidebar) -->
       <PipelineOverview
         specs={pipelineSpecs}
         tasks={pipelineTasks}
         agents={pipelineAgents}
         mrs={pipelineMrs}
         budget={budgetData}
+        specsList={specs}
+        tasksList={wsTasks}
+        agentsList={wsAgents}
+        mrsList={wsMrs}
         onStageClick={handlePipelineStageClick}
+        onApproveSpec={quickApproveSpec}
+        onRejectSpec={quickRejectSpec}
+        onEnqueueMr={quickEnqueueMr}
+        onNavigateSpec={navigateToSpec}
       />
 
       <!-- Zone 2.5: Workspace Briefing — only show when there's a real LLM narrative or exceptions.
