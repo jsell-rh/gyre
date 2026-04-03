@@ -2038,19 +2038,37 @@
                       {#each mr._gateSummary.gates as gate}
                         {@const passed = gate.status === 'Passed' || gate.status === 'passed'}
                         {@const failed = gate.status === 'Failed' || gate.status === 'failed'}
+                        {@const running = gate.status === 'Running' || gate.status === 'running'}
                         {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
-                        <button class="gate-detail-item" class:gate-pass={passed} class:gate-fail={failed} onclick={() => { activeTab = 'gates'; }} title="View gate details">
-                          <span class="gate-check">{passed ? '✓' : failed ? '✗' : '○'}</span>
-                          <span class="gate-detail-name">{gate.gate_name ?? gate.name ?? (gate.gate_type ? gate.gate_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : (gate.command ? gate.command.split(' ')[0].split('/').pop() : 'Quality Gate'))}</span>
-                          {#if gate.gate_type}<span class="gate-type-tag">{gate.gate_type.replace(/_/g, ' ')}</span>{/if}
+                        {@const gateDesc = ({
+                          test_command: 'Runs the test suite to verify correctness',
+                          lint_command: 'Checks code style and formatting',
+                          build_command: 'Compiles the project to verify it builds',
+                          trace_capture: 'Captures execution traces for observability',
+                          trace_validation: 'Validates execution traces match expected behavior',
+                          spec_compliance: 'Verifies implementation matches the linked specification',
+                          security_scan: 'Scans for known security vulnerabilities',
+                          coverage_check: 'Checks test coverage meets threshold',
+                          agent_review: 'AI agent reviews the code changes',
+                          agent_validation: 'AI agent validates acceptance criteria',
+                          required_approvals: 'Requires human approval before merge',
+                        })[gate.gate_type] ?? null}
+                        <button class="gate-detail-item" class:gate-pass={passed} class:gate-fail={failed} class:gate-running={running} onclick={() => { activeTab = 'gates'; }} title={gateDesc ? gateDesc + '\nClick for full gate details' : 'Click for full gate details'}>
+                          <span class="gate-check">{passed ? '✓' : failed ? '✗' : running ? '⟳' : '○'}</span>
+                          <div class="gate-detail-name-block">
+                            <span class="gate-detail-name">{gate.gate_name ?? gate.name ?? (gate.gate_type ? gate.gate_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : (gate.command ? gate.command.split(' ')[0].split('/').pop() : 'Quality Gate'))}</span>
+                            {#if gateDesc}<span class="gate-detail-desc">{gateDesc}</span>{/if}
+                          </div>
                           {#if gate.required === false}<span class="gate-advisory-tag">advisory</span>{/if}
                           {#if duration}<span class="gate-duration-tag">{duration < 1000 ? duration + 'ms' : (duration / 1000).toFixed(1) + 's'}</span>{/if}
-                          {#if gate.command}<span class="gate-cmd-tag mono">{gate.command}</span>{/if}
                         </button>
                         {#if failed && (gate.error || gate.output)}
-                          <div class="gate-inline-error">
-                            <pre class="gate-inline-error-text">{(gate.error || gate.output || '').slice(0, 300)}{(gate.error || gate.output || '').length > 300 ? '...' : ''}</pre>
-                          </div>
+                          <details class="gate-inline-error" open>
+                            <summary class="gate-inline-error-summary">
+                              {gate.error ? 'Error output' : 'Output'} — click to {(gate.error || gate.output || '').length > 300 ? 'expand' : 'collapse'}
+                            </summary>
+                            <pre class="gate-inline-error-text">{gate.error || gate.output || ''}</pre>
+                          </details>
                         {/if}
                       {/each}
                     </div>
@@ -8124,7 +8142,12 @@
   .gate-detail-item.gate-pass .gate-check { color: var(--color-success); }
   .gate-detail-item.gate-fail .gate-check { color: var(--color-danger); }
   .gate-check { font-weight: 600; width: 14px; text-align: center; }
+  .gate-detail-name-block { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
   .gate-detail-name { font-weight: 500; }
+  .gate-detail-desc { font-size: 11px; color: var(--color-text-muted); font-weight: 400; }
+  .gate-running { border-left-color: var(--color-warning); }
+  .gate-inline-error-summary { font-size: var(--text-xs); color: var(--color-text-muted); cursor: pointer; padding: 2px 0; }
+  .gate-inline-error-summary:hover { color: var(--color-text); }
 
   .gate-type-tag {
     font-size: 9px;
