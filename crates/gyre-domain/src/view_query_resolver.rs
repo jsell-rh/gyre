@@ -341,9 +341,29 @@ pub fn resolve_scope(
                 .collect()
         }
 
-        Scope::Diff { .. } => {
-            // Diff requires temporal graph data; return all for now.
-            all_ids
+        Scope::Diff {
+            from_commit,
+            to_commit,
+        } => {
+            // Filter to nodes that changed between commits.
+            // Use created_sha and last_modified_sha to approximate.
+            let from_lower = from_commit.to_lowercase();
+            let to_lower = to_commit.to_lowercase();
+            active_nodes
+                .iter()
+                .filter(|n| {
+                    let created = n.created_sha.to_lowercase();
+                    let modified = n.last_modified_sha.to_lowercase();
+                    // Include node if it was created or modified with a SHA that matches
+                    // the target commit range (simple prefix match).
+                    created.starts_with(&to_lower)
+                        || modified.starts_with(&to_lower)
+                        || (!from_lower.is_empty()
+                            && (created.starts_with(&from_lower)
+                                || modified.starts_with(&from_lower)))
+                })
+                .map(|n| n.id.to_string())
+                .collect()
         }
 
         Scope::Concept {
