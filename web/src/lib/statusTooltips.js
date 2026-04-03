@@ -59,14 +59,64 @@ export function mrStatusTooltip(mr) {
   }
 }
 
-export function agentStatusTooltip(status) {
+export function agentStatusTooltip(agent) {
+  const status = typeof agent === 'string' ? agent : agent?.status;
+  const spawned = typeof agent === 'object' ? agent?.spawned_at ?? agent?.created_at : null;
+  const completed = typeof agent === 'object' ? agent?.completed_at : null;
+  let duration = '';
+  if (spawned) {
+    const start = new Date(typeof spawned === 'number' ? spawned * 1000 : spawned).getTime();
+    const end = completed ? new Date(typeof completed === 'number' ? completed * 1000 : completed).getTime() : Date.now();
+    const secs = Math.round((end - start) / 1000);
+    if (secs < 60) duration = ` (${secs}s)`;
+    else if (secs < 3600) duration = ` (${Math.round(secs / 60)}m)`;
+    else duration = ` (${Math.round(secs / 3600)}h)`;
+  }
   switch (status) {
-    case 'active': return 'Agent is currently running — implementing code, running tests, or communicating';
-    case 'idle': return 'Agent has completed its work — MR should have been created';
-    case 'completed': return 'Agent finished successfully';
-    case 'failed': return 'Agent encountered an error during execution';
+    case 'active': return `Agent is currently running${duration}`;
+    case 'idle': return `Agent completed its work${duration} — MR should have been created`;
+    case 'completed': return `Agent finished successfully${duration}`;
+    case 'failed': return `Agent encountered an error${duration}`;
     case 'dead': return 'Agent was killed by an administrator';
     case 'stopped': return 'Agent was stopped gracefully';
     default: return '';
   }
+}
+
+/**
+ * Build a status journey array from MR timeline events.
+ * Returns [{step, status, timestamp, detail}] for rendering a stepper.
+ */
+export function mrStatusJourney(mr, timelineEvents) {
+  const steps = [
+    { step: 'Created', status: 'done', timestamp: mr?.created_at },
+  ];
+
+  // Gates
+  const gates = mr?._gates ?? {};
+  if (gates.total > 0) {
+    if (gates.failed > 0) {
+      steps.push({ step: 'Gates', status: 'failed', detail: `${gates.failed} failed` });
+    } else if (gates.passed === gates.total) {
+      steps.push({ step: 'Gates', status: 'done', detail: `${gates.passed} passed` });
+    } else {
+      steps.push({ step: 'Gates', status: 'pending', detail: `${gates.passed}/${gates.total}` });
+    }
+  }
+
+  // Queue
+  if (mr?.queue_position != null) {
+    steps.push({ step: 'Queued', status: 'active', detail: `#${mr.queue_position + 1}` });
+  } else if (mr?.status === 'merged') {
+    steps.push({ step: 'Queued', status: 'done' });
+  }
+
+  // Merged
+  if (mr?.status === 'merged') {
+    steps.push({ step: 'Merged', status: 'done', timestamp: mr?.merged_at });
+  } else if (mr?.status === 'closed') {
+    steps.push({ step: 'Closed', status: 'failed' });
+  }
+
+  return steps;
 }
