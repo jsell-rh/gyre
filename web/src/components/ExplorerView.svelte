@@ -4,6 +4,8 @@
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import MoldableView from '../lib/MoldableView.svelte';
+  import ExplorerTreemap from '../lib/ExplorerTreemap.svelte';
+  import ExplorerChat from '../lib/ExplorerChat.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Badge from '../lib/Badge.svelte';
@@ -38,6 +40,13 @@
 
   // Repo-scope tab: 'architecture' | 'code' | 'briefing'
   let explorerTab = $state('architecture');
+
+  // New explorer state
+  let explorerCanvasState = $state({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] });
+  let activeViewQuery = $state(null);
+  let explorerFilter = $state('all');
+  let explorerLens = $state('structural');
+  let explorerSavedViews = $state([]);
 
   // Filter panel state
   let filterVisible = $state(false);
@@ -608,15 +617,27 @@
           </div>
 
         {:else if graph}
-          <MoldableView
-            nodes={graph.nodes ?? []}
-            edges={graph.edges ?? []}
-            repoId={selectedRepoId}
-            onSelectNode={onSelectNode}
-            conceptFilterIds={conceptFilterIds}
-            conceptQuery={conceptQuery.trim()}
-            categoryFilters={activeFilters}
-          />
+          <div class="explorer-split">
+            <div class="explorer-canvas-area">
+              <ExplorerTreemap
+                repoId={selectedRepoId}
+                nodes={graph.nodes ?? []}
+                edges={graph.edges ?? []}
+                activeQuery={activeViewQuery}
+                filter={explorerFilter}
+                lens={explorerLens}
+                bind:canvasState={explorerCanvasState}
+              />
+            </div>
+            <div class="explorer-chat-area">
+              <ExplorerChat
+                repoId={selectedRepoId}
+                canvasState={explorerCanvasState}
+                onViewQuery={(q) => { activeViewQuery = q; }}
+                savedViews={explorerSavedViews}
+              />
+            </div>
+          </div>
         {/if}
 
         <!-- Repo dependencies, risks, types, modules, timeline (below graph, architecture tab only) -->
@@ -1576,4 +1597,43 @@
   .diff-del { color: var(--color-danger); }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  /* ── Explorer split layout (treemap + chat) ──────────────────────── */
+  .explorer-split {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .explorer-canvas-area {
+    flex: 1;
+    overflow: hidden;
+    min-width: 0;
+    position: relative;
+  }
+
+  .explorer-chat-area {
+    width: 360px;
+    min-width: 280px;
+    max-width: 480px;
+    border-left: 1px solid var(--color-border);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  @media (max-width: 900px) {
+    .explorer-split {
+      flex-direction: column;
+    }
+    .explorer-chat-area {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      border-left: none;
+      border-top: 1px solid var(--color-border);
+      max-height: 50%;
+    }
+  }
 </style>
