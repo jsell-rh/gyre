@@ -1052,7 +1052,7 @@
       if (specs.length === 0) return 'Push specs to your repo to start the autonomous pipeline.';
       if (s.approved > 0 && s.totalTasks === 0) return 'Specs approved — waiting for task creation.';
       if (s.mergedMrs > 0 && s.activeAgentCount === 0 && s.openMrs === 0 && s.pending === 0) {
-        return `All clear — ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with signed attestation, ${s.approved} spec${s.approved !== 1 ? 's' : ''} implemented. Browse workspace to inspect the provenance chain.`;
+        return `All clear — ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with signed attestation, ${s.approved} spec${s.approved !== 1 ? 's' : ''} implemented.`;
       }
       return 'System idle — no active work.';
     }
@@ -1175,7 +1175,17 @@
       {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
         <p class="ws-briefing-inline" data-testid="briefing-inline">{briefingData.summary ?? briefingData.narrative}</p>
       {:else if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-        <p class="ws-briefing-inline" class:ws-briefing-idle={statusItems.length === 0} data-testid="briefing-inline">{statusSentence}</p>
+        {#if statusItems.length > 0}
+          <div class="status-chips" data-testid="briefing-inline">
+            {#each statusItems as item}
+              <button class="status-chip status-chip-{item.variant}" onclick={() => { wsTab = item.tab; userSelectedTab = true; }}>
+                <span class="status-chip-icon">{item.icon}</span> {item.text}
+              </button>
+            {/each}
+          </div>
+        {:else}
+          <p class="ws-briefing-inline ws-briefing-idle" data-testid="briefing-inline">{statusSentence}</p>
+        {/if}
       {/if}
 
       <!-- ── Decisions / Action Needed (compact, inline) ────────────── -->
