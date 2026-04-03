@@ -278,6 +278,26 @@
         </div>
       {/if}
 
+      <!-- Risk assessment (synthesized from metrics) -->
+      {#if node.complexity != null || node.churn_count_30d || node.test_coverage != null}
+        <div class="detail-section">
+          <h4 class="detail-section-title">Risk Assessment</h4>
+          <div class="risk-assessment">
+            {#if (node.complexity ?? 0) > 20 && (node.test_coverage ?? 1) < 0.5}
+              <p class="risk-item risk-high">High complexity ({node.complexity}) with low test coverage ({Math.round((node.test_coverage ?? 0) * 100)}%) — consider adding tests</p>
+            {:else if (node.complexity ?? 0) > 30}
+              <p class="risk-item risk-medium">High complexity ({node.complexity}) — consider refactoring</p>
+            {:else if (node.churn_count_30d ?? 0) > 10 && relationships.calledBy.length > 5}
+              <p class="risk-item risk-medium">High churn ({node.churn_count_30d}/30d) with many dependents ({relationships.calledBy.length} callers)</p>
+            {:else if (node.test_coverage ?? 1) < 0.3 && node.node_type === 'function'}
+              <p class="risk-item risk-medium">Low test coverage ({Math.round((node.test_coverage ?? 0) * 100)}%)</p>
+            {:else}
+              <p class="risk-item risk-low">Healthy — stable metrics</p>
+            {/if}
+          </div>
+        </div>
+      {/if}
+
       <!-- Metrics -->
       <div class="detail-section">
         <h4 class="detail-section-title">Metrics</h4>
@@ -316,6 +336,32 @@
           </span>
         </div>
       </div>
+
+      <!-- Spec implementation completeness (for spec-linked nodes) -->
+      {#if node.spec_path}
+        {@const specNodes = nodes.filter(n => n.spec_path === node.spec_path && !n.deleted_at)}
+        {#if specNodes.length > 0}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Spec Coverage</h4>
+            <p class="spec-completeness">
+              <strong>{specNodes.length}</strong> node{specNodes.length !== 1 ? 's' : ''} governed by <code>{node.spec_path}</code>
+            </p>
+            <ul class="detail-ref-list">
+              {#each specNodes.slice(0, 8) as sn}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(sn)} type="button">
+                    <span class="ref-type">{sn.node_type}</span> {sn.name}
+                    <span class="spec-check">✓</span>
+                  </button>
+                </li>
+              {/each}
+              {#if specNodes.length > 8}
+                <li class="detail-more">+{specNodes.length - 8} more</li>
+              {/if}
+            </ul>
+          </div>
+        {/if}
+      {/if}
     </div>
   </div>
 {/if}
@@ -536,6 +582,25 @@
     border-color: var(--color-success);
     background: color-mix(in srgb, var(--color-success) 10%, transparent);
   }
+
+  .risk-assessment { margin: 0; }
+  .risk-item {
+    font-size: var(--text-xs); line-height: 1.5; margin: 0;
+    padding: var(--space-1) var(--space-2); border-radius: var(--radius-sm);
+  }
+  .risk-high { background: color-mix(in srgb, #ef4444 12%, transparent); color: #fca5a5; border-left: 3px solid #ef4444; }
+  .risk-medium { background: color-mix(in srgb, #f59e0b 12%, transparent); color: #fde68a; border-left: 3px solid #f59e0b; }
+  .risk-low { background: color-mix(in srgb, #22c55e 10%, transparent); color: #bbf7d0; border-left: 3px solid #22c55e; }
+
+  .spec-completeness {
+    font-size: var(--text-xs); color: var(--color-text-secondary); margin: 0;
+  }
+  .spec-completeness code {
+    font-family: var(--font-mono); font-size: var(--text-xs);
+    background: color-mix(in srgb, var(--color-text) 8%, transparent);
+    padding: 1px 4px; border-radius: 3px;
+  }
+  .spec-check { color: var(--color-success); margin-left: auto; font-size: 12px; }
 
   @media (prefers-reduced-motion: reduce) {
     .detail-ref-link { transition: none; }
