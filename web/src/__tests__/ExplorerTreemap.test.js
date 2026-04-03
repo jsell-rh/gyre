@@ -298,12 +298,72 @@ describe('ExplorerTreemap — context menu', () => {
   });
 
   it('context menu backdrop closes on click', () => {
-    // Context menu requires right-click which needs canvas hit testing
-    // Just verify the context menu CSS classes exist in the component
     const { container } = render(ExplorerTreemap, {
       props: { nodes: NODES, edges: EDGES },
     });
-    // Context menu is only rendered conditionally
     expect(container.querySelector('.ctx-menu')).toBeFalsy();
+  });
+});
+
+describe('ExplorerTreemap — timeline scrubber', () => {
+  it('does not show timeline by default', () => {
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES },
+    });
+    expect(container.querySelector('.timeline-scrubber')).toBeFalsy();
+  });
+
+  it('has a Timeline toggle button in toolbar', () => {
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES },
+    });
+    const btns = Array.from(container.querySelectorAll('.tb-btn'));
+    const timelineBtn = btns.find(b => b.textContent.includes('Timeline'));
+    expect(timelineBtn).toBeTruthy();
+  });
+});
+
+describe('ExplorerTreemap — canvas search', () => {
+  it('does not show search by default', () => {
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES },
+    });
+    expect(container.querySelector('.canvas-search')).toBeFalsy();
+  });
+});
+
+describe('ExplorerTreemap — evaluative lens', () => {
+  it('renders evaluative metric buttons when lens is evaluative', () => {
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
+    });
+    const evalBtns = container.querySelectorAll('.eval-metric-group .tb-btn-sm');
+    expect(evalBtns.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renders annotation with badge query', () => {
+    const query = {
+      scope: { type: 'all' },
+      emphasis: { badges: { metric: 'incoming_calls', template: '{{count}} calls' } },
+      annotation: { title: 'Call count badges' },
+    };
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    expect(container.querySelector('.annotation-title')?.textContent).toContain('Call count badges');
+  });
+
+  it('renders interactive $clicked query annotation', () => {
+    const query = {
+      scope: { type: 'focus', node: '$clicked', edges: ['calls'], direction: 'incoming', depth: 10 },
+      emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'], dim_unmatched: 0.12 },
+      annotation: { title: 'Blast radius: $name', description: '{{count}} transitive callers' },
+    };
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    const title = container.querySelector('.annotation-title');
+    // $name should be replaced with empty string since no node is selected
+    expect(title?.textContent).toContain('Blast radius:');
   });
 });
