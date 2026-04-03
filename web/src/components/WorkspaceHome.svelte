@@ -1354,6 +1354,8 @@
                         <th>Status</th>
                         <th>Priority</th>
                         <th>Spec</th>
+                        <th>Output</th>
+                        <th>Repo</th>
                         <th>Updated</th>
                       </tr>
                     </thead>
@@ -1364,6 +1366,7 @@
                       }) as task}
                         {@const taskStatus = task.status ?? 'backlog'}
                         {@const taskAgent = wsAgents.find(a => (a.task_id ?? a.current_task_id) === task.id)}
+                        {@const taskMr = wsMrs.find(m => m.task_id === task.id || (task.spec_path && m.spec_ref?.includes(task.spec_path)))}
                         <tr class="ws-entity-row" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })}>
                           <td class="entity-name-cell">
                             <Icon name="task" size={12} />
@@ -1375,12 +1378,9 @@
                                 {taskStatus}
                               </span>
                               {#if taskStatus === 'in_progress' && taskAgent}
-                                <span class="status-context">Agent: {taskAgent.name ?? formatId('agent', taskAgent.id)}</span>
-                              {:else if taskStatus === 'done'}
-                                {@const taskMr = wsMrs.find(m => m.task_id === task.id || m.spec_ref?.includes(task.spec_path))}
-                                {#if taskMr}
-                                  <span class="status-context">MR {taskMr.status}</span>
-                                {/if}
+                                <button class="status-context status-context-link" onclick={(e) => { e.stopPropagation(); nav('agent', taskAgent.id, { repo_id: task.repo_id, name: taskAgent.name }); }}>
+                                  {taskAgent.name ?? formatId('agent', taskAgent.id)}
+                                </button>
                               {:else if taskStatus === 'blocked'}
                                 <span class="status-context">Waiting for dependency</span>
                               {/if}
@@ -1395,6 +1395,25 @@
                             {#if task.spec_path}
                               <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }}>
                                 {task.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                              </button>
+                            {/if}
+                          </td>
+                          <td>
+                            {#if taskMr}
+                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('mr', taskMr.id, { repo_id: taskMr.repository_id ?? taskMr.repo_id, title: taskMr.title }); }}>
+                                <span class="status-pill status-pill-{taskMr.status}" style="font-size: 9px; padding: 0 4px;">{taskMr.status}</span>
+                                {taskMr.title ?? entityName('mr', taskMr.id)}
+                              </button>
+                            {:else if taskStatus === 'backlog'}
+                              <span class="text-muted">-</span>
+                            {:else if taskStatus === 'in_progress'}
+                              <span class="text-muted">in progress</span>
+                            {/if}
+                          </td>
+                          <td>
+                            {#if task.repo_id && repoMap[task.repo_id]}
+                              <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[task.repo_id]); }}>
+                                {repoMap[task.repo_id].name}
                               </button>
                             {/if}
                           </td>
@@ -2606,6 +2625,21 @@
 
   .status-context-danger { color: var(--color-danger); }
   .status-context-success { color: var(--color-success); }
+
+  .status-context-link {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: 10px;
+    color: var(--color-primary);
+    padding: 0;
+    white-space: nowrap;
+  }
+
+  .status-context-link:hover {
+    text-decoration: underline;
+  }
 
   /* Sidebar styles removed — entity summaries moved to PipelineOverview expansion */
 
