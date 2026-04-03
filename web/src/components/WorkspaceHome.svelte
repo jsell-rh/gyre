@@ -1769,10 +1769,9 @@
 
       </div><!-- .dashboard-flow -->
 
-      <!-- Workspace briefing (AI-generated summary) -->
+      <!-- Workspace briefing (AI-generated summary) — shown inline when available -->
       {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
-        <details class="ws-briefing-section">
-          <summary class="ws-briefing-toggle">Workspace Briefing</summary>
+        <section class="ws-briefing-section">
           <div class="ws-briefing-body">
             {#if briefingData.summary}
               <p class="ws-briefing-text">{briefingData.summary}</p>
@@ -1781,7 +1780,7 @@
               <p class="ws-briefing-text ws-briefing-narrative">{briefingData.narrative}</p>
             {/if}
           </div>
-        </details>
+        </section>
       {/if}
 
     </div><!-- .focused-dashboard -->
@@ -1847,28 +1846,16 @@
     line-height: 1.4;
   }
 
-  /* ── Workspace briefing (collapsible) ────────────────────────────── */
+  /* ── Workspace briefing (inline) ─────────────────────────────────── */
   .ws-briefing-section {
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     background: var(--color-surface);
+    border-left: 3px solid var(--color-primary);
   }
-
-  .ws-briefing-toggle {
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .ws-briefing-toggle:hover { color: var(--color-text-secondary); }
 
   .ws-briefing-body {
-    padding: 0 var(--space-3) var(--space-3);
+    padding: var(--space-2) var(--space-3);
   }
 
   .ws-briefing-text {
