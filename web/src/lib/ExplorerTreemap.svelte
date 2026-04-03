@@ -326,8 +326,32 @@
       return;
     }
 
-    // Get root nodes (no Contains parent)
-    const rootNodes = nodes.filter(n => !childToParent.has(n.id));
+    // Determine which nodes to show based on breadcrumb drill-down.
+    // If breadcrumb is active, show only descendants of the last breadcrumb node.
+    let visibleNodes;
+    if (breadcrumb.length > 0) {
+      const drillId = breadcrumb[breadcrumb.length - 1].id;
+      const childIds = parentToChildren.get(drillId) ?? [];
+      const descendantSet = new Set();
+      const queue = [...childIds];
+      while (queue.length > 0) {
+        const cid = queue.pop();
+        if (descendantSet.has(cid)) continue;
+        descendantSet.add(cid);
+        for (const gid of (parentToChildren.get(cid) ?? [])) queue.push(gid);
+      }
+      visibleNodes = nodes.filter(n => descendantSet.has(n.id));
+      if (visibleNodes.length === 0) visibleNodes = nodes.filter(n => childIds.includes(n.id));
+    } else {
+      visibleNodes = nodes;
+    }
+
+    // Get root nodes (no Contains parent within the visible set)
+    const visibleSet = new Set(visibleNodes.map(n => n.id));
+    const rootNodes = visibleNodes.filter(n => {
+      const parentId = childToParent.get(n.id);
+      return !parentId || !visibleSet.has(parentId);
+    });
 
     // Build path tree from root nodes
     const pathTreeRoot = buildPathTree(rootNodes, childToParent, parentToChildren, nodeById);
@@ -1676,6 +1700,27 @@
     const hit = hitTest(e.clientX, e.clientY);
     if (!hit) return;
 
+    // Progressive drill-down via Contains edges (explorer-canvas.md §Progressive Drill-Down):
+    // Double-click → filter to children, update breadcrumb, zoom transition.
+    const node = hit.node;
+    if (node) {
+      const children = treeData.parentToChildren.get(node.id) ?? [];
+      if (children.length > 0) {
+        // This node has children — drill into it
+        breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
+        selectedNodeId = null;
+        canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })) };
+        onNodeDetail(null);
+        // Zoom to fit the drilled-in region
+        targetCam.x = hit.x;
+        targetCam.y = hit.y;
+        const fitZoom = Math.min(W / (hit.w || 200), H / (hit.h || 200)) * 0.85;
+        targetCam.zoom = Math.max(fitZoom, cam.zoom * 1.5);
+        scheduleRedraw();
+        return;
+      }
+    }
+
     if (hit.kind === 'tree-group') {
       // Zoom into this tree group smoothly
       targetCam.x = hit.x;
@@ -1684,7 +1729,9 @@
       targetCam.zoom = Math.max(fitZoom, cam.zoom * 1.5);
       scheduleRedraw();
     } else if (hit.isLeafGraphNode) {
-      // Zoom into leaf node
+      // Zoom into leaf node — open its detail panel
+      selectedNodeId = node?.id;
+      onNodeDetail(node);
       targetCam.x = hit.x;
       targetCam.y = hit.y;
       targetCam.zoom = Math.max(cam.zoom * 2, 3);
@@ -1753,6 +1800,20 @@
     } else if (action === 'detail') {
       selectedNodeId = node.id;
       onNodeDetail(node);
+    } else if (action === 'provenance') {
+      onNodeDetail({ ...node, _action: 'view_provenance' });
+    } else if (action === 'history') {
+      onNodeDetail({ ...node, _action: 'view_history' });
+    } else if (action === 'drill') {
+      // Drill into this node via Contains edges
+      const children = treeData.parentToChildren.get(node.id) ?? [];
+      if (children.length > 0) {
+        breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
+        selectedNodeId = null;
+        canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })) };
+        onNodeDetail(null);
+        scheduleRedraw();
+      }
     }
   }
 
@@ -1997,6 +2058,12 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg>
             Show callees
           </button>
+          {#if (treeData.parentToChildren.get(contextMenu.node.id) ?? []).length > 0}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('drill')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>
+              Drill into
+            </button>
+          {/if}
           {#if contextMenu.node.spec_path}
             <div class="ctx-sep"></div>
             <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('spec')}>
@@ -2008,6 +2075,14 @@
           <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('detail')}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
             View details
+          </button>
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('provenance')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+            View provenance
+          </button>
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('history')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            View history
           </button>
         </div>
       {/if}

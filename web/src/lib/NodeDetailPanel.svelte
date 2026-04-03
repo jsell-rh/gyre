@@ -259,6 +259,25 @@
         </div>
       {/if}
 
+      <!-- Provenance -->
+      {#if node.last_modified_by || node.created_sha}
+        <div class="detail-section">
+          <h4 class="detail-section-title">Provenance</h4>
+          {#if node.last_modified_by}
+            <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+          {/if}
+          {#if node.last_modified_at}
+            <p class="detail-provenance">Modified: {new Date(node.last_modified_at * 1000).toLocaleDateString()}</p>
+          {/if}
+          {#if node.created_sha}
+            <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
+          {/if}
+          {#if node.first_seen_at}
+            <p class="detail-provenance">First seen: {new Date(node.first_seen_at * 1000).toLocaleDateString()}</p>
+          {/if}
+        </div>
+      {/if}
+
       <!-- Metrics -->
       <div class="detail-section">
         <h4 class="detail-section-title">Metrics</h4>
@@ -278,7 +297,13 @@
           {#if node.test_coverage != null}
             <span class="metric" title="Test coverage">
               <span class="metric-label">Coverage</span>
-              <span class="metric-value">{node.test_coverage}%</span>
+              <span class="metric-value">{Math.round((node.test_coverage ?? 0) * 100)}%</span>
+            </span>
+          {/if}
+          {#if node.churn_count_30d}
+            <span class="metric" title="Changes in last 30 days">
+              <span class="metric-label">Churn/30d</span>
+              <span class="metric-value">{node.churn_count_30d}</span>
             </span>
           {/if}
           <span class="metric" title="Incoming call edges">
@@ -411,6 +436,21 @@
     color: var(--color-link);
     font-family: var(--font-mono);
     margin: 0;
+  }
+
+  .detail-provenance {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.6;
+  }
+
+  .detail-provenance code {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    background: color-mix(in srgb, var(--color-text) 8%, transparent);
+    padding: 1px 4px;
+    border-radius: 3px;
   }
 
   .detail-ref-list {
