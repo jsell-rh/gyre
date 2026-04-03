@@ -7,6 +7,7 @@ pub mod message;
 pub mod notification;
 pub mod protocol;
 pub mod trace;
+pub mod view_query;
 pub mod view_spec;
 
 pub use completion::{AgentCompletionSummary, Decision};

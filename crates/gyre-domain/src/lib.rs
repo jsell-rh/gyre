@@ -47,6 +47,7 @@ pub mod tree_sitter_utils;
 pub mod typescript_extractor;
 pub mod user;
 pub mod user_profile;
+pub mod view_query_resolver;
 pub mod workspace;
 pub mod workspace_membership;
 
