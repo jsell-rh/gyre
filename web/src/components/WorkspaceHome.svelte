@@ -1057,7 +1057,7 @@
                     nav('spec', sp, { path: sp, repo_id: n.repo_id });
                   }
                 }}>
-                  <span class="decision-type">{typeLabel(nt)}</span>
+                  <span class="decision-type">{typeLabel(nt)}{#if n.repo_id && repoMap[n.repo_id]} · {repoMap[n.repo_id].name}{/if}</span>
                   <span class="decision-title">{n.title ?? n.message ?? ''}</span>
                   {#if n.created_at}
                     <span class="decision-time">{relTime(n.created_at)}</span>
