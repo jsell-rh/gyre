@@ -877,3 +877,19 @@ diesel::table! {
         created_at -> BigInt,
     }
 }
+
+diesel::table! {
+    saved_views (id) {
+        id -> Text,
+        repo_id -> Text,
+        workspace_id -> Text,
+        tenant_id -> Text,
+        name -> Text,
+        description -> Nullable<Text>,
+        query_json -> Text,
+        created_by -> Text,
+        created_at -> BigInt,
+        updated_at -> BigInt,
+        is_system -> Bool,
+    }
+}

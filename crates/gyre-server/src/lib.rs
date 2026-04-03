@@ -313,6 +313,8 @@ pub struct AppState {
     pub wg_config: WireGuardConfig,
     /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
     pub graph_store: Arc<dyn GraphPort>,
+    /// Saved explorer views (per-repo).
+    pub saved_views: Arc<dyn gyre_ports::SavedViewRepository>,
     /// DB-backed meta-spec registry (agent-runtime spec §2).
     pub meta_specs: Arc<dyn MetaSpecRepository>,
     /// Meta-spec binding repository.
@@ -897,6 +899,12 @@ pub fn build_state(
             Arc::clone(d) as Arc<dyn GraphPort>
         } else {
             Arc::new(gyre_adapters::MemGraphStore::new()) as Arc<dyn GraphPort>
+        },
+        saved_views: if let Some(ref d) = sqlite_db {
+            Arc::clone(d) as Arc<dyn gyre_ports::SavedViewRepository>
+        } else {
+            Arc::new(gyre_adapters::MemSavedViewRepository::default())
+                as Arc<dyn gyre_ports::SavedViewRepository>
         },
         meta_specs: store!(
             dyn MetaSpecRepository,

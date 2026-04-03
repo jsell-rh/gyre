@@ -38,6 +38,7 @@ pub mod provenance;
 pub mod push_gates;
 pub mod release;
 pub mod repos;
+pub mod saved_views;
 pub mod scim;
 pub mod search;
 pub mod spawn;
@@ -786,6 +787,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/briefing/ask",
             post(graph::briefing_ask),
+        )
+        // Saved views (per-repo, explorer-implementation.md)
+        .route(
+            "/api/v1/repos/:id/views",
+            get(saved_views::list_views).post(saved_views::create_view),
+        )
+        .route(
+            "/api/v1/repos/:id/views/:view_id",
+            get(saved_views::get_view)
+                .put(saved_views::update_view)
+                .delete(saved_views::delete_view),
         )
         // Explorer views CRUD + LLM generation (S3.1)
         // NOTE: /generate must be registered BEFORE /:view_id to avoid "generate"
