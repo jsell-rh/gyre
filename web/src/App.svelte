@@ -908,9 +908,9 @@
       if (detailPanel.open) {
         if (detailHistory.length > 0) {
           // Navigate back within the detail panel history stack.
-          // Push a new state so the next back press continues working.
+          // Replace (not push) so back button doesn't grow history infinitely.
           goBackDetailPanel();
-          window.history.pushState(
+          window.history.replaceState(
             { ...e.state, detailOpen: true },
             '',
             window.location.href,
