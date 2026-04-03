@@ -962,33 +962,27 @@
         onStageClick={handlePipelineStageClick}
       />
 
-      <!-- Zone 2.5: Workspace Briefing (compact narrative summary) -->
+      <!-- Zone 2.5: Workspace Briefing — only show when there's a real LLM narrative or exceptions.
+           Chip-only counts ("N in progress", "M completed") duplicate PipelineOverview, so skip those. -->
       {#if briefingData && !briefingLoading}
         {@const b = briefingData}
-        {@const hasSummary = b.summary || b.narrative || (b.completed?.length > 0) || (b.in_progress?.length > 0) || (b.exceptions?.length > 0)}
-        {#if hasSummary}
+        {@const hasNarrative = !!(b.summary || b.narrative)}
+        {@const hasExceptions = b.exceptions?.length > 0}
+        {#if hasNarrative || hasExceptions}
           <section class="briefing-compact" data-testid="section-briefing">
             <div class="briefing-header">
               <Icon name="activity" size={14} />
               <span class="briefing-title">What's happening</span>
             </div>
             <div class="briefing-body">
-              {#if b.summary || b.narrative}
+              {#if hasNarrative}
                 <p class="briefing-text">{b.summary ?? b.narrative}</p>
               {/if}
-              {#if b.completed?.length > 0 || b.in_progress?.length > 0 || b.exceptions?.length > 0}
+              {#if hasExceptions}
                 <div class="briefing-highlights">
-                  {#if b.exceptions?.length > 0}
-                    {#each b.exceptions.slice(0, 2) as ex}
-                      <span class="briefing-chip briefing-chip-danger">{ex.summary ?? ex.title ?? 'Issue'}</span>
-                    {/each}
-                  {/if}
-                  {#if b.in_progress?.length > 0}
-                    <span class="briefing-chip briefing-chip-active">{b.in_progress.length} in progress</span>
-                  {/if}
-                  {#if b.completed?.length > 0}
-                    <span class="briefing-chip briefing-chip-done">{b.completed.length} completed</span>
-                  {/if}
+                  {#each b.exceptions.slice(0, 3) as ex}
+                    <span class="briefing-chip briefing-chip-danger">{ex.summary ?? ex.title ?? 'Issue'}</span>
+                  {/each}
                 </div>
               {/if}
             </div>
