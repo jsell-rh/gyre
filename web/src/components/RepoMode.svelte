@@ -693,10 +693,11 @@
                       {@const overflowCount = sortedGates.length - 3}
                       <span class="gate-names-repo">
                         {#each visibleGates as g}
-                          <button class="gate-badge gate-badge-{g.status}" title="{g.name}{g.required === false ? ' (advisory)' : ''}{g.command ? '\nCommand: ' + g.command : ''}{g.duration_ms ? '\nDuration: ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}{g.output ? '\nOutput: ' + g.output.slice(0, 200) : ''}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
+                          <button class="gate-badge gate-badge-{g.status}" title="{g.name}{g.required === false ? ' (advisory)' : ''}{g.gate_type ? '\nType: ' + g.gate_type.replace(/_/g, ' ') : ''}{g.command ? '\n$ ' + g.command : ''}{g.duration_ms ? '\nDuration: ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}{g.output ? '\nOutput: ' + g.output.slice(0, 200) : ''}\nClick to view full gate details" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
                             <span class="gate-badge-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
                             <span class="gate-badge-name">{g.name ?? (g.gate_type ? g.gate_type.replace(/_/g, ' ') : 'check')}</span>
                             {#if g.required === false}<span class="gate-advisory-inline">(adv)</span>{/if}
+                            {#if g.duration_ms}<span class="gate-duration-inline">{g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's'}</span>{/if}
                           </button>
                         {/each}
                         {#if overflowCount > 0}
@@ -705,8 +706,11 @@
                       </span>
                       {#if mr._gates.failed > 0}
                         {@const failedGate = mr._gates.details?.find(g => g.status === 'failed')}
-                        {#if failedGate?.output}
-                          <span class="gate-error-preview" title="Click to see full gate details">{failedGate.output.split('\n')[0]?.slice(0, 80)}{failedGate.output.length > 80 ? '...' : ''}</span>
+                        {#if failedGate}
+                          <button class="gate-error-preview" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }} title="Click to see full gate output">
+                            {#if failedGate.command}<code class="gate-error-cmd">$ {failedGate.command.split(' ')[0].split('/').pop()}</code>{/if}
+                            {failedGate.output ? failedGate.output.split('\n')[0]?.slice(0, 80) : failedGate.error?.split('\n')[0]?.slice(0, 60) ?? 'failed'}
+                          </button>
                         {/if}
                       {/if}
                     {/if}
@@ -1701,6 +1705,7 @@
     font-family: var(--font-mono);
     color: var(--color-danger);
     background: color-mix(in srgb, var(--color-danger) 6%, transparent);
+    border: none;
     padding: 1px 4px;
     border-radius: var(--radius-sm);
     margin-top: 2px;
@@ -1708,6 +1713,18 @@
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 250px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .gate-error-preview:hover {
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    text-decoration: underline;
+  }
+
+  .gate-error-cmd {
+    font-weight: 600;
+    margin-right: 3px;
   }
 
   /* ── Entity link buttons in tables ──────────────────────────────────── */
