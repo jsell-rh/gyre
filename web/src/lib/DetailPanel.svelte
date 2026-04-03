@@ -1868,7 +1868,7 @@
                 <dt>Status</dt>
                 <dd>
                   <Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
-                  <span class="status-explain">{mrStatusExplain(mr)}</span>
+                  <span class="status-explain" class:status-explain-danger={mr.status !== 'merged' && (mr._gateSummary?.failed > 0 || mr.has_conflicts)} class:status-explain-warn={mr.status === 'closed'}>{mrStatusExplain(mr)}</span>
                 </dd>
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('mr', entity.id)}</dd>
                 {#if mr.description}
@@ -2266,7 +2266,7 @@
                 <dt>Status</dt>
                 <dd>
                   <Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} />
-                  <span class="status-explain">{agentStatusExplain(ag)}</span>
+                  <span class="status-explain" class:status-explain-danger={ag.status === 'failed' || ag.status === 'dead'} class:status-explain-warn={ag.status === 'stopped'}>{agentStatusExplain(ag)}</span>
                 </dd>
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('agent', entity.id)}</dd>
                 {#if ag.agent_type}
@@ -2584,7 +2584,7 @@
                 <dt>Status</dt>
                 <dd>
                   <Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} />
-                  <span class="status-explain">{taskStatusExplain(tk)}</span>
+                  <span class="status-explain" class:status-explain-danger={tk.status === 'failed' || tk.status === 'blocked'} class:status-explain-warn={tk.status === 'cancelled'}>{taskStatusExplain(tk)}</span>
                 </dd>
                 <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('task', entity.id)}</dd>
                 {#if tk.priority}
@@ -8255,6 +8255,14 @@
     color: var(--color-text-muted);
     margin-top: 2px;
     font-style: italic;
+  }
+  .status-explain-danger {
+    color: var(--color-danger, #e53e3e);
+    font-weight: 500;
+  }
+  .status-explain-warn {
+    color: var(--color-warning, #dd6b20);
+    font-weight: 500;
   }
 
   /* Status Journey Stepper */
