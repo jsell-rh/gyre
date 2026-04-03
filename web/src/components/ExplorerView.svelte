@@ -49,6 +49,79 @@
   let explorerSavedViews = $state([]);
   let detailNode = $state(null);
 
+  // Spec editor state (inline editing with progressive preview, §3)
+  let specEditorOpen = $state(false);
+  let specEditorPath = $state('');
+  let specEditorContent = $state('');
+  let specEditorOriginal = $state('');
+  let specEditorLoading = $state(false);
+  let specEditorError = $state('');
+  let predictLoading = $state(false);
+  let predictError = $state('');
+  let ghostOverlays = $state([]);
+
+  async function openSpecEditor(specPath) {
+    if (!specPath || !selectedRepoId) return;
+    specEditorOpen = true;
+    specEditorPath = specPath;
+    specEditorContent = '';
+    specEditorOriginal = '';
+    specEditorError = '';
+    specEditorLoading = true;
+    predictError = '';
+    ghostOverlays = [];
+    try {
+      const spec = await api.specContent(specPath, selectedRepoId);
+      const content = spec?.content ?? spec?.body ?? spec?.text ?? '';
+      specEditorContent = content;
+      specEditorOriginal = content;
+    } catch (e) {
+      specEditorError = e.message ?? 'Failed to load spec';
+    } finally {
+      specEditorLoading = false;
+    }
+  }
+
+  function closeSpecEditor() {
+    specEditorOpen = false;
+    specEditorPath = '';
+    specEditorContent = '';
+    specEditorOriginal = '';
+    specEditorError = '';
+    predictError = '';
+    ghostOverlays = [];
+  }
+
+  async function runPrediction() {
+    if (!selectedRepoId || !specEditorPath || predictLoading) return;
+    predictLoading = true;
+    predictError = '';
+    ghostOverlays = [];
+    try {
+      const result = await api.graphPredict(selectedRepoId, {
+        spec_path: specEditorPath,
+        draft_content: specEditorContent,
+      });
+      const overlays = [];
+      for (const item of (result?.added ?? [])) {
+        overlays.push({ id: item.id ?? `ghost-add-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'new node', type: item.node_type ?? item.type ?? 'unknown', action: 'add' });
+      }
+      for (const item of (result?.changed ?? [])) {
+        overlays.push({ id: item.id ?? `ghost-change-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'changed node', type: item.node_type ?? item.type ?? 'unknown', action: 'change' });
+      }
+      for (const item of (result?.removed ?? [])) {
+        overlays.push({ id: item.id ?? `ghost-remove-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'removed node', type: item.node_type ?? item.type ?? 'unknown', action: 'remove' });
+      }
+      ghostOverlays = overlays;
+    } catch (e) {
+      predictError = e.message ?? 'Prediction failed';
+    } finally {
+      predictLoading = false;
+    }
+  }
+
+  let specEditorDirty = $derived(specEditorContent !== specEditorOriginal);
+
   // Filter panel state
   let filterVisible = $state(false);
   let insightsCollapsed = $state(true);
@@ -268,6 +341,7 @@
   onDestroy(() => {
     clearTimeout(debounceTimer);
     askAbortController?.abort();
+    ghostOverlays = [];
   });
 
   let selectedRepo = $derived.by(() => repos.find(r => r.id === selectedRepoId) ?? null);
@@ -629,6 +703,7 @@
                 lens={explorerLens}
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => { detailNode = n; }}
+                {ghostOverlays}
               />
             </div>
             {#if detailNode}
@@ -640,6 +715,79 @@
                   onClose={() => { detailNode = null; }}
                   onNavigate={(n) => { detailNode = n; }}
                 />
+                {#if detailNode.spec_path && !specEditorOpen}
+                  <div class="edit-spec-action">
+                    <button
+                      class="edit-spec-btn"
+                      onclick={() => openSpecEditor(detailNode.spec_path)}
+                      type="button"
+                    >{$t('explorer_view.edit_spec')}</button>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+            {#if specEditorOpen}
+              <div class="spec-editor-panel" role="complementary" aria-label={$t('explorer_view.spec_editor_title')}>
+                <div class="spec-editor-header">
+                  <h3 class="spec-editor-title">{$t('explorer_view.spec_editor_title')}</h3>
+                  <code class="spec-editor-path">{specEditorPath}</code>
+                  <button class="spec-editor-close" onclick={closeSpecEditor} aria-label={$t('explorer_view.spec_editor_cancel')} type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                      <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                  </button>
+                </div>
+                <div class="spec-editor-body">
+                  {#if specEditorLoading}
+                    <div class="spec-editor-loading">
+                      <span class="spinner" aria-hidden="true"></span>
+                      <span>{$t('explorer_view.spec_editor_loading')}</span>
+                    </div>
+                  {:else if specEditorError}
+                    <div class="spec-editor-error" role="alert">
+                      <span>{$t('explorer_view.spec_editor_error', { values: { error: specEditorError } })}</span>
+                    </div>
+                  {:else}
+                    <textarea
+                      class="spec-editor-textarea"
+                      bind:value={specEditorContent}
+                      spellcheck="false"
+                      aria-label="Spec content"
+                    ></textarea>
+                  {/if}
+                </div>
+                <div class="spec-editor-footer">
+                  {#if predictError}
+                    <div class="spec-editor-predict-error" role="alert">
+                      {$t('explorer_view.spec_editor_predict_error', { values: { error: predictError } })}
+                    </div>
+                  {/if}
+                  {#if ghostOverlays.length > 0}
+                    <div class="spec-editor-predict-result" role="status">
+                      {ghostOverlays.length} predicted {ghostOverlays.length === 1 ? 'change' : 'changes'}
+                    </div>
+                  {/if}
+                  <div class="spec-editor-actions">
+                    <button
+                      class="spec-editor-cancel-btn"
+                      onclick={closeSpecEditor}
+                      type="button"
+                    >{$t('explorer_view.spec_editor_cancel')}</button>
+                    <button
+                      class="spec-editor-preview-btn"
+                      onclick={runPrediction}
+                      disabled={predictLoading || !specEditorDirty}
+                      type="button"
+                    >
+                      {#if predictLoading}
+                        <span class="spinner" aria-hidden="true"></span>
+                        {$t('explorer_view.spec_editor_predicting')}
+                      {:else}
+                        {$t('explorer_view.spec_editor_preview')}
+                      {/if}
+                    </button>
+                  </div>
+                </div>
               </div>
             {/if}
             <div class="explorer-chat-area">
@@ -1646,11 +1794,241 @@
     flex-direction: column;
   }
 
+  /* ── Edit Spec button (inside detail panel) ─────────────────────── */
+  .edit-spec-action {
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--color-border);
+    flex-shrink: 0;
+  }
+
+  .edit-spec-btn {
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-primary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .edit-spec-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 20%, transparent);
+    border-color: var(--color-primary);
+  }
+
+  .edit-spec-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /* ── Spec Editor slide-out panel ───────────────────────────────── */
+  .spec-editor-panel {
+    width: 420px;
+    min-width: 320px;
+    max-width: 520px;
+    border-left: 1px solid var(--color-border);
+    background: var(--color-surface);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .spec-editor-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+    background: var(--color-surface-elevated);
+  }
+
+  .spec-editor-title {
+    margin: 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    white-space: nowrap;
+  }
+
+  .spec-editor-path {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .spec-editor-close {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    padding: var(--space-1);
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .spec-editor-close:hover {
+    color: var(--color-text);
+    background: var(--color-surface);
+  }
+
+  .spec-editor-close:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .spec-editor-body {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .spec-editor-loading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-6);
+    justify-content: center;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    font-style: italic;
+  }
+
+  .spec-editor-error {
+    padding: var(--space-4);
+    color: var(--color-danger);
+    font-size: var(--text-sm);
+  }
+
+  .spec-editor-textarea {
+    flex: 1;
+    width: 100%;
+    resize: none;
+    border: none;
+    outline: none;
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.6;
+    tab-size: 2;
+    min-height: 0;
+  }
+
+  .spec-editor-textarea:focus {
+    background: color-mix(in srgb, var(--color-surface-elevated) 50%, var(--color-surface));
+  }
+
+  .spec-editor-footer {
+    border-top: 1px solid var(--color-border);
+    padding: var(--space-3) var(--space-4);
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    background: var(--color-surface-elevated);
+  }
+
+  .spec-editor-predict-error {
+    font-size: var(--text-xs);
+    color: var(--color-danger);
+    padding: var(--space-1) 0;
+  }
+
+  .spec-editor-predict-result {
+    font-size: var(--text-xs);
+    color: var(--color-success);
+    font-weight: 500;
+    padding: var(--space-1) 0;
+  }
+
+  .spec-editor-actions {
+    display: flex;
+    gap: var(--space-2);
+    justify-content: flex-end;
+  }
+
+  .spec-editor-cancel-btn {
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .spec-editor-cancel-btn:hover {
+    background: var(--color-surface);
+    border-color: var(--color-text-muted);
+  }
+
+  .spec-editor-cancel-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .spec-editor-preview-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius);
+    color: var(--color-text-inverse);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast), opacity var(--transition-fast);
+  }
+
+  .spec-editor-preview-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-primary) 85%, black);
+  }
+
+  .spec-editor-preview-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .spec-editor-preview-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
   @media (max-width: 900px) {
     .explorer-split {
       flex-direction: column;
     }
     .explorer-chat-area {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      border-left: none;
+      border-top: 1px solid var(--color-border);
+      max-height: 50%;
+    }
+    .spec-editor-panel {
       width: 100%;
       max-width: 100%;
       min-width: 0;
