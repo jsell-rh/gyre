@@ -2254,7 +2254,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: var(--space-2) var(--space-3);
+    padding: 6px var(--space-2);
     background: transparent;
     border: none;
     border-bottom: 2px solid transparent;
@@ -2318,7 +2318,7 @@
 
   .ws-entity-table th {
     text-align: left;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-1) var(--space-2);
     font-weight: 600;
     color: var(--color-text-muted);
     text-transform: uppercase;
@@ -2341,7 +2341,7 @@
   }
 
   .ws-entity-row td {
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--color-border);
     vertical-align: middle;
   }
@@ -2870,18 +2870,18 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--space-3) var(--space-4);
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
+    padding: var(--space-1) 0;
     gap: var(--space-2);
     flex-wrap: wrap;
   }
 
   .section-title {
     font-family: var(--font-display);
-    font-size: var(--text-sm);
+    font-size: var(--text-xs);
     font-weight: 600;
-    color: var(--color-text);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
     margin: 0;
     display: flex;
     align-items: center;
