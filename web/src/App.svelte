@@ -157,24 +157,9 @@
   // { type: 'mr'|'task'|'agent'|'spec', id: string }
   let entityDetail = $state(null);
 
-  // ── Entity name cache for breadcrumbs ─────────────────────────────
-  let breadcrumbNameCache = $state({});
-
+  // Use shared entity name resolution (global singleton cache)
   function resolveEntityName(type, id) {
-    if (!id) return '';
-    if (type === 'spec') return id.split('/').pop().replace(/\.md$/, '');
-    const key = `${type}:${id}`;
-    if (breadcrumbNameCache[key]) return breadcrumbNameCache[key];
-    // Start async resolution
-    const fetcher = type === 'mr' ? api.mergeRequest(id).then(m => m?.title)
-      : type === 'task' ? api.task(id).then(t => t?.title)
-      : type === 'agent' ? api.agent(id).then(a => a?.name)
-      : Promise.resolve(null);
-    fetcher.then(name => {
-      if (name) breadcrumbNameCache = { ...breadcrumbNameCache, [key]: name };
-    }).catch(() => {});
-    // Return short ID while resolving
-    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+    return sharedEntityName(type, id);
   }
 
   export function parseUrl(pathname) {

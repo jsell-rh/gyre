@@ -6,7 +6,7 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
-  import { shortId } from '../lib/entityNames.svelte.js';
+  import { shortId, entityName } from '../lib/entityNames.svelte.js';
   import { getContext } from 'svelte';
 
   const navigate = getContext('navigate');
@@ -295,7 +295,7 @@
             <button class="entity-list-item" onclick={() => nav('agent', agent.id, agent)}>
               <Badge value={agent.status ?? 'unknown'} variant={statusColor} />
               <div class="entity-list-main">
-                <span class="entity-list-title">{agent.name ?? (agent.id?.length > 12 ? agent.id.slice(0, 8) + '...' : agent.id)}</span>
+                <span class="entity-list-title">{agent.name ?? entityName('agent', agent.id)}</span>
                 {#if agent.branch}
                   <span class="entity-list-sub mono">{agent.branch}</span>
                 {/if}
@@ -316,7 +316,7 @@
             <button class="entity-list-item" onclick={() => nav('task', task.id, task)}>
               <Badge value={task.status ?? 'backlog'} variant={statusColor} />
               <div class="entity-list-main">
-                <span class="entity-list-title">{task.title ?? (task.id?.length > 12 ? task.id.slice(0, 8) + '...' : task.id)}</span>
+                <span class="entity-list-title">{task.title ?? entityName('task', task.id)}</span>
                 {#if task.spec_path}
                   <span class="entity-list-sub mono">{task.spec_path.split('/').pop()}</span>
                 {/if}
@@ -340,7 +340,7 @@
             <button class="entity-list-item" onclick={() => nav('mr', mr.id, mr)}>
               <Badge value={mr.status ?? 'open'} variant={statusColor} />
               <div class="entity-list-main">
-                <span class="entity-list-title">{mr.title ?? (mr.id?.length > 12 ? mr.id.slice(0, 8) + '...' : mr.id)}</span>
+                <span class="entity-list-title">{mr.title ?? entityName('mr', mr.id)}</span>
                 {#if mr.source_branch}
                   <span class="entity-list-sub mono">{mr.source_branch} → {mr.target_branch ?? 'main'}</span>
                 {/if}

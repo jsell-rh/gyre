@@ -429,7 +429,7 @@
                   <Badge value={$t('decisions.status_resolved')} variant="success" />
                 {/if}
                 {#if scope === 'tenant' && n.workspace_id}
-                  <Badge value={workspaceMap[n.workspace_id] ?? (n.workspace_id.length > 12 ? n.workspace_id.slice(0, 8) + '...' : n.workspace_id)} variant="default" />
+                  <Badge value={workspaceMap[n.workspace_id] ?? entityName('workspace', n.workspace_id)} variant="default" />
                 {/if}
                 <Badge
                   value={typeLabel(n.notification_type)}
@@ -477,7 +477,7 @@
                       class="ref-link"
                       onclick={() => openDetail({ type: 'agent', id: body.agent_id, data: n })}
                     >
-                      {$t('decisions.agent_label', { values: { id: body.agent_name ?? (body.agent_id?.length > 12 ? body.agent_id.slice(0, 8) + '...' : body.agent_id) } })}
+                      {$t('decisions.agent_label', { values: { id: body.agent_name ?? entityName('agent', body.agent_id) } })}
                     </button>
                   {/if}
                   {#if body.persona}

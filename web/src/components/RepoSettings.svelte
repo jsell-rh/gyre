@@ -472,26 +472,9 @@
   }
 
   /** Entity name cache for audit */
-  let auditEntityCache = $state({});
-
+  // Use shared entity name resolution (global singleton cache)
   function auditEntityName(type, id) {
-    if (!id) return id?.slice?.(0, 8) ?? '—';
-    const key = `${type}:${id}`;
-    if (auditEntityCache[key]) return auditEntityCache[key];
-    // Queue async resolution
-    queueMicrotask(() => {
-      if (auditEntityCache[key]) return;
-      auditEntityCache = { ...auditEntityCache, [key]: null };
-      const fetch = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                    type === 'task' ? api.task(id).then(t => t?.title) :
-                    type === 'mr' ? api.mergeRequest(id).then(m => m?.title) :
-                    type === 'spec' ? Promise.resolve(id.split('/').pop()) :
-                    Promise.resolve(null);
-      fetch.then(name => {
-        if (name) auditEntityCache = { ...auditEntityCache, [key]: name };
-      }).catch(() => {});
-    });
-    return type === 'spec' ? id.split('/').pop() : (id.length > 12 ? id.slice(0, 8) + '...' : id);
+    return entityName(type, id);
   }
 
   const repoBudgetPct = $derived.by(() => {
