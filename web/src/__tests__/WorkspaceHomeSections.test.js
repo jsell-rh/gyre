@@ -193,10 +193,10 @@ describe('WorkspaceHome — basic rendering', () => {
 
   it('shows key sections when workspace is set', () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    // New streamlined layout: PipelineOverview, Repos, Activity feed
+    // Streamlined layout: PipelineOverview, Repos, Entity/Activity tabs
     expect(container.querySelector('[data-testid="pipeline-overview"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="ws-tabbed-panel"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="browse-panel"]')).toBeTruthy();
   });
 });
 
