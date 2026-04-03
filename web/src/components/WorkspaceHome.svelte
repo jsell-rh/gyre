@@ -722,7 +722,7 @@
           return {
             ...e,
             _mr: mr,
-            _title: mr.title ?? shortId(mrId),
+            _title: mr.title ?? entityName('mr', mrId),
             _status: mr.status,
             _branch: mr.source_branch,
             _agent: mr.author_agent_id,
@@ -1189,7 +1189,7 @@
                   <li>
                     <button class="sidebar-list-item" onclick={() => nav('agent', agent.id, agent)}>
                       <span class="sidebar-item-dot sidebar-dot-active"></span>
-                      <span class="sidebar-item-name">{agent.name ?? shortId(agent.id)}</span>
+                      <span class="sidebar-item-name">{agent.name ?? entityName('agent', agent.id)}</span>
                       {#if agent.spec_path}<span class="sidebar-item-meta">{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>{/if}
                       <span class="sidebar-item-time">{elapsed < 60 ? `${elapsed}m` : `${Math.floor(elapsed/60)}h`}</span>
                     </button>
