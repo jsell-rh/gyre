@@ -1243,7 +1243,7 @@
                         <th>Status</th>
                         <th>Gates</th>
                         <th>Diff</th>
-                        <th>Spec</th>
+                        <th>Repo</th>
                         <th>Updated</th>
                         <th class="th-actions"></th>
                       </tr>
@@ -1305,13 +1305,10 @@
                             {/if}
                           </td>
                           <td>
-                            {#if mr.spec_ref}
-                              {@const specRefPath = mr.spec_ref.split('@')[0]}
-                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', specRefPath, { path: specRefPath, repo_id: mr.repository_id ?? mr.repo_id }); }}>
-                                {specRefPath.split('/').pop()?.replace(/\.md$/, '')}
+                            {#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}
+                              <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[mr.repository_id ?? mr.repo_id]); }}>
+                                {repoMap[mr.repository_id ?? mr.repo_id].name}
                               </button>
-                            {:else if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}
-                              <span class="text-muted">{repoMap[mr.repository_id ?? mr.repo_id].name}</span>
                             {/if}
                           </td>
                           <td class="entity-time">{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
