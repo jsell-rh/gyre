@@ -211,6 +211,27 @@
         }
         mrsLoading = false;
         mrsLoaded = true;
+        // Enrich open MRs with speculative merge conflict check (best-effort)
+        const openMrs = repoMrs.filter(mr => mr.status === 'open');
+        if (openMrs.length > 0 && repoId) {
+          api.repoSpeculative(repoId).then(specs => {
+            if (aborted) return;
+            const specArr = Array.isArray(specs) ? specs : [];
+            const conflictMap = {};
+            for (const spec of specArr) {
+              if (spec.has_conflicts || spec.conflict) {
+                conflictMap[spec.branch ?? spec.source_branch] = true;
+              }
+            }
+            if (Object.keys(conflictMap).length > 0) {
+              repoMrs = repoMrs.map(mr =>
+                mr.source_branch && conflictMap[mr.source_branch]
+                  ? { ...mr, _has_conflicts: true }
+                  : mr
+              );
+            }
+          }).catch(() => {});
+        }
       })
       .catch(() => { if (!aborted) { repoMrs = []; mrsLoading = false; mrsLoaded = true; } });
     return () => { aborted = true; };
@@ -639,7 +660,7 @@
                 <tr class="entity-row" onclick={() => goToEntityDetail?.('mr', mr.id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') goToEntityDetail?.('mr', mr.id, mr); }}>
                   <td title={mrStatusTooltip(mr)}><Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} />{#if mr.status === 'merged' && mr.merge_commit_sha}<code class="sha-inline mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</td>
                   <td class="cell-title">{mr.title ?? 'Untitled MR'}</td>
-                  <td class="cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}</td>
+                  <td class="cell-mono"><span class="branch-ref">{mr.source_branch ?? ''}</span>{#if mr.target_branch}<span class="branch-arrow">→</span><span class="branch-ref">{mr.target_branch}</span>{/if}{#if mr._has_conflicts}<span class="conflict-badge" title="Speculative merge detected conflicts with main branch">conflicts</span>{/if}</td>
                   <td class="cell-mono">{#if mr.author_agent_id}<EntityLink type="agent" id={mr.author_agent_id} />{:else}{''}{/if}</td>
                   <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<EntityLink type="spec" id={specPath} data={{ path: specPath, repo_id: mr.repository_id ?? repo?.id }} />{/if}</td>
                   <td>
@@ -1710,6 +1731,18 @@
     color: var(--color-text-muted);
     margin: 0 2px;
     font-size: var(--text-xs);
+  }
+
+  .conflict-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    margin-left: 4px;
+    vertical-align: middle;
   }
 
   /* ── Responsive ─────────────────────────────────────────────────────── */
