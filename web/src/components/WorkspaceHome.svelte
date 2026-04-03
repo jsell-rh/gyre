@@ -1098,6 +1098,26 @@
   {:else}
     <div class="focused-dashboard">
 
+      <!-- ── Workspace header ──────────────────────────────────────── -->
+      <header class="ws-header">
+        <div class="ws-header-main">
+          <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
+          {#if workspace.description}
+            <p class="ws-header-desc">{workspace.description}</p>
+          {/if}
+        </div>
+        <div class="ws-header-actions">
+          <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M6.5 1.5h3l.5 2 1.5.9 2-.5 1.5 2.6-1.5 1.5v1.5l1.5 1.5-1.5 2.6-2-.5-1.5.9-.5 2h-3l-.5-2L4.5 11l-2 .5L1 8.9l1.5-1.5V6L1 4.5l1.5-2.6 2 .5L6 1.5z"/><circle cx="8" cy="8" r="2"/></svg>
+            Settings
+          </button>
+          <button class="ws-header-link" onclick={() => goToAgentRules?.()} title="Agent rules and meta-specs">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M4 2h8v12H4zM7 5h2M7 7h2M7 9h1"/></svg>
+            Agent Rules
+          </button>
+        </div>
+      </header>
+
       <!-- ── Pipeline progress: the primary status summary ────────── -->
         <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
           <!-- Workspace health indicator -->
@@ -1860,6 +1880,67 @@
     max-width: 1100px;
     margin: 0 auto;
     width: 100%;
+  }
+
+  /* ── Workspace header ────────────────────────────────────────────── */
+  .ws-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .ws-header-main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .ws-header-name {
+    margin: 0;
+    font-size: var(--text-xl);
+    font-weight: 700;
+    color: var(--color-text);
+    font-family: var(--font-display);
+  }
+
+  .ws-header-desc {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    max-width: 600px;
+    line-height: 1.4;
+  }
+
+  .ws-header-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .ws-header-link {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    transition: all var(--transition-fast);
+  }
+
+  .ws-header-link:hover {
+    color: var(--color-primary);
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
   }
 
   /* ── Status hero — prominent workspace summary ──────────────────── */
