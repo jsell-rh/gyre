@@ -167,12 +167,12 @@
     if (url.searchParams.get('create') === 'true') {
       showNewSpec = true;
       url.searchParams.delete('create');
-      window.history.replaceState({}, '', url.toString());
+      window.history.replaceState(window.history.state, '', url.toString());
     }
     const specPath = url.searchParams.get('path');
     if (specPath) {
       url.searchParams.delete('path');
-      window.history.replaceState({}, '', url.toString());
+      window.history.replaceState(window.history.state, '', url.toString());
       // Defer so specs have time to load before opening the panel
       load().then(() => {
         handleRowClick({ path: specPath, repo_id: repoId });

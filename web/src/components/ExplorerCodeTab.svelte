@@ -126,7 +126,7 @@
       const url = new URL(window.location.href);
       url.searchParams.delete('subTab');
       url.searchParams.delete('file');
-      window.history.replaceState({}, '', url.toString());
+      window.history.replaceState(window.history.state, '', url.toString());
     }
     if (repoId) loadTab(subTab);
   });
