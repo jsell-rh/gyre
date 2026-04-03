@@ -672,7 +672,7 @@
                   <td title={mrStatusTooltip(mr)}>
                     <Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} />
                     {#if mr.status === 'merged' && mr.merge_commit_sha}
-                      <code class="sha-inline mono" title="Click to copy {mr.merge_commit_sha}" style="cursor: pointer; user-select: all;">{mr.merge_commit_sha.slice(0, 7)}</code>
+                      <code class="sha-inline mono" title="Click to copy {mr.merge_commit_sha}" onclick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); toastSuccess('SHA copied'); }} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); } }}>{mr.merge_commit_sha.slice(0, 7)}</code>
                     {:else if mr.status === 'open' && mr._gates?.failed > 0}
                       <span class="status-why status-why-danger">{mr._gates.failed} gate{mr._gates.failed !== 1 ? 's' : ''} failed</span>
                     {:else if mr.status === 'open' && mr._gates?.passed === mr._gates?.total && mr._gates?.total > 0}
