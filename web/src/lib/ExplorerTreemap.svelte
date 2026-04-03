@@ -12,6 +12,7 @@
     lens = 'structural',
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
     onNodeDetail = () => {},
+    ghostOverlays = [],
   } = $props();
 
   // ── Color palette (depth-based HSL for tree groups) ──────────────────
@@ -80,6 +81,16 @@
 
   // Evaluative lens metric mode
   let evaluativeMetric = $state('complexity'); // 'complexity' | 'churn' | 'incoming_calls' | 'test_coverage'
+
+  // ── Ghost overlay state (spec editing preview) ──────────────────────
+  // ghostOverlays: [{ id, name, type, action: 'add'|'change'|'remove', edges?: [] }]
+  let ghostById = $derived.by(() => {
+    const m = new Map();
+    for (const g of ghostOverlays) m.set(g.id, g);
+    return m;
+  });
+  let hasGhosts = $derived(ghostOverlays.length > 0);
+  let ghostPulsePhase = $state(0); // 0..1 pulsing animation
 
   // Trace path numbering state (BFS order badges for "Trace from here")
   let tracePathOrder = $state(new Map()); // nodeId → step number (1-based)
@@ -1323,7 +1334,231 @@
       }
     }
 
+    // ── Ghost overlay rendering (spec editing preview) ────────────────
+    if (hasGhosts) {
+      drawGhostOverlays(ctx);
+    }
+
     drawMinimap();
+  }
+
+  // ── Ghost overlay drawing ─────────────────────────────────────────
+  function drawGhostOverlays(ctx) {
+    const pulse = 0.5 + 0.5 * Math.sin(ghostPulsePhase * Math.PI * 2);
+
+    for (const ghost of ghostOverlays) {
+      // Try to find existing layout node for change/remove actions
+      const existingLn = layoutNodeMap.get(ghost.id);
+
+      if (ghost.action === 'add') {
+        drawGhostNewNode(ctx, ghost, pulse);
+      } else if (ghost.action === 'change' && existingLn) {
+        drawGhostChangeNode(ctx, existingLn, ghost, pulse);
+      } else if (ghost.action === 'remove' && existingLn) {
+        drawGhostRemoveNode(ctx, existingLn, ghost, pulse);
+      }
+
+      // Draw ghost edges
+      if (ghost.edges?.length) {
+        for (const edge of ghost.edges) {
+          drawGhostEdge(ctx, edge, ghost.action, pulse);
+        }
+      }
+    }
+  }
+
+  function drawGhostNewNode(ctx, ghost, pulse) {
+    // Position new ghost nodes near related nodes or in a default spot
+    let wx = 0, wy = 0;
+    let gw = 100, gh = 40;
+
+    // Try to position near a related edge target
+    if (ghost.edges?.length) {
+      const relatedId = ghost.edges[0].target ?? ghost.edges[0].source;
+      const relLn = layoutNodeMap.get(relatedId);
+      if (relLn) {
+        wx = relLn.x + relLn.w * 0.8;
+        wy = relLn.y + relLn.h * 0.3;
+        gw = relLn.w * 0.7;
+        gh = relLn.h * 0.7;
+      }
+    }
+
+    const s = worldToScreen(wx, wy);
+    const sw = gw * cam.zoom;
+    const sh = gh * cam.zoom;
+    if (sw < 8 || sh < 6) return;
+
+    const r = Math.min(6, sw * 0.08);
+
+    ctx.save();
+    ctx.globalAlpha = 0.4 + 0.3 * pulse;
+
+    // Pulsing green dotted border
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#22c55e';
+    ctx.lineWidth = 2;
+    roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+    ctx.stroke();
+
+    // Semi-transparent green fill
+    ctx.fillStyle = 'rgba(34, 197, 94, 0.08)';
+    roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+    ctx.fill();
+
+    // Label
+    if (sw > 30 && sh > 14) {
+      const fontSize = Math.max(8, Math.min(13, Math.min(sw * 0.14, sh * 0.4)));
+      ctx.fillStyle = '#22c55e';
+      ctx.font = `500 ${fontSize}px 'SF Mono', Menlo, monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      let label = ghost.name ?? '+ new';
+      const maxW = sw - 8;
+      const tw = measureText(ctx, label, ctx.font);
+      if (tw > maxW) {
+        while (measureText(ctx, label + '\u2026', ctx.font) > maxW && label.length > 3) label = label.slice(0, -1);
+        label += '\u2026';
+      }
+      ctx.fillText(label, s.x, s.y);
+
+      // Type label below
+      if (sh > 30 && sw > 50 && ghost.type) {
+        const typeSize = Math.max(7, fontSize * 0.7);
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.6)';
+        ctx.font = `400 ${typeSize}px system-ui`;
+        ctx.fillText(ghost.type, s.x, s.y + fontSize * 0.7 + 2);
+      }
+    }
+
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  function drawGhostChangeNode(ctx, ln, ghost, pulse) {
+    if (!isVisible(ln)) return;
+    const s = worldToScreen(ln.x, ln.y);
+    const sw = ln.w * cam.zoom;
+    const sh = ln.h * cam.zoom;
+    if (sw < 8 || sh < 6) return;
+
+    const r = Math.min(6, sw * 0.08);
+
+    ctx.save();
+    ctx.globalAlpha = 0.5 + 0.3 * pulse;
+
+    // Yellow highlight overlay
+    ctx.fillStyle = 'rgba(234, 179, 8, 0.12)';
+    roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+    ctx.fill();
+
+    // Yellow pulsing border
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#eab308';
+    ctx.lineWidth = 2.5;
+    roundRect(ctx, s.x - sw / 2 - 2, s.y - sh / 2 - 2, sw + 4, sh + 4, r + 1);
+    ctx.stroke();
+
+    // "Changed" badge
+    if (sw > 50 && sh > 20) {
+      const badgeText = '\u0394'; // delta symbol
+      const bx = s.x + sw / 2 - 2;
+      const by = s.y - sh / 2 + 2;
+      ctx.fillStyle = '#854d0e';
+      ctx.beginPath();
+      ctx.arc(bx, by, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#fde047';
+      ctx.font = 'bold 10px system-ui';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(badgeText, bx, by);
+    }
+
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  function drawGhostRemoveNode(ctx, ln, ghost, pulse) {
+    if (!isVisible(ln)) return;
+    const s = worldToScreen(ln.x, ln.y);
+    const sw = ln.w * cam.zoom;
+    const sh = ln.h * cam.zoom;
+    if (sw < 8 || sh < 6) return;
+
+    const r = Math.min(6, sw * 0.08);
+
+    ctx.save();
+    ctx.globalAlpha = 0.4 + 0.2 * pulse;
+
+    // Red semi-transparent overlay
+    ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
+    roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+    ctx.fill();
+
+    // Red dotted border
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 2;
+    roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+    ctx.stroke();
+
+    // Strikethrough line
+    ctx.setLineDash([]);
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(s.x - sw / 2 + 4, s.y);
+    ctx.lineTo(s.x + sw / 2 - 4, s.y);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawGhostEdge(ctx, edge, action, pulse) {
+    const srcLn = layoutNodeMap.get(edge.source);
+    const tgtLn = layoutNodeMap.get(edge.target);
+    if (!srcLn || !tgtLn) return;
+
+    const ss = worldToScreen(srcLn.x, srcLn.y);
+    const ts = worldToScreen(tgtLn.x, tgtLn.y);
+
+    // Frustum cull
+    if (ss.x < -50 && ts.x < -50) return;
+    if (ss.x > W + 50 && ts.x > W + 50) return;
+    if (ss.y < -50 && ts.y < -50) return;
+    if (ss.y > H + 50 && ts.y > H + 50) return;
+
+    ctx.save();
+    ctx.globalAlpha = 0.4 + 0.3 * pulse;
+    ctx.setLineDash([6, 4]);
+
+    if (action === 'add') {
+      ctx.strokeStyle = '#22c55e';
+    } else if (action === 'change') {
+      ctx.strokeStyle = '#eab308';
+    } else {
+      ctx.strokeStyle = '#ef4444';
+    }
+
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(ss.x, ss.y);
+    ctx.lineTo(ts.x, ts.y);
+    ctx.stroke();
+
+    // Arrowhead
+    const angle = Math.atan2(ts.y - ss.y, ts.x - ss.x);
+    const aLen = 8;
+    ctx.beginPath();
+    ctx.moveTo(ts.x, ts.y);
+    ctx.lineTo(ts.x - aLen * Math.cos(angle - 0.4), ts.y - aLen * Math.sin(angle - 0.4));
+    ctx.moveTo(ts.x, ts.y);
+    ctx.lineTo(ts.x - aLen * Math.cos(angle + 0.4), ts.y - aLen * Math.sin(angle + 0.4));
+    ctx.stroke();
+
+    ctx.setLineDash([]);
+    ctx.restore();
   }
 
   function drawTreeGroup(ctx, ln, s, sw, sh, op) {
@@ -1714,13 +1949,19 @@
 
   function animLoop() {
     lerpCam();
+
+    // Advance ghost pulse animation (1 cycle per 1.5 seconds at ~60fps)
+    if (hasGhosts) {
+      ghostPulsePhase = (ghostPulsePhase + 0.011) % 1;
+    }
+
     drawFrame();
 
     // Keep animating if camera is still moving or always (for smooth interactions)
     const dx = Math.abs(cam.x - targetCam.x);
     const dy = Math.abs(cam.y - targetCam.y);
     const dz = Math.abs(cam.zoom - targetCam.zoom);
-    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim) {
+    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || hasGhosts) {
       needsAnim = false;
       animFrame = requestAnimationFrame(animLoop);
     } else {
@@ -2176,7 +2417,7 @@
 
   // Trigger redraws on reactive state changes (NOT hoveredNodeId — that triggers scheduleRedraw directly)
   $effect(() => {
-    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens];
+    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens, ghostOverlays];
     scheduleRedraw();
   });
 
@@ -2253,6 +2494,28 @@
       <button class="annotation-clear" onclick={() => { activeQuery = null; }} title="Clear" type="button" aria-label="Clear view query">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
+    </div>
+  {/if}
+
+  <!-- Preview mode indicator (ghost overlays active) -->
+  {#if hasGhosts}
+    <div class="preview-mode-bar" role="status" data-testid="preview-mode-indicator">
+      <div class="preview-mode-content">
+        <span class="preview-pulse-dot"></span>
+        <span class="preview-mode-label">Preview Mode</span>
+        <span class="preview-mode-count">{ghostOverlays.length} predicted {ghostOverlays.length === 1 ? 'change' : 'changes'}</span>
+      </div>
+      <div class="ghost-legend-chips">
+        {#if ghostOverlays.some(g => g.action === 'add')}
+          <span class="ghost-chip ghost-chip-add">+ New</span>
+        {/if}
+        {#if ghostOverlays.some(g => g.action === 'change')}
+          <span class="ghost-chip ghost-chip-change">{'\u0394'} Changed</span>
+        {/if}
+        {#if ghostOverlays.some(g => g.action === 'remove')}
+          <span class="ghost-chip ghost-chip-remove">{'\u2212'} Removed</span>
+        {/if}
+      </div>
     </div>
   {/if}
 
@@ -2724,7 +2987,54 @@
     white-space: nowrap;
   }
 
+  /* Preview mode bar (ghost overlays) */
+  .preview-mode-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 12px; background: linear-gradient(90deg, #172554, #1a2e05);
+    border-bottom: 1px solid #1e3a5f; flex-shrink: 0;
+  }
+  .preview-mode-content {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .preview-pulse-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #22c55e;
+    animation: ghost-pulse 1.5s ease-in-out infinite;
+  }
+  .preview-mode-label {
+    font-size: 13px; font-weight: 600; color: #86efac;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  .preview-mode-count {
+    font-size: 11px; color: #64748b;
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+  .ghost-legend-chips {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .ghost-chip {
+    font-size: 10px; font-weight: 600; padding: 2px 8px;
+    border-radius: 4px; font-family: 'SF Mono', Menlo, monospace;
+  }
+  .ghost-chip-add {
+    color: #22c55e; background: rgba(34, 197, 94, 0.15);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+  }
+  .ghost-chip-change {
+    color: #eab308; background: rgba(234, 179, 8, 0.15);
+    border: 1px solid rgba(234, 179, 8, 0.3);
+  }
+  .ghost-chip-remove {
+    color: #ef4444; background: rgba(239, 68, 68, 0.15);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+  }
+
+  @keyframes ghost-pulse {
+    0%, 100% { opacity: 0.4; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1.2); }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .tb-btn, .breadcrumb-item, .treemap-minimap { transition: none; }
+    .preview-pulse-dot { animation: none; opacity: 1; }
   }
 </style>
