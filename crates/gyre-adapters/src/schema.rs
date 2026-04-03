@@ -771,6 +771,7 @@ diesel::table! {
         first_seen_at -> BigInt,
         last_seen_at -> BigInt,
         deleted_at -> Nullable<BigInt>,
+        test_node -> Bool,
     }
 }
 

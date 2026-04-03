@@ -149,6 +149,7 @@ struct GraphNodeRow {
     first_seen_at: i64,
     last_seen_at: i64,
     deleted_at: Option<i64>,
+    test_node: bool,
 }
 
 impl GraphNodeRow {
@@ -177,7 +178,7 @@ impl GraphNodeRow {
             first_seen_at: self.first_seen_at as u64,
             last_seen_at: self.last_seen_at as u64,
             deleted_at: self.deleted_at.map(|t| t as u64),
-            test_node: false,
+            test_node: self.test_node,
         })
     }
 }
@@ -208,6 +209,7 @@ struct NewGraphNodeRow<'a> {
     first_seen_at: i64,
     last_seen_at: i64,
     deleted_at: Option<i64>,
+    test_node: bool,
 }
 
 #[derive(Queryable, Selectable)]
@@ -326,6 +328,7 @@ impl GraphPort for SqliteStorage {
                 first_seen_at: node.first_seen_at as i64,
                 last_seen_at: node.last_seen_at as i64,
                 deleted_at: node.deleted_at.map(|t| t as i64),
+                test_node: node.test_node,
             };
             diesel::insert_into(graph_nodes::table)
                 .values(&row)
@@ -352,6 +355,7 @@ impl GraphPort for SqliteStorage {
                     graph_nodes::last_seen_at.eq(row.last_seen_at),
                     // Clear deleted_at when a node reappears after removal.
                     graph_nodes::deleted_at.eq(row.deleted_at),
+                    graph_nodes::test_node.eq(row.test_node),
                 ))
                 .execute(&mut *conn)
                 .context("insert graph node")?;
