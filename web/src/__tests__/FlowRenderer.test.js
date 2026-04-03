@@ -1,3 +1,7 @@
+// FlowCanvas and FlowRenderer are superseded by the unified ExplorerTreemap
+// canvas per explorer-canvas.md. The evaluative lens (OTLP particle overlay)
+// will be integrated directly into ExplorerTreemap in a future phase.
+// These tests are skipped until the evaluative overlay is built.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from '@testing-library/svelte';
 import FlowCanvas from '../lib/FlowCanvas.svelte';
@@ -74,7 +78,7 @@ afterEach(() => {
 // FlowCanvas
 // ============================================================
 
-describe('FlowCanvas', () => {
+describe.skip('FlowCanvas — superseded by ExplorerTreemap (explorer-canvas.md)', () => {
   it('renders a canvas element', () => {
     const { container } = render(FlowCanvas, { props: { nodes: NODES, edges: EDGES, spans: SPANS } });
     const canvas = container.querySelector('canvas');
@@ -123,7 +127,7 @@ describe('FlowCanvas', () => {
 // Particle system (via DOM + internal state verification)
 // ============================================================
 
-describe('FlowCanvas — particle system', () => {
+describe.skip('FlowCanvas — particle system — superseded by ExplorerTreemap', () => {
   it('creates particles from root spans', () => {
     // Root spans are those with parent_id = null
     // We can verify indirectly via aria-label which shows particle count
@@ -162,7 +166,7 @@ describe('FlowCanvas — particle system', () => {
 // WebGL mode (> 100 particles)
 // ============================================================
 
-describe('FlowCanvas — WebGL fallback', () => {
+describe.skip('FlowCanvas — WebGL fallback — superseded by ExplorerTreemap', () => {
   it('uses 2D context for small particle counts', () => {
     render(FlowCanvas, {
       props: { nodes: NODES, edges: EDGES, spans: SPANS, currentTime: 5000 },
@@ -296,7 +300,7 @@ describe('NodeBadge', () => {
 // FlowRenderer
 // ============================================================
 
-describe('FlowRenderer', () => {
+describe.skip('FlowRenderer — superseded by ExplorerTreemap', () => {
   const GRAPH_NODES = [
     { id: 'n1', node_type: 'module',   name: 'domain', qualified_name: 'domain' },
     { id: 'n2', node_type: 'function', name: 'save',   qualified_name: 'save'   },

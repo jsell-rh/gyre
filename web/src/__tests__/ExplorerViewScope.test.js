@@ -46,7 +46,7 @@ describe('ExplorerView scope branching', () => {
     });
     await waitFor(() => {
       // Explorer header is rendered for repo scope
-      expect(getByText('System Explorer')).toBeTruthy();
+      expect(getByText('Architecture')).toBeTruthy();
     });
   });
 
@@ -54,7 +54,7 @@ describe('ExplorerView scope branching', () => {
     const { container } = render(ExplorerView);
     // Should render WorkspaceCards (tenant scope), not the graph
     await waitFor(() => {
-      expect(container.innerHTML).not.toContain('System Explorer');
+      expect(container.innerHTML).not.toContain('Architecture');
     });
   });
 });
