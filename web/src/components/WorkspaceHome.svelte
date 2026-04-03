@@ -1262,8 +1262,8 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-5);
-    padding: var(--space-4) var(--space-6);
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-5);
     max-width: 1400px;
     margin: 0 auto;
     width: 100%;
@@ -1511,8 +1511,8 @@
   /* ── Repo cards grid (responsive) ──────────────────────────────────── */
   .repo-cards-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: var(--space-3);
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--space-2);
   }
 
   .repo-header-actions {
@@ -1673,7 +1673,7 @@
   }
 
   .feed-body {
-    max-height: 500px;
+    max-height: 360px;
     overflow-y: auto;
   }
 
@@ -1884,10 +1884,10 @@
   }
 
   .section-body {
-    padding: var(--space-4);
+    padding: var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-2);
   }
 
   /* Briefing section (unused — section removed) */
@@ -2650,7 +2650,7 @@
     display: flex;
     position: relative;
     padding-left: 24px;
-    min-height: 32px;
+    min-height: 26px;
     border: none;
     background: none;
     text-align: left;
@@ -2708,8 +2708,8 @@
   .activity-content {
     display: flex;
     flex-direction: column;
-    gap: 1px;
-    padding: 2px 0 var(--space-2) var(--space-2);
+    gap: 0;
+    padding: 1px 0 var(--space-1) var(--space-2);
     font-size: var(--text-xs);
     min-width: 0;
   }
