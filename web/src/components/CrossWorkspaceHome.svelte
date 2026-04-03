@@ -567,26 +567,26 @@
     {/if}
   </div>
 
-  <!-- ── Aggregate Stat Cards ───────────────────────────────────────────── -->
+  <!-- ── Aggregate Stat Cards (clickable for drill-down) ──────────────── -->
   <div class="cwh-stat-cards" data-testid="stat-cards">
-    <div class="cwh-stat-card">
+    <button class="cwh-stat-card cwh-stat-card-btn" onclick={() => { document.getElementById('workspaces-heading')?.scrollIntoView({ behavior: 'smooth' }); }}>
       <span class="cwh-stat-value">{workspacesLoading ? '...' : workspaces.length}</span>
       <span class="cwh-stat-label">Workspaces</span>
       {#if !workspacesLoading && workspacesNeedingAttention > 0}
         <span class="cwh-stat-sub cwh-stat-warn">{workspacesNeedingAttention} need attention</span>
       {/if}
-    </div>
+    </button>
     <div class="cwh-stat-card">
       <span class="cwh-stat-value">{statsLoading ? '...' : totalRepos}</span>
       <span class="cwh-stat-label">Repos</span>
     </div>
-    <div class="cwh-stat-card">
+    <button class="cwh-stat-card cwh-stat-card-btn" onclick={() => { document.getElementById('specs-heading')?.scrollIntoView({ behavior: 'smooth' }); }}>
       <span class="cwh-stat-value">{statsLoading ? '...' : totalSpecs}</span>
       <span class="cwh-stat-label">Specs</span>
       {#if !statsLoading && pendingSpecs > 0}
         <span class="cwh-stat-sub cwh-stat-warn">{pendingSpecs} awaiting approval</span>
       {/if}
-    </div>
+    </button>
     <div class="cwh-stat-card">
       <span class="cwh-stat-value">{statsLoading ? '...' : activeAgents}</span>
       <span class="cwh-stat-label">Active Agents</span>
@@ -599,10 +599,10 @@
       {/if}
     </div>
     {#if !statsLoading && notifications.length > 0}
-      <div class="cwh-stat-card cwh-stat-card-alert">
+      <button class="cwh-stat-card cwh-stat-card-alert cwh-stat-card-btn" onclick={() => { document.getElementById('decisions-heading')?.scrollIntoView({ behavior: 'smooth' }); }}>
         <span class="cwh-stat-value">{notifications.length}</span>
         <span class="cwh-stat-label">Pending Decisions</span>
-      </div>
+      </button>
     {/if}
     {#if !budgetSummaryLoading && budgetSummary?.total_cost_today != null}
       <div class="cwh-stat-card">
@@ -2016,6 +2016,17 @@
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
+  }
+
+  .cwh-stat-card-btn {
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  }
+
+  .cwh-stat-card-btn:hover {
+    border-color: var(--color-primary);
+    box-shadow: var(--shadow-sm);
   }
 
   .cwh-stat-value {
