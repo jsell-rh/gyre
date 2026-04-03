@@ -1137,30 +1137,7 @@
             <p class="ws-header-desc">{workspace.description}</p>
           {/if}
 
-          <!-- Compact provenance flow: shows pipeline stage counts -->
-          {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
-            <div class="ws-header-flow">
-              <button class="ws-flow-stage" class:ws-flow-active={pipelineSpecs.pending > 0} class:ws-flow-done={specs.length > 0 && pipelineSpecs.pending === 0} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }} title="{specs.length} specs ({pipelineSpecs.pending} pending, {pipelineSpecs.approved} approved)">
-                <span class="ws-flow-count">{specs.length}</span>
-                <span class="ws-flow-label">Specs</span>
-              </button>
-              <span class="ws-flow-arrow">→</span>
-              <button class="ws-flow-stage" class:ws-flow-active={pipelineTasks.in_progress > 0} class:ws-flow-done={pipelineTasks.done > 0 && pipelineTasks.in_progress === 0} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }} title="{wsTasks.length} tasks ({pipelineTasks.in_progress} active, {pipelineTasks.done} done)">
-                <span class="ws-flow-count">{wsTasks.length}</span>
-                <span class="ws-flow-label">Tasks</span>
-              </button>
-              <span class="ws-flow-arrow">→</span>
-              <button class="ws-flow-stage" class:ws-flow-active={pipelineAgents.active > 0} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }} title="{wsAgents.length} agents ({pipelineAgents.active} active)">
-                <span class="ws-flow-count">{wsAgents.length}</span>
-                <span class="ws-flow-label">Agents</span>
-              </button>
-              <span class="ws-flow-arrow">→</span>
-              <button class="ws-flow-stage" class:ws-flow-active={pipelineMrs.open > 0} class:ws-flow-warn={pipelineMrs.failed_gates > 0} class:ws-flow-done={pipelineMrs.merged > 0 && pipelineMrs.open === 0} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }} title="{wsMrs.length} MRs ({pipelineMrs.open} open, {pipelineMrs.merged} merged)">
-                <span class="ws-flow-count">{wsMrs.length}</span>
-                <span class="ws-flow-label">MRs</span>
-              </button>
-            </div>
-          {/if}
+          <!-- Pipeline flow removed: tab badges already show counts + status -->
         </div>
       </header>
 
