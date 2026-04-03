@@ -1398,12 +1398,6 @@
             {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
             {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
           </button>
-          {#if mergeQueueItems.length > 0}
-            <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; browseExpanded = true; }}>
-              Queue
-              <span class="ws-tab-badge ws-tab-badge-warn">{mergeQueueItems.length}</span>
-            </button>
-          {/if}
           <span class="ws-tab-spacer"></span>
           <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; browseExpanded = true; }}>
             Activity
@@ -1636,6 +1630,30 @@
             <!-- ── MRs tab ────────────────────────────────────────────── -->
             {:else if wsTab === 'mrs'}
               <div class="feed-body">
+                {#if !mergeQueueLoading && mergeQueueItems.length > 0}
+                  <div class="ws-merge-queue-inline">
+                    <div class="mq-inline-header">
+                      <span class="mq-inline-label">Merge queue</span>
+                      <span class="mq-inline-count">{mergeQueueItems.length} queued</span>
+                    </div>
+                    {#each mergeQueueItems.slice(0, 5) as item, i}
+                      {@const mrId = item.merge_request_id ?? item.mr_id}
+                      <button class="mq-inline-item" onclick={() => nav('mr', mrId, item._mr)}>
+                        <span class="mq-inline-pos">#{i + 1}</span>
+                        <span class="mq-inline-title">{item._title}</span>
+                        {#if item._mr?._gates?.total > 0}
+                          <span class="mq-inline-gates">
+                            {#if item._mr._gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{item._mr._gates.failed}</span>{/if}
+                            {#if item._mr._gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{item._mr._gates.passed}</span>{/if}
+                          </span>
+                        {/if}
+                      </button>
+                    {/each}
+                    {#if mergeQueueItems.length > 5}
+                      <span class="mq-inline-more">+{mergeQueueItems.length - 5} more in queue</span>
+                    {/if}
+                  </div>
+                {/if}
                 {#if mrsLoading}
                   <div class="skeleton-row"></div>
                 {:else if wsMrs.length === 0}
@@ -1891,47 +1909,6 @@
                       {/each}
                     </tbody>
                   </table>
-                {/if}
-              </div>
-
-            <!-- ── Merge Queue tab ───────────────────────────────────────── -->
-            {:else if wsTab === 'queue'}
-              <div class="feed-body">
-                {#if mergeQueueLoading}
-                  <div class="skeleton-row"></div>
-                {:else if mergeQueueItems.length === 0}
-                  <p class="empty-text">Merge queue is empty.</p>
-                {:else}
-                  <div class="mq-list">
-                    {#each mergeQueueItems as item, i}
-                      {@const mrId = item.merge_request_id ?? item.mr_id}
-                      <button class="mq-list-item" onclick={() => nav('mr', mrId, item._mr)}>
-                        <span class="mq-item-position">#{i + 1}</span>
-                        <div class="mq-list-item-body">
-                          <span class="mq-list-item-title">{item._title}</span>
-                          <div class="mq-list-item-meta">
-                            {#if item._branch}<span class="entity-branch-tag">{item._branch}</span>{/if}
-                            {#if item._spec_ref}
-                              <span class="text-muted">{item._spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '')}</span>
-                            {/if}
-                            {#if item._agent}
-                              <span class="entity-agent-chip">{entityName('agent', item._agent)}</span>
-                            {/if}
-                            {#if item._deps?.length > 0}
-                              <span class="mq-dep-badge">depends on {item._deps.length}</span>
-                            {/if}
-                          </div>
-                        </div>
-                        {#if item._mr?._gates?.total > 0}
-                          <div class="mq-list-item-gates">
-                            {#each (item._mr._gates.details ?? []).slice(0, 3) as g}
-                              <span class="gate-chip gate-chip-{g.status}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}</span>
-                            {/each}
-                          </div>
-                        {/if}
-                      </button>
-                    {/each}
-                  </div>
                 {/if}
               </div>
 
@@ -2559,7 +2536,87 @@
     opacity: 0.6;
   }
 
-  /* ── Queue list (inline in entity panel tab) ──────────────────────── */
+  /* ── Merge queue inline (inside MRs tab) ─────────────────────────── */
+  .ws-merge-queue-inline {
+    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, var(--color-border));
+    background: color-mix(in srgb, var(--color-warning) 4%, var(--color-surface));
+    border-radius: var(--radius);
+    padding: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-3);
+  }
+
+  .mq-inline-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-1);
+  }
+
+  .mq-inline-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .mq-inline-count {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+    padding: 0 5px;
+    border-radius: 8px;
+  }
+
+  .mq-inline-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 2px var(--space-1);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    text-align: left;
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .mq-inline-item:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .mq-inline-pos {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-warning);
+    min-width: 20px;
+  }
+
+  .mq-inline-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mq-inline-gates {
+    display: flex;
+    gap: 3px;
+  }
+
+  .mq-inline-more {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    padding-left: 24px;
+    margin-top: var(--space-1);
+  }
+
+  /* ── Queue list (legacy, used by standalone queue view) ─────────── */
   .mq-list {
     display: flex;
     flex-direction: column;
