@@ -249,6 +249,73 @@ fn compute_test_reachable(
     reachable
 }
 
+/// Compute the number of test paths reaching a node (test fragility metric).
+fn compute_test_fragility_count(
+    node_id: &str,
+    nodes: &[GraphNode],
+    outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
+    incoming: &HashMap<String, Vec<(String, EdgeType)>>,
+) -> usize {
+    let test_ids: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.test_node && n.deleted_at.is_none())
+        .map(|n| n.id.to_string())
+        .collect();
+    let mut count = 0;
+    for tid in &test_ids {
+        let reached = bfs_traverse(tid, &[EdgeType::Calls], "outgoing", 100, outgoing, incoming);
+        if reached.contains(node_id) {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Count incoming Calls edges to a node.
+fn count_incoming_calls(
+    node_id: &str,
+    incoming: &HashMap<String, Vec<(String, EdgeType)>>,
+) -> usize {
+    incoming
+        .get(node_id)
+        .map(|neighbors| {
+            neighbors
+                .iter()
+                .filter(|(_, et)| *et == EdgeType::Calls)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Count outgoing Calls edges from a node.
+fn count_outgoing_calls(
+    node_id: &str,
+    outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
+) -> usize {
+    outgoing
+        .get(node_id)
+        .map(|neighbors| {
+            neighbors
+                .iter()
+                .filter(|(_, et)| *et == EdgeType::Calls)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Count FieldOf edges incoming to a node (field count).
+fn count_fields(node_id: &str, incoming: &HashMap<String, Vec<(String, EdgeType)>>) -> usize {
+    incoming
+        .get(node_id)
+        .map(|neighbors| {
+            neighbors
+                .iter()
+                .filter(|(_, et)| *et == EdgeType::FieldOf)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 // ── Core resolver ────────────────────────────────────────────────────────────
 
 /// Resolve a view query scope against the graph, returning the set of matched node IDs.
@@ -322,7 +389,14 @@ pub fn resolve_scope(
         } => {
             // If computed expression, try to evaluate it.
             if let Some(expr) = computed {
-                resolve_computed_expression(expr, &active_nodes, edges, &outgoing, &incoming)
+                resolve_computed_expression(
+                    expr,
+                    &active_nodes,
+                    edges,
+                    &outgoing,
+                    &incoming,
+                    selected_node_id,
+                )
             } else {
                 let types: Vec<NodeType> = node_types
                     .iter()
@@ -364,8 +438,8 @@ pub fn resolve_scope(
             from_commit,
             to_commit,
         } => {
-            // Filter to nodes that changed between commits.
-            // Use created_sha and last_modified_sha to approximate.
+            // Filter to nodes whose last_modified_sha matches the to_commit
+            // but NOT the from_commit (i.e., changed between the two).
             let from_lower = from_commit.to_lowercase();
             let to_lower = to_commit.to_lowercase();
             active_nodes
@@ -373,13 +447,20 @@ pub fn resolve_scope(
                 .filter(|n| {
                     let created = n.created_sha.to_lowercase();
                     let modified = n.last_modified_sha.to_lowercase();
-                    // Include node if it was created or modified with a SHA that matches
-                    // the target commit range (simple prefix match).
-                    created.starts_with(&to_lower)
-                        || modified.starts_with(&to_lower)
-                        || (!from_lower.is_empty()
-                            && (created.starts_with(&from_lower)
-                                || modified.starts_with(&from_lower)))
+                    // Changed between commits: modified matches to_commit but not from_commit.
+                    // Also include nodes created in the to_commit range.
+                    let changed_to = if to_lower.len() >= 7 {
+                        modified.starts_with(&to_lower) || created.starts_with(&to_lower)
+                    } else {
+                        modified == to_lower || created == to_lower
+                    };
+                    let existed_at_from = if from_lower.len() >= 7 {
+                        created.starts_with(&from_lower) || modified.starts_with(&from_lower)
+                    } else {
+                        created == from_lower
+                    };
+                    // Include if changed in to_commit but not merely existing at from_commit
+                    changed_to && !existed_at_from
                 })
                 .map(|n| n.id.to_string())
                 .collect()
@@ -415,16 +496,31 @@ pub fn resolve_scope(
     }
 }
 
-/// Attempt to resolve simple computed expressions.
-/// Supports: $test_unreachable, $test_reachable, $where(...), $intersect(...), $diff(...), $union(...)
+/// Attempt to resolve computed expressions.
+/// Supports: $test_unreachable, $test_reachable, $clicked, $selected,
+/// $where(...), $intersect(...), $diff(...), $union(...),
+/// $callers(...), $callees(...), $implementors(...), $fields(...),
+/// $descendants(...), $ancestors(...), $governed_by(...), $test_fragility(...),
+/// $reachable(...)
 fn resolve_computed_expression(
     expr: &str,
     active_nodes: &[&GraphNode],
     edges: &[GraphEdge],
     outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
-    _incoming: &HashMap<String, Vec<(String, EdgeType)>>,
+    incoming: &HashMap<String, Vec<(String, EdgeType)>>,
+    selected_node_id: Option<&str>,
 ) -> HashSet<String> {
     let trimmed = expr.trim();
+
+    // $clicked / $selected resolve to the selected node
+    if trimmed == "$clicked" || trimmed == "$selected" {
+        if let Some(id) = selected_node_id {
+            let mut set = HashSet::new();
+            set.insert(id.to_string());
+            return set;
+        }
+        return HashSet::new();
+    }
 
     if trimmed == "$test_unreachable" {
         let all_nodes: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
@@ -456,10 +552,22 @@ fn resolve_computed_expression(
             return active_nodes
                 .iter()
                 .filter(|n| {
+                    let nid = n.id.to_string();
                     let node_val = match prop {
                         "complexity" => n.complexity.map(|c| c as f64),
                         "churn" | "churn_count_30d" => Some(n.churn_count_30d as f64),
                         "test_coverage" => n.test_coverage,
+                        "incoming_calls" => Some(count_incoming_calls(&nid, incoming) as f64),
+                        "outgoing_calls" => Some(count_outgoing_calls(&nid, outgoing) as f64),
+                        "field_count" => Some(count_fields(&nid, incoming) as f64),
+                        "test_fragility" => {
+                            let all_nodes: Vec<GraphNode> =
+                                active_nodes.iter().map(|nn| (*nn).clone()).collect();
+                            Some(
+                                compute_test_fragility_count(&nid, &all_nodes, outgoing, incoming)
+                                    as f64,
+                            )
+                        }
                         _ => None,
                     };
                     match (node_val, op) {
@@ -476,16 +584,28 @@ fn resolve_computed_expression(
         }
     }
 
-    // $intersect(set_a, set_b) — simple two-argument form
+    // $intersect(set_a, set_b)
     if trimmed.starts_with("$intersect(") && trimmed.ends_with(')') {
         let inner = &trimmed[11..trimmed.len() - 1];
         if let Some(comma_pos) = find_balanced_comma(inner) {
             let a_expr = inner[..comma_pos].trim();
             let b_expr = inner[comma_pos + 1..].trim();
-            let set_a =
-                resolve_computed_expression(a_expr, active_nodes, edges, outgoing, _incoming);
-            let set_b =
-                resolve_computed_expression(b_expr, active_nodes, edges, outgoing, _incoming);
+            let set_a = resolve_computed_expression(
+                a_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+            );
+            let set_b = resolve_computed_expression(
+                b_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+            );
             return set_a.intersection(&set_b).cloned().collect();
         }
     }
@@ -496,10 +616,22 @@ fn resolve_computed_expression(
         if let Some(comma_pos) = find_balanced_comma(inner) {
             let a_expr = inner[..comma_pos].trim();
             let b_expr = inner[comma_pos + 1..].trim();
-            let set_a =
-                resolve_computed_expression(a_expr, active_nodes, edges, outgoing, _incoming);
-            let set_b =
-                resolve_computed_expression(b_expr, active_nodes, edges, outgoing, _incoming);
+            let set_a = resolve_computed_expression(
+                a_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+            );
+            let set_b = resolve_computed_expression(
+                b_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+            );
             return set_a.union(&set_b).cloned().collect();
         }
     }
@@ -510,64 +642,81 @@ fn resolve_computed_expression(
         if let Some(comma_pos) = find_balanced_comma(inner) {
             let a_expr = inner[..comma_pos].trim();
             let b_expr = inner[comma_pos + 1..].trim();
-            let set_a =
-                resolve_computed_expression(a_expr, active_nodes, edges, outgoing, _incoming);
-            let set_b =
-                resolve_computed_expression(b_expr, active_nodes, edges, outgoing, _incoming);
+            let set_a = resolve_computed_expression(
+                a_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+            );
+            let set_b = resolve_computed_expression(
+                b_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+            );
             return set_a.difference(&set_b).cloned().collect();
         }
     }
 
-    // $callers(node, depth?) — nodes with incoming Calls edges transitively
+    // $callers(node_or_ref, depth?)
     if trimmed.starts_with("$callers(") && trimmed.ends_with(')') {
         let inner = &trimmed[9..trimmed.len() - 1];
         let parts: Vec<&str> = inner.splitn(2, ',').map(|s| s.trim()).collect();
-        let node_name = parts[0].trim_matches('\'').trim_matches('"');
+        let node_ref = parts[0].trim_matches('\'').trim_matches('"');
         let depth: u32 = parts.get(1).and_then(|d| d.parse().ok()).unwrap_or(10);
+
+        let resolved_name = resolve_node_ref(node_ref, selected_node_id);
         let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
             return bfs_traverse(
                 &found.id.to_string(),
                 &[EdgeType::Calls],
                 "incoming",
                 depth,
                 outgoing,
-                _incoming,
+                incoming,
             );
         }
         return HashSet::new();
     }
 
-    // $callees(node, depth?) — nodes with outgoing Calls edges transitively
+    // $callees(node_or_ref, depth?)
     if trimmed.starts_with("$callees(") && trimmed.ends_with(')') {
         let inner = &trimmed[9..trimmed.len() - 1];
         let parts: Vec<&str> = inner.splitn(2, ',').map(|s| s.trim()).collect();
-        let node_name = parts[0].trim_matches('\'').trim_matches('"');
+        let node_ref = parts[0].trim_matches('\'').trim_matches('"');
         let depth: u32 = parts.get(1).and_then(|d| d.parse().ok()).unwrap_or(10);
+
+        let resolved_name = resolve_node_ref(node_ref, selected_node_id);
         let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
             return bfs_traverse(
                 &found.id.to_string(),
                 &[EdgeType::Calls],
                 "outgoing",
                 depth,
                 outgoing,
-                _incoming,
+                incoming,
             );
         }
         return HashSet::new();
     }
 
-    // $implementors(node) — types with Implements edges TO this node
+    // $implementors(node)
     if trimmed.starts_with("$implementors(") && trimmed.ends_with(')') {
         let node_name = trimmed[14..trimmed.len() - 1]
             .trim()
             .trim_matches('\'')
             .trim_matches('"');
+        let resolved_name = resolve_node_ref(node_name, selected_node_id);
         let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
             let found_id = found.id.to_string();
-            return _incoming
+            return incoming
                 .get(&found_id)
                 .map(|neighbors| {
                     neighbors
@@ -581,17 +730,18 @@ fn resolve_computed_expression(
         return HashSet::new();
     }
 
-    // $fields(node) — nodes with FieldOf edges TO this node
+    // $fields(node)
     if trimmed.starts_with("$fields(") && trimmed.ends_with(')') {
         let node_name = trimmed[8..trimmed.len() - 1]
             .trim()
             .trim_matches('\'')
             .trim_matches('"');
+        let resolved_name = resolve_node_ref(node_name, selected_node_id);
         let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
             let found_id = found.id.to_string();
             // FieldOf: source is the field, target is the parent type
-            return _incoming
+            return incoming
                 .get(&found_id)
                 .map(|neighbors| {
                     neighbors
@@ -605,54 +755,58 @@ fn resolve_computed_expression(
         return HashSet::new();
     }
 
-    // $descendants(node) — all children via Contains edges recursively
+    // $descendants(node)
     if trimmed.starts_with("$descendants(") && trimmed.ends_with(')') {
         let node_name = trimmed[13..trimmed.len() - 1]
             .trim()
             .trim_matches('\'')
             .trim_matches('"');
+        let resolved_name = resolve_node_ref(node_name, selected_node_id);
         let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
             return bfs_traverse(
                 &found.id.to_string(),
                 &[EdgeType::Contains],
                 "outgoing",
                 100,
                 outgoing,
-                _incoming,
+                incoming,
             );
         }
         return HashSet::new();
     }
 
-    // $ancestors(node) — parent chain via Contains edges to root
+    // $ancestors(node)
     if trimmed.starts_with("$ancestors(") && trimmed.ends_with(')') {
         let node_name = trimmed[11..trimmed.len() - 1]
             .trim()
             .trim_matches('\'')
             .trim_matches('"');
+        let resolved_name = resolve_node_ref(node_name, selected_node_id);
         let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
             return bfs_traverse(
                 &found.id.to_string(),
                 &[EdgeType::Contains],
                 "incoming",
                 100,
                 outgoing,
-                _incoming,
+                incoming,
             );
         }
         return HashSet::new();
     }
 
-    // $governed_by(spec_path) — nodes linked to a spec via GovernedBy
+    // $governed_by(spec_path) — use GovernedBy edge traversal, not spec_path substring
     if trimmed.starts_with("$governed_by(") && trimmed.ends_with(')') {
         let spec_path = trimmed[13..trimmed.len() - 1]
             .trim()
             .trim_matches('\'')
             .trim_matches('"');
         let lower = spec_path.to_lowercase();
-        return active_nodes
+
+        // First find spec nodes (or any node whose spec_path matches)
+        let spec_node_ids: HashSet<String> = active_nodes
             .iter()
             .filter(|n| {
                 n.spec_path
@@ -661,38 +815,41 @@ fn resolve_computed_expression(
             })
             .map(|n| n.id.to_string())
             .collect();
+
+        // Traverse GovernedBy edges: source is the code node, target is the spec node
+        let mut governed = HashSet::new();
+        for edge in edges
+            .iter()
+            .filter(|e| e.deleted_at.is_none() && e.edge_type == EdgeType::GovernedBy)
+        {
+            if spec_node_ids.contains(&edge.target_id.to_string()) {
+                governed.insert(edge.source_id.to_string());
+            }
+        }
+
+        // Also include nodes that have a matching spec_path directly
+        // (for backwards compatibility when GovernedBy edges aren't present)
+        if governed.is_empty() {
+            return spec_node_ids;
+        }
+
+        // Include the spec nodes themselves too
+        governed.extend(spec_node_ids);
+        return governed;
     }
 
-    // $test_fragility(node) — count of distinct test paths reaching this node (returns as single-item set for use in intersect)
+    // $test_fragility(node) — returns the count of distinct test paths as a metric,
+    // but for set operations returns the node if count > 0
     if trimmed.starts_with("$test_fragility(") && trimmed.ends_with(')') {
         let node_name = trimmed[16..trimmed.len() - 1]
             .trim()
             .trim_matches('\'')
             .trim_matches('"');
+        let resolved_name = resolve_node_ref(node_name, selected_node_id);
         let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
             let found_id = found.id.to_string();
-            // Count how many test nodes can reach this node
-            let test_ids: Vec<String> = active_nodes
-                .iter()
-                .filter(|n| n.test_node)
-                .map(|n| n.id.to_string())
-                .collect();
-            let mut count = 0;
-            for tid in &test_ids {
-                let reached = bfs_traverse(
-                    tid,
-                    &[EdgeType::Calls],
-                    "outgoing",
-                    100,
-                    outgoing,
-                    _incoming,
-                );
-                if reached.contains(&found_id) {
-                    count += 1;
-                }
-            }
-            // Return the node itself if it has any test coverage
+            let count = compute_test_fragility_count(&found_id, &all_nodes_vec, outgoing, incoming);
             if count > 0 {
                 let mut result = HashSet::new();
                 result.insert(found_id);
@@ -702,34 +859,40 @@ fn resolve_computed_expression(
         return HashSet::new();
     }
 
-    // $reachable(node, edge_types, direction, depth) — general BFS
+    // $reachable(node, edge_types, direction, depth) — use find_balanced_comma for parsing
     if trimmed.starts_with("$reachable(") && trimmed.ends_with(')') {
         let inner = &trimmed[11..trimmed.len() - 1];
-        let parts: Vec<&str> = inner.splitn(4, ',').map(|s| s.trim()).collect();
+        // Parse using balanced comma finding for proper array handling
+        let parts = split_balanced_args(inner);
         if parts.len() >= 2 {
-            let node_name = parts[0].trim_matches('\'').trim_matches('"');
+            let node_name = parts[0].trim().trim_matches('\'').trim_matches('"');
             let edge_types_str = parts.get(1).unwrap_or(&"");
             let direction = parts
                 .get(2)
-                .map(|s| s.trim_matches('\'').trim_matches('"'))
+                .map(|s| s.trim().trim_matches('\'').trim_matches('"'))
                 .unwrap_or("outgoing");
-            let depth: u32 = parts.get(3).and_then(|d| d.parse().ok()).unwrap_or(10);
+            let depth: u32 = parts
+                .get(3)
+                .and_then(|d| d.trim().parse().ok())
+                .unwrap_or(10);
 
             let edge_types: Vec<EdgeType> = edge_types_str
+                .trim()
                 .trim_matches(|c: char| c == '[' || c == ']')
                 .split(',')
                 .filter_map(|s| parse_edge_type(s.trim().trim_matches('\'').trim_matches('"')))
                 .collect();
 
+            let resolved_name = resolve_node_ref(node_name, selected_node_id);
             let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-            if let Some(found) = find_node_by_name(&all_nodes_vec, node_name) {
+            if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
                 return bfs_traverse(
                     &found.id.to_string(),
                     &edge_types,
                     direction,
                     depth,
                     outgoing,
-                    _incoming,
+                    incoming,
                 );
             }
         }
@@ -738,6 +901,47 @@ fn resolve_computed_expression(
 
     // Fallback: empty set
     HashSet::new()
+}
+
+/// Resolve $clicked/$selected references to the actual node ID.
+fn resolve_node_ref(reference: &str, selected_node_id: Option<&str>) -> String {
+    match reference {
+        "$clicked" | "$selected" => selected_node_id.unwrap_or("").to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Find a node by ID first, then fall back to name matching.
+fn find_node_by_ref<'a>(nodes: &'a [GraphNode], reference: &str) -> Option<&'a GraphNode> {
+    // Try direct ID match first (for resolved $clicked/$selected).
+    nodes
+        .iter()
+        .find(|n| n.id.to_string() == reference)
+        .or_else(|| find_node_by_name(nodes, reference))
+}
+
+/// Split a string by commas, respecting balanced brackets and parentheses.
+fn split_balanced_args(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth_paren = 0;
+    let mut depth_bracket = 0;
+    let mut last = 0;
+
+    for (i, c) in s.chars().enumerate() {
+        match c {
+            '(' => depth_paren += 1,
+            ')' => depth_paren -= 1,
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket -= 1,
+            ',' if depth_paren == 0 && depth_bracket == 0 => {
+                parts.push(&s[last..i]);
+                last = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[last..]);
+    parts
 }
 
 /// Find the position of the first comma that isn't inside balanced parentheses.
@@ -752,6 +956,22 @@ fn find_balanced_comma(s: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// Resolve annotation template variables server-side.
+pub fn resolve_annotation_template(
+    template: &str,
+    focused_node_name: Option<&str>,
+    matched_count: usize,
+    group_count: usize,
+) -> String {
+    let mut result = template.to_string();
+    if let Some(name) = focused_node_name {
+        result = result.replace("$name", name);
+    }
+    result = result.replace("{{count}}", &matched_count.to_string());
+    result = result.replace("{{group_count}}", &group_count.to_string());
+    result
 }
 
 // ── Dry-run ──────────────────────────────────────────────────────────────────
@@ -787,6 +1007,18 @@ pub fn dry_run(
         .filter(|n| n.deleted_at.is_none())
         .map(|n| (n.id.to_string(), n))
         .collect();
+
+    // Resolve the focused node name for annotation templates
+    let focused_node_name = match &query.scope {
+        Scope::Focus { node, .. } => {
+            if node == "$clicked" || node == "$selected" {
+                selected_node_id.and_then(|id| node_map.get(id).map(|n| n.name.clone()))
+            } else {
+                Some(node.clone())
+            }
+        }
+        _ => None,
+    };
 
     let matched_node_names: Vec<String> = result_set
         .iter()
@@ -1079,9 +1311,9 @@ mod tests {
             None,
         );
         assert_eq!(result.len(), 2);
-        assert!(result.contains("n1")); // AuthService
-        assert!(result.contains("n2")); // auth_handler
-        assert!(!result.contains("n3")); // UserRepo
+        assert!(result.contains("n1"));
+        assert!(result.contains("n2"));
+        assert!(!result.contains("n3"));
     }
 
     #[test]
@@ -1108,7 +1340,6 @@ mod tests {
             &edges,
             None,
         );
-        // A -> B -> C (depth 2), D is at depth 3
         assert_eq!(result.len(), 3);
         assert!(result.contains("n1"));
         assert!(result.contains("n2"));
@@ -1138,7 +1369,7 @@ mod tests {
             &edges,
             None,
         );
-        assert_eq!(result.len(), 3); // C + A + B
+        assert_eq!(result.len(), 3);
     }
 
     #[test]
@@ -1176,10 +1407,10 @@ mod tests {
             &edges,
             None,
         );
-        assert!(result.contains("n1")); // seed
-        assert!(result.contains("n2")); // outgoing call
-        assert!(result.contains("n3")); // incoming call (both direction)
-        assert!(!result.contains("n4")); // unrelated
+        assert!(result.contains("n1"));
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3"));
+        assert!(!result.contains("n4"));
     }
 
     #[test]
@@ -1192,8 +1423,14 @@ mod tests {
         let edges = vec![make_edge("e1", "t1", "n1", EdgeType::Calls)];
         let active: Vec<&GraphNode> = nodes.iter().collect();
         let (outgoing, incoming) = build_adjacency(&edges);
-        let result =
-            resolve_computed_expression("$test_unreachable", &active, &edges, &outgoing, &incoming);
+        let result = resolve_computed_expression(
+            "$test_unreachable",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
         assert!(result.contains("n2"));
         assert!(!result.contains("n1"));
     }
@@ -1214,6 +1451,33 @@ mod tests {
             &[],
             &outgoing,
             &incoming,
+            None,
+        );
+        assert!(result.contains("n1"));
+        assert!(!result.contains("n2"));
+    }
+
+    #[test]
+    fn test_computed_where_incoming_calls() {
+        let nodes = vec![
+            make_node("n1", "popular_fn", NodeType::Function),
+            make_node("n2", "lonely_fn", NodeType::Function),
+            make_node("n3", "caller1", NodeType::Function),
+            make_node("n4", "caller2", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n3", "n1", EdgeType::Calls),
+            make_edge("e2", "n4", "n1", EdgeType::Calls),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$where(incoming_calls, '>=', 2)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
         );
         assert!(result.contains("n1"));
         assert!(!result.contains("n2"));
@@ -1239,10 +1503,11 @@ mod tests {
             &edges,
             &outgoing,
             &incoming,
+            None,
         );
-        assert!(result.contains("n1")); // complex AND untested
-        assert!(!result.contains("n2")); // simple
-        assert!(!result.contains("n3")); // complex but tested
+        assert!(result.contains("n1"));
+        assert!(!result.contains("n2"));
+        assert!(!result.contains("n3"));
     }
 
     #[test]
@@ -1321,10 +1586,37 @@ mod tests {
         let active: Vec<&GraphNode> = nodes.iter().collect();
         let (outgoing, incoming) = build_adjacency(&edges);
         let result =
-            resolve_computed_expression("$callers(C)", &active, &edges, &outgoing, &incoming);
+            resolve_computed_expression("$callers(C)", &active, &edges, &outgoing, &incoming, None);
         assert!(result.contains("n1"));
         assert!(result.contains("n2"));
-        assert!(result.contains("n3")); // start node
+        assert!(result.contains("n3"));
+    }
+
+    #[test]
+    fn test_computed_callers_with_selected() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+            make_node("n3", "C", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n3", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Calls),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        // $callers($selected) should resolve to C when selected_node_id = "n3"
+        let result = resolve_computed_expression(
+            "$callers($selected)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            Some("n3"),
+        );
+        assert!(result.contains("n1"));
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3"));
     }
 
     #[test]
@@ -1341,8 +1633,8 @@ mod tests {
         let active: Vec<&GraphNode> = nodes.iter().collect();
         let (outgoing, incoming) = build_adjacency(&edges);
         let result =
-            resolve_computed_expression("$callees(A)", &active, &edges, &outgoing, &incoming);
-        assert!(result.contains("n1")); // start node
+            resolve_computed_expression("$callees(A)", &active, &edges, &outgoing, &incoming, None);
+        assert!(result.contains("n1"));
         assert!(result.contains("n2"));
         assert!(result.contains("n3"));
     }
@@ -1366,6 +1658,33 @@ mod tests {
             &edges,
             &outgoing,
             &incoming,
+            None,
+        );
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3"));
+        assert!(!result.contains("n1"));
+    }
+
+    #[test]
+    fn test_computed_fields() {
+        let nodes = vec![
+            make_node("n1", "MyType", NodeType::Type),
+            make_node("n2", "field_a", NodeType::Field),
+            make_node("n3", "field_b", NodeType::Field),
+        ];
+        let edges = vec![
+            make_edge("e1", "n2", "n1", EdgeType::FieldOf),
+            make_edge("e2", "n3", "n1", EdgeType::FieldOf),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$fields(MyType)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
         );
         assert!(result.contains("n2"));
         assert!(result.contains("n3"));
@@ -1391,30 +1710,100 @@ mod tests {
             &edges,
             &outgoing,
             &incoming,
+            None,
         );
-        assert!(result.contains("n1")); // start
+        assert!(result.contains("n1"));
         assert!(result.contains("n2"));
         assert!(result.contains("n3"));
     }
 
     #[test]
-    fn test_computed_governed_by() {
-        let mut nodes = vec![
-            make_node("n1", "Governed", NodeType::Type),
-            make_node("n2", "Ungoverned", NodeType::Type),
+    fn test_computed_ancestors() {
+        let nodes = vec![
+            make_node("n1", "root_mod", NodeType::Module),
+            make_node("n2", "child_mod", NodeType::Module),
+            make_node("n3", "leaf_fn", NodeType::Function),
         ];
-        nodes[0].spec_path = Some("specs/search.md".to_string());
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Contains),
+            make_edge("e2", "n2", "n3", EdgeType::Contains),
+        ];
         let active: Vec<&GraphNode> = nodes.iter().collect();
-        let (outgoing, incoming) = build_adjacency(&[]);
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$ancestors(leaf_fn)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(result.contains("n1"));
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3"));
+    }
+
+    #[test]
+    fn test_computed_governed_by_with_edges() {
+        let mut nodes = vec![
+            make_node("n1", "SearchService", NodeType::Type),
+            make_node("n2", "AuthService", NodeType::Type),
+            make_node("n3", "search_spec", NodeType::Type),
+        ];
+        nodes[2].spec_path = Some("specs/search.md".to_string());
+        let edges = vec![
+            // SearchService is governed by search_spec
+            make_edge("e1", "n1", "n3", EdgeType::GovernedBy),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
         let result = resolve_computed_expression(
             "$governed_by(search.md)",
             &active,
-            &[],
+            &edges,
             &outgoing,
             &incoming,
+            None,
+        );
+        assert!(result.contains("n1")); // governed via edge
+        assert!(result.contains("n3")); // spec node itself
+        assert!(!result.contains("n2")); // not governed
+    }
+
+    #[test]
+    fn test_computed_test_fragility() {
+        let nodes = vec![
+            make_node("n1", "important_fn", NodeType::Function),
+            make_node("n2", "unused_fn", NodeType::Function),
+            make_test_node("t1", "test_a"),
+            make_test_node("t2", "test_b"),
+        ];
+        let edges = vec![
+            make_edge("e1", "t1", "n1", EdgeType::Calls),
+            make_edge("e2", "t2", "n1", EdgeType::Calls),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        // important_fn is reachable by 2 tests, so it should be in the result
+        let result = resolve_computed_expression(
+            "$test_fragility(important_fn)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
         );
         assert!(result.contains("n1"));
-        assert!(!result.contains("n2"));
+        // unused_fn has 0 test paths
+        let result2 = resolve_computed_expression(
+            "$test_fragility(unused_fn)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(result2.is_empty());
     }
 
     #[test]
@@ -1427,20 +1816,18 @@ mod tests {
         let active: Vec<&GraphNode> = nodes.iter().collect();
         let (outgoing, incoming) = build_adjacency(&[]);
 
-        // Union of types and functions = all
         let union = resolve_computed_expression(
             "$union($where(complexity, '>=', 0), $where(complexity, '<', 0))",
             &active,
             &[],
             &outgoing,
             &incoming,
+            None,
         );
-        // $where(complexity >= 0) should match all (complexity=5 default)
         assert!(union.contains("n1"));
         assert!(union.contains("n2"));
         assert!(union.contains("n3"));
 
-        // Diff: all - complex = simple
         let mut nodes_varied = nodes.clone();
         nodes_varied[0].complexity = Some(30);
         nodes_varied[1].complexity = Some(3);
@@ -1452,9 +1839,10 @@ mod tests {
             &[],
             &outgoing,
             &incoming,
+            None,
         );
-        assert!(diff.contains("n2")); // complexity 3, not > 20
-        assert!(!diff.contains("n1")); // complexity 30, > 20
+        assert!(diff.contains("n2"));
+        assert!(!diff.contains("n1"));
     }
 
     #[test]
@@ -1476,6 +1864,33 @@ mod tests {
             &edges,
             &outgoing,
             &incoming,
+            None,
+        );
+        assert!(result.contains("n1"));
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3"));
+    }
+
+    #[test]
+    fn test_reachable_multi_edge_types() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+            make_node("n3", "C", NodeType::Type),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Implements),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$reachable(A, [calls, implements], outgoing, 5)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
         );
         assert!(result.contains("n1"));
         assert!(result.contains("n2"));
@@ -1490,5 +1905,26 @@ mod tests {
         let result = resolve_scope(&Scope::All, &nodes, &[], None);
         assert_eq!(result.len(), 1);
         assert!(result.contains("n2"));
+    }
+
+    #[test]
+    fn test_annotation_template_resolution() {
+        let resolved = resolve_annotation_template(
+            "Blast radius: $name ({{count}} nodes, {{group_count}} groups)",
+            Some("TaskPort"),
+            14,
+            3,
+        );
+        assert_eq!(resolved, "Blast radius: TaskPort (14 nodes, 3 groups)");
+    }
+
+    #[test]
+    fn test_split_balanced_args() {
+        let args = split_balanced_args("A, [calls, implements], outgoing, 5");
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[0].trim(), "A");
+        assert_eq!(args[1].trim(), "[calls, implements]");
+        assert_eq!(args[2].trim(), "outgoing");
+        assert_eq!(args[3].trim(), "5");
     }
 }
