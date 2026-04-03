@@ -654,8 +654,8 @@
           <li class="decision-item" data-testid="cwh-decision-item">
             <span class="decision-icon" aria-hidden="true">{TYPE_ICONS[notif.notification_type] ?? '•'}</span>
             <button class="decision-body decision-body-clickable" onclick={() => {
-              if (body.mr_id) nav('mr', body.mr_id, { repo_id: notif.repo_id });
-              else if (body.agent_id) nav('agent', body.agent_id, { repo_id: notif.repo_id });
+              if (body.mr_id) nav('mr', body.mr_id, { repo_id: notif.repo_id, _openTab: notif.notification_type === 'gate_failure' || notif.notification_type === 'GateFailure' ? 'gates' : undefined });
+              else if (body.agent_id) nav('agent', body.agent_id, { repo_id: notif.repo_id, _openTab: notif.notification_type === 'agent_failed' || notif.notification_type === 'AgentFailed' ? 'history' : undefined });
               else if (body.task_id) nav('task', body.task_id, { repo_id: notif.repo_id });
               else if (body.spec_path) { const sp = normalizeSpecPath(body.spec_path); nav('spec', sp, { path: sp, repo_id: notif.repo_id }); }
             }}>
