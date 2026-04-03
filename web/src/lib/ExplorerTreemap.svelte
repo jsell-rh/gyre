@@ -397,15 +397,88 @@
         const ch = gh - pad * 2 - headerH;
 
         if (cw > 5 && ch > 5) {
-          // First layout sub-tree-groups (directories)
-          if (r.children.size > 0) {
+          if (r.children.size > 0 && r.graphNodes.length > 0) {
+            // Both sub-directories AND direct graph nodes at this level.
+            // Layout them together: sub-dirs as tree-groups, graph nodes as leaves,
+            // all sharing the same squarified space.
+            layoutMixed([...r.children.values()], r.graphNodes, cx, cy, cw, ch, ln, depth + 1);
+          } else if (r.children.size > 0) {
             layoutPathTreeNode([...r.children.values()], cx, cy, cw, ch, ln, depth + 1);
-          }
-
-          // Then layout leaf graph nodes inside remaining space
-          // (only if there are no sub-groups — otherwise they fill the space)
-          if (r.children.size === 0 && r.graphNodes.length > 0) {
+          } else if (r.graphNodes.length > 0) {
             layoutLeafNodes(r.graphNodes, cx, cy, cw, ch, ln, depth + 1);
+          }
+        }
+      }
+    }
+
+    // Layout mix of path-tree children (directories) and direct graph nodes together
+    function layoutMixed(ptChildren, graphNodes, x, y, w, h, parentLn, depth) {
+      // Build unified items array: tree-groups get their totalDescendants as weight,
+      // graph nodes get their descendant count as weight
+      const items = [];
+      for (const pt of ptChildren) {
+        items.push({
+          kind: 'tree',
+          ptNode: pt,
+          weight: Math.max(1, pt.totalDescendants),
+        });
+      }
+      for (const gn of graphNodes) {
+        items.push({
+          kind: 'graph',
+          graphNode: gn,
+          weight: Math.max(1, descendantCounts.get(gn.id) ?? 1),
+        });
+      }
+
+      const rects = squarify(items, x, y, w, h);
+      const gap = Math.max(2, Math.min(8, Math.min(w, h) * 0.01));
+
+      for (let idx = 0; idx < rects.length; idx++) {
+        const r = rects[idx];
+        const gw = r.w - gap;
+        const gh = r.h - gap;
+        if (gw <= 2 || gh <= 2) continue;
+
+        if (r.kind === 'tree') {
+          // Recurse into this as a path-tree group
+          layoutPathTreeNode([r.ptNode], r.x - gw/2, r.y - gh/2, gw, gh, parentLn, depth);
+        } else {
+          // Render as a leaf graph node
+          const gn = r.graphNode;
+          const { parentToChildren: ptc } = treeData;
+          const hasChildren = (ptc.get(gn.id) ?? []).length > 0;
+
+          const ln = {
+            id: gn.id,
+            kind: hasChildren ? 'tree-group' : 'leaf',
+            x: r.x, y: r.y, w: gw, h: gh,
+            label: gn.name ?? '',
+            node: gn,
+            treeDepth: depth,
+            parentTreeGroup: parentLn,
+            totalChildren: (descendantCounts.get(gn.id) ?? 1) - 1,
+            isLeafGraphNode: !hasChildren,
+            treeNode: hasChildren ? { children: new Map(), graphNodes: [] } : null,
+            childIndex: idx,
+          };
+          allLayoutNodes.push(ln);
+          lnMap.set(ln.id, ln);
+
+          if (hasChildren) {
+            const childIds = (ptc.get(gn.id) ?? []);
+            const childNodes = childIds.map(cid => nodeById.get(cid)).filter(Boolean);
+            if (childNodes.length > 0) {
+              const cpad = Math.max(2, Math.min(gw, gh) * 0.02);
+              const cheader = Math.max(8, Math.min(gw, gh) * 0.03);
+              const ccx = r.x - gw / 2 + cpad;
+              const ccy = r.y - gh / 2 + cpad + cheader;
+              const ccw = gw - cpad * 2;
+              const cch = gh - cpad * 2 - cheader;
+              if (ccw > 3 && cch > 3) {
+                layoutLeafNodes(childNodes, ccx, ccy, ccw, cch, ln, depth + 1);
+              }
+            }
           }
         }
       }
@@ -481,26 +554,40 @@
   });
 
   // ── Zoom-dependent visibility ──────────────────────────────────────
+  //
+  // Key UX principle: let humans sit with high-level structure before
+  // revealing details. Children should only appear when you've zoomed
+  // in far enough that the parent container fills most of the screen.
+  //
+  // Summary mode: opaque box, centered label, descendant count
+  //   → stays until the box is ~450px on screen
+  // Container mode: transparent bg, children visible inside
+  //   → children fade in when parent is 500-700px on screen
+  //
+  // This means at the initial overview, you see clean labeled boxes.
+  // You have to deliberately zoom into a specific area to see inside it.
+
   function nodeOpacity(ln) {
     if (ln.kind === 'tree-group') return treeGroupOpacity(ln);
 
-    // Leaf nodes: visible when parent tree-group is large enough
+    // Leaf graph nodes: only visible when parent tree-group is very large on screen
     const sw = ln.w * cam.zoom;
     const sh = ln.h * cam.zoom;
-    if (sw < 3 || sh < 2) return 0;
+    if (sw < 4 || sh < 3) return 0;
 
     if (ln.parentTreeGroup) {
       const ps = Math.min(ln.parentTreeGroup.w * cam.zoom, ln.parentTreeGroup.h * cam.zoom);
-      if (ps < 200) return 0;
-      if (ps < 400) {
-        const pf = (ps - 200) / 200;
+      // Parent must be 500px+ before leaf children appear
+      if (ps < 500) return 0;
+      if (ps < 700) {
+        const pf = (ps - 500) / 200;
         const ms = Math.min(sw, sh);
-        const sf = ms < 6 ? Math.max(0, (ms - 3) / 3) : 1.0;
+        const sf = ms < 8 ? Math.max(0, (ms - 4) / 4) : 1.0;
         return pf * sf;
       }
     }
     const ms = Math.min(sw, sh);
-    if (ms < 6) return Math.max(0, (ms - 3) / 3);
+    if (ms < 8) return Math.max(0, (ms - 4) / 4);
     return 1.0;
   }
 
@@ -508,30 +595,36 @@
     const sw = ln.w * cam.zoom;
     const sh = ln.h * cam.zoom;
     const ss = Math.min(sw, sh);
-    if (ss < 8) return 0;
+    if (ss < 10) return 0;
 
     if (ln.parentTreeGroup) {
       const ps = Math.min(ln.parentTreeGroup.w * cam.zoom, ln.parentTreeGroup.h * cam.zoom);
-      if (ps < 150) return 0;
-      if (ps < 300) return (ps - 150) / 150;
+      // Children tree-groups only appear when parent is large enough to be in container mode
+      if (ps < 400) return 0;
+      if (ps < 600) return (ps - 400) / 200;
     }
 
-    if (ss < 15) return (ss - 8) / 7;
-    if (ss > 2000) {
-      if (ss > 4000) return 0;
-      return 1.0 - (ss - 2000) / 2000;
+    // Fade in small nodes
+    if (ss < 20) return (ss - 10) / 10;
+
+    // Fade out when this group fills the entire screen (becomes just background)
+    if (ss > 2500) {
+      if (ss > 5000) return 0;
+      return 1.0 - (ss - 2500) / 2500;
     }
     return 1.0;
   }
 
   function isSummaryMode(ln) {
     if (ln.kind !== 'tree-group') return false;
-    return Math.min(ln.w * cam.zoom, ln.h * cam.zoom) < 250;
+    // Stay in summary mode until the box is quite large — this keeps
+    // the view clean and lets humans read labels before diving deeper
+    return Math.min(ln.w * cam.zoom, ln.h * cam.zoom) < 450;
   }
 
   function shouldShowChildren(ln) {
     if (ln.kind !== 'tree-group') return false;
-    return Math.min(ln.w * cam.zoom, ln.h * cam.zoom) > 120;
+    return Math.min(ln.w * cam.zoom, ln.h * cam.zoom) > 400;
   }
 
   // ── Filter visibility ─────────────────────────────────────────────
@@ -769,15 +862,29 @@
     return s.x + hw > 0 && s.x - hw < W && s.y + hh > 0 && s.y - hh < H;
   }
 
-  // Pre-sorted layout nodes (sorted once on layout change, not every frame)
-  let sortedLayoutNodes = $state([]);
+  // Build parent→children index for hierarchical draw (prune invisible subtrees)
+  let childrenIndex = $state(new Map()); // parentId → [child layout nodes]
+  let rootLayoutNodes = $state([]);      // nodes with no parent
   $effect(() => {
-    sortedLayoutNodes = [...layoutNodes].sort((a, b) => {
-      const aTree = a.kind === 'tree-group' ? 0 : 1;
-      const bTree = b.kind === 'tree-group' ? 0 : 1;
-      if (aTree !== bTree) return aTree - bTree;
-      return (a.treeDepth || 0) - (b.treeDepth || 0);
+    const idx = new Map();
+    const roots = [];
+    for (const ln of layoutNodes) {
+      const pid = ln.parentTreeGroup?.id;
+      if (pid) {
+        if (!idx.has(pid)) idx.set(pid, []);
+        idx.get(pid).push(ln);
+      } else {
+        roots.push(ln);
+      }
+    }
+    // Sort roots: tree-groups first, then by depth
+    roots.sort((a, b) => {
+      const at = a.kind === 'tree-group' ? 0 : 1;
+      const bt = b.kind === 'tree-group' ? 0 : 1;
+      return at !== bt ? at - bt : (a.treeDepth || 0) - (b.treeDepth || 0);
     });
+    childrenIndex = idx;
+    rootLayoutNodes = roots;
   });
 
   // Track canvas size to avoid unnecessary resize
@@ -808,36 +915,32 @@
     // Dot grid
     drawDotGrid(ctx);
 
-    if (sortedLayoutNodes.length === 0) return;
+    if (rootLayoutNodes.length === 0) return;
 
     // Draw edges first (below nodes)
     drawEdges(ctx);
 
-    // Draw nodes — with visibility culling
-    let drawnCount = 0;
-    for (const ln of sortedLayoutNodes) {
-      // Quick frustum check FIRST (cheapest)
-      if (!isVisible(ln)) continue;
+    // Draw nodes — hierarchical traversal that prunes invisible subtrees
+    function drawNodeRecursive(ln) {
+      // Frustum cull
+      if (!isVisible(ln)) return;
 
+      // Opacity check — if this node is invisible, skip it AND all children
       let op = nodeOpacity(ln);
-      if (op < 0.01) continue;
+      if (op < 0.01) return;
 
       op *= filterOpacity(ln);
-      if (op < 0.01) continue;
+      if (op < 0.01) return;
 
-      // Query emphasis
       if (activeQuery) {
         const qOp = queryNodeOpacity(ln);
         if (qOp >= 0.8) op = Math.max(op, qOp);
         else op *= qOp;
       }
 
-      // Connected highlight
       if (connectedHighlight && ln.node) {
         if (!connectedHighlight.has(ln.node.id)) op *= 0.2;
       }
-
-      drawnCount++;
 
       ctx.save();
       ctx.globalAlpha = op;
@@ -853,6 +956,21 @@
       }
 
       ctx.restore();
+
+      // Recursively draw children — only if this node is in container mode
+      // (children are visible inside it). If in summary mode, children are hidden.
+      if (ln.kind === 'tree-group' && !isSummaryMode(ln)) {
+        const children = childrenIndex.get(ln.id);
+        if (children) {
+          for (const child of children) {
+            drawNodeRecursive(child);
+          }
+        }
+      }
+    }
+
+    for (const root of rootLayoutNodes) {
+      drawNodeRecursive(root);
     }
 
     // Draw callout labels
