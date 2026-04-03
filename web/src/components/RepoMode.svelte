@@ -650,7 +650,7 @@
                         {#each visibleGates as g}
                           <button class="gate-badge gate-badge-{g.status}" title="{g.name}{g.required === false ? ' (advisory)' : ''}{g.command ? '\nCommand: ' + g.command : ''}{g.output ? '\nOutput: ' + g.output.slice(0, 200) : ''}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'gates' }); }}>
                             <span class="gate-badge-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
-                            <span class="gate-badge-name">{g.name}</span>
+                            <span class="gate-badge-name">{g.name ?? (g.gate_type ? g.gate_type.replace(/_/g, ' ') : 'gate')}</span>
                             {#if g.required === false}<span class="gate-advisory-inline">(adv)</span>{/if}
                           </button>
                         {/each}
