@@ -1141,34 +1141,34 @@
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1" width="14" height="14"><circle cx="8" cy="8" r="5.5"/></svg>
             </span>
           {/if}
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} title="{pipelineSpecs.total} total: {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending{pipelineSpecs.pending > 0 ? ' — click to review' : ''}" onclick={() => {
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} title="{pipelineSpecs.total} specs: {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending" onclick={() => {
             const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
             if (pendingSpecs.length === 1) { navigateToSpec(pendingSpecs[0]); return; }
             wsTab = 'specs'; userSelectedTab = true;
           }}>
             <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
             <span class="pipeline-stage-label">Specs</span>
-            {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
+            {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warn">{pipelineSpecs.pending}</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} title="{pipelineTasks.total} total: {pipelineTasks.done} done, {pipelineTasks.in_progress} active, {pipelineTasks.blocked} blocked" onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-warn={pipelineTasks.blocked > 0} title="{pipelineTasks.total} tasks: {pipelineTasks.done} done, {pipelineTasks.in_progress} active, {pipelineTasks.blocked} blocked" onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
             <span class="pipeline-stage-count">{pipelineTasks.total}</span>
             <span class="pipeline-stage-label">Tasks</span>
-            {#if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge">{pipelineTasks.in_progress} active</span>{/if}
-            {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked} blocked</span>{/if}
+            {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked}</span>
+            {:else if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge">{pipelineTasks.in_progress}</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} title="{pipelineAgents.total} total: {pipelineAgents.active} running{pipelineAgents.active > 0 ? ' — click to see agent details' : ''}" onclick={() => {
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} title="{pipelineAgents.total} agents: {pipelineAgents.active} running" onclick={() => {
             const activeAgentList = wsAgents.filter(a => a.status === 'active');
             if (activeAgentList.length === 1) { nav('agent', activeAgentList[0].id, { repo_id: activeAgentList[0].repo_id, name: activeAgentList[0].name }); return; }
             wsTab = 'agents'; userSelectedTab = true;
           }}>
             <span class="pipeline-stage-count">{pipelineAgents.total}</span>
             <span class="pipeline-stage-label">Agents</span>
-            {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active} running</span>{/if}
+            {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active}</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-warn={pipelineMrs.failed_gates > 0} title="{pipelineMrs.total} total: {pipelineMrs.open} open, {pipelineMrs.merged} merged{pipelineMrs.failed_gates > 0 ? ', ' + pipelineMrs.failed_gates + ' with failed gates' : ''}" onclick={() => {
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-warn={pipelineMrs.failed_gates > 0} title="{pipelineMrs.total} MRs: {pipelineMrs.open} open, {pipelineMrs.merged} merged" onclick={() => {
             const failedMrs = wsMrs.filter(m => m._gates?.failed > 0);
             if (failedMrs.length === 1) { nav('mr', failedMrs[0].id, { repo_id: failedMrs[0].repository_id ?? failedMrs[0].repo_id, title: failedMrs[0].title, _openTab: 'gates' }); return; }
             const openMrs = wsMrs.filter(m => m.status === 'open');
@@ -1177,11 +1177,11 @@
           }}>
             <span class="pipeline-stage-count">{pipelineMrs.total}</span>
             <span class="pipeline-stage-label">MRs</span>
-            {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates} failed</span>
-            {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge">{pipelineMrs.open} open</span>{/if}
+            {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates}</span>
+            {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge">{pipelineMrs.open}</span>{/if}
           </button>
           <span class="pipeline-arrow">→</span>
-          <div class="pipeline-stage pipeline-stage-done pipeline-stage-terminal" title="{pipelineMrs.merged} merge requests have passed all gates and been merged">
+          <div class="pipeline-stage pipeline-stage-done pipeline-stage-terminal" title="{pipelineMrs.merged} merged with signed attestation">
             <span class="pipeline-stage-count">{pipelineMrs.merged}</span>
             <span class="pipeline-stage-label">Merged</span>
           </div>
@@ -2083,16 +2083,17 @@
 
   /* browse-toggle removed — entity tabs are always visible */
 
-  /* ── Pipeline progress bar ─────────────────────────────────────── */
+  /* ── Pipeline progress bar (compact inline stepper) ────────────── */
   .pipeline-progress {
     display: flex;
     align-items: center;
     gap: 0;
-    padding: 2px var(--space-2);
+    padding: 0 var(--space-2);
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     overflow-x: auto;
+    height: 32px;
   }
 
   .ws-health-indicator {
@@ -2114,17 +2115,16 @@
 
   .pipeline-stage {
     display: flex;
-    flex-direction: column;
     align-items: center;
-    gap: 0;
-    padding: 1px var(--space-2);
+    gap: 4px;
+    padding: 2px var(--space-2);
     background: transparent;
     border: 1px solid transparent;
     border-radius: var(--radius);
     cursor: pointer;
     font-family: var(--font-body);
     transition: all var(--transition-fast);
-    min-width: 40px;
+    white-space: nowrap;
     position: relative;
   }
 
@@ -2143,7 +2143,7 @@
   }
 
   .pipeline-stage-count {
-    font-size: var(--text-sm);
+    font-size: var(--text-xs);
     font-weight: 700;
     color: var(--color-text-muted);
     font-family: var(--font-mono);
@@ -2163,11 +2163,9 @@
   }
 
   .pipeline-stage-label {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
   }
 
   .pipeline-stage-badge {
@@ -2197,10 +2195,10 @@
 
   .pipeline-arrow {
     color: var(--color-text-muted);
-    font-size: var(--text-sm);
+    font-size: 11px;
     flex-shrink: 0;
-    padding: 0 2px;
-    opacity: 0.5;
+    padding: 0 1px;
+    opacity: 0.4;
   }
 
   .pipeline-budget-indicator {
@@ -2214,7 +2212,7 @@
 
   .pipeline-budget-bar {
     width: 40px;
-    height: 4px;
+    height: 3px;
     background: var(--color-border);
     border-radius: 2px;
     overflow: hidden;
