@@ -1060,36 +1060,10 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Workspace header ───────────────────────────────────────── -->
-      <header class="ws-header">
-        <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
-        {#if workspace.description}
-          <p class="ws-header-desc">{workspace.description}</p>
-        {/if}
-        <div class="ws-header-actions">
-          {#if goToWorkspaceSettings}
-            <button class="ws-header-settings" onclick={() => goToWorkspaceSettings()} title="Workspace settings">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16" aria-hidden="true">
-                <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
-              </svg>
-              Settings
-            </button>
-          {/if}
-          {#if goToAgentRules}
-            <button class="ws-header-settings" onclick={() => goToAgentRules()} title="Agent rules (personas, principles, standards)">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16" aria-hidden="true">
-                <path d="M12 2L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5L12 2z"/>
-              </svg>
-              Agent Rules
-            </button>
-          {/if}
-        </div>
-      </header>
-
-      <!-- ── Status sentence — tells the user what matters right now ── -->
+      <!-- ── Status hero — the single most important thing on the page ── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-        <div class="ws-status-area">
-          <p class="ws-status-sentence" data-testid="status-sentence">{statusSentence}</p>
+        <div class="ws-status-hero" data-testid="status-sentence">
+          <p class="ws-status-sentence">{statusSentence}</p>
           {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
             <p class="ws-briefing-inline">{briefingData.summary ?? briefingData.narrative}</p>
           {/if}
@@ -1209,6 +1183,42 @@
                   {/if}
                 </div>
               </div>
+            {/each}
+          </div>
+        </section>
+      {/if}
+
+      <!-- ── Recent Completions — provenance chain visualization ──── -->
+      {#if recentCompletions.length > 0}
+        <section class="ws-completions-section" data-testid="section-completions">
+          <h2 class="completions-title">Recent completions</h2>
+          <div class="completions-list">
+            {#each recentCompletions as c}
+              <button class="completion-item" onclick={() => nav('mr', c.mr.id, { repo_id: c.mr.repository_id ?? c.mr.repo_id, title: c.mr.title })}>
+                <div class="completion-chain">
+                  {#if c.specName}
+                    <span class="completion-node completion-spec" title="Spec: {c.specPath}">{c.specName}</span>
+                    <span class="completion-arrow">→</span>
+                  {/if}
+                  {#if c.taskTitle}
+                    <span class="completion-node completion-task" title="Task">{c.taskTitle.length > 30 ? c.taskTitle.slice(0, 27) + '...' : c.taskTitle}</span>
+                    <span class="completion-arrow">→</span>
+                  {/if}
+                  {#if c.agentName}
+                    <span class="completion-node completion-agent" title="Agent">{c.agentName}</span>
+                    <span class="completion-arrow">→</span>
+                  {/if}
+                  <span class="completion-node completion-mr" title="MR: {c.mr.title ?? ''}">{c.mr.title ?? 'MR'}</span>
+                  <span class="completion-arrow">→</span>
+                  <span class="completion-node completion-merged">merged</span>
+                </div>
+                <div class="completion-meta">
+                  {#if c.gates?.passed > 0}<span class="completion-gates">{c.gates.passed} gate{c.gates.passed !== 1 ? 's' : ''} passed</span>{/if}
+                  {#if c.mr.merge_commit_sha}<code class="completion-sha">{c.mr.merge_commit_sha.slice(0, 7)}</code>{/if}
+                  {#if c.repoName}<span>{c.repoName}</span>{/if}
+                  {#if c.mergedAt}<span>{relTime(c.mergedAt)}</span>{/if}
+                </div>
+              </button>
             {/each}
           </div>
         </section>
@@ -1961,71 +1971,20 @@
     width: 100%;
   }
 
-  /* ── Workspace header ──────────────────────────────────────────── */
-  .ws-header {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-  }
-
-  .ws-header-name {
-    font-family: var(--font-display);
-    font-size: var(--text-xl);
-    font-weight: 700;
-    color: var(--color-text);
-    margin: 0;
-    line-height: 1.2;
-  }
-
-  .ws-header-desc {
-    font-size: var(--text-sm);
-    color: var(--color-text-muted);
-    margin: 0;
-    flex: 1;
-    min-width: 120px;
-  }
-
-  .ws-header-actions {
-    display: flex;
-    gap: var(--space-2);
-    margin-left: auto;
-    flex-shrink: 0;
-  }
-
-  .ws-header-settings {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    padding: 4px 8px;
-    background: transparent;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    color: var(--color-text-secondary);
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    cursor: pointer;
-    transition: all var(--transition-fast);
-  }
-
-  .ws-header-settings:hover {
-    background: var(--color-surface-elevated);
-    border-color: var(--color-border-strong);
-    color: var(--color-text);
-  }
-
-  /* ── Status area ────────────────────────────────────────────────── */
-  .ws-status-area {
+  /* ── Status hero — prominent workspace summary ──────────────────── */
+  .ws-status-hero {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
+    padding: var(--space-2) 0;
   }
 
   .ws-status-sentence {
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
+    font-size: var(--text-base);
+    color: var(--color-text);
     margin: 0;
     line-height: 1.4;
+    font-weight: 500;
   }
 
   .ws-briefing-inline {
@@ -2034,10 +1993,7 @@
     margin: 0;
     line-height: 1.4;
     font-style: italic;
-    max-width: 600px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    max-width: 700px;
   }
 
   /* ── Main layout ────────────────────────────────────────────────── */
@@ -2250,6 +2206,7 @@
   }
 
   .completion-spec { color: var(--color-info, #1e90ff); }
+  .completion-task { color: var(--color-text-secondary); }
   .completion-agent { color: var(--color-warning); }
   .completion-mr { color: var(--color-text); }
   .completion-merged { color: var(--color-success); font-weight: 600; }
@@ -2272,6 +2229,15 @@
   .completion-gates {
     color: var(--color-success);
     font-weight: 500;
+  }
+
+  .completion-sha {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 3px;
+    border-radius: var(--radius-sm);
   }
 
   /* ── Workspace briefing (inline) ─────────────────────────────────── */
