@@ -3776,21 +3776,31 @@
           {:else if mrAttestation}
             {@const att = mrAttestation.attestation ?? mrAttestation}
             <div class="attestation-block">
-              <div class="attestation-header">
-                <Badge value="Signed" variant="success" />
-                {#if att.attestation_version}
-                  <span class="att-version">v{att.attestation_version}</span>
+              <!-- Verified badge banner -->
+              <div class="att-verified-banner" class:att-verified={!!mrAttestation.signature}>
+                <div class="att-verified-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="28" height="28">
+                    <path d="M12 2L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5L12 2z"/>
+                    {#if mrAttestation.signature}<path d="M9 12l2 2 4-4" stroke-width="2"/>{/if}
+                  </svg>
+                </div>
+                <div class="att-verified-text">
+                  <span class="att-verified-title">{mrAttestation.signature ? 'Verified Attestation' : 'Attestation Bundle'}</span>
+                  {#if att.attestation_version}
+                    <span class="att-version-badge">v{att.attestation_version}</span>
+                  {/if}
+                </div>
+                {#if att.merged_at}
+                  <span class="att-merged-time">{fmtDate(att.merged_at)}</span>
                 {/if}
               </div>
+
               <dl class="entity-meta">
                 {#if att.merge_commit_sha}
                   <dt>Merge commit</dt>
                   <dd>
-                    <code class="sha-badge mono copyable" title="Click to copy: {att.merge_commit_sha}" onclick={() => copyId(att.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.merge_commit_sha); }}>{att.merge_commit_sha.slice(0, 7)}</code>
+                    <code class="sha-badge mono copyable" title={att.merge_commit_sha} onclick={() => copyId(att.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.merge_commit_sha); }}>{att.merge_commit_sha.slice(0, 7)}</code>
                   </dd>
-                {/if}
-                {#if att.merged_at}
-                  <dt>Merged at</dt><dd>{fmtDate(att.merged_at)}</dd>
                 {/if}
                 {#if att.spec_ref}
                   {@const attSpecPath = att.spec_ref.split('@')[0]}
@@ -3805,7 +3815,10 @@
                   <dt>Spec approved</dt><dd><Badge value={att.spec_fully_approved ? 'yes' : 'no'} variant={att.spec_fully_approved ? 'success' : 'warning'} /></dd>
                 {/if}
                 {#if att.author_agent_id}
-                  <dt>Agent</dt><dd><button class="entity-link mono" title={att.author_agent_id} onclick={() => navigateTo('agent', att.author_agent_id)}>{entityName('agent', att.author_agent_id)}</button></dd>
+                  <dt>Author agent</dt>
+                  <dd>
+                    <button class="entity-link mono" title={att.author_agent_id} onclick={() => navigateTo('agent', att.author_agent_id)}>{entityName('agent', att.author_agent_id)}</button>
+                  </dd>
                 {/if}
                 {#if att.mr_id}
                   <dt>MR</dt><dd><button class="entity-link mono" title={att.mr_id} onclick={() => navigateTo('mr', att.mr_id)}>{entityName('mr', att.mr_id)}</button></dd>
@@ -3816,19 +3829,28 @@
                 {#if att.repo_id}
                   <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {att.repo_id}" onclick={() => copyId(att.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.repo_id); }}>{entityName('repo', att.repo_id)}</dd>
                 {/if}
+                {#if att.conversation_sha}
+                  <dt>Conversation</dt>
+                  <dd>
+                    <button class="entity-link mono" title="View agent reasoning for this merge" onclick={() => { activeTab = 'ask-why'; }}>
+                      <code class="sha-badge mono">{att.conversation_sha.slice(0, 7)}</code>
+                      <span class="att-conv-arrow">View reasoning</span>
+                    </button>
+                  </dd>
+                {/if}
                 {#if att.gate_results?.length > 0}
                   {@const passed = att.gate_results.filter(g => g.status === 'Passed' || g.status === 'passed').length}
                   {@const total = att.gate_results.length}
                   <dt>Gates</dt>
                   <dd class="att-gate-summary">
                     <Badge value="{passed}/{total} passed" variant={passed === total ? 'success' : 'warning'} />
-                    <span class="att-gate-names">{att.gate_results.map(g => g.gate_name ?? g.name ?? 'gate').join(', ')}</span>
                   </dd>
                 {/if}
               </dl>
-              <!-- Expand attestation gate results -->
+
+              <!-- Gate results detail list -->
               {#if att.gate_results?.length > 0}
-                <details class="att-gates-detail">
+                <details class="att-gates-detail" open>
                   <summary class="progress-section-label">Gate Results ({att.gate_results.length})</summary>
                   <ul class="gates-list">
                     {#each att.gate_results as gate}
@@ -3872,8 +3894,14 @@
               {/if}
               {#if mrAttestation.signature}
                 <div class="att-sig-block">
-                  <span class="att-sig-label">Signature</span>
-                  <code class="att-sig-value mono copyable" title="Click to copy full signature" onclick={() => copyId(mrAttestation.signature)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mrAttestation.signature); }}>Ed25519 · {mrAttestation.signature.slice(0, 16)}...</code>
+                  <div class="att-sig-header">
+                    <span class="att-sig-label">Ed25519 Signature</span>
+                    <button class="att-sig-copy-btn" title="Copy full signature" onclick={() => copyId(mrAttestation.signature)}>
+                      <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8" height="8" rx="1"/><path d="M3 11V3h8"/></svg>
+                      Copy
+                    </button>
+                  </div>
+                  <code class="att-sig-value mono">{mrAttestation.signature.slice(0, 20)}...</code>
                 </div>
               {/if}
             </div>
@@ -4015,14 +4043,24 @@
             {@const spans = mrTrace.spans ?? []}
             {@const traceId = mrTrace.trace_id ?? mrTrace.id ?? ''}
             {@const rootSpans = mrTrace.root_spans ?? spans.filter(s => !s.parent_span_id).length}
-            <div class="timeline-summary">
-              <span class="timeline-summary-count">{spans.length} spans</span>
-              {#if rootSpans > 0}
-                <span class="timeline-summary-duration">{rootSpans} root span{rootSpans !== 1 ? 's' : ''}</span>
-              {/if}
-              {#if traceId}
-                <code class="sha-badge mono copyable" title="Click to copy trace ID: {traceId}" onclick={() => copyId(traceId)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(traceId); }}>trace:{traceId.length > 16 ? traceId.slice(0, 12) + '...' : traceId}</code>
-              {/if}
+            {@const totalDurUs = spans.reduce((max, s) => Math.max(max, s.duration_us ?? 0), 0)}
+            {@const totalDurMs = totalDurUs > 0 ? Math.round(totalDurUs / 1000) : (mrTrace.duration_ms ?? null)}
+            <div class="trace-header-banner">
+              <div class="trace-header-left">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="20" height="20"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                <span class="trace-header-title">{spans.length} span{spans.length !== 1 ? 's' : ''}</span>
+                {#if rootSpans > 0}
+                  <span class="trace-header-roots">{rootSpans} root</span>
+                {/if}
+              </div>
+              <div class="trace-header-right">
+                {#if totalDurMs != null && totalDurMs > 0}
+                  <span class="trace-header-duration">{totalDurMs < 1000 ? totalDurMs + 'ms' : totalDurMs < 60000 ? (totalDurMs / 1000).toFixed(1) + 's' : (totalDurMs / 60000).toFixed(1) + 'min'}</span>
+                {/if}
+                {#if traceId}
+                  <code class="sha-badge mono copyable" title="Click to copy trace ID: {traceId}" onclick={() => copyId(traceId)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(traceId); }}>trace:{traceId.length > 16 ? traceId.slice(0, 12) + '...' : traceId}</code>
+                {/if}
+              </div>
             </div>
             {#if spans.length > 0}
               {@const spanTree = (() => {
@@ -4067,7 +4105,7 @@
                       {#if span.graph_node_id}
                         <button class="entity-link mono trace-graph-link" onclick={() => navigateTo('node', span.graph_node_id, { id: span.graph_node_id })} title="Linked to graph node: {span.graph_node_id}">
                           <svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M6 6l4 4"/></svg>
-                          graph
+                          {span.graph_node_name ?? entityName('node', span.graph_node_id)}
                         </button>
                       {/if}
                     </div>
@@ -6186,16 +6224,82 @@
     gap: var(--space-3);
   }
 
-  .attestation-header {
+  .att-verified-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: color-mix(in srgb, var(--color-text-muted) 6%, transparent);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+  .att-verified-banner.att-verified {
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
+    border-color: color-mix(in srgb, var(--color-success) 30%, transparent);
+  }
+  .att-verified-icon {
+    flex-shrink: 0;
+    color: var(--color-text-muted);
+  }
+  .att-verified-banner.att-verified .att-verified-icon {
+    color: var(--color-success);
+  }
+  .att-verified-text {
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    flex: 1;
+    min-width: 0;
   }
-
-  .att-version {
+  .att-verified-title {
+    font-weight: 600;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+  .att-version-badge {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-muted);
+    border: 1px solid var(--color-border);
+  }
+  .att-merged-time {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
-    font-family: var(--font-mono);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .att-conv-arrow {
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    margin-left: var(--space-1);
+  }
+
+  .att-sig-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .att-sig-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 2px 8px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+  .att-sig-copy-btn:hover {
+    color: var(--color-text);
+    border-color: var(--color-border-focus);
+    background: var(--color-surface-elevated);
   }
 
   .att-completion-block {
@@ -6538,6 +6642,51 @@
   }
 
   /* ── Trace waterfall (hierarchical flame graph style) ───────────────── */
+  .trace-header-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-info) 6%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-info) 20%, transparent);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-3);
+  }
+  .trace-header-left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--color-text-secondary);
+  }
+  .trace-header-left svg {
+    flex-shrink: 0;
+    color: var(--color-info);
+  }
+  .trace-header-title {
+    font-weight: 600;
+    font-size: var(--text-sm);
+  }
+  .trace-header-roots {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+  .trace-header-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .trace-header-duration {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    padding: 1px 8px;
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--color-border);
+  }
+
   .trace-waterfall {
     display: flex;
     flex-direction: column;
