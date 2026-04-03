@@ -81,6 +81,9 @@
   // Evaluative lens metric mode
   let evaluativeMetric = $state('complexity'); // 'complexity' | 'churn' | 'incoming_calls' | 'test_coverage'
 
+  // Trace path numbering state (BFS order badges for "Trace from here")
+  let tracePathOrder = $state(new Map()); // nodeId → step number (1-based)
+
   // Timeline scrubber state
   let timelineEnabled = $state(false);
   let timelineRange = $state([0, 100]); // percentage range [from, to]
@@ -576,7 +579,7 @@
       const items = graphNodes.map(n => ({
         id: n.id,
         node: n,
-        weight: Math.max(1, descendantCounts.get(n.id) ?? 1),
+        weight: Math.max(1, n.complexity ?? (descendantCounts.get(n.id) ?? 1)),
       }));
       const rects = squarify(items, x, y, w, h);
       const gap = Math.max(1, Math.min(4, Math.min(w, h) * 0.008));
@@ -1134,6 +1137,57 @@
     // Draw edges first (below nodes)
     drawEdges(ctx);
 
+    // Draw view query group boundaries
+    if (activeQuery?.groups?.length) {
+      const GROUP_COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#ef4444'];
+      for (let gi = 0; gi < activeQuery.groups.length; gi++) {
+        const group = activeQuery.groups[gi];
+        const groupNodeNames = group.nodes ?? group.node_names ?? [];
+        if (groupNodeNames.length === 0) continue;
+        // Find bounding box of all nodes in this group
+        let gMinX = Infinity, gMinY = Infinity, gMaxX = -Infinity, gMaxY = -Infinity;
+        for (const name of groupNodeNames) {
+          const n = nodes.find(nd => nd.name === name || nd.qualified_name === name || nd.id === name);
+          if (!n) continue;
+          const ln = layoutNodeMap.get(n.id);
+          if (!ln) continue;
+          const l = ln.x - ln.w / 2, r = ln.x + ln.w / 2;
+          const t = ln.y - ln.h / 2, b = ln.y + ln.h / 2;
+          if (l < gMinX) gMinX = l;
+          if (r > gMaxX) gMaxX = r;
+          if (t < gMinY) gMinY = t;
+          if (b > gMaxY) gMaxY = b;
+        }
+        if (gMinX === Infinity) continue;
+        const pad = 12 / cam.zoom;
+        const gColor = GROUP_COLORS[gi % GROUP_COLORS.length];
+        const tl = worldToScreen(gMinX - pad, gMinY - pad);
+        const br = worldToScreen(gMaxX + pad, gMaxY + pad);
+        const gw = br.x - tl.x, gh = br.y - tl.y;
+        ctx.save();
+        ctx.globalAlpha = 0.15;
+        ctx.fillStyle = gColor;
+        roundRect(ctx, tl.x, tl.y, gw, gh, 8);
+        ctx.fill();
+        ctx.globalAlpha = 0.6;
+        ctx.strokeStyle = gColor;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        roundRect(ctx, tl.x, tl.y, gw, gh, 8);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Group label
+        const label = group.label ?? group.name ?? `Group ${gi + 1}`;
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = gColor;
+        ctx.font = 'bold 11px system-ui, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(label, tl.x + 6, tl.y - 3);
+        ctx.restore();
+      }
+    }
+
     // Draw nodes — hierarchical traversal that prunes invisible subtrees
     function drawNodeRecursive(ln) {
       // Frustum cull
@@ -1212,6 +1266,36 @@
       ctx.textBaseline = 'bottom';
       ctx.fillText(label, s.x, s.y - sh / 2 - 4);
       ctx.restore();
+    }
+
+    // Trace path numbered badges (BFS order from trace source)
+    if (tracePathOrder.size > 0) {
+      for (const [nodeId, stepNum] of tracePathOrder) {
+        const ln = layoutNodeMap.get(nodeId);
+        if (!ln) continue;
+        if (!isVisible(ln)) continue;
+        const op = nodeOpacity(ln);
+        if (op < 0.05) continue;
+        const s = worldToScreen(ln.x, ln.y);
+        const sw = ln.w * cam.zoom;
+        const sh = ln.h * cam.zoom;
+        if (sw < 20 || sh < 14) continue;
+        const badgeR = Math.max(7, Math.min(12, sw * 0.08));
+        const bx = s.x - sw / 2 + badgeR + 2;
+        const by = s.y - sh / 2 + badgeR + 2;
+        ctx.save();
+        ctx.globalAlpha = 0.92;
+        ctx.fillStyle = '#7c3aed';
+        ctx.beginPath();
+        ctx.arc(bx, by, badgeR, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.font = `bold ${Math.max(7, badgeR)}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(stepNum), bx, by);
+        ctx.restore();
+      }
     }
 
     // Narrative step markers
@@ -1336,9 +1420,10 @@
     ctx.fillStyle = 'rgba(20,28,48,0.9)';
     ctx.fill();
 
-    // Border — colored by spec confidence
+    // Border — colored by spec confidence, width scaled by churn
     let borderColor = ln.id === selectedNodeId ? '#ef4444' : specBorderColor(n);
-    let borderWidth = ln.id === selectedNodeId ? 2 : 1;
+    const churnWidth = 1 + Math.min((n?.churn_count_30d ?? 0) / 3, 4);
+    let borderWidth = ln.id === selectedNodeId ? 2 : churnWidth;
 
     const qColor = queryNodeColor(ln);
     if (qColor && ln.id !== selectedNodeId) {
@@ -1920,6 +2005,12 @@
       onNodeDetail({ ...node, _action: 'view_provenance' });
     } else if (action === 'history') {
       onNodeDetail({ ...node, _action: 'view_history' });
+    } else if (action === 'open_in_code') {
+      const filePath = node.file_path ?? '';
+      const line = node.line_start ?? 1;
+      // Open file in the repo's source view at the given line
+      const codeUrl = `/${repoId}/blob/main/${filePath}#L${line}`;
+      window.open(codeUrl, '_blank');
     } else if (action === 'drill') {
       // Drill into this node via Contains edges
       const children = treeData.parentToChildren.get(node.id) ?? [];
@@ -1971,6 +2062,60 @@
         chatInput.focus();
       }
     }
+  }
+
+  // ── Minimap click-to-navigate ──────────────────────────────────────
+  function minimapToWorld(clientX, clientY) {
+    const rect = minimapEl?.getBoundingClientRect();
+    if (!rect) return null;
+    const mx = clientX - rect.left;
+    const my = clientY - rect.top;
+    // Reproduce the minimap transform to invert it
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const ln of layoutNodes) {
+      if (ln.kind !== 'tree-group' || ln.treeDepth > 0) continue;
+      const l = ln.x - ln.w / 2, r = ln.x + ln.w / 2;
+      const t = ln.y - ln.h / 2, b = ln.y + ln.h / 2;
+      if (l < minX) minX = l;
+      if (r > maxX) maxX = r;
+      if (t < minY) minY = t;
+      if (b > maxY) maxY = b;
+    }
+    if (minX === Infinity) return null;
+    const mw = maxX - minX, mh = maxY - minY;
+    const scale = Math.min((MINIMAP_W - 8) / mw, (MINIMAP_H - 8) / mh);
+    const ox = MINIMAP_W / 2 - (minX + mw / 2) * scale;
+    const oy = MINIMAP_H / 2 - (minY + mh / 2) * scale;
+    const wx = (mx - ox) / scale;
+    const wy = (my - oy) / scale;
+    return { x: wx, y: wy };
+  }
+
+  function onMinimapClick(e) {
+    const w = minimapToWorld(e.clientX, e.clientY);
+    if (!w) return;
+    targetCam.x = w.x;
+    targetCam.y = w.y;
+    scheduleRedraw();
+    e.stopPropagation();
+  }
+
+  let minimapDragging = $state(false);
+
+  function onMinimapMouseDown(e) {
+    if (e.button !== 0) return;
+    minimapDragging = true;
+    onMinimapClick(e);
+    const onMove = (ev) => {
+      if (!minimapDragging) return;
+      const w = minimapToWorld(ev.clientX, ev.clientY);
+      if (w) { targetCam.x = w.x; targetCam.y = w.y; scheduleRedraw(); }
+    };
+    const onUp = () => { minimapDragging = false; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    e.stopPropagation();
+    e.preventDefault();
   }
 
   // ── Touch handlers ────────────────────────────────────────────────
@@ -2035,6 +2180,44 @@
     scheduleRedraw();
   });
 
+  // View query zoom directive: auto-zoom to fit highlighted nodes after query is applied
+  $effect(() => {
+    if (!activeQuery?.zoom || activeQuery.zoom !== 'fit') return;
+    if (!queryMatchedIds || queryMatchedIds.size === 0) return;
+    // Find bounding box of all matched nodes in layout
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const ln of layoutNodes) {
+      const nid = ln.node?.id ?? ln.id;
+      if (!queryMatchedIds.has(nid)) continue;
+      const l = ln.x - ln.w / 2, r = ln.x + ln.w / 2;
+      const t = ln.y - ln.h / 2, b = ln.y + ln.h / 2;
+      if (l < minX) minX = l;
+      if (r > maxX) maxX = r;
+      if (t < minY) minY = t;
+      if (b > maxY) maxY = b;
+    }
+    if (minX === Infinity) return;
+    const mw = maxX - minX, mh = maxY - minY;
+    const fitZoom = Math.min(W / (mw || 1), H / (mh || 1)) * 0.8;
+    targetCam = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom: Math.min(fitZoom, MAX_ZOOM) };
+    scheduleRedraw();
+  });
+
+  // Compute trace path BFS ordering when a trace query is active
+  $effect(() => {
+    if (!activeQuery?.annotation?.title?.startsWith('Trace from:') || !queryMatchedWithDepth) {
+      tracePathOrder = new Map();
+      return;
+    }
+    // Sort matched nodes by BFS depth, then assign step numbers
+    const entries = [...queryMatchedWithDepth.entries()].sort((a, b) => a[1] - b[1]);
+    const ordered = new Map();
+    for (let i = 0; i < entries.length; i++) {
+      ordered.set(entries[i][0], i + 1);
+    }
+    tracePathOrder = ordered;
+  });
+
   // Sync canvasState zoom
   $effect(() => {
     if (Math.abs(cam.zoom - (canvasState.zoom ?? 1)) > 0.01) {
@@ -2086,7 +2269,7 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn" disabled title="Observable (requires production telemetry)" type="button">Observable</button>
+      <button class="tb-btn" disabled type="button">Observable <span class="observable-note">(requires production telemetry)</span></button>
     </div>
 
     {#if lens === 'evaluative'}
@@ -2175,7 +2358,7 @@
 
       <!-- Minimap -->
       <div class="treemap-minimap" aria-hidden="true">
-        <canvas bind:this={minimapEl} style="width: {MINIMAP_W}px; height: {MINIMAP_H}px"></canvas>
+        <canvas bind:this={minimapEl} style="width: {MINIMAP_W}px; height: {MINIMAP_H}px" onclick={onMinimapClick} onmousedown={onMinimapMouseDown}></canvas>
       </div>
 
       <!-- Context menu -->
@@ -2222,6 +2405,12 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
             View details
           </button>
+          {#if contextMenu.node.file_path}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('open_in_code')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              Open in code
+            </button>
+          {/if}
           <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('provenance')}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
             View provenance
@@ -2362,6 +2551,7 @@
   .tb-btn:hover:not(:disabled) { background: rgba(51,65,85,0.5); color: #e2e8f0; }
   .tb-btn.active { background: #1e293b; color: #e2e8f0; box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .observable-note { font-size: 10px; font-style: italic; color: #64748b; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .eval-metric-group { display: flex; gap: 2px; align-items: center; }
 
@@ -2401,7 +2591,7 @@
     position: absolute; bottom: 12px; right: 12px; border: 1px solid #334155;
     border-radius: 8px; overflow: hidden; background: #0f0f1a;
     box-shadow: 0 4px 16px rgba(0,0,0,0.5); opacity: 0.8; transition: opacity 0.15s;
-    pointer-events: none;
+    cursor: pointer;
   }
   .treemap-minimap:hover { opacity: 1; }
 
