@@ -91,6 +91,58 @@
     return v === 'public' ? 'pub' : v === 'private' ? 'priv' : v;
   });
 
+  // Compute story: how the node evolved over milestones/commits
+  let story = $derived.by(() => {
+    if (!node) return null;
+    const created = node.created_at ? new Date(node.created_at * 1000) : null;
+    const modified = node.last_modified_at ? new Date(node.last_modified_at * 1000) : null;
+    const firstSeen = node.first_seen_at ? new Date(node.first_seen_at * 1000) : null;
+
+    // Count modifications (field changes, related edges added)
+    const relatedEdges = edges.filter(e => {
+      const src = e.source_id ?? e.from;
+      const tgt = e.target_id ?? e.to;
+      return src === node.id || tgt === node.id;
+    });
+
+    const modCount = node.churn_count_30d ?? 0;
+    const fieldCount = relationships.fields.length;
+
+    let parts = [];
+    if (created) parts.push(`Created ${created.toLocaleDateString()}`);
+    if (node.created_sha) parts.push(`in commit ${node.created_sha.slice(0, 7)}`);
+    if (fieldCount > 0) parts.push(`${fieldCount} field${fieldCount !== 1 ? 's' : ''}`);
+    if (modCount > 0) parts.push(`${modCount} change${modCount !== 1 ? 's' : ''} in last 30 days`);
+    if (relatedEdges.length > 0) parts.push(`${relatedEdges.length} relationship${relatedEdges.length !== 1 ? 's' : ''}`);
+
+    return parts.length > 0 ? parts.join('. ') + '.' : null;
+  });
+
+  // For endpoint nodes: extract request/response info from metadata
+  let endpointMeta = $derived.by(() => {
+    if (!node || node.node_type !== 'endpoint') return null;
+    // Look for RoutesTo edges from this endpoint
+    const routesTo = [];
+    for (const e of edges) {
+      const src = e.source_id ?? e.from;
+      const et = (e.edge_type ?? '').toLowerCase();
+      if (et === 'routes_to' && src === node.id) {
+        const handler = nodes.find(n => n.id === (e.target_id ?? e.to));
+        if (handler) routesTo.push(handler);
+      }
+    }
+    // Parse metadata if available
+    let method = '';
+    let path = '';
+    try {
+      if (node.doc_comment) {
+        const parts = node.doc_comment.match(/^(GET|POST|PUT|DELETE|PATCH)\s+(.+)/);
+        if (parts) { method = parts[1]; path = parts[2]; }
+      }
+    } catch(e) {}
+    return { routesTo, method, path };
+  });
+
   function handleNodeClick(targetNode) {
     if (targetNode) {
       onNavigate(targetNode);
@@ -140,6 +192,36 @@
         <div class="detail-section">
           <h4 class="detail-section-title">Spec</h4>
           <p class="detail-spec">{node.spec_path ?? relationships.governedBy}</p>
+        </div>
+      {/if}
+
+      <!-- Story (evolution narrative) -->
+      {#if story}
+        <div class="detail-section">
+          <h4 class="detail-section-title">Story</h4>
+          <p class="detail-story">{story}</p>
+        </div>
+      {/if}
+
+      <!-- Endpoint-specific view -->
+      {#if node.node_type === 'endpoint' && endpointMeta}
+        <div class="detail-section">
+          <h4 class="detail-section-title">Endpoint</h4>
+          {#if endpointMeta.method || endpointMeta.path}
+            <p class="detail-endpoint-method"><code>{endpointMeta.method} {endpointMeta.path}</code></p>
+          {/if}
+          {#if endpointMeta.routesTo.length > 0}
+            <p class="detail-endpoint-label">Routes to:</p>
+            <ul class="detail-ref-list">
+              {#each endpointMeta.routesTo as handler}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(handler)} type="button">
+                    <span class="ref-type">{handler.node_type}</span> {handler.name}
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
         </div>
       {/if}
 

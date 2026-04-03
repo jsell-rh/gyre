@@ -50,8 +50,9 @@
     const socket = new WebSocket(url);
 
     socket.onopen = () => {
-      socket.send(JSON.stringify({ type: 'auth', token: getAuthToken() }));
-      // Request saved views list
+      // Auth is handled via HTTP header (Bearer token in cookie/header),
+      // no separate auth message needed.
+      // Request saved views list.
       socket.send(JSON.stringify({ type: 'list_views' }));
       status = 'ready';
       reconnectCount = 0;
@@ -95,17 +96,17 @@
   function handleMessage(msg) {
     switch (msg.type) {
       case 'text': {
-        if (msg.streaming) {
+        if (!msg.done) {
+          // Streaming chunk: accumulate text
           streamingText += msg.content ?? '';
           status = 'thinking';
         } else {
-          // Final text message
-          if (streamingText) {
-            messages = [...messages, { role: 'assistant', content: streamingText + (msg.content ?? ''), timestamp: Date.now() }];
-            streamingText = '';
-          } else {
-            messages = [...messages, { role: 'assistant', content: msg.content ?? '', timestamp: Date.now() }];
+          // Final text message (done=true)
+          const fullText = streamingText + (msg.content ?? '');
+          if (fullText.trim()) {
+            messages = [...messages, { role: 'assistant', content: fullText, timestamp: Date.now() }];
           }
+          streamingText = '';
           status = 'ready';
           scrollToBottom();
         }
@@ -132,8 +133,11 @@
         else if (msg.status === 'ready') status = 'ready';
         break;
       }
-      case 'views_list': {
-        // Handled by parent through savedViews prop
+      case 'views': {
+        // Update saved views list from server response
+        if (msg.views) {
+          savedViews = msg.views;
+        }
         break;
       }
       case 'error': {
@@ -159,8 +163,8 @@
     scrollToBottom();
 
     ws.send(JSON.stringify({
-      type: 'question',
-      content: text,
+      type: 'message',
+      text: text,
       canvas_state: canvasState,
     }));
 
@@ -178,7 +182,14 @@
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const name = prompt($t('explorer_chat.save_view_name'));
     if (!name?.trim()) return;
-    ws.send(JSON.stringify({ type: 'save_view', name: name.trim() }));
+    // Find the last view query from conversation
+    const lastViewQuery = [...messages].reverse().find(m => m.viewQuery)?.viewQuery ?? {};
+    ws.send(JSON.stringify({
+      type: 'save_view',
+      name: name.trim(),
+      description: `Saved from explorer chat`,
+      query: lastViewQuery,
+    }));
   }
 
   // ── Keyboard ─────────────────────────────────────────────────────────────
