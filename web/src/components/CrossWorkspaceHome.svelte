@@ -11,8 +11,9 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
-  import { entityName, shortId } from '../lib/entityNames.svelte.js';
+  import { entityName, shortId, formatId } from '../lib/entityNames.svelte.js';
   import { relativeTime } from '../lib/timeFormat.js';
+  import Icon from '../lib/Icon.svelte';
   import Modal from '../lib/Modal.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
@@ -701,17 +702,33 @@
               {#if ws.description}
                 <span class="workspace-description">{ws.description}</span>
               {/if}
-              <div class="workspace-stats-row">
-                <span class="ws-stat-chip" title="{wsRepos.length} repos">
-                  {wsRepos.length} {wsRepos.length === 1 ? 'repo' : 'repos'}
+              <!-- Mini pipeline: Repos → Specs → Agents → MRs -->
+              <div class="ws-pipeline-row">
+                <span class="ws-pipe-stage" class:ws-pipe-active={wsRepos.length > 0}>
+                  <Icon name="code" size={10} />
+                  <span class="ws-pipe-count">{wsRepos.length}</span>
+                  <span class="ws-pipe-label">repos</span>
                 </span>
-                {#if wsSpecs.length > 0}
-                  <span class="ws-stat-chip" title="{wsSpecs.length} specs">
-                    {wsSpecs.length} specs
-                    {#if wsPendingSpecs > 0}<span class="ws-stat-alert">{wsPendingSpecs} pending</span>{/if}
-                    {#if wsApprovedSpecs > 0}<span class="ws-stat-active">{wsApprovedSpecs} approved</span>{/if}
-                  </span>
-                {/if}
+                <span class="ws-pipe-arrow">→</span>
+                <span class="ws-pipe-stage" class:ws-pipe-active={wsSpecs.length > 0} class:ws-pipe-warn={wsPendingSpecs > 0}>
+                  <Icon name="spec" size={10} />
+                  <span class="ws-pipe-count">{wsSpecs.length}</span>
+                  <span class="ws-pipe-label">specs</span>
+                </span>
+                <span class="ws-pipe-arrow">→</span>
+                <span class="ws-pipe-stage" class:ws-pipe-active={wsActiveAgents.length > 0} class:ws-pipe-success={wsActiveAgents.length > 0}>
+                  <Icon name="agent" size={10} />
+                  <span class="ws-pipe-count">{wsActiveAgents.length}</span>
+                  <span class="ws-pipe-label">agents</span>
+                </span>
+                <span class="ws-pipe-arrow">→</span>
+                <span class="ws-pipe-stage" class:ws-pipe-active={wsOpenMrs.length > 0} class:ws-pipe-danger={wsGateFailures.length > 0}>
+                  <Icon name="git-merge" size={10} />
+                  <span class="ws-pipe-count">{wsOpenMrs.length}</span>
+                  <span class="ws-pipe-label">MRs</span>
+                </span>
+              </div>
+              <div class="workspace-stats-row">
                 {#if wsActiveAgents.length > 0}
                   <span class="ws-stat-chip ws-stat-agents" title="{wsActiveAgents.length} active agents">
                     {wsActiveAgents.length} active {wsActiveAgents.length === 1 ? 'agent' : 'agents'}
@@ -1438,6 +1455,38 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  /* Mini pipeline in workspace rows */
+  .ws-pipeline-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .ws-pipe-stage {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+    opacity: 0.5;
+  }
+
+  .ws-pipe-active { opacity: 1; }
+  .ws-pipe-warn { color: var(--color-warning); opacity: 1; }
+  .ws-pipe-success { color: var(--color-success); opacity: 1; }
+  .ws-pipe-danger { color: var(--color-danger); opacity: 1; }
+
+  .ws-pipe-count { font-weight: 600; }
+  .ws-pipe-label { font-weight: 400; }
+
+  .ws-pipe-arrow {
+    font-size: 9px;
+    color: var(--color-text-muted);
+    opacity: 0.4;
   }
 
   .workspace-stats-row {
