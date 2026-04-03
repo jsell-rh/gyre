@@ -1099,7 +1099,6 @@
     <div class="focused-dashboard">
 
       <!-- ── Pipeline progress: the primary status summary ────────── -->
-      {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
         <div class="pipeline-progress" data-testid="pipeline-progress" role="navigation" aria-label="Development pipeline">
           <!-- Workspace health indicator -->
           {#if pipelineMrs.failed_gates > 0}
@@ -1171,7 +1170,6 @@
             </span>
           {/if}
         </div>
-      {/if}
 
       <!-- ── Briefing — one-line workspace summary ─────────────────── -->
       {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
