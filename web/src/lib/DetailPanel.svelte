@@ -717,13 +717,18 @@
         agentDetail = norm ? { ...norm, _container: container, _workload: workload, _touchedPaths: touchedPaths, _card: card, _costs } : norm;
         // Pre-cache a few recent logs for the info view
         if (!agentLogs) agentLogs = Array.isArray(logs) ? logs : (logs?.logs ?? logs?.entries ?? []);
-        // Resolve spec_path via task if available
+        // Resolve spec_path + task context via task if available
         const taskId = norm?.task_id;
-        if (taskId && !norm?.spec_path) {
+        if (taskId) {
           try {
             const task = await api.task(taskId);
-            if (task?.spec_path) {
-              agentDetail = { ...agentDetail, spec_path: task.spec_path, _taskTitle: task.title };
+            if (task) {
+              agentDetail = {
+                ...agentDetail,
+                spec_path: agentDetail.spec_path ?? task.spec_path,
+                _taskTitle: task.title,
+                _taskDescription: task.description,
+              };
             }
           } catch { /* best effort */ }
         }
@@ -2300,6 +2305,34 @@
                   <dt>Running</dt><dd>{elapsed < 60 ? `${elapsed}m` : `${Math.round(elapsed / 60)}h ${elapsed % 60}m`}</dd>
                 {/if}
               </dl>
+
+              <!-- Task description (why this agent exists) -->
+              {#if ag._taskTitle || ag._taskDescription}
+                <div class="agent-container-info agent-task-context">
+                  <span class="progress-section-label">Task</span>
+                  <p class="agent-task-title">{ag._taskTitle ?? 'Untitled'}</p>
+                  {#if ag._taskDescription}
+                    <p class="agent-task-desc">{ag._taskDescription}</p>
+                  {/if}
+                </div>
+              {/if}
+
+              <!-- Log preview for failed/dead agents -->
+              {#if (ag.status === 'failed' || ag.status === 'dead') && agentLogs && agentLogs.length > 0}
+                <div class="agent-container-info agent-log-preview">
+                  <span class="progress-section-label">Recent Logs</span>
+                  <div class="log-preview-lines">
+                    {#each agentLogs.slice(-5) as log}
+                      {@const lvl = (log.level ?? '').toLowerCase() || (typeof log.message === 'string' && log.message.match(/\b(error|err|fail)\b/i) ? 'error' : typeof log.message === 'string' && log.message.match(/\bwarn\b/i) ? 'warn' : 'info')}
+                      <div class="log-preview-line log-preview-{lvl}">
+                        <span class="log-preview-level">{lvl}</span>
+                        <span class="log-preview-msg mono">{(log.message ?? log.content ?? log.line ?? JSON.stringify(log)).slice(0, 200)}</span>
+                      </div>
+                    {/each}
+                  </div>
+                  <button class="entity-link" onclick={() => { activeTab = 'history'; }}>View full logs →</button>
+                </div>
+              {/if}
 
               <!-- Workload attestation (compute target, hostname, alive) -->
               {#if ag._workload}
@@ -4854,6 +4887,73 @@
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
     margin-bottom: var(--space-2);
+  }
+
+  /* Agent task context */
+  .agent-task-title {
+    font-weight: 600;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    margin: 0 0 2px 0;
+  }
+
+  .agent-task-desc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
+    line-height: 1.4;
+  }
+
+  /* Log preview for failed agents */
+  .log-preview-lines {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin-bottom: var(--space-2);
+    max-height: 160px;
+    overflow-y: auto;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+  }
+
+  .log-preview-line {
+    display: flex;
+    gap: var(--space-2);
+    padding: 2px var(--space-1);
+    font-size: 11px;
+    line-height: 1.3;
+    border-radius: 2px;
+  }
+
+  .log-preview-error {
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  }
+
+  .log-preview-warn {
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  }
+
+  .log-preview-level {
+    flex-shrink: 0;
+    width: 36px;
+    text-transform: uppercase;
+    font-size: 9px;
+    font-weight: 700;
+    padding-top: 1px;
+  }
+
+  .log-preview-error .log-preview-level { color: var(--color-danger); }
+  .log-preview-warn .log-preview-level { color: var(--color-warning); }
+  .log-preview-info .log-preview-level { color: var(--color-text-muted); }
+
+  .log-preview-msg {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text);
   }
 
   .conv-summary {
