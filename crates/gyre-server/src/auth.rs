@@ -399,11 +399,20 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
+        // Check Authorization header first, then fall back to ?token= query param
+        // (needed for WebSocket connections where browser API doesn't support headers).
         let token = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
+            .or_else(|| {
+                parts.uri.query().and_then(|q| {
+                    q.split('&')
+                        .find(|p| p.starts_with("token="))
+                        .map(|p| &p[6..])
+                })
+            })
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response())?;
 
         // 1. Global auth token (dev / system usage). Use constant-time compare.

@@ -46,7 +46,8 @@
 
     status = 'connecting';
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/api/v1/repos/${repoId}/explorer`;
+    const token = getAuthToken();
+    const url = `${protocol}//${window.location.host}/api/v1/repos/${repoId}/explorer?token=${encodeURIComponent(token)}`;
     const socket = new WebSocket(url);
 
     socket.onopen = () => {

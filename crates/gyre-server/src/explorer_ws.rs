@@ -33,6 +33,15 @@ use crate::{auth::AuthenticatedAgent, AppState};
 /// Max agent refinement turns (spec says 3).
 const MAX_AGENT_TURNS: usize = 3;
 
+/// Max messages per session before requiring reconnect (prevents unbounded history).
+const MAX_SESSION_MESSAGES: usize = 50;
+
+/// Max conversation history entries before summarization window.
+const MAX_CONVERSATION_HISTORY: usize = 20;
+
+/// Minimum interval between user messages (rate limiting), in milliseconds.
+const MIN_MESSAGE_INTERVAL_MS: u64 = 1000;
+
 pub async fn explorer_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -105,6 +114,13 @@ async fn handle_explorer_session(
 
     // Maintain conversation history across messages within a session.
     let mut conversation_history: Vec<ConversationMessage> = Vec::new();
+    let mut message_count: usize = 0;
+    let mut last_message_time = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(10))
+        .unwrap_or_else(std::time::Instant::now);
+    // Cache graph data for the session (avoid re-fetching per message).
+    let mut cached_nodes: Option<Vec<gyre_common::graph::GraphNode>> = None;
+    let mut cached_edges: Option<Vec<gyre_common::graph::GraphEdge>> = None;
 
     while let Some(msg) = receiver.next().await {
         let msg = match msg {
@@ -132,6 +148,32 @@ async fn handle_explorer_session(
 
         match client_msg {
             ExplorerClientMessage::Message { text, canvas_state } => {
+                // Rate limiting: enforce minimum interval between messages.
+                let now = std::time::Instant::now();
+                let elapsed = now.duration_since(last_message_time).as_millis() as u64;
+                if elapsed < MIN_MESSAGE_INTERVAL_MS {
+                    let err = ExplorerServerMessage::Error {
+                        message: "Please wait before sending another message.".to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                        .await;
+                    continue;
+                }
+                last_message_time = now;
+
+                // Session message limit: prevent unbounded history growth.
+                message_count += 1;
+                if message_count > MAX_SESSION_MESSAGES {
+                    let err = ExplorerServerMessage::Error {
+                        message: "Session message limit reached. Please reconnect for a fresh session.".to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                        .await;
+                    continue;
+                }
+
                 // Send thinking status
                 send_status(&mut sender, "thinking").await;
 
@@ -143,6 +185,8 @@ async fn handle_explorer_session(
                     &canvas_state,
                     &mut sender,
                     &mut conversation_history,
+                    &mut cached_nodes,
+                    &mut cached_edges,
                 )
                 .await
                 {
@@ -309,49 +353,74 @@ async fn handle_explorer_session(
 async fn send_status(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     status: &str,
-) {
+) -> bool {
     let msg = ExplorerServerMessage::Status {
         status: status.to_string(),
     };
-    let _ = sender
+    sender
         .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
-        .await;
+        .await
+        .is_ok()
 }
 
-/// Stream text to the client token-by-token using a channel.
+/// Stream text to the client in word-boundary chunks for natural display.
+/// Returns false if the client disconnected.
 async fn stream_text(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     text: &str,
     done: bool,
-) {
-    // Stream in chunks to provide progressive feedback.
-    // For short text, send all at once. For longer text, chunk it.
-    const CHUNK_SIZE: usize = 80;
-    if text.len() <= CHUNK_SIZE || done {
+) -> bool {
+    // Stream in word-boundary chunks for more natural progressive display.
+    // Aim for ~40-60 char chunks, breaking at word boundaries.
+    const TARGET_CHUNK: usize = 50;
+
+    if text.len() <= TARGET_CHUNK || done {
         let msg = ExplorerServerMessage::Text {
             content: text.to_string(),
             done,
         };
-        let _ = sender
+        return sender
             .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
-            .await;
-    } else {
-        let chars: Vec<char> = text.chars().collect();
-        let chunks: Vec<String> = chars
-            .chunks(CHUNK_SIZE)
-            .map(|c| c.iter().collect::<String>())
-            .collect();
-        for (i, chunk) in chunks.iter().enumerate() {
-            let is_last = i == chunks.len() - 1;
-            let msg = ExplorerServerMessage::Text {
-                content: chunk.clone(),
-                done: is_last && done,
-            };
-            let _ = sender
-                .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
-                .await;
-        }
+            .await
+            .is_ok();
     }
+
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    while start < bytes.len() {
+        let end = (start + TARGET_CHUNK).min(bytes.len());
+        // Find word boundary
+        let chunk_end = if end >= bytes.len() {
+            bytes.len()
+        } else {
+            // Look backwards for a space
+            let mut pos = end;
+            while pos > start && bytes[pos] != b' ' && bytes[pos] != b'\n' {
+                pos -= 1;
+            }
+            if pos == start {
+                end // No space found, use the target
+            } else {
+                pos + 1 // Include the space in this chunk
+            }
+        };
+
+        let chunk = &text[start..chunk_end];
+        let is_last = chunk_end >= bytes.len();
+        let msg = ExplorerServerMessage::Text {
+            content: chunk.to_string(),
+            done: is_last && done,
+        };
+        if sender
+            .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+            .await
+            .is_err()
+        {
+            return false; // Client disconnected
+        }
+        start = chunk_end;
+    }
+    true
 }
 
 // ── Tool definitions for the explorer agent ──────────────────────────────────
@@ -429,6 +498,8 @@ async fn run_explorer_agent(
     canvas_state: &gyre_common::view_query::CanvasState,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     conversation_history: &mut Vec<ConversationMessage>,
+    cached_nodes: &mut Option<Vec<gyre_common::graph::GraphNode>>,
+    cached_edges: &mut Option<Vec<gyre_common::graph::GraphEdge>>,
 ) -> anyhow::Result<()> {
     let llm = match &state.llm {
         Some(llm) => llm.clone(),
@@ -446,26 +517,73 @@ async fn run_explorer_agent(
     let model = std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
     let llm_port = llm.for_model(&model);
 
-    // Load graph data once for tool execution
+    // Load graph data (cached across messages in the session).
     let rid = Id::new(repo_id);
-    let nodes = state
-        .graph_store
-        .list_nodes(&rid, None)
-        .await
-        .unwrap_or_default();
-    let edges = state
-        .graph_store
-        .list_edges(&rid, None)
-        .await
-        .unwrap_or_default();
+    if cached_nodes.is_none() {
+        *cached_nodes = Some(
+            state
+                .graph_store
+                .list_nodes(&rid, None)
+                .await
+                .unwrap_or_default(),
+        );
+        *cached_edges = Some(
+            state
+                .graph_store
+                .list_edges(&rid, None)
+                .await
+                .unwrap_or_default(),
+        );
+    }
+    let nodes = cached_nodes.as_ref().unwrap();
+    let edges = cached_edges.as_ref().unwrap();
 
     let system_prompt = build_system_prompt();
     let tools = explorer_tool_definitions();
 
-    // Build user message with canvas context
-    let canvas_json = serde_json::to_string(canvas_state).unwrap_or_else(|_| "{}".to_string());
-    let user_content =
-        format!("Canvas state:\n```json\n{canvas_json}\n```\n\nUser question: {user_question}");
+    // Build user message with structured canvas context
+    let mut canvas_context_parts = Vec::new();
+    if let Some(ref sel) = canvas_state.selected_node {
+        let qname = sel.qualified_name.as_deref().unwrap_or(&sel.name);
+        canvas_context_parts.push(format!(
+            "Selected node: {qname} (type: {}, id: {})",
+            sel.node_type, sel.id
+        ));
+    }
+    if !canvas_state.visible_tree_groups.is_empty() {
+        canvas_context_parts.push(format!(
+            "Visible groups: {}",
+            canvas_state.visible_tree_groups.join(", ")
+        ));
+    }
+    if let Some(ref lens) = canvas_state.active_lens {
+        if !lens.is_empty() {
+            canvas_context_parts.push(format!("Active lens: {lens}"));
+        }
+    }
+    let canvas_summary = if canvas_context_parts.is_empty() {
+        String::new()
+    } else {
+        format!("[Canvas: {}]\n\n", canvas_context_parts.join(" | "))
+    };
+    let user_content = format!("{canvas_summary}{user_question}");
+
+    // Truncate conversation history to prevent unbounded growth.
+    // Keep the first message (for context) and the most recent messages.
+    if conversation_history.len() > MAX_CONVERSATION_HISTORY {
+        let keep_recent = MAX_CONVERSATION_HISTORY - 2;
+        let summary_msg = ConversationMessage {
+            role: "user".to_string(),
+            content: ConversationContent::Text(
+                "[Earlier conversation messages were summarized to save context. The conversation continues below.]".to_string(),
+            ),
+        };
+        let recent: Vec<ConversationMessage> =
+            conversation_history.split_off(conversation_history.len() - keep_recent);
+        conversation_history.clear();
+        conversation_history.push(summary_msg);
+        conversation_history.extend(recent);
+    }
 
     // Add to persistent conversation history
     conversation_history.push(ConversationMessage {
@@ -492,7 +610,9 @@ async fn run_explorer_agent(
 
             // Stream the clean text (without view_query block)
             if !clean_text.is_empty() {
-                stream_text(sender, &clean_text, is_final && view_query.is_none()).await;
+                if !stream_text(sender, &clean_text, is_final && view_query.is_none()).await {
+                    break; // Client disconnected
+                }
             }
 
             // If a view query was found, perform server-enforced self-check
@@ -568,8 +688,11 @@ async fn run_explorer_agent(
             }
         }
 
-        // If no tool calls, we're done
-        if response.tool_calls.is_empty() || response.stop_reason == "end_turn" {
+        // If no tool calls or stop_reason indicates end, we're done
+        if response.tool_calls.is_empty()
+            || response.stop_reason == "end_turn"
+            || response.stop_reason == "max_tokens"
+        {
             // Add final assistant response to conversation history
             conversation_history.push(ConversationMessage {
                 role: "assistant".to_string(),
@@ -578,7 +701,9 @@ async fn run_explorer_agent(
             break;
         }
 
-        send_status(sender, "refining").await;
+        if !send_status(sender, "refining").await {
+            break; // Client disconnected
+        }
 
         // Add the assistant's response (with tool_use blocks) to the conversation
         let mut assistant_blocks = Vec::new();
@@ -816,61 +941,82 @@ async fn execute_tool(
 }
 
 fn build_system_prompt() -> String {
-    r##"You are the Gyre Explorer agent. You help users understand their codebase by generating view queries that visualize the knowledge graph.
+    r##"You are the Gyre Explorer agent. You help humans understand codebases they didn't write by generating interactive visualizations of the knowledge graph.
 
-You have access to tools that query the knowledge graph. When the user asks a question:
+## Context
+User messages may include a [Canvas: ...] prefix showing what's currently selected/visible.
+- "Selected node: X" means the user clicked on X — $selected resolves to it
+- "Visible groups: A, B" means those tree groups are expanded on screen
+- "Active lens: structural|evaluative|trace" shows the current analysis mode
 
+## Workflow
 1. Call graph_summary to understand the codebase structure
 2. If you need specific nodes, call graph_nodes with a name_pattern
 3. If you need relationships, call graph_edges
 4. Generate a view query JSON and validate it with graph_query_dryrun
-5. If the dry-run has warnings (too many matches, unresolved nodes), refine and dry-run again
-6. When satisfied, output the view query in a <view_query>{ ... JSON ... }</view_query> block
-7. Also provide a text explanation of what the visualization shows
+5. If the dry-run has warnings, refine and dry-run again
+6. Output the view query in a <view_query>{ ... JSON ... }</view_query> block
+7. Provide a text explanation of what the visualization reveals
 
-You maintain conversation history across messages — you can reference prior questions and answers.
-When the user says "what about this one?" they mean the currently selected node ($selected).
+## Grounding Rules
+- EVERY claim must be traceable to actual nodes/edges from tool results
+- When naming nodes, use the exact qualified_name from graph_nodes results
+- Never invent node names — always verify via graph_nodes or search first
+- When explaining structure, cite the specific edge types connecting nodes
+- If you're unsure whether a node exists, search for it before referencing it
 
 ## View Query Grammar
 
 ### Scope Types
 - `all`: Show everything
-- `focus`: BFS from a node. Fields: node (name or "$clicked"), edges (array of edge types), direction ("outgoing"/"incoming"/"both"), depth (number)
-- `filter`: Filter by node_types (array), computed expression, or name_pattern
+- `focus`: BFS from a node. Fields: node (name or "$clicked"), edges (array), direction ("outgoing"/"incoming"/"both"), depth (number)
+- `filter`: Filter by node_types (array), computed (expression), or name_pattern
 - `test_gaps`: Functions not reachable from any test
-- `concept`: Cross-cutting concept. Fields: seed_nodes (array), expand_edges (array), expand_depth (number)
+- `diff`: Changed nodes between commits. Fields: from_commit, to_commit
+- `concept`: Cross-cutting concept. Fields: seed_nodes (array), expand_edges (array), expand_depth (number), expand_direction ("outgoing"/"incoming"/"both")
 
 ### Edge Types
 calls, contains, implements, depends_on, field_of, returns, routes_to, governed_by
 
+### Computed Expressions (for filter scope)
+- `$where(property, 'op', value)` — property: complexity, churn, test_coverage, incoming_calls, outgoing_calls, field_count, test_fragility. op: >, >=, <, <=, ==
+- `$callers(node, depth?)`, `$callees(node, depth?)` — call graph traversal
+- `$implementors(trait)` — types implementing a trait
+- `$fields(type)` — fields of a type
+- `$descendants(module)`, `$ancestors(node)` — containment hierarchy
+- `$governed_by(spec_path)` — nodes governed by a spec
+- `$test_unreachable`, `$test_reachable` — test coverage
+- `$intersect(A, B)`, `$union(A, B)`, `$diff(A, B)` — set operations on expressions
+- `$reachable(node, [edge_types], direction, depth)` — general BFS
+
 ### Emphasis
-- `highlight.matched`: { color, label } for matched nodes
+- `highlight`: { matched: { color, label } } for matched nodes
 - `dim_unmatched`: opacity 0.0-1.0 for non-matched
 - `tiered_colors`: array of colors by BFS depth (e.g. ["#ef4444", "#f97316", "#eab308", "#94a3b8"])
-- `heat`: { metric, palette } — metric can be incoming_calls, complexity, churn, test_fragility
+- `heat`: { metric, palette } — metric: incoming_calls, complexity, churn, test_fragility, test_coverage
 - `badges`: { template } — e.g. "{{count}} calls"
 
 ### Other Fields
-- `edges.filter`: array of edge types to show
+- `edges`: { filter: [edge types] }
 - `zoom`: "fit" or "current"
-- `annotation`: { title, description } — use $name for focused node name, {{count}} for result count
-- `groups`: array of { name, nodes: [node names], color }
-- `callouts`: array of { node_name, text, color }
-- `narrative`: array of { node_name, text, order }
+- `annotation`: { title, description } — $name for focused node name, {{count}} for result count, {{group_count}} for group count
+- `groups`: array of { name, nodes: [qualified node names], color }
+- `callouts`: array of { node: "qualified_name", text, color }
+- `narrative`: array of { node: "qualified_name", text, order }
 
 ## Rules
-1. Be specific with node names — use qualified names when ambiguous
-2. Always provide a text explanation alongside the view query
-3. Use $selected to reference the node the user clicked
-4. For interactive queries, use $clicked so each click re-runs the traversal
+1. Use exact qualified names from tool results — never guess
+2. Always explain what the visualization reveals and why it matters
+3. Use $selected when referring to the user's clicked node
+4. For interactive (click-to-explore) queries, use $clicked in the focus node
 5. Keep groups focused (< 20 nodes each)
-6. Prefer "fit" zoom so the result is visible
-7. ALWAYS call graph_summary first to understand what's in the graph
-8. ALWAYS dry-run your view query before finalizing it
-9. If a dry-run returns warnings, refine the query and dry-run again
+6. Prefer "fit" zoom
+7. ALWAYS call graph_summary first
+8. ALWAYS dry-run before finalizing
+9. Refine if dry-run returns warnings
 
 ## Output Format
-- Text explanation (conversational, concise)
+- Conversational explanation (what it shows, what's interesting, what to look at)
 - <view_query>{ ... JSON ... }</view_query> block"##.to_string()
 }
 
@@ -1028,12 +1174,19 @@ This shows all callers of TaskPort."#;
     }
 
     #[test]
-    fn test_conversation_history_prompt() {
-        // Verify that the system prompt mentions conversation history
+    fn test_grounding_and_canvas_instructions() {
         let prompt = build_system_prompt();
         assert!(
-            prompt.contains("conversation history"),
-            "System prompt should mention conversation history"
+            prompt.contains("Grounding Rules"),
+            "System prompt should contain grounding instructions"
+        );
+        assert!(
+            prompt.contains("Canvas"),
+            "System prompt should explain canvas state format"
+        );
+        assert!(
+            prompt.contains("EVERY claim must be traceable"),
+            "System prompt should require grounded claims"
         );
     }
 }

@@ -22,8 +22,14 @@ function inlineMarkdown(line) {
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     // Italic
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    // Links
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Links — sanitize href to prevent javascript: XSS
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
+      const trimmed = url.trim().toLowerCase();
+      if (trimmed.startsWith('javascript:') || trimmed.startsWith('data:') || trimmed.startsWith('vbscript:')) {
+        return text; // Strip dangerous links, show text only
+      }
+      return `<a href="${url}" target="_blank" rel="noopener">${text}</a>`;
+    });
 }
 
 export function renderMarkdown(md) {
