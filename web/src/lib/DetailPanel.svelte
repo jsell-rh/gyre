@@ -3107,13 +3107,13 @@
               <div class="progress-bar-fill" style="width: {pct}%"></div>
             </div>
             {#if specProgress.tasks?.length > 0}
-              <span class="progress-section-label">Tasks</span>
+              <span class="progress-section-label">Tasks ({specProgress.tasks.length})</span>
               <ul class="task-list">
                 {#each specProgress.tasks as task}
                   <li class="task-item clickable-row" onclick={() => navigateTo('task', task.id ?? task.task_id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('task', task.id ?? task.task_id, task); }}>
                     <Badge value={task.status} variant={taskStatusColor(task.status)} />
                     <span class="task-title">{task.title}</span>
-                    {#if task.priority && task.priority !== 'medium'}
+                    {#if task.priority}
                       <span class="task-priority priority-{task.priority}">{task.priority}</span>
                     {/if}
                     {#if task.agent_id}
@@ -3126,14 +3126,40 @@
               <p class="no-data">{$t('detail_panel.no_tasks')}</p>
             {/if}
             {#if specProgress.mrs?.length > 0}
-              <span class="progress-section-label">Merge Requests</span>
+              <span class="progress-section-label">Merge Requests ({specProgress.mrs.length})</span>
               <ul class="task-list">
                 {#each specProgress.mrs as mr}
                   <li class="task-item clickable-row" onclick={() => navigateTo('mr', mr.id ?? mr.mr_id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', mr.id ?? mr.mr_id, mr); }}>
                     <Badge value={mr.status} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
                     <span class="task-title">{mr.title}</span>
+                    {#if mr.gate_summary}
+                      <span class="mr-gate-summary mono">{mr.gate_summary}</span>
+                    {:else if mr.gates_passed != null && mr.gates_total != null}
+                      <span class="mr-gate-summary mono">{mr.gates_passed}/{mr.gates_total} gates</span>
+                    {/if}
+                    {#if mr.additions != null || mr.deletions != null}
+                      <span class="mr-diff-stats mono">
+                        {#if mr.additions != null}<span class="diff-add">+{mr.additions}</span>{/if}
+                        {#if mr.deletions != null}<span class="diff-del">-{mr.deletions}</span>{/if}
+                      </span>
+                    {/if}
                     {#if mr.source_branch}
                       <span class="task-agent mono">{mr.source_branch}</span>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if specProgress.agents?.length > 0}
+              <span class="progress-section-label">Agents ({specProgress.agents.length})</span>
+              <ul class="task-list">
+                {#each specProgress.agents as agent}
+                  {@const agentId = agent.id ?? agent.agent_id}
+                  <li class="task-item clickable-row" onclick={() => navigateTo('agent', agentId, agent)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('agent', agentId, agent); }}>
+                    <Badge value={agent.status ?? 'unknown'} variant={agent.status === 'running' ? 'info' : agent.status === 'completed' ? 'success' : agent.status === 'failed' ? 'danger' : 'muted'} />
+                    <span class="task-title">{entityName('agent', agentId)}</span>
+                    {#if agent.task_id}
+                      <button class="entity-link mono" title={agent.task_id} onclick={(e) => { e.stopPropagation(); navigateTo('task', agent.task_id); }}>{entityName('task', agent.task_id)}</button>
                     {/if}
                   </li>
                 {/each}
@@ -3209,16 +3235,28 @@
                   {@const kind = typeof link === 'object' ? (link.kind ?? link.link_type ?? link.type) : null}
                   {@const direction = typeof link === 'object' ? link.direction : null}
                   {@const isConflict = kind === 'conflicts_with' || kind === 'conflicts'}
+                  {@const isImplements = kind === 'implements' || kind === 'implemented_by'}
+                  {@const isExtends = kind === 'extends' || kind === 'extended_by'}
+                  {@const approvalStatus = typeof link === 'object' ? (link.approval_status ?? link.status) : null}
                   <li class="link-item" class:link-conflict={isConflict}>
                     {#if kind}
+                      <span class="link-type-icon" class:link-type-conflict={isConflict} class:link-type-implements={isImplements} class:link-type-extends={isExtends}>
+                        {#if isConflict}&#9888;{:else if isImplements}&#8594;{:else if isExtends}&#8599;{:else}&#8596;{/if}
+                      </span>
                       <Badge
                         value={kind.replace(/_/g, ' ')}
-                        variant={isConflict ? 'danger' : 'info'}
+                        variant={isConflict ? 'danger' : isImplements ? 'success' : 'info'}
                       />
                     {/if}
-                    <span class="link-direction">{direction === 'inbound' ? '← from' : '→ to'}</span>
+                    <span class="link-direction">{direction === 'inbound' ? '<- from' : '-> to'}</span>
                     <button class="entity-link mono" title="Navigate to {target}" onclick={() => navigateTo('spec', target, { path: target, repo_id: entity?.data?.repo_id })}>{target.split('/').pop()}</button>
                     <span class="link-full-path mono">{target}</span>
+                    {#if approvalStatus}
+                      <Badge
+                        value={approvalStatus}
+                        variant={approvalStatus === 'approved' ? 'success' : approvalStatus === 'rejected' ? 'danger' : approvalStatus === 'draft' ? 'warning' : 'muted'}
+                      />
+                    {/if}
                   </li>
                 {/each}
               </ul>
@@ -3298,29 +3336,58 @@
                 {#each Array(4) as _}<Skeleton width="100%" height="2rem" />{/each}
               </div>
             {:else if specHistory?.length > 0}
-              <div class="history-list">
-                {#each specHistory as ev}
-                  <div class="history-item">
-                    <div class="history-row">
-                      <Badge
-                        value={ev.event}
-                        variant={ev.event === 'approved' ? 'success' : ev.event === 'rejected' || ev.event === 'invalidated' || ev.event === 'revoked' ? 'danger' : 'muted'}
-                      />
-                      {#if ev.user_id || ev.approver_id}
-                        {@const reviewerId = ev.user_id || ev.approver_id}
-                        <span class="history-user mono" title={reviewerId}>{reviewerId === 'human-reviewer' || reviewerId === 'system' ? reviewerId : entityName('agent', reviewerId)}</span>
+              <div class="history-list history-timeline">
+                {#each specHistory as ev, idx}
+                  {@const eventType = ev.event ?? ev.action ?? 'unknown'}
+                  {@const isApproved = eventType === 'approved'}
+                  {@const isRejected = eventType === 'rejected' || eventType === 'invalidated'}
+                  {@const isRevoked = eventType === 'revoked'}
+                  <div class="history-item history-timeline-item">
+                    <div class="history-timeline-marker" class:marker-approved={isApproved} class:marker-rejected={isRejected} class:marker-revoked={isRevoked}>
+                      {#if isApproved}
+                        <span class="timeline-icon" aria-label="Approved">&#10003;</span>
+                      {:else if isRejected}
+                        <span class="timeline-icon" aria-label="Rejected">&#10007;</span>
+                      {:else if isRevoked}
+                        <span class="timeline-icon" aria-label="Revoked">!</span>
                       {:else}
-                        <span class="history-user mono">—</span>
+                        <span class="timeline-icon" aria-label={eventType}>&#8226;</span>
                       {/if}
-                      <span class="history-time">{fmtDate(ev.timestamp || ev.approved_at)}</span>
                     </div>
-                    {#if ev.sha || ev.spec_sha}
-                      {@const evSha = ev.sha || ev.spec_sha}
-                      <code class="sha-badge mono copyable" title="Click to copy: {evSha}" onclick={() => copyId(evSha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(evSha); }}>{evSha.slice(0, 7)}</code>
+                    {#if idx < specHistory.length - 1}
+                      <div class="history-timeline-line"></div>
                     {/if}
-                    {#if ev.reason}
-                      <p class="history-reason">{ev.reason}</p>
-                    {/if}
+                    <div class="history-timeline-content">
+                      <div class="history-row">
+                        <Badge
+                          value={eventType}
+                          variant={isApproved ? 'success' : isRejected || isRevoked ? 'danger' : 'muted'}
+                        />
+                        {#if ev.user_id || ev.approver_id}
+                          {@const reviewerId = ev.user_id || ev.approver_id}
+                          {#if reviewerId === 'human-reviewer' || reviewerId === 'system'}
+                            <span class="history-user mono" title={reviewerId}>{reviewerId}</span>
+                          {:else}
+                            <button class="entity-link mono" title={reviewerId} onclick={() => navigateTo('agent', reviewerId)}>{entityName('agent', reviewerId)}</button>
+                          {/if}
+                        {:else}
+                          <span class="history-user mono">--</span>
+                        {/if}
+                        {@const evTs = ev.timestamp || ev.approved_at}
+                        {#if evTs}
+                          <span class="history-time" title={formatDate(evTs)}>{relativeTime(evTs) || formatDate(evTs)}</span>
+                        {:else}
+                          <span class="history-time">--</span>
+                        {/if}
+                      </div>
+                      {#if ev.sha || ev.spec_sha}
+                        {@const evSha = ev.sha || ev.spec_sha}
+                        <code class="sha-badge mono copyable" title="Click to copy: {evSha}" onclick={() => copyId(evSha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(evSha); }}>{evSha.slice(0, 7)}</code>
+                      {/if}
+                      {#if ev.reason}
+                        <p class="history-reason">{ev.reason}</p>
+                      {/if}
+                    </div>
                   </div>
                 {/each}
               </div>
@@ -7904,5 +7971,119 @@
     background: color-mix(in srgb, var(--color-danger) 8%, transparent);
     border-radius: var(--radius-sm);
     line-height: 1.4;
+  }
+
+  /* ── History timeline ──────────────────────────────────────────────────── */
+  .history-timeline {
+    position: relative;
+  }
+
+  .history-timeline-item {
+    position: relative;
+    padding-left: var(--space-6);
+  }
+
+  .history-timeline-marker {
+    position: absolute;
+    left: 0;
+    top: var(--space-2);
+    width: 1.25rem;
+    height: 1.25rem;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--color-surface-elevated);
+    border: 2px solid var(--color-border);
+    z-index: 1;
+  }
+
+  .history-timeline-marker.marker-approved {
+    border-color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 15%, var(--color-surface-elevated));
+  }
+
+  .history-timeline-marker.marker-rejected {
+    border-color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 15%, var(--color-surface-elevated));
+  }
+
+  .history-timeline-marker.marker-revoked {
+    border-color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 15%, var(--color-surface-elevated));
+  }
+
+  .timeline-icon {
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .marker-approved .timeline-icon {
+    color: var(--color-success);
+  }
+
+  .marker-rejected .timeline-icon {
+    color: var(--color-danger);
+  }
+
+  .marker-revoked .timeline-icon {
+    color: var(--color-warning);
+  }
+
+  .history-timeline-line {
+    position: absolute;
+    left: calc(0.625rem - 1px);
+    top: calc(var(--space-2) + 1.25rem);
+    bottom: calc(-1 * var(--space-1));
+    width: 2px;
+    background: var(--color-border);
+  }
+
+  .history-timeline-content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  /* ── MR diff stats in progress tab ─────────────────────────────────────── */
+  .mr-gate-summary {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .mr-diff-stats {
+    font-size: var(--text-xs);
+    display: inline-flex;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .diff-add {
+    color: var(--color-success);
+  }
+
+  .diff-del {
+    color: var(--color-danger);
+  }
+
+  /* ── Link type icons ───────────────────────────────────────────────────── */
+  .link-type-icon {
+    font-size: var(--text-sm);
+    flex-shrink: 0;
+    color: var(--color-text-muted);
+  }
+
+  .link-type-icon.link-type-conflict {
+    color: var(--color-danger);
+  }
+
+  .link-type-icon.link-type-implements {
+    color: var(--color-success);
+  }
+
+  .link-type-icon.link-type-extends {
+    color: var(--color-info);
   }
 </style>
