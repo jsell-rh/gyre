@@ -71,7 +71,10 @@ pub use git_ops::GitOpsPort;
 pub use graph::GraphPort;
 pub use jj_ops::{JjChange, JjOpsPort};
 pub use kv_store::KvJsonStore;
-pub use llm::{LlmPort, LlmPortFactory};
+pub use llm::{
+    ContentBlock, ConversationContent, ConversationMessage, LlmPort, LlmPortFactory, ToolCall,
+    ToolCallingResponse, ToolDefinition,
+};
 pub use llm_config::LlmConfigRepository;
 pub use merge_queue::MergeQueueRepository;
 pub use merge_request::MergeRequestRepository;
