@@ -102,31 +102,22 @@
       </div>
     {/if}
 
-    <!-- Mini pipeline flow — shows where this repo is in the lifecycle -->
+    <!-- Compact stats row — clickable counts link to repo tabs -->
     {#if stats.specs > 0 || stats.tasks > 0 || stats.agents > 0 || stats.mrs > 0}
-      <div class="repo-card-pipeline">
-        <button class="repo-pipe-stage" class:repo-pipe-active={specBreakdown?.pending > 0} class:repo-pipe-done={stats.specs > 0 && !specBreakdown?.pending} onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending)` : ''}">
-          <span class="repo-pipe-count">{stats.specs}</span>
-          <span class="repo-pipe-label">Specs</span>
-        </button>
-        <span class="repo-pipe-arrow">→</span>
-        <button class="repo-pipe-stage" class:repo-pipe-active={stats.tasks > 0} onclick={(e) => handleStatClick('tasks', e)} title="{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}">
-          <span class="repo-pipe-count">{stats.tasks}</span>
-          <span class="repo-pipe-label">Tasks</span>
-        </button>
-        <span class="repo-pipe-arrow">→</span>
-        <button class="repo-pipe-stage" class:repo-pipe-active={stats.agents > 0} onclick={(e) => handleStatClick('agents', e)} title="{stats.agents} active agent{stats.agents !== 1 ? 's' : ''}">
-          <span class="repo-pipe-count">{stats.agents}</span>
-          <span class="repo-pipe-label">Agents</span>
-        </button>
-        <span class="repo-pipe-arrow">→</span>
-        <button class="repo-pipe-stage" class:repo-pipe-active={stats.openMrs > 0} class:repo-pipe-warn={stats.failedGates > 0} onclick={(e) => handleStatClick('mrs', e)} title="{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{stats.openMrs > 0 ? ` (${stats.openMrs} open)` : ''}{stats.failedGates > 0 ? ` — ${stats.failedGates} gate failures` : ''}">
-          <span class="repo-pipe-count">{stats.mrs}</span>
-          <span class="repo-pipe-label">MRs</span>
-        </button>
-        {#if stats.mrs > 0 || stats.specs > 0}
-          <button class="repo-pipe-code" onclick={(e) => handleStatClick('code', e)} title="Browse code with agent attribution">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="10" height="10"><path d="M5 4L1 8l4 4M11 4l4 4-4 4"/></svg>
+      <div class="repo-card-stats">
+        {#if stats.specs > 0}
+          <button class="repo-stat" class:repo-stat-warn={specBreakdown?.pending > 0} onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending)` : ''}">
+            <span class="repo-stat-count">{stats.specs}</span> spec{stats.specs !== 1 ? 's' : ''}
+          </button>
+        {/if}
+        {#if stats.tasks > 0}
+          <button class="repo-stat" onclick={(e) => handleStatClick('tasks', e)} title="{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}">
+            <span class="repo-stat-count">{stats.tasks}</span> task{stats.tasks !== 1 ? 's' : ''}
+          </button>
+        {/if}
+        {#if stats.mrs > 0}
+          <button class="repo-stat" class:repo-stat-danger={stats.failedGates > 0} onclick={(e) => handleStatClick('mrs', e)} title="{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{stats.failedGates > 0 ? ` — ${stats.failedGates} gate failures` : ''}">
+            <span class="repo-stat-count">{stats.mrs}</span> MR{stats.mrs !== 1 ? 's' : ''}
           </button>
         {/if}
       </div>
@@ -281,79 +272,40 @@
   .gate-mini-pass { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
   .gate-mini-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
 
-  /* Mini pipeline flow in repo card */
-  .repo-card-pipeline {
+  /* Compact stats row */
+  .repo-card-stats {
     display: flex;
     align-items: center;
-    gap: 3px;
-    font-size: var(--text-xs);
+    gap: 6px;
+    font-size: 11px;
     margin-top: var(--space-1);
     padding-top: var(--space-1);
     border-top: 1px solid var(--color-border);
   }
 
-  .repo-pipe-stage {
-    display: flex;
-    flex-direction: column;
+  .repo-stat {
+    display: inline-flex;
     align-items: center;
-    gap: 0;
-    padding: 1px 4px;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-family: var(--font-body);
-    min-width: 32px;
-    transition: all var(--transition-fast);
-  }
-
-  .repo-pipe-stage:hover {
-    background: var(--color-surface-elevated);
-    border-color: var(--color-border);
-  }
-
-  .repo-pipe-count {
-    font-size: var(--text-sm);
-    font-weight: 700;
-    font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    line-height: 1;
-  }
-
-  .repo-pipe-active .repo-pipe-count { color: var(--color-primary); }
-  .repo-pipe-done .repo-pipe-count { color: var(--color-success); }
-  .repo-pipe-warn .repo-pipe-count { color: var(--color-danger); }
-
-  .repo-pipe-label {
-    font-size: 9px;
-    font-weight: 500;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-
-  .repo-pipe-arrow {
-    color: var(--color-text-muted);
-    font-size: 8px;
-    opacity: 0.5;
-    flex-shrink: 0;
-  }
-
-  .repo-pipe-code {
-    display: flex;
-    align-items: center;
-    padding: 2px 4px;
+    gap: 2px;
+    padding: 0;
     background: transparent;
     border: none;
-    border-radius: var(--radius-sm);
     cursor: pointer;
+    font-family: var(--font-body);
+    font-size: inherit;
     color: var(--color-text-muted);
-    margin-left: auto;
-    transition: color var(--transition-fast), background var(--transition-fast);
+    transition: color var(--transition-fast);
   }
 
-  .repo-pipe-code:hover {
-    color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  .repo-stat:hover { color: var(--color-primary); }
+
+  .repo-stat-count {
+    font-weight: 700;
+    font-family: var(--font-mono);
   }
+
+  .repo-stat-warn { color: var(--color-warning); }
+  .repo-stat-warn .repo-stat-count { color: var(--color-warning); }
+  .repo-stat-danger { color: var(--color-danger); }
+  .repo-stat-danger .repo-stat-count { color: var(--color-danger); }
 </style>
