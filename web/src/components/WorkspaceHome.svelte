@@ -1587,7 +1587,7 @@
                         {@const mrStatus = mr.status ?? 'open'}
                         {@const gates = mr._gates}
                         {@const ds = mr.diff_stats}
-                        <tr class="ws-entity-row" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })}>
+                        <tr class="ws-entity-row" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })} title="Click to view diff, gates, attestation, and agent reasoning">
                           <td class="entity-name-cell">
                             <Icon name="git-merge" size={12} />
                             <span class="entity-primary-name">{mr.title ?? 'Untitled MR'}</span>
