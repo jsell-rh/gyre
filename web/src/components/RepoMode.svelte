@@ -668,10 +668,10 @@
                   </td>
                   <td>
                     {#if mr.diff_stats}
-                      <span class="diff-stat-compact">
+                      <button class="diff-stat-compact diff-stat-link" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', mr.id, { ...mr, _openTab: 'diff' }); }} title="View code diff">
                         <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
                         <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
-                      </span>
+                      </button>
                     {/if}
                   </td>
                   <td class="cell-time">{relativeTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</td>
@@ -1544,6 +1544,25 @@
 
   .diff-ins { color: var(--color-success); font-weight: 600; }
   .diff-del { color: var(--color-danger); font-weight: 600; }
+
+  .diff-stat-link {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+  }
+
+  .diff-stat-link:hover {
+    background: var(--color-surface-elevated);
+    text-decoration: underline;
+  }
+
+  .diff-stat-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+  }
 
   /* Gate badges in MR table */
 
