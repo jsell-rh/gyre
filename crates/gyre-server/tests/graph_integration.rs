@@ -1637,3 +1637,206 @@ async fn test_divergence_skips_human_pushed_deltas() {
 
     std::env::remove_var("GYRE_DIVERGENCE_THRESHOLD");
 }
+
+// ── Saved Views Integration Tests ────────────────────────────────────────────
+
+/// POST + GET /api/v1/repos/{id}/views — create and list saved views.
+#[tokio::test]
+async fn test_saved_views_crud() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-views").await;
+
+    // List empty
+    let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
+    assert_eq!(resp.status(), 200);
+    let views: Vec<Value> = resp.json().await.unwrap();
+    assert!(views.is_empty());
+
+    // Create a view
+    let resp = ctx
+        .post_json(
+            &format!("/api/v1/repos/{repo_id}/views"),
+            json!({
+                "name": "Test View",
+                "description": "A test saved view",
+                "query": {
+                    "scope": { "type": "all" },
+                    "emphasis": { "dim_unmatched": 0.3 },
+                    "annotation": { "title": "All nodes" }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let view: Value = resp.json().await.unwrap();
+    let view_id = view["id"].as_str().unwrap();
+    assert_eq!(view["name"].as_str().unwrap(), "Test View");
+    assert!(view["query"]["scope"]["type"].as_str().unwrap() == "all");
+
+    // List — should have 1
+    let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
+    let views: Vec<Value> = resp.json().await.unwrap();
+    assert_eq!(views.len(), 1);
+
+    // Get by ID
+    let resp = ctx
+        .get(&format!("/api/v1/repos/{repo_id}/views/{view_id}"))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let fetched: Value = resp.json().await.unwrap();
+    assert_eq!(fetched["name"].as_str().unwrap(), "Test View");
+
+    // Update
+    let resp = ctx
+        .client
+        .put(ctx.url(&format!("/api/v1/repos/{repo_id}/views/{view_id}")))
+        .bearer_auth(TOKEN)
+        .json(&json!({
+            "name": "Updated View",
+            "query": { "scope": { "type": "test_gaps" } }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let updated: Value = resp.json().await.unwrap();
+    assert_eq!(updated["name"].as_str().unwrap(), "Updated View");
+
+    // Delete
+    let resp = ctx
+        .client
+        .delete(ctx.url(&format!("/api/v1/repos/{repo_id}/views/{view_id}")))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    // List — should be empty again
+    let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
+    let views: Vec<Value> = resp.json().await.unwrap();
+    assert!(views.is_empty());
+}
+
+/// MCP graph_summary tool returns valid summary.
+#[tokio::test]
+async fn test_mcp_graph_summary() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-mcp-summary").await;
+
+    // Populate some nodes
+    let n1 = make_node(&repo_id, "TaskService", NodeType::Type);
+    let n2 = make_node(&repo_id, "create_task", NodeType::Function);
+    let n3 = make_node(&repo_id, "main_mod", NodeType::Module);
+    ctx.state.graph_store.create_node(n1.clone()).await.unwrap();
+    ctx.state.graph_store.create_node(n2.clone()).await.unwrap();
+    ctx.state.graph_store.create_node(n3.clone()).await.unwrap();
+
+    let e1 = make_edge(&repo_id, &n2.id, &n1.id, EdgeType::Calls);
+    ctx.state.graph_store.create_edge(e1).await.unwrap();
+
+    let resp = ctx
+        .post_json(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_summary",
+                    "arguments": { "repo_id": repo_id }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let content = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    assert!(content.contains("type"), "summary should include type counts");
+    assert!(content.contains("function"), "summary should include function counts");
+    assert!(content.contains("calls"), "summary should include edge counts");
+}
+
+/// MCP graph_query_dryrun tool validates view queries.
+#[tokio::test]
+async fn test_mcp_graph_query_dryrun() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-mcp-dryrun").await;
+
+    // Populate nodes
+    let n1 = make_node(&repo_id, "Alpha", NodeType::Function);
+    let n2 = make_node(&repo_id, "Beta", NodeType::Function);
+    ctx.state.graph_store.create_node(n1.clone()).await.unwrap();
+    ctx.state.graph_store.create_node(n2.clone()).await.unwrap();
+
+    let e = make_edge(&repo_id, &n1.id, &n2.id, EdgeType::Calls);
+    ctx.state.graph_store.create_edge(e).await.unwrap();
+
+    let resp = ctx
+        .post_json(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": repo_id,
+                        "query": {
+                            "scope": { "type": "focus", "node": "Alpha", "edges": ["calls"], "direction": "outgoing", "depth": 5 },
+                            "emphasis": { "dim_unmatched": 0.12 },
+                            "zoom": "fit",
+                            "annotation": { "title": "Test" }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let content = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        content.contains("matched_nodes"),
+        "dryrun should return matched_nodes"
+    );
+    // Parse the dry-run result
+    let dryrun: Value = serde_json::from_str(content).unwrap();
+    assert!(dryrun["matched_nodes"].as_u64().unwrap() >= 1);
+}
+
+/// MCP graph_nodes tool returns nodes by pattern.
+#[tokio::test]
+async fn test_mcp_graph_nodes() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-mcp-nodes").await;
+
+    let n1 = make_node(&repo_id, "AuthService", NodeType::Type);
+    ctx.state.graph_store.create_node(n1).await.unwrap();
+
+    let resp = ctx
+        .post_json(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_nodes",
+                    "arguments": { "repo_id": repo_id, "name_pattern": "auth" }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let content = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    assert!(content.contains("AuthService"));
+}
