@@ -1115,29 +1115,11 @@
             </div>
           </div>
 
-          <!-- Status line: one sentence + clickable status chips -->
+          <!-- Status line: concise sentence summarizing workspace state -->
           {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-            {#if statusItems.length > 0}
-              <div class="ws-status-chips">
-                {#each statusItems as item}
-                  <button class="ws-status-chip ws-status-chip-{item.variant}" onclick={() => { wsTab = item.tab; userSelectedTab = true; }} title={item.text}>
-                    <span class="ws-status-chip-icon">{item.icon}</span>
-                    {item.text}
-                  </button>
-                {/each}
-              </div>
-            {:else}
-              <p class="ws-header-status">{statusSentence}</p>
-            {/if}
+            <p class="ws-header-status">{statusSentence}</p>
           {:else if workspace.description}
             <p class="ws-header-desc">{workspace.description}</p>
-          {/if}
-
-          <!-- Briefing — only show when LLM summary available -->
-          {#if briefingData && !briefingLoading && (briefingData.summary || briefingData.narrative)}
-            <p class="ws-briefing-inline" data-testid="briefing-inline">{briefingData.summary ?? briefingData.narrative}</p>
-          {:else if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && specs.length === 0 && repos.length === 0}
-            <p class="ws-briefing-inline ws-briefing-idle" data-testid="briefing-inline">Get started by creating a repo and pushing specs.</p>
           {/if}
         </div>
       </header>
@@ -1145,18 +1127,17 @@
       <!-- ── Main content ──────────────────────────────────────────── -->
       <div class="ws-main-col">
 
-      <!-- ── Decisions / Action Needed (compact banner) ──────────── -->
+      <!-- ── Action Needed (compact, dismissible) ──────────── -->
       {#if !decisionsLoading && actionableNotifications.length > 0}
         {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
         <section class="ws-decisions-section" class:decisions-danger={hasDangerDecision} data-testid="section-decisions">
           <div class="decisions-header">
             <h2 class="decisions-title">
-              Needs your attention
-              <span class="decisions-count-badge">{actionableNotifications.length}</span>
+              {actionableNotifications.length} item{actionableNotifications.length !== 1 ? 's need' : ' needs'} attention
             </h2>
             {#if actionableNotifications.length > 3}
               <button class="section-btn" onclick={() => showAllDecisions = !showAllDecisions}>
-                {showAllDecisions ? 'Show less' : `Show all (${actionableNotifications.length})`}
+                {showAllDecisions ? 'Show less' : `Show all`}
               </button>
             {/if}
           </div>
@@ -1226,40 +1207,40 @@
       <!-- ── Main workspace content: tabbed view (repos + entity browse) ── -->
       <div class="dashboard-flow" data-testid="browse-panel">
         <nav class="ws-tab-bar" aria-label="Workspace navigation" data-testid="section-repos">
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'repos'} onclick={() => { wsTab = 'repos'; userSelectedTab = true; }} title="{repos.length} repositories">
-            Repos{#if !reposLoading && repos.length > 0} <span class="ws-tab-count">{repos.length}</span>{/if}
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'repos'} onclick={() => { wsTab = 'repos'; userSelectedTab = true; }}>
+            Repos
           </button>
           <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => {
             const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending');
             if (pendingSpecs.length === 1 && wsTab !== 'specs') { navigateToSpec(pendingSpecs[0]); return; }
             wsTab = 'specs'; userSelectedTab = true;
-          }} title="{specs.length} specs: {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending">
-            Specs{#if !specsLoading && specs.length > 0} <span class="ws-tab-count">{specs.length}</span>{/if}
-            {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
+          }}>
+            Specs
+            {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }} title="{wsTasks.length} tasks: {pipelineTasks.done} done, {pipelineTasks.in_progress} active, {pipelineTasks.blocked} blocked">
-            Tasks{#if !tasksLoading && wsTasks.length > 0} <span class="ws-tab-count">{wsTasks.length}</span>{/if}
-            {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
-            {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
+            Tasks
+            {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked} blocked</span>
+            {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress} active</span>{/if}
           </button>
           <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => {
             const failedMrs = wsMrs.filter(m => m._gates?.failed > 0);
             if (failedMrs.length === 1 && wsTab !== 'mrs') { nav('mr', failedMrs[0].id, { repo_id: failedMrs[0].repository_id ?? failedMrs[0].repo_id, title: failedMrs[0].title, _openTab: 'gates' }); return; }
             wsTab = 'mrs'; userSelectedTab = true;
-          }} title="{wsMrs.length} MRs: {pipelineMrs.open} open, {pipelineMrs.merged} merged{pipelineMrs.failed_gates > 0 ? ', ' + pipelineMrs.failed_gates + ' with failed gates' : ''}">
-            MRs{#if !mrsLoading && wsMrs.length > 0} <span class="ws-tab-count">{wsMrs.length}</span>{/if}
-            {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
-            {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
+          }}>
+            MRs
+            {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates} failed</span>
+            {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open} open</span>{/if}
           </button>
           <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => {
             const activeAgentList = wsAgents.filter(a => a.status === 'active');
             if (activeAgentList.length === 1 && wsTab !== 'agents') { nav('agent', activeAgentList[0].id, { repo_id: activeAgentList[0].repo_id, name: activeAgentList[0].name }); return; }
             wsTab = 'agents'; userSelectedTab = true;
-          }} title="{wsAgents.length} agents: {pipelineAgents.active} active">
-            Agents{#if !agentsLoading && wsAgents.length > 0} <span class="ws-tab-count">{wsAgents.length}</span>{/if}
-            {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
+          }}>
+            Agents
+            {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active} active</span>{/if}
           </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }} title="Recent workspace activity feed">
+          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
             Activity
           </button>
           <span class="ws-tab-spacer"></span>
@@ -3014,19 +2995,19 @@
 
   .ws-tab-badge {
     font-size: 10px;
-    font-weight: 700;
-    background: var(--color-primary);
-    color: var(--color-text-inverse);
-    border-radius: 8px;
-    padding: 0 5px;
-    min-width: 14px;
-    text-align: center;
-    line-height: 16px;
+    font-weight: 600;
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    color: var(--color-primary);
+    border-radius: 999px;
+    padding: 1px 6px;
+    white-space: nowrap;
+    line-height: 14px;
+    margin-left: 2px;
   }
 
-  .ws-tab-badge-warn { background: var(--color-warning); }
-  .ws-tab-badge-danger { background: var(--color-danger); }
-  .ws-tab-badge-success { background: var(--color-success); }
+  .ws-tab-badge-warn { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
+  .ws-tab-badge-danger { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
+  .ws-tab-badge-success { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
 
   .ws-tab-bar-secondary {
     border-radius: var(--radius) var(--radius) 0 0;
