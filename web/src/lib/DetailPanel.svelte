@@ -2047,21 +2047,27 @@
               {#if mrDeps && ((mrDeps.depends_on?.length ?? 0) > 0 || (mrDeps.dependents?.length ?? 0) > 0)}
                 <div class="mr-deps-section">
                   {#if mrDeps.depends_on?.length > 0}
-                    <span class="progress-section-label">Blocked by</span>
+                    <span class="progress-section-label">Depends on ({mrDeps.depends_on.length})</span>
+                    <p class="deps-explain">This MR cannot merge until these are merged first</p>
                     <ul class="task-list">
                       {#each mrDeps.depends_on as depId}
                         <li class="task-item clickable-row" onclick={() => navigateTo('mr', depId)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', depId); }}>
+                          <span class="dep-arrow dep-arrow-in">←</span>
                           <span class="task-title">{entityName('mr', depId)}</span>
+                          <span class="dep-id mono">{sharedFormatId('mr', depId)}</span>
                         </li>
                       {/each}
                     </ul>
                   {/if}
                   {#if mrDeps.dependents?.length > 0}
-                    <span class="progress-section-label">Blocks</span>
+                    <span class="progress-section-label">Blocks ({mrDeps.dependents.length})</span>
+                    <p class="deps-explain">These MRs are waiting for this one to merge</p>
                     <ul class="task-list">
                       {#each mrDeps.dependents as depId}
                         <li class="task-item clickable-row" onclick={() => navigateTo('mr', depId)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', depId); }}>
+                          <span class="dep-arrow dep-arrow-out">→</span>
                           <span class="task-title">{entityName('mr', depId)}</span>
+                          <span class="dep-id mono">{sharedFormatId('mr', depId)}</span>
                         </li>
                       {/each}
                     </ul>
@@ -8212,6 +8218,30 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+  }
+
+  .deps-explain {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
+    font-style: italic;
+  }
+
+  .dep-arrow {
+    font-weight: 700;
+    font-size: var(--text-sm);
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+  }
+
+  .dep-arrow-in { color: var(--color-warning); }
+  .dep-arrow-out { color: var(--color-info, #1e90ff); }
+
+  .dep-id {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
   }
 
   /* ── Provenance chain ─────────────────────────────────────────────────── */
