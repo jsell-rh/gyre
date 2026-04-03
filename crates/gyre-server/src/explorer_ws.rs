@@ -176,7 +176,9 @@ async fn handle_explorer_session(
                 message_count += 1;
                 if message_count > MAX_SESSION_MESSAGES {
                     let err = ExplorerServerMessage::Error {
-                        message: "Session message limit reached. Please reconnect for a fresh session.".to_string(),
+                        message:
+                            "Session message limit reached. Please reconnect for a fresh session."
+                                .to_string(),
                     };
                     let _ = sender
                         .send(Message::Text(serde_json::to_string(&err).unwrap().into()))

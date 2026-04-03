@@ -280,10 +280,8 @@ fn compute_test_reachable(
     // Multi-source BFS: start from ALL test nodes simultaneously.
     // This is O(N + M) instead of O(T * (N + M)).
     let mut reachable = HashSet::new();
-    let mut queue: std::collections::VecDeque<(String, u32)> = test_node_ids
-        .iter()
-        .map(|id| (id.clone(), 0))
-        .collect();
+    let mut queue: std::collections::VecDeque<(String, u32)> =
+        test_node_ids.iter().map(|id| (id.clone(), 0)).collect();
     while let Some((current, depth)) = queue.pop_front() {
         if depth > 100 {
             continue;
@@ -670,9 +668,9 @@ fn resolve_computed_expression(
                                     .iter()
                                     .filter(|(caller_id, et)| {
                                         *et == EdgeType::Calls
-                                            && active_nodes
-                                                .iter()
-                                                .any(|n| n.id.to_string() == *caller_id && n.test_node)
+                                            && active_nodes.iter().any(|n| {
+                                                n.id.to_string() == *caller_id && n.test_node
+                                            })
                                     })
                                     .count()
                             });
@@ -1155,7 +1153,10 @@ pub fn count_distinct_parent_modules(
     }
     // Fall back to counting distinct file_path prefixes if no Contains edges found
     if parents.is_empty() {
-        for node in nodes.iter().filter(|n| matched_ids.contains(&n.id.to_string())) {
+        for node in nodes
+            .iter()
+            .filter(|n| matched_ids.contains(&n.id.to_string()))
+        {
             if let Some(last_sep) = node.file_path.rfind('/') {
                 parents.insert(node.file_path[..last_sep].to_string());
             }
@@ -1343,7 +1344,9 @@ pub fn dry_run(
             .iter()
             .filter_map(|id| {
                 let val = match heat.metric.as_str() {
-                    "complexity" => node_map.get(id).and_then(|n| n.complexity.map(|c| c as f64)),
+                    "complexity" => node_map
+                        .get(id)
+                        .and_then(|n| n.complexity.map(|c| c as f64)),
                     "churn" | "churn_count_30d" => {
                         node_map.get(id).map(|n| n.churn_count_30d as f64)
                     }
@@ -1675,9 +1678,15 @@ mod tests {
         ];
         let edges = vec![make_edge("e1", "t1", "n1", EdgeType::Calls)];
         let result = resolve_scope(&Scope::TestGaps, &nodes, &edges, None);
-        assert!(result.contains("n2"), "Endpoints should appear in test gaps");
+        assert!(
+            result.contains("n2"),
+            "Endpoints should appear in test gaps"
+        );
         assert!(result.contains("n3"), "Types should appear in test gaps");
-        assert!(!result.contains("n4"), "Modules should NOT appear in test gaps");
+        assert!(
+            !result.contains("n4"),
+            "Modules should NOT appear in test gaps"
+        );
     }
 
     #[test]
@@ -2217,13 +2226,12 @@ mod tests {
     #[test]
     fn test_annotation_template_no_focus_node() {
         // When there's no focused node, $name should be removed (not left as literal "$name")
-        let resolved = resolve_annotation_template(
-            "Test gaps: $name ({{count}} nodes)",
-            None,
-            42,
-            5,
+        let resolved =
+            resolve_annotation_template("Test gaps: $name ({{count}} nodes)", None, 42, 5);
+        assert!(
+            !resolved.contains("$name"),
+            "Literal $name should not remain"
         );
-        assert!(!resolved.contains("$name"), "Literal $name should not remain");
         assert!(resolved.contains("42 nodes"));
     }
 
@@ -2304,7 +2312,10 @@ mod tests {
             narrative: vec![],
         };
         let result = dry_run(&query, &nodes, &edges, None);
-        assert!(!result.node_depths.is_empty(), "Focus scope should return depths");
+        assert!(
+            !result.node_depths.is_empty(),
+            "Focus scope should return depths"
+        );
         assert_eq!(*result.node_depths.get("n1").unwrap(), 0);
         assert_eq!(*result.node_depths.get("n2").unwrap(), 1);
     }
@@ -2338,7 +2349,10 @@ mod tests {
         assert!(validate_computed_expression("$governed_by(spec.md)").is_none());
         assert!(validate_computed_expression("$test_fragility(fn_name)").is_none());
         assert!(validate_computed_expression("$reachable(A, [calls], outgoing, 5)").is_none());
-        assert!(validate_computed_expression("$intersect($where(complexity, '>', 10), $test_unreachable)").is_none());
+        assert!(validate_computed_expression(
+            "$intersect($where(complexity, '>', 10), $test_unreachable)"
+        )
+        .is_none());
         assert!(validate_computed_expression("$union($callers(A), $callees(B))").is_none());
         assert!(validate_computed_expression("$diff($test_reachable, $callers(C))").is_none());
     }
@@ -2385,7 +2399,10 @@ mod tests {
         matched.insert("n2".to_string());
 
         let count = count_distinct_parent_modules(&matched, &nodes, &edges);
-        assert_eq!(count, 2, "Should find 2 distinct parent modules via Contains edges");
+        assert_eq!(
+            count, 2,
+            "Should find 2 distinct parent modules via Contains edges"
+        );
     }
 
     #[test]
@@ -2457,9 +2474,18 @@ mod tests {
             &incoming,
             None,
         );
-        assert!(result.contains("n1"), "n1 has 2 test callers, should match > 1");
-        assert!(!result.contains("n2"), "n2 has 1 test caller, should not match > 1");
-        assert!(!result.contains("n3"), "n3 has 0 test callers, should not match > 1");
+        assert!(
+            result.contains("n1"),
+            "n1 has 2 test callers, should match > 1"
+        );
+        assert!(
+            !result.contains("n2"),
+            "n2 has 1 test caller, should not match > 1"
+        );
+        assert!(
+            !result.contains("n3"),
+            "n3 has 0 test callers, should not match > 1"
+        );
 
         // test_fragility >= 1 should match n1 and n2
         let result2 = resolve_computed_expression(
@@ -2506,7 +2532,10 @@ mod tests {
         assert!(result.contains("n1"), "Seed node A should be included");
         assert!(result.contains("n2"), "B is outgoing from A");
         assert!(result.contains("n3"), "C is outgoing from B");
-        assert!(!result.contains("n4"), "D calls A but direction is outgoing, so D should NOT be included");
+        assert!(
+            !result.contains("n4"),
+            "D calls A but direction is outgoing, so D should NOT be included"
+        );
     }
 
     #[test]
@@ -2540,9 +2569,7 @@ mod tests {
 
     #[test]
     fn test_dry_run_warns_on_invalid_computed_expression() {
-        let nodes = vec![
-            make_node("n1", "Foo", NodeType::Function),
-        ];
+        let nodes = vec![make_node("n1", "Foo", NodeType::Function)];
         let query = ViewQuery {
             scope: Scope::Filter {
                 node_types: vec![],
@@ -2559,7 +2586,10 @@ mod tests {
         };
         let result = dry_run(&query, &nodes, &[], None);
         assert!(
-            result.warnings.iter().any(|w| w.contains("Computed expression error")),
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Computed expression error")),
             "dry_run should include a warning about invalid computed expression, got: {:?}",
             result.warnings
         );
@@ -2567,9 +2597,7 @@ mod tests {
 
     #[test]
     fn test_dry_run_no_warning_for_valid_computed() {
-        let mut nodes = vec![
-            make_node("n1", "complex_fn", NodeType::Function),
-        ];
+        let mut nodes = vec![make_node("n1", "complex_fn", NodeType::Function)];
         nodes[0].complexity = Some(30);
         let query = ViewQuery {
             scope: Scope::Filter {
@@ -2587,7 +2615,10 @@ mod tests {
         };
         let result = dry_run(&query, &nodes, &[], None);
         assert!(
-            !result.warnings.iter().any(|w| w.contains("Computed expression error")),
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Computed expression error")),
             "valid expression should not produce a computed expression error warning"
         );
         assert_eq!(result.matched_nodes, 1);

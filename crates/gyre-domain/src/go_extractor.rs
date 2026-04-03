@@ -586,9 +586,7 @@ impl GoExtractionContext {
                 self.edges.push(edge);
 
                 // Extract handler function name and create RoutesTo edge.
-                if let Some(handler_name) =
-                    extract_handler_from_call(node, source)
-                {
+                if let Some(handler_name) = extract_handler_from_call(node, source) {
                     // Look up handler by name in current package
                     let handler_qname = format!("{pkg_qname}.{handler_name}");
                     if let Some(handler_id) = self.name_to_id.get(&handler_qname) {
@@ -1073,10 +1071,7 @@ fn extract_http_route_call(
 
 /// Extract the handler function name from an HTTP route call's arguments.
 /// In `http.HandleFunc("/path", handlerFunc)`, returns `Some("handlerFunc")`.
-fn extract_handler_from_call(
-    call_node: &tree_sitter::Node,
-    source: &[u8],
-) -> Option<String> {
+fn extract_handler_from_call(call_node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
     let args = find_child_by_kind(call_node, "argument_list")?;
     // The handler is typically the 2nd (or later) argument that is an identifier.
     let mut found_path = false;
