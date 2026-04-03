@@ -283,6 +283,8 @@
               status: (g.status === 'Passed' || g.status === 'passed') ? 'passed' : (g.status === 'Failed' || g.status === 'failed') ? 'failed' : 'pending',
               gate_type: g.gate_type,
               required: g.required,
+              output: g.output,
+              error: g.error,
             };
           });
           return { id: mr.id, passed, failed, total: arr.length, details };
@@ -1518,7 +1520,7 @@
                             {#if gates && gates.total > 0}
                               <button class="gates-inline" title="View gate details" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }}>
                                 {#each (gates.details ?? []).slice(0, 3) as g}
-                                  <span class="gate-chip gate-chip-{g.status}" title="{g.name}: {g.status}{g.required === false ? ' (advisory)' : ''}">
+                                  <span class="gate-chip gate-chip-{g.status}" title="{g.name}: {g.status}{g.required === false ? ' (advisory)' : ''}{g.gate_type ? '\nType: ' + g.gate_type.replace(/_/g, ' ') : ''}">
                                     {g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}
                                   </span>
                                 {/each}
@@ -1531,6 +1533,12 @@
                                   {#if gates.total > gates.passed + gates.failed}<span class="gate-chip gate-chip-pending">○ {gates.total - gates.passed - gates.failed} pending</span>{/if}
                                 {/if}
                               </button>
+                              {#if gates.failed > 0}
+                                {@const failedGate = (gates.details ?? []).find(g => g.status === 'failed')}
+                                {#if failedGate?.output || failedGate?.error}
+                                  <span class="gate-error-preview" title="Click MR to see full gate details">{(failedGate.error ?? failedGate.output ?? '').split('\n')[0]?.slice(0, 80)}</span>
+                                {/if}
+                              {/if}
                             {:else}
                               <span class="text-muted">-</span>
                             {/if}
@@ -2745,6 +2753,21 @@
     font-size: 10px;
     color: var(--color-text-muted);
     padding: 1px 4px;
+  }
+
+  .gate-error-preview {
+    display: block;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 6%, transparent);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    margin-top: 2px;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .gates-mini {
