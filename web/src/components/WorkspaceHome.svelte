@@ -1753,6 +1753,7 @@
                         <th>Output</th>
                         <th>Duration</th>
                         <th>Repo</th>
+                        <th class="th-actions"></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1827,6 +1828,12 @@
                               <button class="entity-repo-link" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id]); }}>
                                 {repoMap[agent.repo_id].name}
                               </button>
+                            {/if}
+                          </td>
+                          <td class="td-actions">
+                            <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name, _openTab: 'history' }); }} title="View agent execution logs">Logs</button>
+                            {#if agentMr}
+                              <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title, _openTab: 'diff' }); }} title="View MR diff">Diff</button>
                             {/if}
                           </td>
                         </tr>
