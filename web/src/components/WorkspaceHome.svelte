@@ -605,21 +605,24 @@
   });
 
   // ── Workspace-level entity tab ──────────────────────────────────────
-  // Default to activity feed — the unified cross-repo stream
-  let wsTab = $state('activity');
+  // Default to specs tab — the starting point of the autonomous dev pipeline
+  let wsTab = $state('specs');
   // Entity tables are always visible — they ARE the workspace home
   let browseExpanded = $state(true);
+  // Track whether user has manually selected a tab (don't auto-switch after that)
+  let userSelectedTab = $state(false);
 
-  function toggleBrowse() {
-    browseExpanded = !browseExpanded;
-    if (browseExpanded) {
-      // Default to the most actionable tab
-      if (pipelineSpecs.pending > 0) wsTab = 'specs';
-      else if (pipelineMrs.open > 0 || pipelineMrs.failed_gates > 0) wsTab = 'mrs';
-      else if (pipelineTasks.in_progress > 0) wsTab = 'tasks';
-      else wsTab = 'specs';
-    }
-  }
+  // Auto-select the most actionable tab once data loads
+  $effect(() => {
+    if (userSelectedTab) return;
+    // Wait until at least specs+tasks are loaded
+    if (specsLoading || tasksLoading) return;
+    if (pipelineSpecs.pending > 0) wsTab = 'specs';
+    else if (pipelineMrs.open > 0 || pipelineMrs.failed_gates > 0) wsTab = 'mrs';
+    else if (pipelineTasks.in_progress > 0 || pipelineTasks.blocked > 0) wsTab = 'tasks';
+    else if (pipelineAgents.active > 0) wsTab = 'agents';
+    // else leave on default (specs)
+  });
 
   // ── Activity filter + pagination ──────────────────────────────────────
   let activityFilter = $state('');
@@ -693,10 +696,8 @@
     const tabMap = { specs: 'specs', tasks: 'tasks', mrs: 'mrs', agents: 'agents', merged: 'mrs' };
     const tab = tabMap[stageId];
     if (!tab) return;
-    // Open the browse panel and switch to the corresponding tab
-    browseExpanded = true;
     wsTab = tab;
-    // Scroll into view after DOM update
+    // Scroll entity tables into view
     requestAnimationFrame(() => {
       document.querySelector('[data-testid="browse-panel"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
@@ -1054,23 +1055,23 @@
           <!-- ── Entity Tables (primary content) ────────────────── -->
           <section class="ws-feed-panel" data-testid="browse-panel">
             <nav class="ws-tab-bar" aria-label="Browse entities">
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; }}>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
                 <Icon name="spec" size={12} />
                 Specs
                 {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
               </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; }}>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
                 <Icon name="task" size={12} />
                 Tasks
                 {#if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
               </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; }}>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
                 <Icon name="git-merge" size={12} />
                 MRs
                 {#if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>
                 {:else if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>{/if}
               </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; }}>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
                 <Icon name="agent" size={12} />
                 Agents
                 {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
