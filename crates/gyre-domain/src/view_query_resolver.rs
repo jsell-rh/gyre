@@ -2059,4 +2059,278 @@ mod tests {
         assert_eq!(args[2].trim(), "outgoing");
         assert_eq!(args[3].trim(), "5");
     }
+
+    // ── validate_computed_expression tests ──────────────────────────────────
+
+    #[test]
+    fn test_validate_computed_expression_valid() {
+        // All recognized expressions should return None (no error)
+        assert!(validate_computed_expression("$clicked").is_none());
+        assert!(validate_computed_expression("$selected").is_none());
+        assert!(validate_computed_expression("$test_unreachable").is_none());
+        assert!(validate_computed_expression("$test_reachable").is_none());
+        assert!(validate_computed_expression("$where(complexity, '>', 10)").is_none());
+        assert!(validate_computed_expression("$callers(A)").is_none());
+        assert!(validate_computed_expression("$callees(B)").is_none());
+        assert!(validate_computed_expression("$implementors(MyTrait)").is_none());
+        assert!(validate_computed_expression("$fields(MyType)").is_none());
+        assert!(validate_computed_expression("$descendants(root)").is_none());
+        assert!(validate_computed_expression("$ancestors(leaf)").is_none());
+        assert!(validate_computed_expression("$governed_by(spec.md)").is_none());
+        assert!(validate_computed_expression("$test_fragility(fn_name)").is_none());
+        assert!(validate_computed_expression("$reachable(A, [calls], outgoing, 5)").is_none());
+        assert!(validate_computed_expression("$intersect($where(complexity, '>', 10), $test_unreachable)").is_none());
+        assert!(validate_computed_expression("$union($callers(A), $callees(B))").is_none());
+        assert!(validate_computed_expression("$diff($test_reachable, $callers(C))").is_none());
+    }
+
+    #[test]
+    fn test_validate_computed_expression_invalid() {
+        // Empty expression
+        let err = validate_computed_expression("").unwrap();
+        assert!(err.contains("Empty expression"));
+
+        // Unrecognized expression
+        let err = validate_computed_expression("$bogus(x)").unwrap();
+        assert!(err.contains("Unrecognized expression"));
+        assert!(err.contains("$bogus(x)"));
+
+        // Plain text (not a $ expression)
+        let err = validate_computed_expression("just some text").unwrap();
+        assert!(err.contains("Unrecognized expression"));
+    }
+
+    #[test]
+    fn test_validate_computed_expression_unbalanced_parens() {
+        let err = validate_computed_expression("$where(complexity, '>', 10").unwrap();
+        assert!(err.contains("Unbalanced parentheses"));
+        assert!(err.contains("1 open, 0 close"));
+    }
+
+    // ── count_distinct_parent_modules tests ─────────────────────────────────
+
+    #[test]
+    fn test_count_distinct_parent_modules_via_contains_edges() {
+        let nodes = vec![
+            make_node("n1", "fn_a", NodeType::Function),
+            make_node("n2", "fn_b", NodeType::Function),
+            make_node("m1", "mod_a", NodeType::Module),
+            make_node("m2", "mod_b", NodeType::Module),
+        ];
+        let edges = vec![
+            make_edge("e1", "m1", "n1", EdgeType::Contains),
+            make_edge("e2", "m2", "n2", EdgeType::Contains),
+        ];
+        let mut matched = HashSet::new();
+        matched.insert("n1".to_string());
+        matched.insert("n2".to_string());
+
+        let count = count_distinct_parent_modules(&matched, &nodes, &edges);
+        assert_eq!(count, 2, "Should find 2 distinct parent modules via Contains edges");
+    }
+
+    #[test]
+    fn test_count_distinct_parent_modules_same_parent() {
+        let nodes = vec![
+            make_node("n1", "fn_a", NodeType::Function),
+            make_node("n2", "fn_b", NodeType::Function),
+            make_node("m1", "mod_a", NodeType::Module),
+        ];
+        let edges = vec![
+            make_edge("e1", "m1", "n1", EdgeType::Contains),
+            make_edge("e2", "m1", "n2", EdgeType::Contains),
+        ];
+        let mut matched = HashSet::new();
+        matched.insert("n1".to_string());
+        matched.insert("n2".to_string());
+
+        let count = count_distinct_parent_modules(&matched, &nodes, &edges);
+        assert_eq!(count, 1, "Both functions share the same parent module");
+    }
+
+    #[test]
+    fn test_count_distinct_parent_modules_fallback_to_file_path() {
+        let mut n1 = make_node("n1", "fn_a", NodeType::Function);
+        n1.file_path = "src/auth/login.rs".to_string();
+        let mut n2 = make_node("n2", "fn_b", NodeType::Function);
+        n2.file_path = "src/auth/session.rs".to_string();
+        let mut n3 = make_node("n3", "fn_c", NodeType::Function);
+        n3.file_path = "src/db/query.rs".to_string();
+        let nodes = vec![n1, n2, n3];
+
+        // No Contains edges -- should fall back to file_path directory prefixes
+        let edges: Vec<GraphEdge> = vec![];
+        let mut matched = HashSet::new();
+        matched.insert("n1".to_string());
+        matched.insert("n2".to_string());
+        matched.insert("n3".to_string());
+
+        let count = count_distinct_parent_modules(&matched, &nodes, &edges);
+        assert_eq!(count, 2, "Should find 2 distinct dirs: src/auth and src/db");
+    }
+
+    // ── $where(test_fragility, ...) tests ───────────────────────────────────
+
+    #[test]
+    fn test_where_test_fragility_filters_by_direct_test_callers() {
+        let nodes = vec![
+            make_node("n1", "well_tested", NodeType::Function),
+            make_node("n2", "poorly_tested", NodeType::Function),
+            make_node("n3", "untested", NodeType::Function),
+            make_test_node("t1", "test_a"),
+            make_test_node("t2", "test_b"),
+        ];
+        // t1 and t2 both call n1 (2 test callers); only t1 calls n2 (1 test caller)
+        let edges = vec![
+            make_edge("e1", "t1", "n1", EdgeType::Calls),
+            make_edge("e2", "t2", "n1", EdgeType::Calls),
+            make_edge("e3", "t1", "n2", EdgeType::Calls),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+
+        // test_fragility > 1 should match n1 (2 callers) but not n2 (1) or n3 (0)
+        let result = resolve_computed_expression(
+            "$where(test_fragility, '>', 1)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(result.contains("n1"), "n1 has 2 test callers, should match > 1");
+        assert!(!result.contains("n2"), "n2 has 1 test caller, should not match > 1");
+        assert!(!result.contains("n3"), "n3 has 0 test callers, should not match > 1");
+
+        // test_fragility >= 1 should match n1 and n2
+        let result2 = resolve_computed_expression(
+            "$where(test_fragility, '>=', 1)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(result2.contains("n1"));
+        assert!(result2.contains("n2"));
+        assert!(!result2.contains("n3"));
+    }
+
+    // ── Concept scope expand_direction tests ────────────────────────────────
+
+    #[test]
+    fn test_concept_outgoing_does_not_expand_bidirectionally() {
+        // A -> B -> C and D -> A
+        // With outgoing from A, we should get A, B, C but NOT D
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+            make_node("n3", "C", NodeType::Function),
+            make_node("n4", "D", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Calls),
+            make_edge("e3", "n4", "n1", EdgeType::Calls), // D calls A (incoming to A)
+        ];
+        let result = resolve_scope(
+            &Scope::Concept {
+                seed_nodes: vec!["A".to_string()],
+                expand_edges: vec!["calls".to_string()],
+                expand_depth: 5,
+                expand_direction: "outgoing".to_string(),
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        assert!(result.contains("n1"), "Seed node A should be included");
+        assert!(result.contains("n2"), "B is outgoing from A");
+        assert!(result.contains("n3"), "C is outgoing from B");
+        assert!(!result.contains("n4"), "D calls A but direction is outgoing, so D should NOT be included");
+    }
+
+    #[test]
+    fn test_concept_both_expands_bidirectionally() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+            make_node("n3", "C", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Calls),
+            make_edge("e2", "n3", "n1", EdgeType::Calls), // C calls A (incoming to A)
+        ];
+        let result = resolve_scope(
+            &Scope::Concept {
+                seed_nodes: vec!["A".to_string()],
+                expand_edges: vec!["calls".to_string()],
+                expand_depth: 2,
+                expand_direction: "both".to_string(),
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        assert!(result.contains("n1"), "Seed A");
+        assert!(result.contains("n2"), "B via outgoing");
+        assert!(result.contains("n3"), "C via incoming (both direction)");
+    }
+
+    // ── dry_run warns on computed expression errors ─────────────────────────
+
+    #[test]
+    fn test_dry_run_warns_on_invalid_computed_expression() {
+        let nodes = vec![
+            make_node("n1", "Foo", NodeType::Function),
+        ];
+        let query = ViewQuery {
+            scope: Scope::Filter {
+                node_types: vec![],
+                computed: Some("$bogus_expression".to_string()),
+                name_pattern: None,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("Computed expression error")),
+            "dry_run should include a warning about invalid computed expression, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_no_warning_for_valid_computed() {
+        let mut nodes = vec![
+            make_node("n1", "complex_fn", NodeType::Function),
+        ];
+        nodes[0].complexity = Some(30);
+        let query = ViewQuery {
+            scope: Scope::Filter {
+                node_types: vec![],
+                computed: Some("$where(complexity, '>', 10)".to_string()),
+                name_pattern: None,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("Computed expression error")),
+            "valid expression should not produce a computed expression error warning"
+        );
+        assert_eq!(result.matched_nodes, 1);
+    }
 }
