@@ -1320,7 +1320,6 @@
       <!-- ── Cross-repo entity browse (always visible tabs) ──────────── -->
       <div class="dashboard-flow" data-testid="browse-panel">
         <nav class="ws-tab-bar" aria-label="Browse workspace entities">
-          <span class="ws-tab-bar-label">Workspace</span>
           <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
             Specs
             {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
@@ -1362,8 +1361,8 @@
                   <div class="skeleton-row"></div>
                 {:else if specs.length === 0}
                   <div class="empty-state-guided">
-                    <p class="empty-text">No specs yet.</p>
-                    <p class="empty-guide">Create a <code>specs/manifest.yaml</code> in your repo and <code>git push</code>. Specs define what agents should build — they're the starting point of the autonomous development pipeline.</p>
+                    <p class="empty-text">No specs yet</p>
+                    <p class="empty-guide">Create <code>specs/manifest.yaml</code> in your repo and push. Specs are the starting point — they define what agents build.</p>
                   </div>
                 {:else}
                   <table class="ws-entity-table">
