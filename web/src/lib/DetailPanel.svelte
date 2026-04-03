@@ -3595,7 +3595,8 @@
                       </button>
                     {/if}
                     {#if commit.timestamp ?? commit.created_at}
-                      <span class="commit-time">{fmtDate(commit.timestamp ?? commit.created_at)}</span>
+                      {@const commitTs = commit.timestamp ?? commit.created_at}
+                      <span class="commit-time" title={absoluteTime(commitTs)}>{relativeTime(commitTs) || formatDate(commitTs)}</span>
                     {/if}
                   </div>
                 </div>
@@ -3858,13 +3859,41 @@
                 {@const elapsed = (prevTime && thisTime) ? Math.round(thisTime - prevTime) : null}
                 <div class="timeline-item">
                   <div class="timeline-connector">
-                    <div class="timeline-dot timeline-dot-{timelineEventVariant(evtType, evt)}"></div>
+                    <div class="timeline-dot timeline-dot-{timelineEventVariant(evtType, evt)}">
+                      {#if evtType === 'created' || evtType === 'mr_created'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5"/><path d="M8 5.5v5M5.5 8h5"/></svg>
+                      {:else if evtType === 'merged' || evtType === 'Merged'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 3v6a4 4 0 004 4h2M5 3L3 5M5 3l2 2M11 7v6"/></svg>
+                      {:else if evtType === 'closed'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5"/></svg>
+                      {:else if evtType?.startsWith('gate_') || evtType === 'GateResult'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="2" width="10" height="12" rx="1"/><path d="M6 6h4M6 9h2"/></svg>
+                      {:else if evtType === 'commit_pushed' || evtType === 'GitPush'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 12V4M8 4l-3 3M8 4l3 3"/></svg>
+                      {:else if evtType === 'review_submitted'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 8.5l3 3 7-7"/></svg>
+                      {:else if evtType === 'comment_added'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3h10v7H6l-3 3V3z"/></svg>
+                      {:else if evtType === 'enqueued' || evtType === 'MergeQueueEnqueued'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="10" height="10" rx="2"/><path d="M6 6h4M6 8h4M6 10h2"/></svg>
+                      {:else if evtType === 'AgentSpawned' || evtType === 'AgentCompleted'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="6" r="3"/><path d="M4 13c0-2.2 1.8-4 4-4s4 1.8 4 4"/></svg>
+                      {:else if evtType === 'GraphDelta' || evtType === 'graph_extracted' || evtType === 'GraphExtraction'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="4" r="2"/><circle cx="8" cy="12" r="2"/><path d="M5.5 5.5L8 10M10.5 5.5L8 10"/></svg>
+                      {:else if evtType === 'attestation_created'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2L3 5v4c0 3.3 2.2 5.6 5 7 2.8-1.4 5-3.7 5-7V5L8 2z"/></svg>
+                      {:else if evtType === 'SpecLifecycleTrigger'}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 2h8v12H4zM7 5h2M7 7h2"/></svg>
+                      {:else}
+                        <svg class="timeline-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="3"/></svg>
+                      {/if}
+                    </div>
                     {#if i < mrTimeline.length - 1}<div class="timeline-line"></div>{/if}
                   </div>
                   <div class="timeline-content">
                     <div class="timeline-header">
                       <Badge value={timelineEventLabel(evtType)} variant={timelineEventVariant(evtType, evt)} />
-                      <span class="timeline-time">{fmtDate(thisTime)}</span>
+                      <span class="timeline-time" title={absoluteTime(thisTime)}>{relativeTime(thisTime) || formatDate(thisTime)}</span>
                       {#if elapsed && elapsed > 0}
                         <span class="timeline-elapsed">+{elapsed < 60 ? elapsed + 's' : elapsed < 3600 ? Math.round(elapsed / 60) + 'm' : Math.round(elapsed / 3600) + 'h'}</span>
                       {/if}
@@ -4012,15 +4041,14 @@
             {#if conversation.length > 0}
               <div class="conversation-list">
                 {#each conversation as item}
-                  <div class="conversation-item conversation-item-{item._kind}">
+                  {@const isApproved = item._kind === 'review' && (item.decision === 'approved' || item.status === 'approved')}
+                  {@const isChangesRequested = item._kind === 'review' && (item.decision === 'changes_requested' || item.status === 'changes_requested')}
+                  <div class="conversation-item conversation-item-{item._kind}" class:conversation-item-approved={isApproved} class:conversation-item-changes-requested={isChangesRequested}>
                     <div class="conversation-header">
                       {#if item._kind === 'review'}
                         <Badge
                           value={item.decision ?? item.status ?? 'review'}
-                          variant={
-                            (item.decision === 'approved' || item.status === 'approved') ? 'success' :
-                            (item.decision === 'changes_requested' || item.status === 'changes_requested') ? 'danger' : 'info'
-                          }
+                          variant={isApproved ? 'success' : isChangesRequested ? 'danger' : 'info'}
                         />
                         {@const reviewer = item.reviewer ?? (item.reviewer_agent_id ? entityName('agent', item.reviewer_agent_id) : item.user_id ?? item.reviewer_id ?? 'reviewer')}
                         {#if item.reviewer_agent_id}
@@ -4030,6 +4058,9 @@
                         {/if}
                         <span class="conversation-verb">reviewed</span>
                       {:else}
+                        <span class="conversation-comment-icon">
+                          <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3h10v7H6l-3 3V3z"/></svg>
+                        </span>
                         {@const author = item.author ?? (item.author_agent_id ? entityName('agent', item.author_agent_id) : item.user_id ?? item.author_id ?? 'author')}
                         {#if item.author_agent_id}
                           <button class="entity-link mono conversation-author" onclick={() => navigateTo('agent', item.author_agent_id)}>{entityName('agent', item.author_agent_id)}</button>
@@ -4038,7 +4069,7 @@
                         {/if}
                         <span class="conversation-verb">commented</span>
                       {/if}
-                      <span class="conversation-time">{fmtDate(item._time)}</span>
+                      <span class="conversation-time" title={absoluteTime(item._time)}>{relativeTime(item._time) || formatDate(item._time)}</span>
                     </div>
                     {#if item.body}
                       <p class="review-body">{item.body}</p>
@@ -4052,11 +4083,12 @@
 
             <!-- Unified submission area -->
             <div class="conversation-submit">
+              <span class="conversation-submit-heading">Add to conversation</span>
               <textarea
                 class="comment-textarea"
                 bind:value={newCommentText}
-                placeholder="Leave a comment..."
-                rows="3"
+                placeholder="Leave a comment or submit a review..."
+                rows="4"
                 disabled={submittingComment || submittingReview}
               ></textarea>
               <div class="conversation-actions">
@@ -6647,19 +6679,32 @@
   }
 
   .timeline-dot {
-    width: 10px;
-    height: 10px;
+    width: 22px;
+    height: 22px;
     border-radius: 50%;
     border: 2px solid var(--color-border-strong);
     background: var(--color-surface);
     flex-shrink: 0;
     z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .timeline-icon {
+    width: 12px;
+    height: 12px;
+    color: var(--color-text-muted);
   }
 
   .timeline-dot-success { border-color: var(--color-success); background: color-mix(in srgb, var(--color-success) 20%, transparent); }
+  .timeline-dot-success .timeline-icon { color: var(--color-success); }
   .timeline-dot-danger { border-color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 20%, transparent); }
+  .timeline-dot-danger .timeline-icon { color: var(--color-danger); }
   .timeline-dot-warning { border-color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 20%, transparent); }
+  .timeline-dot-warning .timeline-icon { color: var(--color-warning); }
   .timeline-dot-info { border-color: var(--color-info); background: color-mix(in srgb, var(--color-info) 20%, transparent); }
+  .timeline-dot-info .timeline-icon { color: var(--color-info); }
 
   .timeline-line {
     width: 2px;
@@ -6793,8 +6838,24 @@
     border-left: 3px solid var(--color-info);
   }
 
+  .conversation-item-approved {
+    border-left-color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 5%, var(--color-surface-elevated));
+  }
+
+  .conversation-item-changes-requested {
+    border-left-color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 5%, var(--color-surface-elevated));
+  }
+
   .conversation-item-comment {
     border-left: 3px solid var(--color-border-strong);
+  }
+
+  .conversation-comment-icon {
+    color: var(--color-text-muted);
+    display: flex;
+    align-items: center;
   }
 
   .conversation-header {
@@ -6828,6 +6889,13 @@
     gap: var(--space-2);
     border-top: 1px solid var(--color-border);
     padding-top: var(--space-4);
+  }
+
+  .conversation-submit-heading {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    margin-bottom: var(--space-1);
   }
 
   .conversation-actions {
