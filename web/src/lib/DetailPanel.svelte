@@ -524,7 +524,7 @@
         if (rawTimeline.length > 0) {
           const events = rawTimeline.slice(-4).map(evt => {
             const evtType = evt.event_type ?? evt.type ?? evt.event;
-            return { label: timelineEventLabel(evtType), variant: timelineEventVariant(evtType, evt), time: evt.timestamp ?? evt.created_at };
+            return { label: timelineEventLabel(evtType), variant: timelineEventVariant(evtType, evt), time: evt.timestamp ?? evt.created_at, why: timelineEventWhy(evtType, evt, d) };
           });
           mrDetail = { ...mrDetail, _statusStory: events };
         } else {
@@ -1575,6 +1575,37 @@
       'attestation_created': 'Attestation signed',
     };
     return map[evt] ?? evt?.replace(/_/g, ' ') ?? 'Event';
+  }
+
+  function timelineEventWhy(evt, evtObj, mr) {
+    const detail = evtObj?.detail ?? evtObj?.description ?? '';
+    switch (evt) {
+      case 'created':
+      case 'mr_created': {
+        const agentId = mr?.author_agent_id;
+        const specRef = mr?.spec_ref?.split('@')[0]?.split('/').pop()?.replace(/\.md$/, '');
+        return agentId ? `Agent implemented${specRef ? ` "${specRef}"` : ' code'} and created this MR` : 'Merge request opened for review';
+      }
+      case 'enqueued':
+      case 'MergeQueueEnqueued': return 'Added to merge queue — gates will run automatically';
+      case 'gate_passed': return detail || 'Quality gate passed — one step closer to merge';
+      case 'gate_failed': return detail || 'Quality gate failed — merge blocked until fixed';
+      case 'GateResult': return detail || 'Quality gate completed';
+      case 'merged':
+      case 'Merged': {
+        const sha = mr?.merge_commit_sha?.slice(0, 7);
+        return sha ? `Merged as ${sha} with signed attestation` : 'Successfully merged with signed attestation';
+      }
+      case 'closed': return 'Closed without merging — may have been superseded';
+      case 'commit_pushed': return detail || 'New commits pushed to the source branch';
+      case 'review_submitted': return detail || 'Code review submitted';
+      case 'attestation_created': return 'Cryptographic attestation signed — provenance chain sealed';
+      case 'GraphDelta':
+      case 'GraphExtraction': return 'Knowledge graph updated with new types and relationships';
+      case 'AgentSpawned': return detail || 'Agent spawned to implement this task';
+      case 'AgentCompleted': return detail || 'Agent finished implementation';
+      default: return detail || '';
+    }
   }
 
   function timelineEventVariant(evt, evtObj) {
