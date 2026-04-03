@@ -9,7 +9,8 @@
   import { getContext } from 'svelte';
   import { relativeTime } from '../lib/timeFormat.js';
   import Badge from '../lib/Badge.svelte';
-  import { entityName, shortId } from '../lib/entityNames.svelte.js';
+  import { entityName, formatId } from '../lib/entityNames.svelte.js';
+  import Icon from '../lib/Icon.svelte';
 
   const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
@@ -48,15 +49,6 @@
     <div class="repo-card-header">
       <span class="repo-card-health" style="color: {h.color}" title={h.label} aria-label={h.label}>{h.dot}</span>
       <span class="repo-card-name">{repo.name}</span>
-      <span class="repo-card-health-text" style="color: {h.color}">
-        {#if stats.failedGates > 0}
-          {stats.failedGates} gate failure{stats.failedGates !== 1 ? 's' : ''}
-        {:else if stats.agents > 0}
-          {stats.agents} agent{stats.agents !== 1 ? 's' : ''} running
-        {:else}
-          No activity
-        {/if}
-      </span>
       {#if stats.last_activity}
         <span class="repo-card-time">{relativeTime(stats.last_activity)}</span>
       {/if}
@@ -66,27 +58,40 @@
       <p class="repo-card-desc">{repo.description}</p>
     {/if}
 
+    <!-- Mini pipeline: Specs → Tasks → Agents → MRs → Merged -->
+    <div class="repo-card-pipeline" title="Pipeline: Specs → Tasks → Agents → MRs → Merged">
+      <span class="pipe-stage" class:pipe-stage-active={stats.specs > 0} class:pipe-stage-warn={specBreakdown?.pending > 0}>
+        <Icon name="spec" size={10} />
+        <span class="pipe-count">{stats.specs ?? 0}</span>
+      </span>
+      <span class="pipe-arrow">→</span>
+      <span class="pipe-stage" class:pipe-stage-active={stats.tasks > 0}>
+        <Icon name="task" size={10} />
+        <span class="pipe-count">{stats.tasks ?? 0}</span>
+      </span>
+      <span class="pipe-arrow">→</span>
+      <span class="pipe-stage" class:pipe-stage-active={stats.agents > 0} class:pipe-stage-success={stats.agents > 0}>
+        <Icon name="agent" size={10} />
+        <span class="pipe-count">{stats.agents ?? 0}</span>
+      </span>
+      <span class="pipe-arrow">→</span>
+      <span class="pipe-stage" class:pipe-stage-active={stats.openMrs > 0} class:pipe-stage-danger={stats.failedGates > 0}>
+        <Icon name="git-merge" size={10} />
+        <span class="pipe-count">{stats.openMrs ?? 0}</span>
+      </span>
+      <span class="pipe-arrow">→</span>
+      <span class="pipe-stage" class:pipe-stage-active={(stats.mrs ?? 0) - (stats.openMrs ?? 0) > 0}>
+        <Icon name="check" size={10} />
+        <span class="pipe-count">{(stats.mrs ?? 0) - (stats.openMrs ?? 0)}</span>
+      </span>
+    </div>
+
     <!-- Status summary — the ONE most important thing about this repo right now -->
     {#if statusSummary}
       <div class="repo-card-status repo-card-status-{statusSummary.variant}">
         <span class="status-text">{statusSummary.text}</span>
         {#if statusSummary.why}
           <span class="status-why">{statusSummary.why}</span>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- Spec breakdown — show spec pipeline health -->
-    {#if specBreakdown && (specBreakdown.pending > 0 || specBreakdown.approved > 0 || specBreakdown.draft > 0)}
-      <div class="repo-card-spec-breakdown">
-        {#if specBreakdown.pending > 0}
-          <span class="spec-count spec-count-pending">{specBreakdown.pending} pending</span>
-        {/if}
-        {#if specBreakdown.approved > 0}
-          <span class="spec-count spec-count-approved">{specBreakdown.approved} approved</span>
-        {/if}
-        {#if specBreakdown.draft > 0}
-          <span class="spec-count spec-count-draft">{specBreakdown.draft} draft</span>
         {/if}
       </div>
     {/if}
@@ -117,24 +122,16 @@
         {:else}
           <span class="latest-title">{latestMr.title ?? 'Untitled MR'}</span>
         {/if}
-        {#if latestMr.gate_status}
+        {#if latestMr._gates}
+          <span class="latest-gates-summary" onclick={(e) => { e.stopPropagation(); if (goToEntityDetail) goToEntityDetail('mr', latestMr.id, { ...latestMr, _openTab: 'gates' }); }}>
+            {#if latestMr._gates.failed > 0}<span class="gate-fail-count">&#10007;{latestMr._gates.failed}</span>{/if}
+            {#if latestMr._gates.passed > 0}<span class="gate-pass-count">&#10003;{latestMr._gates.passed}</span>{/if}
+          </span>
+        {:else if latestMr.gate_status}
           <span class="latest-gate latest-gate-{latestMr.gate_status}">{latestMr.gate_status}</span>
         {/if}
       </div>
     {/if}
-
-    <!-- Compact stats row -->
-    <div class="repo-card-stats">
-      {#if stats.specs != null && stats.specs > 0}
-        <span class="stat-chip">{stats.specs} spec{stats.specs !== 1 ? 's' : ''}</span>
-      {/if}
-      {#if stats.tasks != null && stats.tasks > 0}
-        <span class="stat-chip">{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}</span>
-      {/if}
-      {#if stats.mrs != null && stats.mrs > 0}
-        <span class="stat-chip">{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}</span>
-      {/if}
-    </div>
   </button>
 {/if}
 
@@ -216,6 +213,38 @@
     white-space: nowrap;
   }
 
+  /* Mini pipeline indicator */
+  .repo-card-pipeline {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .pipe-stage {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+    opacity: 0.5;
+    transition: opacity var(--transition-fast);
+  }
+
+  .pipe-stage-active { opacity: 1; }
+  .pipe-stage-warn { color: var(--color-warning); opacity: 1; }
+  .pipe-stage-success { color: var(--color-success); opacity: 1; }
+  .pipe-stage-danger { color: var(--color-danger); opacity: 1; }
+
+  .pipe-count { font-weight: 600; }
+
+  .pipe-arrow {
+    font-size: 9px;
+    color: var(--color-text-muted);
+    opacity: 0.4;
+  }
+
   /* Status summary — prominent one-liner with WHY sub-text */
   .repo-card-status {
     font-size: var(--text-xs);
@@ -251,31 +280,6 @@
   .repo-card-status-info {
     color: var(--color-info, #1e90ff);
     background: color-mix(in srgb, var(--color-info, #1e90ff) 8%, transparent);
-  }
-
-  /* Spec breakdown */
-  .repo-card-spec-breakdown {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: 10px;
-    font-weight: 500;
-  }
-
-  .spec-count {
-    white-space: nowrap;
-  }
-
-  .spec-count-pending {
-    color: var(--color-warning);
-  }
-
-  .spec-count-approved {
-    color: var(--color-success);
-  }
-
-  .spec-count-draft {
-    color: var(--color-text-muted);
   }
 
   /* Active agent chips */
@@ -365,17 +369,26 @@
     background: color-mix(in srgb, var(--color-warning) 10%, transparent);
   }
 
-  /* Compact stats */
-  .repo-card-stats {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-  }
-
-  .stat-chip {
+  /* Latest MR gate summary (clickable to gates tab) */
+  .latest-gates-summary {
     display: inline-flex;
     align-items: center;
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
+    gap: 2px;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .latest-gates-summary:hover {
+    text-decoration: underline;
+  }
+
+  .gate-pass-count {
+    color: var(--color-success);
+  }
+
+  .gate-fail-count {
+    color: var(--color-danger);
   }
 </style>
