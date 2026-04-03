@@ -987,6 +987,10 @@
     <!-- ═══ Two-column dashboard: content + sidebar ═══════════════════ -->
     <div class="focused-dashboard">
 
+      {#if workspace.description}
+        <p class="ws-description">{workspace.description}</p>
+      {/if}
+
       <!-- Pipeline bar (compact, navigational — click stages to jump to repo tab) -->
       <PipelineOverview
         specs={pipelineSpecs}
