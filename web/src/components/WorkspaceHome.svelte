@@ -1517,7 +1517,7 @@
                               {:else if mrStatus === 'open' && mr.queue_position != null}
                                 <span class="status-context">Queue #{mr.queue_position + 1} — waiting for gates</span>
                               {:else if mrStatus === 'merged' && mr.merged_at}
-                                <span class="status-context status-context-success">merged {relTime(mr.merged_at)}</span>
+                                <span class="status-context status-context-success">merged {relTime(mr.merged_at)}{#if mr.merge_commit_sha} <code class="sha-inline mono">{mr.merge_commit_sha.slice(0, 7)}</code>{/if}</span>
                               {:else if mrStatus === 'open' && gates?.passed === gates?.total && gates?.total > 0}
                                 <span class="status-context status-context-success">All gates passed — ready to enqueue</span>
                               {:else if mrStatus === 'open' && (!gates || gates.total === 0)}
