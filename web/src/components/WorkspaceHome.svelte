@@ -1279,6 +1279,7 @@
                         <th>Spec</th>
                         <th>Status</th>
                         <th>Progress</th>
+                        <th>Downstream</th>
                         <th>Repo</th>
                         <th>Updated</th>
                         <th class="th-actions"></th>
@@ -1293,6 +1294,8 @@
                         {@const doneTasks = specTasks.filter(t => t.status === 'done').length}
                         {@const inProgressTasks = specTasks.filter(t => t.status === 'in_progress').length}
                         {@const totalTasks = specTasks.length}
+                        {@const specAgents = wsAgents.filter(a => a.spec_path === spec.path)}
+                        {@const specMrs = wsMrs.filter(m => m.spec_ref?.startsWith(spec.path))}
                         <tr class="ws-entity-row" onclick={() => navigateToSpec(spec)}>
                           <td class="entity-name-cell">
                             <Icon name="spec" size={12} />
@@ -1317,6 +1320,28 @@
                             {:else}
                               <span class="text-muted">-</span>
                             {/if}
+                          </td>
+                          <td>
+                            <div class="spec-downstream">
+                              {#if specAgents.length > 0}
+                                {@const activeAgent = specAgents.find(a => a.status === 'active')}
+                                {#if activeAgent}
+                                  <button class="downstream-chip downstream-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', activeAgent.id, { repo_id: activeAgent.repo_id, name: activeAgent.name }); }} title="Agent running">
+                                    <span class="status-pulse-tiny"></span> {activeAgent.name ?? formatId('agent', activeAgent.id)}
+                                  </button>
+                                {/if}
+                              {/if}
+                              {#if specMrs.length > 0}
+                                {@const latestMr = specMrs.sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))[0]}
+                                <button class="downstream-chip downstream-chip-{latestMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', latestMr.id, { repo_id: latestMr.repository_id ?? latestMr.repo_id, title: latestMr.title }); }} title="MR: {latestMr.title ?? ''}">
+                                  <Icon name="git-merge" size={10} /> {latestMr.status}
+                                </button>
+                              {:else if specAgents.length === 0 && totalTasks === 0 && status === 'pending'}
+                                <span class="text-muted">needs approval</span>
+                              {:else if totalTasks > 0 && specAgents.length === 0}
+                                <span class="text-muted">awaiting agent</span>
+                              {/if}
+                            </div>
                           </td>
                           <td>
                             {#if spec.repo_id && repoMap[spec.repo_id]}
@@ -1442,6 +1467,7 @@
                       <tr>
                         <th>Merge Request</th>
                         <th>Status</th>
+                        <th>Spec</th>
                         <th>Gates</th>
                         <th>Diff</th>
                         <th>Repo</th>
@@ -1485,6 +1511,16 @@
                                 <span class="status-context status-context-success">All gates passed</span>
                               {/if}
                             </div>
+                          </td>
+                          <td>
+                            {#if mr.spec_ref}
+                              {@const mrSpecPath = mr.spec_ref.split('@')[0]}
+                              <button class="entity-spec-link" onclick={(e) => { e.stopPropagation(); nav('spec', mrSpecPath, { path: mrSpecPath, repo_id: mr.repository_id ?? mr.repo_id }); }} title={mr.spec_ref}>
+                                {mrSpecPath.split('/').pop()?.replace(/\.md$/, '')}
+                              </button>
+                            {:else}
+                              <span class="text-muted">-</span>
+                            {/if}
                           </td>
                           <td>
                             {#if gates && gates.total > 0}
@@ -2574,6 +2610,45 @@
   .diff-del-mini { color: var(--color-danger); }
 
   .text-muted { color: var(--color-text-muted); font-size: 10px; }
+
+  /* ── Spec downstream chips ─────────────────────────────────────────── */
+  .spec-downstream {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .downstream-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 500;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    white-space: nowrap;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .downstream-chip:hover { text-decoration: underline; }
+  .downstream-chip-active { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .downstream-chip-merged { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .downstream-chip-open { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 8%, transparent); }
+  .downstream-chip-closed { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+
+  .status-pulse-tiny {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
 
   /* ── Inline action buttons ─────────────────────────────────────────── */
   .td-actions {
