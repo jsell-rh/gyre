@@ -13,6 +13,7 @@
   import WorkspaceCards from './WorkspaceCards.svelte';
   import ExplorerCodeTab from './ExplorerCodeTab.svelte';
   import ExplorerFilterPanel from './ExplorerFilterPanel.svelte';
+  import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
   import Briefing from './Briefing.svelte';
 
   const navigate = getContext('navigate');
@@ -47,6 +48,7 @@
   let explorerFilter = $state('all');
   let explorerLens = $state('structural');
   let explorerSavedViews = $state([]);
+  let detailNode = $state(null);
 
   // Filter panel state
   let filterVisible = $state(false);
@@ -627,8 +629,20 @@
                 filter={explorerFilter}
                 lens={explorerLens}
                 bind:canvasState={explorerCanvasState}
+                onNodeDetail={(n) => { detailNode = n; }}
               />
             </div>
+            {#if detailNode}
+              <div class="explorer-detail-area">
+                <NodeDetailPanel
+                  node={detailNode}
+                  nodes={graph.nodes ?? []}
+                  edges={graph.edges ?? []}
+                  onClose={() => { detailNode = null; }}
+                  onNavigate={(n) => { detailNode = n; }}
+                />
+              </div>
+            {/if}
             <div class="explorer-chat-area">
               <ExplorerChat
                 repoId={selectedRepoId}
@@ -1611,6 +1625,16 @@
     overflow: hidden;
     min-width: 0;
     position: relative;
+  }
+
+  .explorer-detail-area {
+    width: 320px;
+    min-width: 280px;
+    max-width: 380px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--color-border);
   }
 
   .explorer-chat-area {

@@ -11,6 +11,7 @@
     filter = 'all',
     lens = 'structural',
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
+    onNodeDetail = () => {},
   } = $props();
 
   // ── Constants ────────────────────────────────────────────────────────────
@@ -246,25 +247,94 @@
   }
 
   // ── View query rendering helpers ─────────────────────────────────────
-  let queryMatchedIds = $derived.by(() => {
+
+  // Build adjacency from edges for BFS
+  let adjacency = $derived.by(() => {
+    const adj = new Map(); // nodeId -> [{targetId, edgeType}]
+    for (const e of edges) {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (src && tgt) {
+        if (!adj.has(src)) adj.set(src, []);
+        adj.get(src).push({ targetId: tgt, edgeType: et });
+        // Reverse direction for incoming queries
+        if (!adj.has(tgt)) adj.set(tgt, []);
+        adj.get(tgt).push({ targetId: src, edgeType: et, reverse: true });
+      }
+    }
+    return adj;
+  });
+
+  // Resolve focus scope with BFS, tracking depth for tiered colors
+  let queryMatchedWithDepth = $derived.by(() => {
     if (!activeQuery?.scope) return null;
     const scope = activeQuery.scope;
-    const matched = new Set();
+
+    // Focus scope: BFS from a specific node
+    if (scope.type === 'focus' && scope.node) {
+      const startNodeName = scope.node === '$selected' || scope.node === '$clicked'
+        ? canvasState?.selectedNode?.name ?? ''
+        : scope.node;
+      if (!startNodeName) return null;
+      const startNode = nodes.find(n =>
+        n.name === startNodeName || n.qualified_name === startNodeName || n.id === startNodeName
+      );
+      if (!startNode) return null;
+
+      const allowedEdges = new Set((scope.edges ?? ['calls']).map(e => e.toLowerCase()));
+      const direction = scope.direction ?? 'both';
+      const maxDepth = scope.depth ?? 5;
+      const depthMap = new Map(); // nodeId -> depth
+      const queue = [{ id: startNode.id, depth: 0 }];
+      depthMap.set(startNode.id, 0);
+
+      while (queue.length > 0) {
+        const { id, depth } = queue.shift();
+        if (depth >= maxDepth) continue;
+        const neighbors = adjacency.get(id) ?? [];
+        for (const nb of neighbors) {
+          if (depthMap.has(nb.targetId)) continue;
+          if (!allowedEdges.has(nb.edgeType)) continue;
+          // Check direction
+          if (direction === 'outgoing' && nb.reverse) continue;
+          if (direction === 'incoming' && !nb.reverse) continue;
+          depthMap.set(nb.targetId, depth + 1);
+          queue.push({ id: nb.targetId, depth: depth + 1 });
+        }
+      }
+      return depthMap;
+    }
+
+    // Other scope types: flat match (depth = 0 for all matched)
+    const matched = new Map();
     for (const node of nodes) {
       let match = true;
-      if (scope.node_types?.length && !scope.node_types.includes(node.node_type)) match = false;
+      if (scope.type === 'filter') {
+        if (scope.node_types?.length && !scope.node_types.includes(node.node_type)) match = false;
+        if (scope.name_pattern) {
+          const re = new RegExp(scope.name_pattern, 'i');
+          if (!re.test(node.name ?? '') && !re.test(node.qualified_name ?? '')) match = false;
+        }
+      } else if (scope.type === 'test_gaps') {
+        // Show nodes NOT reachable from test nodes
+        match = !node.test_node && node.node_type === 'function';
+      } else if (scope.type === 'all') {
+        match = true;
+      }
       if (scope.modules?.length) {
         const parentId = parentMap.get(node.id);
         const parent = parentId ? nodes.find(n => n.id === parentId) : null;
         if (!parent || !scope.modules.some(m => (parent.name ?? '').includes(m) || (parent.qualified_name ?? '').includes(m))) match = false;
       }
-      if (scope.name_pattern) {
-        const re = new RegExp(scope.name_pattern, 'i');
-        if (!re.test(node.name ?? '') && !re.test(node.qualified_name ?? '')) match = false;
-      }
-      if (match) matched.add(node.id);
+      if (match) matched.set(node.id, 0);
     }
-    return matched;
+    return matched.size > 0 ? matched : null;
+  });
+
+  let queryMatchedIds = $derived.by(() => {
+    if (!queryMatchedWithDepth) return null;
+    return new Set(queryMatchedWithDepth.keys());
   });
 
   let queryCallouts = $derived.by(() => {
@@ -407,9 +477,16 @@
       ctx.lineWidth = isSelected ? 2 : 1;
       ctx.stroke();
 
-      // Emphasis highlight ring
+      // Emphasis highlight ring with tiered colors
       if (activeQuery && isMatched && queryMatchedIds) {
-        const emphColor = activeQuery.emphasis?.color ?? '#fbbf24';
+        const tieredColors = activeQuery.emphasis?.tiered_colors;
+        let emphColor;
+        if (tieredColors?.length && queryMatchedWithDepth) {
+          const depth = queryMatchedWithDepth.get(nodeId) ?? 0;
+          emphColor = tieredColors[Math.min(depth, tieredColors.length - 1)];
+        } else {
+          emphColor = activeQuery.emphasis?.highlight?.matched?.color ?? activeQuery.emphasis?.color ?? '#fbbf24';
+        }
         ctx.strokeStyle = emphColor;
         ctx.lineWidth = 2;
         ctx.globalAlpha = 0.7;
@@ -417,6 +494,29 @@
         roundRect(ctx, rect.x - 2, rect.y - 2, rect.w + 4, rect.h + 4, 6);
         ctx.stroke();
         ctx.globalAlpha = isMatched ? 1 : dimOpacity;
+      }
+
+      // Heat map coloring
+      if (activeQuery?.emphasis?.heat && !queryMatchedIds) {
+        const metric = activeQuery.emphasis.heat.metric;
+        let value = 0;
+        if (metric === 'complexity') value = node.complexity ?? 0;
+        else if (metric === 'incoming_calls') {
+          value = edges.filter(e => (e.target_id ?? e.to_node_id) === nodeId && (e.edge_type ?? '').toLowerCase() === 'calls').length;
+        }
+        if (value > 0) {
+          const maxVal = 20; // Normalize
+          const intensity = Math.min(value / maxVal, 1);
+          const r = Math.round(59 + intensity * 196); // blue → red
+          const g = Math.round(130 - intensity * 100);
+          const b = Math.round(246 - intensity * 200);
+          ctx.fillStyle = `rgb(${r},${g},${b})`;
+          ctx.globalAlpha = 0.6;
+          ctx.beginPath();
+          roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 4);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
       }
 
       // Node label
@@ -442,6 +542,68 @@
         ctx.textBaseline = 'bottom';
         ctx.fillText(callout, rect.x + rect.w / 2, rect.y - 4);
       }
+    }
+
+    // Draw edges between visible nodes
+    const edgeFilter = activeQuery?.edges?.filter;
+    const edgesToDraw = edges.filter(e => {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      // Only draw edges between visible nodes
+      if (!nodeRects.has(src) || !nodeRects.has(tgt)) return false;
+      // Filter by edge type if specified
+      if (edgeFilter?.length && !edgeFilter.includes(et)) return false;
+      // If query active, only show edges between matched nodes
+      if (queryMatchedIds) {
+        return queryMatchedIds.has(src) && queryMatchedIds.has(tgt);
+      }
+      // Only draw Calls and Implements edges by default (skip Contains which is hierarchy)
+      return et === 'calls' || et === 'implements' || et === 'routes_to' || et === 'depends_on';
+    });
+
+    const EDGE_COLORS = {
+      calls: '#60a5fa',
+      implements: '#a78bfa',
+      depends_on: '#f97316',
+      routes_to: '#34d399',
+      field_of: '#94a3b8',
+      governed_by: '#fbbf24',
+    };
+
+    for (const e of edgesToDraw) {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const srcRect = nodeRects.get(src);
+      const tgtRect = nodeRects.get(tgt);
+      if (!srcRect || !tgtRect) continue;
+
+      const sx = srcRect.x + srcRect.w / 2;
+      const sy = srcRect.y + srcRect.h / 2;
+      const tx = tgtRect.x + tgtRect.w / 2;
+      const ty = tgtRect.y + tgtRect.h / 2;
+
+      ctx.globalAlpha = queryMatchedIds ? 0.6 : 0.2;
+      ctx.strokeStyle = EDGE_COLORS[et] ?? '#64748b';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      // Curved edge
+      const mx = (sx + tx) / 2;
+      const my = (sy + ty) / 2 - Math.abs(sx - tx) * 0.15;
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(mx, my, tx, ty);
+      ctx.stroke();
+
+      // Arrowhead
+      const angle = Math.atan2(ty - my, tx - mx);
+      const arrowLen = 6;
+      ctx.beginPath();
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(tx - arrowLen * Math.cos(angle - 0.4), ty - arrowLen * Math.sin(angle - 0.4));
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(tx - arrowLen * Math.cos(angle + 0.4), ty - arrowLen * Math.sin(angle + 0.4));
+      ctx.stroke();
     }
 
     // Draw narrative steps
@@ -645,15 +807,24 @@
 
     if (hit) {
       selectedNodeId = hit.id;
+      const nodeData = hit.node;
       canvasState = {
         ...canvasState,
-        selectedNode: hit.node,
+        selectedNode: {
+          id: nodeData.id,
+          name: nodeData.name ?? '',
+          node_type: nodeData.node_type ?? '',
+          qualified_name: nodeData.qualified_name ?? '',
+        },
         zoom,
         breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })),
       };
+      // Emit detail event for the detail panel
+      onNodeDetail(nodeData);
     } else {
       selectedNodeId = null;
       canvasState = { ...canvasState, selectedNode: null, zoom, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })) };
+      onNodeDetail(null);
     }
     scheduleRedraw();
   }
@@ -802,6 +973,21 @@
 </script>
 
 <div class="treemap-container">
+  <!-- Query annotation banner -->
+  {#if activeQuery?.annotation?.title}
+    <div class="query-annotation" role="status">
+      <div class="annotation-content">
+        <span class="annotation-title">{activeQuery.annotation.title.replace('$name', canvasState?.selectedNode?.name ?? '').replace('{{count}}', queryMatchedIds?.size ?? '?')}</span>
+        {#if activeQuery.annotation.description}
+          <span class="annotation-desc">{activeQuery.annotation.description.replace('{{count}}', queryMatchedIds?.size ?? '?')}</span>
+        {/if}
+      </div>
+      <button class="annotation-clear" onclick={() => { /* parent controls activeQuery */ }} title="Clear query" type="button" aria-label="Clear view query">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+  {/if}
+
   <!-- Filter presets -->
   <div class="treemap-toolbar">
     <div class="filter-group" role="group" aria-label={$t('explorer_treemap.filter_presets')}>
@@ -1103,6 +1289,60 @@
     color: var(--color-text-muted);
     font-size: var(--text-xs);
     user-select: none;
+  }
+
+  /* ── Query annotation banner ─────────────────────────────────────── */
+  .query-annotation {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-4);
+    background: color-mix(in srgb, var(--color-primary) 12%, var(--color-surface));
+    border-bottom: 1px solid color-mix(in srgb, var(--color-primary) 25%, transparent);
+    flex-shrink: 0;
+  }
+
+  .annotation-content {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .annotation-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .annotation-desc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .annotation-clear {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .annotation-clear:hover {
+    background: var(--color-surface);
+    color: var(--color-text);
   }
 
   @media (prefers-reduced-motion: reduce) {
