@@ -1183,36 +1183,36 @@
       <div class="dashboard-flow">
           <section class="ws-feed-panel" data-testid="browse-panel">
             <nav class="ws-tab-bar" aria-label="Development pipeline">
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }}>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'specs'} onclick={() => { wsTab = 'specs'; userSelectedTab = true; }} title="Specifications define what agents build. Approve specs to start the pipeline.">
                 Specs
                 {#if !specsLoading}<span class="ws-tab-count">{specs.length}</span>{/if}
                 {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending}</span>{/if}
               </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }}>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'tasks'} onclick={() => { wsTab = 'tasks'; userSelectedTab = true; }} title="Tasks are generated from approved specs. Agents claim tasks and implement them.">
                 Tasks
                 {#if !tasksLoading}<span class="ws-tab-count">{wsTasks.length}</span>{/if}
                 {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked}</span>
                 {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress}</span>{/if}
               </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }}>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'agents'} onclick={() => { wsTab = 'agents'; userSelectedTab = true; }} title="Agents implement tasks autonomously. Each gets a branch and creates an MR when done.">
                 Agents
                 {#if !agentsLoading}<span class="ws-tab-count">{wsAgents.length}</span>{/if}
                 {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active}</span>{/if}
               </button>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }}>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'mrs'} onclick={() => { wsTab = 'mrs'; userSelectedTab = true; }} title="Merge requests are created by agents. Quality gates run before merging.">
                 MRs
                 {#if !mrsLoading}<span class="ws-tab-count">{wsMrs.length}</span>{/if}
                 {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates}</span>
                 {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open}</span>{/if}
               </button>
               {#if mergeQueueItems.length > 0}
-                <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; }}>
+                <button class="ws-tab" class:ws-tab-active={wsTab === 'queue'} onclick={() => { wsTab = 'queue'; userSelectedTab = true; }} title="MRs waiting to be merged. Gates must pass before merge.">
                   Queue
                   <span class="ws-tab-badge ws-tab-badge-warn">{mergeQueueItems.length}</span>
                 </button>
               {/if}
               <span class="ws-tab-spacer"></span>
-              <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
+              <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }} title="Timeline of all events across repos — specs, agents, gates, merges.">
                 Activity
               </button>
             </nav>
