@@ -316,7 +316,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-1);
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-2) var(--space-3);
     overflow-x: auto;
   }
 
@@ -332,14 +332,14 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 1px;
-    padding: var(--space-2) var(--space-3);
+    gap: 0;
+    padding: var(--space-1) var(--space-2);
     background: transparent;
     border: 1px solid transparent;
     border-radius: var(--radius);
     cursor: pointer;
     font-family: var(--font-body);
-    min-width: 64px;
+    min-width: 56px;
     transition: background var(--transition-fast), border-color var(--transition-fast);
   }
 
