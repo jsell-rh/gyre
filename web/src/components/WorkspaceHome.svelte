@@ -2646,9 +2646,6 @@
     border: 1px solid var(--color-border);
   }
 
-  .activity-summary-bar .filter-select {
-    margin-left: auto;
-  }
 
   /* ── Collapsible feed details ────────────────────── */
   .ws-feed-details {
@@ -4690,15 +4687,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-  }
-
-  .entity-table-compact {
-    font-size: var(--text-sm);
-  }
-
-  .entity-table-compact th,
-  .entity-table-compact td {
-    padding: var(--space-1) var(--space-2);
   }
 
   .progress-section-label {
