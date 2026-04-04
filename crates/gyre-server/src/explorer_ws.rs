@@ -515,6 +515,47 @@ async fn handle_explorer_session(
                                 continue;
                             }
                         };
+                        // Check for stale references in the loaded view query
+                        let mut stale_warning = None;
+                        if let Ok(vq) = serde_json::from_value::<gyre_common::view_query::ViewQuery>(query.clone()) {
+                            if let gyre_common::view_query::Scope::Focus { ref node, .. } = vq.scope {
+                                if node != "$clicked" && node != "$selected" {
+                                    // Refresh graph cache if needed
+                                    if cached_nodes.is_none() {
+                                        let rid = Id::new(&repo_id);
+                                        cached_nodes = Some(
+                                            state.graph_store.list_nodes(&rid, None).await.unwrap_or_default(),
+                                        );
+                                        cached_edges = Some(
+                                            state.graph_store.list_edges(&rid, None).await.unwrap_or_default(),
+                                        );
+                                    }
+                                    if let Some(ref graph_nodes) = cached_nodes {
+                                        let found = graph_nodes.iter().any(|n| {
+                                            n.deleted_at.is_none()
+                                                && (n.name == *node
+                                                    || n.qualified_name == *node
+                                                    || n.id.to_string() == *node)
+                                        });
+                                        if !found {
+                                            stale_warning = Some(format!(
+                                                "Warning: focus node '{}' not found in current graph — this saved view may be stale.",
+                                                node
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(warning) = stale_warning {
+                            let warn_msg = ExplorerServerMessage::Text {
+                                content: warning,
+                                done: true,
+                            };
+                            let _ = sender
+                                .send(Message::Text(serde_json::to_string(&warn_msg).unwrap().into()))
+                                .await;
+                        }
                         let msg = ExplorerServerMessage::ViewQuery {
                             query,
                             explanation: None,

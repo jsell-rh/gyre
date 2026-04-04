@@ -339,6 +339,7 @@ fn compute_test_reachable(
 /// Uses a single multi-source BFS per test node with depth limit, then counts
 /// how many test BFS trees contain the target node.
 /// Accepts `&[&GraphNode]` to avoid cloning node slices.
+#[allow(dead_code)] // Kept for potential use in per-node metric queries
 fn compute_test_fragility_count(
     node_id: &str,
     nodes: &[&GraphNode],
@@ -1090,7 +1091,8 @@ fn resolve_computed_expression(
     }
 
     // $test_fragility(node) — returns the count of distinct test paths as a metric,
-    // but for set operations returns the node if count > 0
+    // but for set operations returns the node if count > 0.
+    // Uses batch computation for consistency with $where(test_fragility, ...).
     if trimmed.starts_with("$test_fragility(") && trimmed.ends_with(')') {
         let node_name = trimmed[16..trimmed.len() - 1]
             .trim()
@@ -1099,7 +1101,9 @@ fn resolve_computed_expression(
         let resolved_name = resolve_node_ref(node_name, selected_node_id);
         if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
             let found_id = found.id.to_string();
-            let count = compute_test_fragility_count(&found_id, active_nodes, outgoing, incoming);
+            // Use batch computation (same work as single-node but consistent perf profile)
+            let all_fragility = compute_all_test_fragility(active_nodes, outgoing, incoming);
+            let count = all_fragility.get(&found_id).copied().unwrap_or(0);
             if count > 0 {
                 let mut result = HashSet::new();
                 result.insert(found_id);

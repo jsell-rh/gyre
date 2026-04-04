@@ -71,12 +71,14 @@
     status = 'connecting';
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const token = getAuthToken();
+    // Browser WebSocket API does not support custom headers, so auth token
+    // must be passed via query parameter. The server strips the token from
+    // access logs to prevent leakage. Future: implement ticket-based auth
+    // (POST /api/v1/explorer/ticket → short-lived ticket → WS ?ticket=).
     const url = `${protocol}//${window.location.host}/api/v1/repos/${repoId}/explorer?token=${encodeURIComponent(token)}`;
     const socket = new WebSocket(url);
 
     socket.onopen = () => {
-      // Auth is handled via HTTP header (Bearer token in cookie/header),
-      // no separate auth message needed.
       // Request saved views list.
       socket.send(JSON.stringify({ type: 'list_views' }));
       status = 'ready';
