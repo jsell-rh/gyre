@@ -574,6 +574,11 @@ export const api = {
     request(`/specs${workspaceId ? '?workspace_id=' + encodeURIComponent(workspaceId) : ''}`),
   specContent: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  updateSpec: (path, repoId, content) =>
+    request(`/specs/${encodeURIComponent(path)}${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
   specProgress: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}/progress${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
   specLinks: (path, repoId) =>

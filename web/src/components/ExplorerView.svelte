@@ -32,7 +32,8 @@
   let graph = $state(null);
   let loading = $state(false);
   let reposLoading = $state(true);
-  let selectedNode = null;
+  // selectedNode tracks the currently selected graph node for canvas state
+  let selectedNode = $state(null);
   let graphError = $state(null);
 
   // Explorer always shows architecture view (tabs removed per spec: "one canvas, one conversation, one understanding").
@@ -149,6 +150,31 @@
   }
 
   let specEditorDirty = $derived(specEditorContent !== specEditorOriginal);
+  let publishLoading = $state(false);
+  let publishError = $state('');
+
+  async function publishSpec() {
+    if (!selectedRepoId || !specEditorPath || !specEditorDirty) return;
+    publishLoading = true;
+    publishError = '';
+    try {
+      await api.updateSpec(specEditorPath, selectedRepoId, specEditorContent);
+      specEditorOriginal = specEditorContent; // Mark as saved
+      showToast('Spec published and submitted for approval.', { type: 'success' });
+      closeSpecEditor();
+    } catch (e) {
+      publishError = e.message ?? 'Failed to publish spec';
+    } finally {
+      publishLoading = false;
+    }
+  }
+
+  function closeSpecEditorWithGuard() {
+    if (specEditorDirty) {
+      if (!confirm('You have unsaved spec changes. Discard them?')) return;
+    }
+    closeSpecEditor();
+  }
 
   // Workspace-scope: track when a repo has been selected to show graph canvas
   let showingRepoGraph = $state(false);
@@ -305,7 +331,7 @@
 
     if (e.key === 'Escape' && !isTyping) {
       // Escape cascade: close the most recent overlay first
-      if (specEditorOpen) { closeSpecEditor(); return; }
+      if (specEditorOpen) { closeSpecEditorWithGuard(); return; }
       if (detailNode) { detailNode = null; return; }
       if (activeViewQuery) { activeViewQuery = null; return; }
       return;
@@ -320,6 +346,14 @@
       } else {
         searchInputEl?.focus();
       }
+    }
+  }
+
+  // Protect unsaved spec edits on page navigation
+  function onBeforeUnload(e) {
+    if (specEditorDirty) {
+      e.preventDefault();
+      return 'You have unsaved spec changes.';
     }
   }
 
@@ -370,7 +404,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} />
+<svelte:window onkeydown={onWindowKeydown} onbeforeunload={onBeforeUnload} />
 
 {#if scopeType === 'tenant'}
   <!-- Tenant scope: workspace cards grid (S4.4a) -->
@@ -478,27 +512,7 @@
           </div>
         {/if}
 
-        <!-- Lens toggle (Structural / Evaluative / Observable) -->
-        <div class="lens-toggle" role="group" aria-label="Explorer lens">
-          <button
-            class="lens-btn"
-            class:active={explorerLens === 'structural'}
-            onclick={() => { explorerLens = 'structural'; }}
-            type="button"
-          >Structural</button>
-          <button
-            class="lens-btn"
-            class:active={explorerLens === 'evaluative'}
-            onclick={() => { explorerLens = 'evaluative'; }}
-            type="button"
-          >Evaluative</button>
-          <button
-            class="lens-btn"
-            disabled
-            title="Requires production telemetry"
-            type="button"
-          >Observable</button>
-        </div>
+        <!-- Lens toggle is in the ExplorerTreemap toolbar to avoid duplication -->
       </div>
     </div>
 
@@ -772,7 +786,7 @@
                 <div class="spec-editor-header">
                   <h3 class="spec-editor-title">{$t('explorer_view.spec_editor_title')}</h3>
                   <code class="spec-editor-path">{specEditorPath}</code>
-                  <button class="spec-editor-close" onclick={closeSpecEditor} aria-label={$t('explorer_view.spec_editor_cancel')} type="button">
+                  <button class="spec-editor-close" onclick={closeSpecEditorWithGuard} aria-label={$t('explorer_view.spec_editor_cancel')} type="button">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
                       <path d="M18 6L6 18M6 6l12 12"/>
                     </svg>
@@ -849,10 +863,15 @@
                       </div>
                     {/if}
                   {/if}
+                  {#if publishError}
+                    <div class="spec-editor-predict-error" role="alert">
+                      {publishError}
+                    </div>
+                  {/if}
                   <div class="spec-editor-actions">
                     <button
                       class="spec-editor-cancel-btn"
-                      onclick={closeSpecEditor}
+                      onclick={closeSpecEditorWithGuard}
                       type="button"
                     >{$t('explorer_view.spec_editor_cancel')}</button>
                     <button
@@ -866,6 +885,20 @@
                         {$t('explorer_view.spec_editor_predicting')}
                       {:else}
                         {$t('explorer_view.spec_editor_preview')}
+                      {/if}
+                    </button>
+                    <button
+                      class="spec-editor-publish-btn"
+                      onclick={publishSpec}
+                      disabled={publishLoading || !specEditorDirty}
+                      type="button"
+                      title="Save spec changes and submit for approval"
+                    >
+                      {#if publishLoading}
+                        <span class="spinner" aria-hidden="true"></span>
+                        Publishing...
+                      {:else}
+                        Publish
                       {/if}
                     </button>
                   </div>
@@ -2104,6 +2137,31 @@
   }
 
   .spec-editor-preview-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .spec-editor-publish-btn {
+    padding: 6px 16px;
+    border-radius: var(--radius-md);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    background: #22c55e;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .spec-editor-publish-btn:hover:not(:disabled) {
+    background: #16a34a;
+  }
+  .spec-editor-publish-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .spec-editor-publish-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
