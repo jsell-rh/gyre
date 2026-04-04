@@ -132,7 +132,11 @@ pub async fn list_views(
 }
 
 /// System default views per the explorer-implementation.md spec.
-fn system_default_views() -> Vec<(&'static str, &'static str, &'static str)> {
+///
+/// Each tuple is `(name, description, query_json)`. Shared by both the
+/// repo-scoped (`/repos/:id/views`) and workspace-scoped
+/// (`/workspaces/:id/explorer-views`) saved-view APIs.
+pub fn system_default_views() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
         (
             "Architecture Overview",

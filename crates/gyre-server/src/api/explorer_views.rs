@@ -29,12 +29,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use super::{error::ApiError, new_id, now_secs};
+use super::{error::ApiError, new_id, now_secs, saved_views::system_default_views};
 use crate::{
     auth::AuthenticatedAgent,
     llm_rate_limit::{check_rate_limit, LLM_RATE_LIMIT, LLM_WINDOW_SECS},
     AppState,
 };
+use gyre_domain::UserRole;
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
@@ -142,31 +143,7 @@ async fn seed_system_views_if_needed(
     Ok(())
 }
 
-/// Canonical system default views (shared with saved_views.rs).
-fn system_default_views() -> Vec<(&'static str, &'static str, &'static str)> {
-    vec![
-        (
-            "Architecture Overview",
-            "Full codebase structure",
-            r##"{"scope":{"type":"all"},"zoom":"fit"}"##,
-        ),
-        (
-            "Test Coverage Gaps",
-            "Functions not reachable from any test",
-            r##"{"scope":{"type":"test_gaps"},"emphasis":{"highlight":{"matched":{"color":"#ef4444","label":"Untested"}},"dim_unmatched":0.3},"annotation":{"title":"Test coverage gaps","description":"{{count}} functions not reachable from any test"}}"##,
-        ),
-        (
-            "Hot Paths",
-            "Most-called functions",
-            r##"{"scope":{"type":"all"},"emphasis":{"heat":{"metric":"incoming_calls","palette":"blue-red"}},"annotation":{"title":"Hot paths"}}"##,
-        ),
-        (
-            "Blast Radius (click)",
-            "Click any node to see what it impacts",
-            r##"{"scope":{"type":"focus","node":"$clicked","edges":["calls","implements","field_of","depends_on"],"direction":"incoming","depth":10},"emphasis":{"tiered_colors":["#ef4444","#f97316","#eab308","#94a3b8"],"dim_unmatched":0.12},"edges":{"filter":["calls","implements","field_of","depends_on"]},"zoom":"fit","annotation":{"title":"Blast radius: $name","description":"{{count}} transitive callers/implementors"}}"##,
-        ),
-    ]
-}
+// system_default_views() is imported from super::saved_views.
 
 // ── ViewSpec validation helper ────────────────────────────────────────────────
 
@@ -246,7 +223,7 @@ pub async fn create_explorer_view(
 pub async fn get_explorer_view(
     State(state): State<Arc<AppState>>,
     Path((workspace_id, view_id)): Path<(String, String)>,
-    _caller: AuthenticatedAgent,
+    caller: AuthenticatedAgent,
 ) -> Result<Json<ExplorerViewRecord>, ApiError> {
     let vid = Id::new(&view_id);
     let view = state
@@ -260,6 +237,9 @@ pub async fn get_explorer_view(
         return Err(ApiError::NotFound(format!(
             "explorer view {view_id} not found in workspace {workspace_id}"
         )));
+    }
+    if view.tenant_id.as_str() != caller.tenant_id {
+        return Err(ApiError::Forbidden("access denied".to_string()));
     }
 
     Ok(Json(ExplorerViewRecord::from(view)))
@@ -285,6 +265,9 @@ pub async fn update_explorer_view(
         return Err(ApiError::NotFound(format!(
             "explorer view {view_id} not found in workspace {workspace_id}"
         )));
+    }
+    if existing.tenant_id.as_str() != caller.tenant_id {
+        return Err(ApiError::Forbidden("access denied".to_string()));
     }
 
     // Ownership check: only creator or Admin may update. System views reject edits.
@@ -335,6 +318,9 @@ pub async fn delete_explorer_view(
         return Err(ApiError::NotFound(format!(
             "explorer view {view_id} not found in workspace {workspace_id}"
         )));
+    }
+    if view.tenant_id.as_str() != caller.tenant_id {
+        return Err(ApiError::Forbidden("access denied".to_string()));
     }
 
     check_ownership(&view, &caller)?;
@@ -431,17 +417,21 @@ pub async fn generate_explorer_view(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Check that the caller is the view creator (system views reject all edits
-/// since created_by is "system").
+/// Check that the caller is the view creator or an Admin.
+/// System (built-in) views reject all edits regardless of role.
 fn check_ownership(view: &SavedView, caller: &AuthenticatedAgent) -> Result<(), ApiError> {
     if view.is_system {
         return Err(ApiError::Forbidden(
             "built-in views cannot be modified".to_string(),
         ));
     }
+    // Admin bypass: admins may modify any user-created view.
+    if caller.roles.contains(&UserRole::Admin) {
+        return Ok(());
+    }
     if view.created_by != caller.agent_id {
         return Err(ApiError::Forbidden(
-            "only the creator may modify this view".to_string(),
+            "only the creator or an admin may modify this view".to_string(),
         ));
     }
     Ok(())

@@ -1,4 +1,4 @@
--- Revert FK constraint: rebuild without REFERENCES
+-- Revert: rebuild without UNIQUE constraint on system views
 CREATE TABLE saved_views_old (
     id TEXT PRIMARY KEY NOT NULL,
     repo_id TEXT NOT NULL,

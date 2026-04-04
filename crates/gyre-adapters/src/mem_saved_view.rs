@@ -61,8 +61,10 @@ impl SavedViewRepository for MemSavedViewRepository {
         let mut views = self.views.lock().unwrap();
         if let Some(existing) = views.iter_mut().find(|v| v.id == view.id) {
             *existing = view.clone();
+            Ok(view)
+        } else {
+            anyhow::bail!("saved view {} not found", view.id)
         }
-        Ok(view)
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {

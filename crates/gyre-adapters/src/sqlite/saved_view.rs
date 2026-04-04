@@ -138,7 +138,7 @@ impl SavedViewRepository for SqliteStorage {
         let v = view.clone();
         tokio::task::spawn_blocking(move || -> Result<SavedView> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::update(saved_views::table.find(v.id.as_str()))
+            let rows = diesel::update(saved_views::table.find(v.id.as_str()))
                 .set((
                     saved_views::name.eq(&v.name),
                     saved_views::description.eq(v.description.as_deref()),
@@ -147,6 +147,9 @@ impl SavedViewRepository for SqliteStorage {
                 ))
                 .execute(&mut *conn)
                 .context("update saved view")?;
+            if rows == 0 {
+                anyhow::bail!("saved view {} not found", v.id);
+            }
             Ok(v)
         })
         .await?
