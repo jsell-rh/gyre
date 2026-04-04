@@ -1519,6 +1519,11 @@
     return result;
   }
 
+  // Edge types traversed for test reachability — matches backend TEST_REACHABILITY_EDGES.
+  // Contains is intentionally excluded to avoid inflating coverage.
+  const FRONTEND_TEST_EDGES = new Set(['calls', 'implements', 'routes_to']);
+  const TESTABLE_TYPES = new Set(['function', 'method', 'endpoint', 'type', 'trait', 'class']);
+
   function computeTestUnreachable() {
     const testN = nodes.filter(n => n.test_node);
     const reachable = new Set(testN.map(n => n.id));
@@ -1526,14 +1531,14 @@
     while (q.length > 0) {
       const id = q.shift();
       for (const nb of (adjacency.get(id) ?? [])) {
-        if (reachable.has(nb.targetId) || nb.edgeType !== 'calls' || nb.reverse) continue;
+        if (reachable.has(nb.targetId) || !FRONTEND_TEST_EDGES.has(nb.edgeType) || nb.reverse) continue;
         reachable.add(nb.targetId);
         q.push(nb.targetId);
       }
     }
     const result = new Set();
     for (const n of nodes) {
-      if (!n.test_node && n.node_type === 'function' && !reachable.has(n.id)) result.add(n.id);
+      if (!n.test_node && TESTABLE_TYPES.has(n.node_type) && !reachable.has(n.id)) result.add(n.id);
     }
     return result;
   }
@@ -1545,7 +1550,7 @@
     while (q.length > 0) {
       const id = q.shift();
       for (const nb of (adjacency.get(id) ?? [])) {
-        if (reachable.has(nb.targetId) || nb.edgeType !== 'calls' || nb.reverse) continue;
+        if (reachable.has(nb.targetId) || !FRONTEND_TEST_EDGES.has(nb.edgeType) || nb.reverse) continue;
         reachable.add(nb.targetId);
         q.push(nb.targetId);
       }
@@ -1647,25 +1652,48 @@
     return result;
   }
 
-  function computeTestFragility(nodeName) {
-    const start = resolveNodeByName(nodeName);
-    if (!start) return new Set();
+  // Cache for all-nodes test fragility (computed once per graph change, O(T*(N+M))
+  // using reverse BFS from each test node). For a single node query ($test_fragility(X)),
+  // returns a set containing just that node if it has any test coverage.
+  let _testFragilityCache = null;
+  let _testFragilityCacheKey = '';
+
+  function computeAllTestFragility() {
+    // Cache key: node count + edge count (invalidates when graph changes)
+    const key = `${nodes.length}:${edges.length}`;
+    if (_testFragilityCache && _testFragilityCacheKey === key) return _testFragilityCache;
+
+    const fragility = new Map(); // node_id -> count of distinct tests reaching it
     const testNodes = nodes.filter(n => n.test_node);
-    let count = 0;
+
+    // For each test node, do a BFS and increment fragility for each reached node.
+    // This is O(T * (N+M)) total but runs once and is cached.
     for (const tn of testNodes) {
       const reached = new Set([tn.id]);
       const q = [tn.id];
       while (q.length > 0) {
         const id = q.shift();
         for (const nb of (adjacency.get(id) ?? [])) {
-          if (['calls', 'implements', 'routes_to', 'contains'].includes(nb.edgeType) && !nb.reverse && !reached.has(nb.targetId)) {
+          if (FRONTEND_TEST_EDGES.has(nb.edgeType) && !nb.reverse && !reached.has(nb.targetId)) {
             reached.add(nb.targetId);
             q.push(nb.targetId);
           }
         }
       }
-      if (reached.has(start.id)) count++;
+      for (const id of reached) {
+        fragility.set(id, (fragility.get(id) || 0) + 1);
+      }
     }
+    _testFragilityCache = fragility;
+    _testFragilityCacheKey = key;
+    return fragility;
+  }
+
+  function computeTestFragility(nodeName) {
+    const start = resolveNodeByName(nodeName);
+    if (!start) return new Set();
+    const fragility = computeAllTestFragility();
+    const count = fragility.get(start.id) || 0;
     if (count > 0) return new Set([start.id]);
     return new Set();
   }
@@ -1811,8 +1839,11 @@
     }
 
     if (scope.type === 'test_gaps') {
-      // Match backend TEST_REACHABILITY_EDGES: calls, implements, routes_to, contains
-      const TEST_REACHABILITY_EDGES = new Set(['calls', 'implements', 'routes_to', 'contains']);
+      // Match backend TEST_REACHABILITY_EDGES: calls, implements, routes_to
+      // NOTE: Contains is intentionally excluded — including it would make all
+      // sibling functions in a module "reachable" just because one test exists
+      // in the same module, inflating test coverage metrics.
+      const TEST_REACHABILITY_EDGES = new Set(['calls', 'implements', 'routes_to']);
       const testN = nodes.filter(n => n.test_node);
       const reachable = new Set(testN.map(n => n.id));
       const q = [...reachable];
@@ -1826,7 +1857,8 @@
       }
       const matched = new Map();
       for (const n of nodes) {
-        if (!n.test_node && n.node_type === 'function' && !reachable.has(n.id)) matched.set(n.id, 0);
+        const testableTypes = new Set(['function', 'method', 'endpoint', 'type', 'trait', 'class']);
+        if (!n.test_node && testableTypes.has(n.node_type) && !reachable.has(n.id)) matched.set(n.id, 0);
       }
       return matched.size > 0 ? matched : null;
     }
@@ -1986,14 +2018,10 @@
           const testCov = node.test_coverage ?? 0;
           value = churn * complexity * (1 - testCov);
         } else if (metric === 'test_fragility') {
-          // Count callers that are test nodes (test fragility = how many tests touch this)
-          for (const nb of (adjacency.get(nodeId) ?? [])) {
-            if (nb.edgeType === 'calls' && nb.reverse) {
-              const src = nb.targetId;
-              const srcNode = nodes.find(n => n.id === src);
-              if (srcNode?.test_node) value++;
-            }
-          }
+          // Transitive test fragility: count of distinct test paths reaching this node
+          // Uses cached all-nodes computation (O(T*(N+M)) once, then O(1) per lookup)
+          const fragility = computeAllTestFragility();
+          value = fragility.get(nodeId) || 0;
         }
       }
       // For heat maps, value=0 is valid (means low/none) — show the low end
