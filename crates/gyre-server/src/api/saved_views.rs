@@ -158,6 +158,11 @@ pub fn system_default_views() -> Vec<(&'static str, &'static str, &'static str)>
             "Click any node to see what it impacts",
             r##"{"scope":{"type":"focus","node":"$clicked","edges":["calls","implements","field_of","depends_on"],"direction":"incoming","depth":10},"emphasis":{"tiered_colors":["#ef4444","#f97316","#eab308","#94a3b8"],"dim_unmatched":0.12},"edges":{"filter":["calls","implements","field_of","depends_on"]},"zoom":"fit","annotation":{"title":"Blast radius: $name","description":"{{count}} transitive callers/implementors"}}"##,
         ),
+        (
+            "Spec Coverage",
+            "Nodes with and without spec governance",
+            r##"{"scope":{"type":"all"},"emphasis":{"heat":{"metric":"risk_score","palette":"green-yellow-red"}},"annotation":{"title":"Spec coverage","description":"Green = governed by spec, Red = unspecified + risky"}}"##,
+        ),
     ]
 }
 
@@ -432,8 +437,8 @@ mod tests {
         let defaults = system_default_views();
         assert_eq!(
             defaults.len(),
-            4,
-            "Should have exactly 4 system default views per spec"
+            5,
+            "Should have exactly 5 system default views"
         );
     }
 
