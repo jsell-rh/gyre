@@ -53,13 +53,16 @@ const MAX_SDK_ACCUMULATED_TEXT: usize = 1_024 * 1_024;
 /// Maximum per-session graph cache size (nodes + edges combined count).
 const MAX_GRAPH_CACHE_ENTRIES: usize = 50_000;
 
-/// Safely serialize an ExplorerServerMessage to JSON, returning None on failure.
+/// Safely serialize an ExplorerServerMessage to JSON.
+/// On serialization failure, returns a minimal valid JSON error message
+/// instead of an empty string (which would confuse the client).
 fn serialize_msg(msg: &ExplorerServerMessage) -> Option<String> {
     match serde_json::to_string(msg) {
         Ok(s) => Some(s),
         Err(e) => {
             warn!("Failed to serialize explorer message: {e}");
-            None
+            // Return a minimal valid error message the client can parse
+            Some(r#"{"type":"error","message":"Internal serialization error"}"#.to_string())
         }
     }
 }
@@ -787,8 +790,12 @@ async fn handle_explorer_session(
                                 .await;
                             continue;
                         }
-                        // Only the creator can delete their own views.
-                        if v.created_by != auth.agent_id {
+                        // Only the creator or an admin can delete views.
+                        let is_admin = auth
+                            .roles
+                            .iter()
+                            .any(|r| matches!(r, gyre_domain::user::UserRole::Admin));
+                        if v.created_by != auth.agent_id && !is_admin {
                             let err = ExplorerServerMessage::Error {
                                 message: "Access denied: you can only delete your own views"
                                     .to_string(),
@@ -865,6 +872,22 @@ async fn handle_explorer_session(
             }
 
             ExplorerClientMessage::ListViews => {
+                // Rate limit ListViews: max 10 per 60s (read-only but triggers DB + seeding)
+                let now_list = std::time::Instant::now();
+                view_op_timestamps.retain(|t| now_list.duration_since(*t).as_secs() < 60);
+                if view_op_timestamps.len() >= 10 {
+                    let err = ExplorerServerMessage::Error {
+                        message: "Too many view operations. Please wait.".to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(
+                            serialize_msg(&err).unwrap_or_default().into(),
+                        ))
+                        .await;
+                    continue;
+                }
+                view_op_timestamps.push(now_list);
+
                 let tenant_id = Id::new(&auth.tenant_id);
                 match state
                     .saved_views
