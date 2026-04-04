@@ -4479,7 +4479,7 @@
     {#if searchResults.length > 0}
       <div class="canvas-search-results" role="listbox" aria-label="Search results" style="max-height: 320px; overflow-y: auto;">
         {#each searchResults.slice(0, 20) as result, idx}
-          <button class="search-result-item" class:active={idx === searchSelectedIdx} role="option"
+          <button class="search-result-item" class:active={idx === searchSelectedIdx} role="option" aria-selected={idx === searchSelectedIdx}
             onclick={() => {
               canvasState = { ...canvasState, selectedNode: { id: result.id, name: result.name, node_type: result.node_type, qualified_name: result.qualified_name } };
               onNodeDetail(result);
