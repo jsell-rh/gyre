@@ -102,22 +102,32 @@
       </div>
     {/if}
 
-    <!-- Compact stats row — clickable counts link to repo tabs -->
+    <!-- Pipeline mini-flow — shows where work is in the spec→task→agent→MR pipeline -->
     {#if stats.specs > 0 || stats.tasks > 0 || stats.agents > 0 || stats.mrs > 0}
-      <div class="repo-card-stats">
-        {#if stats.specs > 0}
-          <button class="repo-stat" class:repo-stat-warn={specBreakdown?.pending > 0} onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending)` : ''}">
-            <span class="repo-stat-count">{stats.specs}</span> spec{stats.specs !== 1 ? 's' : ''}
+      <div class="repo-card-pipeline">
+        <button class="repo-pipeline-stage" class:repo-pipeline-active={specBreakdown?.pending > 0} onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending)` : ''}">
+          <span class="repo-pipeline-count">{stats.specs}</span>
+          <span class="repo-pipeline-label">specs</span>
+        </button>
+        {#if stats.tasks > 0}
+          <span class="repo-pipeline-arrow">→</span>
+          <button class="repo-pipeline-stage" onclick={(e) => handleStatClick('tasks', e)} title="{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}">
+            <span class="repo-pipeline-count">{stats.tasks}</span>
+            <span class="repo-pipeline-label">tasks</span>
           </button>
         {/if}
-        {#if stats.tasks > 0}
-          <button class="repo-stat" onclick={(e) => handleStatClick('tasks', e)} title="{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}">
-            <span class="repo-stat-count">{stats.tasks}</span> task{stats.tasks !== 1 ? 's' : ''}
+        {#if stats.agents > 0}
+          <span class="repo-pipeline-arrow">→</span>
+          <button class="repo-pipeline-stage" class:repo-pipeline-live={stats.agents > 0} onclick={(e) => handleStatClick('agents', e)} title="{stats.agents} agent{stats.agents !== 1 ? 's' : ''}">
+            <span class="repo-pipeline-count">{stats.agents}</span>
+            <span class="repo-pipeline-label">agents</span>
           </button>
         {/if}
         {#if stats.mrs > 0}
-          <button class="repo-stat" class:repo-stat-danger={stats.failedGates > 0} onclick={(e) => handleStatClick('mrs', e)} title="{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{stats.failedGates > 0 ? ` — ${stats.failedGates} gate failures` : ''}">
-            <span class="repo-stat-count">{stats.mrs}</span> MR{stats.mrs !== 1 ? 's' : ''}
+          <span class="repo-pipeline-arrow">→</span>
+          <button class="repo-pipeline-stage" class:repo-pipeline-danger={stats.failedGates > 0} class:repo-pipeline-done={stats.failedGates === 0} onclick={(e) => handleStatClick('mrs', e)} title="{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{stats.failedGates > 0 ? ` — ${stats.failedGates} gate failures` : ''}">
+            <span class="repo-pipeline-count">{stats.mrs}</span>
+            <span class="repo-pipeline-label">MRs</span>
           </button>
         {/if}
       </div>
@@ -272,40 +282,60 @@
   .gate-mini-pass { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
   .gate-mini-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
 
-  /* Compact stats row */
-  .repo-card-stats {
+  /* Pipeline mini-flow */
+  .repo-card-pipeline {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 11px;
+    gap: 2px;
     margin-top: var(--space-1);
     padding-top: var(--space-1);
     border-top: 1px solid var(--color-border);
   }
 
-  .repo-stat {
-    display: inline-flex;
+  .repo-pipeline-stage {
+    display: flex;
     align-items: center;
     gap: 2px;
-    padding: 0;
+    padding: 1px 4px;
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     font-family: var(--font-body);
-    font-size: inherit;
+    font-size: 10px;
     color: var(--color-text-muted);
-    transition: color var(--transition-fast);
+    transition: all var(--transition-fast);
   }
 
-  .repo-stat:hover { color: var(--color-primary); }
+  .repo-pipeline-stage:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+    color: var(--color-primary);
+  }
 
-  .repo-stat-count {
+  .repo-pipeline-count {
     font-weight: 700;
     font-family: var(--font-mono);
+    font-size: 11px;
   }
 
-  .repo-stat-warn { color: var(--color-warning); }
-  .repo-stat-warn .repo-stat-count { color: var(--color-warning); }
-  .repo-stat-danger { color: var(--color-danger); }
-  .repo-stat-danger .repo-stat-count { color: var(--color-danger); }
+  .repo-pipeline-label {
+    font-weight: 500;
+  }
+
+  .repo-pipeline-arrow {
+    color: var(--color-text-muted);
+    opacity: 0.3;
+    font-size: 9px;
+    flex-shrink: 0;
+  }
+
+  .repo-pipeline-active { color: var(--color-warning); }
+  .repo-pipeline-active .repo-pipeline-count { color: var(--color-warning); }
+  .repo-pipeline-live { color: var(--color-success); }
+  .repo-pipeline-live .repo-pipeline-count { color: var(--color-success); }
+  .repo-pipeline-danger { color: var(--color-danger); }
+  .repo-pipeline-danger .repo-pipeline-count { color: var(--color-danger); }
+  .repo-pipeline-done { color: var(--color-success); }
+  .repo-pipeline-done .repo-pipeline-count { color: var(--color-success); }
 </style>
