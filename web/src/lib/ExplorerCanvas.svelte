@@ -1332,6 +1332,27 @@
 
   function matchesActiveFilters(node) {
     if (!filters) return true;
+    // Spec focus: highlight nodes governed by a specific spec (Vision Principle 3: specs as primary artifact)
+    if (filters.focus_spec) {
+      const specPath = filters.focus_spec;
+      // Match nodes with this spec_path
+      if (node.spec_path === specPath) return true;
+      // Match nodes governed by this spec via GovernedBy edges
+      const governed = edges.some(e => {
+        const src = e.source_id ?? e.from_node_id ?? e.from;
+        const tgt = e.target_id ?? e.to_node_id ?? e.to;
+        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+        if (et !== 'governed_by' || src !== node.id) return false;
+        // Check if the target spec node matches
+        const specNode = nodes.find(n => n.id === tgt);
+        return specNode && (specNode.file_path === specPath || specNode.name === specPath || specNode.spec_path === specPath);
+      });
+      return governed;
+    }
+    // Focus on boundary/interface/data node
+    if (filters.focus_node) {
+      return node.id === filters.focus_node;
+    }
     // Category check
     if (filters.categories && filters.categories.length > 0) {
       const nt = (node.node_type ?? '').toLowerCase();
