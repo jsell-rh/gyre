@@ -1128,54 +1128,6 @@
     color: var(--color-text-muted);
   }
 
-  /* ── Lens toggle (segmented control) ──────────────────────────────── */
-  .lens-toggle {
-    display: flex;
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .lens-btn {
-    padding: var(--space-1) var(--space-3);
-    background: var(--color-surface);
-    border: none;
-    border-right: 1px solid var(--color-border-strong);
-    color: var(--color-text-secondary);
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background var(--transition-fast), color var(--transition-fast);
-  }
-
-  .lens-btn:last-child {
-    border-right: none;
-  }
-
-  .lens-btn:hover:not(:disabled) {
-    background: var(--color-surface-elevated);
-    color: var(--color-text);
-  }
-
-  .lens-btn.active {
-    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
-    color: var(--color-primary);
-    font-weight: 600;
-  }
-
-  .lens-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-    color: var(--color-text-muted);
-  }
-
-  .lens-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: -2px;
-  }
-
   /* ── Back to repos button (workspace scope) ───────────────────────── */
   .back-to-repos-btn {
     display: inline-flex;
