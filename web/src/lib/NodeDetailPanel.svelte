@@ -123,6 +123,7 @@
       case 'component': return 'Component';
       case 'table': return 'Table';
       case 'constant': return 'Constant';
+      case 'spec': return 'Spec';
       default: return node.node_type ?? 'Unknown';
     }
   });
@@ -333,6 +334,77 @@
       }
     } catch(e) {}
     return { routesTo, method, path };
+  });
+
+  // For spec view: find all nodes governed by this spec
+  let specGovernedNodes = $derived.by(() => {
+    if (!node || node.node_type !== 'spec') return [];
+    const specId = node.id;
+    const specPath = node.spec_path ?? node.file_path ?? node.name;
+    const governed = new Map();
+
+    // Nodes with matching spec_path
+    for (const n of nodes) {
+      if (n.id === specId) continue;
+      if (n.spec_path && (n.spec_path === specPath || n.spec_path === node.name || n.spec_path === node.qualified_name)) {
+        governed.set(n.id, n);
+      }
+    }
+
+    // Nodes with GovernedBy edges pointing to this spec
+    for (const e of edges) {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (et === 'governed_by' && tgt === specId) {
+        const srcNode = nodes.find(n => n.id === src);
+        if (srcNode) governed.set(srcNode.id, srcNode);
+      }
+    }
+
+    return [...governed.values()];
+  });
+
+  // For spec view: compute implementation completeness
+  let specCompleteness = $derived.by(() => {
+    if (!node || node.node_type !== 'spec') return null;
+    const total = specGovernedNodes.length;
+    if (total === 0) return { total: 0, tested: 0, pct: 0 };
+
+    let tested = 0;
+    for (const gn of specGovernedNodes) {
+      if (gn.test_coverage != null && gn.test_coverage > 0) {
+        tested++;
+      } else if (gn.test_node) {
+        tested++;
+      } else {
+        // Check if any test node calls this governed node
+        for (const e of edges) {
+          const src = e.source_id ?? e.from_node_id ?? e.from;
+          const tgt = e.target_id ?? e.to_node_id ?? e.to;
+          const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+          if ((et === 'tests' || et === 'calls') && tgt === gn.id) {
+            const srcNode = nodes.find(n => n.id === src);
+            if (srcNode?.test_node) { tested++; break; }
+          }
+        }
+      }
+    }
+
+    const pct = total > 0 ? Math.round((tested / total) * 100) : 0;
+    return { total, tested, pct };
+  });
+
+  // For spec view: group governed nodes by type
+  let specNodesByType = $derived.by(() => {
+    if (!node || node.node_type !== 'spec') return new Map();
+    const groups = new Map();
+    for (const gn of specGovernedNodes) {
+      const t = gn.node_type ?? 'unknown';
+      if (!groups.has(t)) groups.set(t, []);
+      groups.get(t).push(gn);
+    }
+    return groups;
   });
 
   function handleNodeClick(targetNode) {
@@ -719,6 +791,115 @@
           <div class="detail-section">
             <h4 class="detail-section-title">Documentation</h4>
             <p class="detail-doc">{node.doc_comment}</p>
+          </div>
+        {/if}
+
+      <!-- ============================================ -->
+      <!-- SPEC VIEW: content preview / completeness / linked nodes -->
+      <!-- ============================================ -->
+      {:else if node.node_type === 'spec'}
+        <!-- Spec content preview -->
+        {#if node.doc_comment || node.description}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Content Preview</h4>
+            <div class="spec-content-preview">
+              <p class="detail-doc">{node.doc_comment ?? node.description}</p>
+            </div>
+          </div>
+        {/if}
+
+        <!-- File path for spec -->
+        {#if node.spec_path && node.spec_path !== node.file_path}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Spec Path</h4>
+            <p class="detail-file"><code>{node.spec_path}</code></p>
+          </div>
+        {/if}
+
+        <!-- Implementation Completeness -->
+        {#if specCompleteness}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Implementation Completeness</summary>
+            <div class="spec-completeness-meter">
+              <div class="completeness-bar">
+                <div class="completeness-fill" style="width: {specCompleteness.total > 0 ? (specGovernedNodes.length > 0 ? 100 : 0) : 0}%"></div>
+                <div class="completeness-tested-fill" style="width: {specCompleteness.pct}%"></div>
+              </div>
+              <div class="completeness-stats">
+                <span class="completeness-stat">
+                  <span class="completeness-stat-value">{specCompleteness.total}</span>
+                  <span class="completeness-stat-label">linked node{specCompleteness.total !== 1 ? 's' : ''}</span>
+                </span>
+                <span class="completeness-stat">
+                  <span class="completeness-stat-value">{specCompleteness.tested}</span>
+                  <span class="completeness-stat-label">tested</span>
+                </span>
+                <span class="completeness-stat">
+                  <span class="completeness-stat-value">{specCompleteness.pct}%</span>
+                  <span class="completeness-stat-label">test coverage</span>
+                </span>
+              </div>
+            </div>
+            {#if specCompleteness.total === 0}
+              <p class="detail-story detail-muted">No implementation nodes linked to this spec.</p>
+            {/if}
+          </details>
+        {/if}
+
+        <!-- Linked nodes by type -->
+        {#if specGovernedNodes.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Linked Nodes ({specGovernedNodes.length})</summary>
+            {#each [...specNodesByType.entries()] as [nodeType, typeNodes]}
+              <div class="spec-type-group">
+                <h5 class="spec-type-group-label">{nodeType} ({typeNodes.length})</h5>
+                <ul class="detail-ref-list">
+                  {#each typeNodes.slice(0, 10) as gn}
+                    <li>
+                      <button class="detail-ref-link" onclick={() => handleNodeClick(gn)} type="button">
+                        <span class="ref-type">{gn.node_type}</span>
+                        <span class="field-name">{gn.name}</span>
+                        {#if gn.test_coverage != null}
+                          <span class="spec-coverage-badge" class:coverage-good={gn.test_coverage >= 0.5} class:coverage-poor={gn.test_coverage < 0.5}>
+                            {Math.round(gn.test_coverage * 100)}%
+                          </span>
+                        {/if}
+                      </button>
+                    </li>
+                  {/each}
+                  {#if typeNodes.length > 10}
+                    <li class="detail-more">+{typeNodes.length - 10} more</li>
+                  {/if}
+                </ul>
+              </div>
+            {/each}
+          </details>
+        {/if}
+
+        <!-- Contains (child specs or sections) -->
+        {#if relationships.contains.length > 0}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Contains ({relationships.contains.length})</summary>
+            <ul class="detail-ref-list">
+              {#each relationships.contains.slice(0, 15) as c}
+                <li>
+                  <button class="detail-ref-link" onclick={() => handleNodeClick(c)} type="button">
+                    <span class="ref-type">{c.node_type}</span> {c.name}
+                  </button>
+                </li>
+              {/each}
+              {#if relationships.contains.length > 15}
+                <li class="detail-more">+{relationships.contains.length - 15} more</li>
+              {/if}
+            </ul>
+          </details>
+        {/if}
+
+        <!-- Story -->
+        {#if story}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Story</h4>
+            <p class="detail-story">{story}</p>
           </div>
         {/if}
 
@@ -1425,8 +1606,118 @@
     margin: 0;
   }
 
+  /* Spec view styles */
+  .spec-content-preview {
+    max-height: 120px;
+    overflow-y: auto;
+    padding: var(--space-2);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+  }
+
+  .spec-completeness-meter {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .completeness-bar {
+    position: relative;
+    width: 100%;
+    height: 8px;
+    background: color-mix(in srgb, var(--color-text) 10%, transparent);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .completeness-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    background: color-mix(in srgb, var(--color-primary) 30%, transparent);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+  }
+
+  .completeness-tested-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    background: #22c55e;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+  }
+
+  .completeness-stats {
+    display: flex;
+    gap: var(--space-3);
+  }
+
+  .completeness-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .completeness-stat-value {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: var(--color-text);
+  }
+
+  .completeness-stat-label {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    letter-spacing: 0.03em;
+  }
+
+  .spec-type-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: var(--space-2);
+  }
+
+  .spec-type-group-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--color-text-secondary);
+    letter-spacing: 0.03em;
+    margin: var(--space-1) 0 0;
+    padding-left: var(--space-2);
+  }
+
+  .spec-coverage-badge {
+    margin-left: auto;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+
+  .spec-coverage-badge.coverage-good {
+    background: color-mix(in srgb, #22c55e 15%, transparent);
+    color: #bbf7d0;
+    border: 1px solid color-mix(in srgb, #22c55e 30%, transparent);
+  }
+
+  .spec-coverage-badge.coverage-poor {
+    background: color-mix(in srgb, #ef4444 15%, transparent);
+    color: #fca5a5;
+    border: 1px solid color-mix(in srgb, #ef4444 30%, transparent);
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .detail-ref-link { transition: none; }
     .detail-collapsible > summary::before { transition: none; }
+    .completeness-fill, .completeness-tested-fill { transition: none; }
   }
 </style>
