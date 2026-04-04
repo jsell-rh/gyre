@@ -411,6 +411,37 @@
 
   let traceMaxFreq = $derived(Math.max(1, ...traceEdgeFrequency.values()));
 
+  // Per-node span statistics for evaluative tooltip (p50, p95, error rate)
+  let nodeSpanStats = $derived.by(() => {
+    if (!traceData?.spans?.length) return new Map();
+    const statsMap = new Map(); // nodeId → { durations: [], errors: number, total: number }
+    for (const s of traceData.spans) {
+      const nid = s.graph_node_id;
+      if (!nid) continue;
+      if (!statsMap.has(nid)) statsMap.set(nid, { durations: [], errors: 0, total: 0 });
+      const st = statsMap.get(nid);
+      st.durations.push(s.duration_us);
+      st.total++;
+      if (s.status === 'error' || s.status === 'ERROR') st.errors++;
+    }
+    // Compute percentiles
+    const result = new Map();
+    for (const [nid, st] of statsMap) {
+      const sorted = st.durations.slice().sort((a, b) => a - b);
+      const p50 = sorted[Math.floor(sorted.length * 0.5)] ?? 0;
+      const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0;
+      const mean = sorted.reduce((a, b) => a + b, 0) / sorted.length;
+      result.set(nid, {
+        spanCount: st.total,
+        errorRate: st.total > 0 ? st.errors / st.total : 0,
+        p50,
+        p95,
+        meanDuration: mean,
+      });
+    }
+    return result;
+  });
+
   // Build particles from trace data when evaluative lens is active
   let traceSpanTimeline = $derived.by(() => {
     if (!traceData?.spans?.length || lens !== 'evaluative') return null;
@@ -3789,6 +3820,17 @@
               {#if tooltipNode.churn_count_30d != null}<span>churn/30d: {tooltipNode.churn_count_30d}</span>{/if}
               {#if tooltipNode.test_coverage != null}<span>test coverage: {Math.round(tooltipNode.test_coverage * 100)}%</span>{/if}
               {#if tooltipNode.test_node}<span class="tooltip-test-badge">test function</span>{/if}
+              {@const spanSt = nodeSpanStats.get(tooltipNode.id)}
+              {#if spanSt}
+                <div class="tooltip-span-stats">
+                  <span>spans: {spanSt.spanCount}</span>
+                  <span>p50: {spanSt.p50 < 1000 ? `${Math.round(spanSt.p50)}\u00B5s` : `${(spanSt.p50 / 1000).toFixed(1)}ms`}</span>
+                  <span>p95: {spanSt.p95 < 1000 ? `${Math.round(spanSt.p95)}\u00B5s` : `${(spanSt.p95 / 1000).toFixed(1)}ms`}</span>
+                  {#if spanSt.errorRate > 0}
+                    <span class="tooltip-error-rate">error rate: {Math.round(spanSt.errorRate * 100)}%</span>
+                  {/if}
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
@@ -4196,6 +4238,9 @@
   .tooltip-eval { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; border-top: 1px solid #1e293b; padding-top: 4px; }
   .tooltip-eval span { font-size: 10px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-test-badge { color: #22c55e !important; font-weight: 600; }
+  .tooltip-span-stats { margin-top: 2px; border-top: 1px dashed #334155; padding-top: 2px; }
+  .tooltip-span-stats span { display: inline-block; margin-right: 6px; }
+  .tooltip-error-rate { color: #ef4444 !important; font-weight: 600; }
 
   .treemap-minimap {
     position: absolute; bottom: 12px; right: 12px; border: 1px solid #334155;
