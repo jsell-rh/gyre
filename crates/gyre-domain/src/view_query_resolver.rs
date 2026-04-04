@@ -386,7 +386,14 @@ fn compute_all_test_fragility(
         .collect();
     let mut fragility: HashMap<String, usize> = HashMap::new();
     for tid in &test_ids {
-        let reached = bfs_traverse(tid, TEST_REACHABILITY_EDGES, "outgoing", 20, outgoing, incoming);
+        let reached = bfs_traverse(
+            tid,
+            TEST_REACHABILITY_EDGES,
+            "outgoing",
+            20,
+            outgoing,
+            incoming,
+        );
         for nid in reached {
             *fragility.entry(nid).or_default() += 1;
         }
@@ -1571,9 +1578,7 @@ pub fn dry_run(
                     "outgoing_calls" => Some(count_outgoing_calls(id, &adjacency_outgoing) as f64),
                     "test_coverage" => node_map.get(id).and_then(|n| n.test_coverage),
                     "field_count" => Some(count_fields(id, &adjacency_incoming) as f64),
-                    "test_fragility" => {
-                        Some(*fragility_map.get(id).unwrap_or(&0) as f64)
-                    }
+                    "test_fragility" => Some(*fragility_map.get(id).unwrap_or(&0) as f64),
                     _ => {
                         if !heat.metric.is_empty() {
                             // Log unrecognized metric once via warning (already validated)

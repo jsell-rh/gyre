@@ -419,7 +419,10 @@ async fn handle_explorer_session(
                                 continue;
                             }
                         };
-                        let msg = ExplorerServerMessage::ViewQuery { query, explanation: None };
+                        let msg = ExplorerServerMessage::ViewQuery {
+                            query,
+                            explanation: None,
+                        };
                         let _ = sender
                             .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
                             .await;
@@ -888,7 +891,10 @@ async fn run_explorer_agent_sdk(
                             }
                             "view_query" => {
                                 if let Some(query) = msg.get("query") {
-                                    let explanation = msg.get("explanation").and_then(|v| v.as_str()).map(|s| s.to_string());
+                                    let explanation = msg
+                                        .get("explanation")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
                                     let view_msg = ExplorerServerMessage::ViewQuery {
                                         query: query.clone(),
                                         explanation,
@@ -1232,8 +1238,7 @@ async fn run_explorer_agent(
                         send_status(sender, "refining").await;
 
                         // Synthetic tool_use ID for the dry-run self-check
-                        let synthetic_tool_id =
-                            format!("selfcheck_{}", refinement_count);
+                        let synthetic_tool_id = format!("selfcheck_{}", refinement_count);
 
                         // Assistant message: text + synthetic tool_use block
                         conversation_history.push(ConversationMessage {
@@ -1259,12 +1264,10 @@ async fn run_explorer_agent(
                         );
                         conversation_history.push(ConversationMessage {
                             role: "user".to_string(),
-                            content: ConversationContent::Blocks(vec![
-                                ContentBlock::ToolResult {
-                                    tool_use_id: synthetic_tool_id,
-                                    content: feedback,
-                                },
-                            ]),
+                            content: ConversationContent::Blocks(vec![ContentBlock::ToolResult {
+                                tool_use_id: synthetic_tool_id,
+                                content: feedback,
+                            }]),
                         });
                         continue;
                     }
@@ -2067,9 +2070,14 @@ Done."#;
         ];
         for (i, (name, description, query_json)) in defaults.iter().enumerate() {
             assert_eq!(*name, expected_names[i]);
-            assert!(!description.is_empty(), "View '{}' should have a description", name);
+            assert!(
+                !description.is_empty(),
+                "View '{}' should have a description",
+                name
+            );
             // Verify the query JSON is a valid ViewQuery
-            let parsed = serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone());
+            let parsed =
+                serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone());
             assert!(
                 parsed.is_ok(),
                 "Default view '{}' has invalid query JSON: {:?}",
@@ -2083,6 +2091,9 @@ Done."#;
     fn test_max_total_turns_is_six() {
         // 3 refinement turns + 3 tool turns = 6 total max
         let max_total = MAX_AGENT_TURNS + 3;
-        assert_eq!(max_total, 6, "Max total turns should be 6 (3 refinement + 3 tool)");
+        assert_eq!(
+            max_total, 6,
+            "Max total turns should be 6 (3 refinement + 3 tool)"
+        );
     }
 }

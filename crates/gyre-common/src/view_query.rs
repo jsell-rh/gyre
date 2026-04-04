@@ -242,7 +242,9 @@ impl ViewQuery {
 
         // Bound depth fields to prevent DoS
         match &self.scope {
-            Scope::Focus { depth, node, edges, .. } => {
+            Scope::Focus {
+                depth, node, edges, ..
+            } => {
                 if *depth > MAX_DEPTH {
                     errors.push(format!(
                         "Focus depth {} exceeds maximum of {MAX_DEPTH}",
@@ -275,9 +277,7 @@ impl ViewQuery {
                     ));
                 }
                 if seed_nodes.is_empty() {
-                    errors.push(
-                        "Concept scope 'seed_nodes' must not be empty".to_string(),
-                    );
+                    errors.push("Concept scope 'seed_nodes' must not be empty".to_string());
                 }
                 for e in expand_edges {
                     if !Self::KNOWN_EDGE_TYPES.contains(&e.to_lowercase().as_str()) {
@@ -319,8 +319,7 @@ impl ViewQuery {
 
         // Validate heat metric is recognized
         if let Some(ref heat) = self.emphasis.heat {
-            if !heat.metric.is_empty()
-                && !Self::KNOWN_HEAT_METRICS.contains(&heat.metric.as_str())
+            if !heat.metric.is_empty() && !Self::KNOWN_HEAT_METRICS.contains(&heat.metric.as_str())
             {
                 errors.push(format!(
                     "Unknown heat metric '{}' — known metrics: complexity, churn, incoming_calls, outgoing_calls, test_coverage, field_count, test_fragility",
@@ -330,15 +329,31 @@ impl ViewQuery {
         }
 
         // Validate computed expression syntax in Filter scope
-        if let Scope::Filter { computed: Some(ref expr), .. } = &self.scope {
+        if let Scope::Filter {
+            computed: Some(ref expr),
+            ..
+        } = &self.scope
+        {
             let normalized = expr.trim();
             if !normalized.is_empty() {
                 let known_prefixes = [
-                    "$clicked", "$selected", "$test_unreachable", "$test_reachable",
-                    "$where(", "$intersect(", "$union(", "$diff(",
-                    "$callers(", "$callees(", "$implementors(", "$fields(",
-                    "$descendants(", "$ancestors(", "$governed_by(",
-                    "$test_fragility(", "$reachable(",
+                    "$clicked",
+                    "$selected",
+                    "$test_unreachable",
+                    "$test_reachable",
+                    "$where(",
+                    "$intersect(",
+                    "$union(",
+                    "$diff(",
+                    "$callers(",
+                    "$callees(",
+                    "$implementors(",
+                    "$fields(",
+                    "$descendants(",
+                    "$ancestors(",
+                    "$governed_by(",
+                    "$test_fragility(",
+                    "$reachable(",
                 ];
                 if !known_prefixes.iter().any(|p| normalized.starts_with(p)) {
                     errors.push(format!("Unknown computed expression: '{}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $intersect, $union, $diff", normalized));
@@ -348,7 +363,10 @@ impl ViewQuery {
                     let open = normalized.chars().filter(|c| *c == '(').count();
                     let close = normalized.chars().filter(|c| *c == ')').count();
                     if open != close {
-                        errors.push(format!("Unbalanced parentheses in computed expression: {} open, {} close", open, close));
+                        errors.push(format!(
+                            "Unbalanced parentheses in computed expression: {} open, {} close",
+                            open, close
+                        ));
                     }
                 }
             }
@@ -425,7 +443,10 @@ pub enum ExplorerServerMessage {
     /// Streamed text response from LLM.
     Text { content: String, done: bool },
     /// View query to apply to canvas.
-    ViewQuery { query: serde_json::Value, explanation: Option<String> },
+    ViewQuery {
+        query: serde_json::Value,
+        explanation: Option<String>,
+    },
     /// List of saved views.
     Views { views: Vec<SavedViewSummary> },
     /// Status update.
