@@ -7,13 +7,10 @@
   import ExplorerChat from '../lib/ExplorerChat.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
-  import Badge from '../lib/Badge.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
   import WorkspaceCards from './WorkspaceCards.svelte';
-  import ExplorerCodeTab from './ExplorerCodeTab.svelte';
   import ExplorerFilterPanel from './ExplorerFilterPanel.svelte';
   import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
-  import Briefing from './Briefing.svelte';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
@@ -38,8 +35,7 @@
   let selectedNode = null;
   let graphError = $state(null);
 
-  // Repo-scope tab: 'architecture' | 'code' | 'briefing'
-  let explorerTab = $state('architecture');
+  // Explorer always shows architecture view (tabs removed per spec: "one canvas, one conversation, one understanding").
 
   // New explorer state
   let explorerCanvasState = $state({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] });
@@ -129,76 +125,6 @@
 
   function onFilterChange(filters) {
     activeFilters = filters;
-  }
-
-  // Ask input state (conversational exploration, §3 Architecture tab)
-  let askQuery = $state('');
-  let askLoading = $state(false);
-  let askExplanation = $state('');
-  let askError = $state('');
-  let askAbortController = null;
-
-  async function submitAsk() {
-    const wid = scope.workspaceId;
-    if (!askQuery.trim() || !wid || askLoading) return;
-    askAbortController?.abort();
-    const controller = new AbortController();
-    askAbortController = controller;
-    askLoading = true;
-    askExplanation = '';
-    askError = '';
-    try {
-      const res = await api.generateExplorerView(wid, {
-        question: askQuery.trim(),
-        ...(selectedRepoId ? { repo_id: selectedRepoId } : {}),
-      });
-      if (!res.ok) {
-        askError = $t('explorer_view.ask_request_failed', { values: { status: res.status } });
-        askLoading = false;
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const blocks = buffer.split('\n\n');
-        buffer = blocks.pop() ?? '';
-        for (const block of blocks) {
-          if (!block.trim()) continue;
-          const lines = block.split('\n');
-          let eventType = 'message';
-          let dataPayload = '';
-          for (const line of lines) {
-            if (line.startsWith('event: ')) eventType = line.slice(7).trim();
-            else if (line.startsWith('data: ')) dataPayload += (dataPayload ? '\n' : '') + line.slice(6);
-          }
-          if (eventType === 'error') {
-            askError = dataPayload || $t('explorer_view.ask_llm_failed');
-          } else if (eventType === 'partial') {
-            askExplanation += dataPayload;
-          } else if (eventType === 'complete' || eventType === 'message') {
-            try {
-              const parsed = JSON.parse(dataPayload);
-              if (parsed.explanation) askExplanation = parsed.explanation;
-            } catch {
-              if (dataPayload) askExplanation = dataPayload;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      if (e.name === 'AbortError') return;
-      askError = $t('explorer_view.ask_llm_failed');
-    } finally {
-      if (!controller.signal.aborted) {
-        askLoading = false;
-        askAbortController = null;
-        if (!askError) askQuery = '';
-      }
-    }
   }
 
   // Concept search state
@@ -356,11 +282,9 @@
 
   onDestroy(() => {
     clearTimeout(debounceTimer);
-    askAbortController?.abort();
     ghostOverlays = [];
   });
 
-  let selectedRepo = $derived.by(() => repos.find(r => r.id === selectedRepoId) ?? null);
   let conceptFilterIds = $derived.by(() =>
     conceptNodes ? new Set(conceptNodes.map(n => n.id)) : null
   );
@@ -456,7 +380,7 @@
   </div>
 
 {:else}
-  <!-- Repo scope: architecture + code — existing graph view (S4.4b/c) -->
+  <!-- Repo scope: architecture canvas + chat (S4.4b/c) -->
   <div class="explorer-view">
     <!-- Header -->
     <div class="explorer-header">
@@ -493,7 +417,7 @@
           {/if}
         {/if}
 
-        {#if graph && explorerTab === 'architecture'}
+        {#if graph}
           <div class="graph-stats">
             <span class="stat">
               <span class="stat-val">{graph.nodes?.length ?? 0}</span>
@@ -509,53 +433,9 @@
       </div>
     </div>
 
-    <!-- Architecture / Briefing / Code tab switcher — only shown in non-repo scope (in repo scope, these are separate top-level tabs) -->
-    {#if selectedRepoId && scopeType !== 'repo'}
-      <!-- svelte-ignore a11y_interactive_supports_focus -->
-      <div class="explorer-tabs" role="tablist" aria-label={$t('explorer_view.system_title')}
-        onkeydown={(e) => {
-          const tabs = ['architecture', 'briefing', 'code'];
-          const idx = tabs.indexOf(explorerTab);
-          if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
-            e.preventDefault();
-            const ni = (idx + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
-            explorerTab = tabs[ni];
-            document.getElementById('explorer-tab-' + tabs[ni])?.focus();
-          }
-        }}
-      >
-        <button
-          class="explorer-tab-btn {explorerTab === 'architecture' ? 'active' : ''}"
-          role="tab"
-          id="explorer-tab-architecture"
-          aria-selected={explorerTab === 'architecture'}
-          tabindex={explorerTab === 'architecture' ? 0 : -1}
-          onclick={() => { explorerTab = 'architecture'; }}
-          type="button"
-        >{$t('explorer_view.sub_tabs.architecture')}</button>
-        <button
-          class="explorer-tab-btn {explorerTab === 'briefing' ? 'active' : ''}"
-          role="tab"
-          id="explorer-tab-briefing"
-          aria-selected={explorerTab === 'briefing'}
-          tabindex={explorerTab === 'briefing' ? 0 : -1}
-          onclick={() => { explorerTab = 'briefing'; }}
-          type="button"
-        >{$t('explorer_view.sub_tabs.briefing')}</button>
-        <button
-          class="explorer-tab-btn {explorerTab === 'code' ? 'active' : ''}"
-          role="tab"
-          id="explorer-tab-code"
-          aria-selected={explorerTab === 'code'}
-          tabindex={explorerTab === 'code' ? 0 : -1}
-          onclick={() => { explorerTab = 'code'; }}
-          type="button"
-        >{$t('explorer_view.sub_tabs.code')}</button>
-      </div>
-    {/if}
 
-    <!-- Control bar — shown when architecture tab is active + repo loaded, but not when graph canvas is showing (canvas has its own toolbar) -->
-    {#if selectedRepoId && explorerTab === 'architecture' && !graph}
+    <!-- Control bar — concept search + filter toggle, always shown when repo is selected -->
+    {#if selectedRepoId}
       <div class="concept-search-bar">
         <!-- Filter toggle -->
         <button
@@ -619,55 +499,12 @@
             </span>
           {/if}
         {/if}
-
-        <span class="control-spacer"></span>
-
-        <!-- Ask input (conversational exploration, §8 of system-explorer.md) -->
-        <div class="ask-wrap">
-          <input
-            type="text"
-            class="ask-input"
-            placeholder={$t('explorer_view.ask_placeholder')}
-            bind:value={askQuery}
-            onkeydown={(e) => { if (e.key === 'Enter') submitAsk(); }}
-            disabled={askLoading}
-            aria-label={$t('explorer_view.ask_placeholder')}
-            aria-busy={askLoading}
-          />
-          <button
-            class="ctrl-btn ask-btn"
-            onclick={submitAsk}
-            disabled={askLoading || !askQuery.trim()}
-            type="button"
-            aria-label={$t('explorer_view.ask_btn')}
-          >
-            {#if askLoading}
-              <span class="spinner" aria-hidden="true"></span>
-            {:else}
-              {$t('explorer_view.ask_btn')}
-            {/if}
-          </button>
-        </div>
       </div>
-
-      <!-- Ask explanation/error feedback -->
-      {#if askExplanation || askError}
-        <div class="ask-feedback" role="status" aria-live="polite">
-          {#if askError}
-            <span class="ask-error">{askError}</span>
-          {:else}
-            <span class="ask-explanation">{askExplanation}</span>
-          {/if}
-        </div>
-      {/if}
     {/if}
 
     <!-- Main content -->
     <div class="explorer-body">
-      <!-- Filter panel — hidden when graph canvas active (treemap has built-in filter toolbar) -->
-      {#if explorerTab === 'architecture' && !graph}
-        <ExplorerFilterPanel visible={filterVisible} onfilterchange={onFilterChange} />
-      {/if}
+      <ExplorerFilterPanel visible={filterVisible} onfilterchange={onFilterChange} />
 
       <div class="explorer-body-main">
         {#if !selectedRepoId}
@@ -686,14 +523,6 @@
               {/if}
             {/if}
           </div>
-
-        {:else if explorerTab === 'briefing'}
-          <div class="briefing-wrap">
-            <Briefing workspaceId={scope.workspaceId} repoId={selectedRepoId} scope={scopeType === 'repo' ? 'repo' : 'workspace'} workspaceName={workspaceName} />
-          </div>
-
-        {:else if explorerTab === 'code'}
-          <ExplorerCodeTab repoId={selectedRepoId} repo={selectedRepo} />
 
         {:else if loading}
           <div class="loading-wrap">
@@ -820,7 +649,7 @@
         {/if}
 
         <!-- Repo dependencies, risks, types, modules, timeline — shown as collapsible section both before and alongside graph -->
-        {#if selectedRepoId && explorerTab === 'architecture' && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
+        {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
           <div class="arch-insights-toggle">
             <button
               class="arch-insights-btn"
@@ -1166,11 +995,6 @@
     min-width: 0;
   }
 
-  .briefing-wrap {
-    flex: 1;
-    overflow-y: auto;
-  }
-
   .empty-state-wrap {
     flex: 1;
     display: flex;
@@ -1214,43 +1038,6 @@
     text-align: center;
     margin: 0;
     font-style: italic;
-  }
-
-  /* Architecture / Code tab switcher */
-  .explorer-tabs {
-    display: flex;
-    gap: 0;
-    padding: 0 var(--space-6);
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface);
-    flex-shrink: 0;
-  }
-
-  .explorer-tab-btn {
-    padding: var(--space-2) var(--space-4);
-    background: transparent;
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--color-text-secondary);
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    cursor: pointer;
-    transition: color var(--transition-fast), border-color var(--transition-fast);
-    margin-bottom: -1px;
-  }
-
-  .explorer-tab-btn.active {
-    color: var(--color-primary);
-    border-bottom-color: var(--color-primary);
-  }
-
-  .explorer-tab-btn:not(.active):hover {
-    color: var(--color-text);
-  }
-
-  .explorer-tab-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
   }
 
   /* Concept search bar */
@@ -1490,57 +1277,6 @@
     border-color: var(--color-primary);
     color: var(--color-primary);
   }
-
-  .control-spacer {
-    flex: 1;
-  }
-
-  /* ── Ask input ─────────────────────────────────────────────────────── */
-  .ask-wrap {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    flex-shrink: 0;
-  }
-
-  .ask-input {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius);
-    color: var(--color-text);
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    padding: var(--space-1) var(--space-2);
-    min-width: 180px;
-    max-width: 260px;
-    outline: none;
-    transition: border-color var(--transition-fast);
-  }
-
-  .ask-input::placeholder { color: var(--color-text-muted); }
-
-  .ask-input:focus {
-    border-color: var(--color-focus);
-    box-shadow: 0 0 0 2px var(--color-focus);
-  }
-
-  .ask-btn {
-    padding: var(--space-1) var(--space-3);
-  }
-
-  /* ── Ask feedback ──────────────────────────────────────────────────── */
-  .ask-feedback {
-    padding: var(--space-2) var(--space-6);
-    background: var(--color-surface-elevated);
-    border-bottom: 1px solid var(--color-border);
-    font-size: var(--text-sm);
-    flex-shrink: 0;
-    max-height: 100px;
-    overflow-y: auto;
-  }
-
-  .ask-explanation { color: var(--color-text-secondary); }
-  .ask-error { color: var(--color-danger); }
 
   /* ── Architecture insights (deps + risks) ────────────────────────── */
   .arch-insights-toggle {
