@@ -134,7 +134,11 @@
 
   // Instant preview tier: compute link graph impact without LLM (§3 Instant tier)
   let instantImpact = $derived.by(() => {
-    if (!specEditorOpen || !specEditorDirty || !graph?.nodes?.length || !graph?.edges?.length) return null;
+    if (!specEditorOpen || !graph?.nodes?.length || !graph?.edges?.length) return null;
+    // Find the spec node for this path
+    const specNode = (graph.nodes ?? []).find(n => n.spec_path === specEditorPath || n.name === specEditorPath);
+    const specNodeId = specNode?.id;
+
     // Find nodes governed by this spec path
     const governedNodeIds = new Set();
     for (const e of (graph.edges ?? [])) {
@@ -151,14 +155,36 @@
     for (const n of (graph.nodes ?? [])) {
       if (n.spec_path === specEditorPath) governedNodeIds.add(n.id);
     }
-    // Count affected repos, nodes, and dependent specs
+
+    // Count connected specs (specs linked to this spec via edges)
+    const connectedSpecIds = new Set();
+    if (specNodeId) {
+      for (const e of (graph.edges ?? [])) {
+        const src = e.source_id ?? e.from_node_id ?? e.from;
+        const tgt = e.target_id ?? e.to_node_id ?? e.to;
+        if (src === specNodeId || tgt === specNodeId) {
+          const otherId = src === specNodeId ? tgt : src;
+          const otherNode = (graph.nodes ?? []).find(n => n.id === otherId);
+          if (otherNode?.node_type === 'spec') connectedSpecIds.add(otherId);
+        }
+      }
+    }
+
+    // Count implementing repos (distinct repo_id values among governed nodes)
+    const repoIds = new Set();
     const affectedNodes = (graph.nodes ?? []).filter(n => governedNodeIds.has(n.id));
+    for (const n of affectedNodes) {
+      if (n.repo_id) repoIds.add(n.repo_id);
+    }
+
     const affectedTypes = new Map();
     for (const n of affectedNodes) {
       affectedTypes.set(n.node_type ?? 'unknown', (affectedTypes.get(n.node_type ?? 'unknown') ?? 0) + 1);
     }
     return {
       governedCount: governedNodeIds.size,
+      connectedSpecs: connectedSpecIds.size,
+      implementingRepos: repoIds.size,
       byType: [...affectedTypes.entries()].map(([t, c]) => `${c} ${t}${c !== 1 ? 's' : ''}`).join(', '),
     };
   });
@@ -247,7 +273,16 @@
     };
   });
 
-  async function publishSpec() {
+  // Publish approval confirmation state
+  let publishConfirmOpen = $state(false);
+
+  function requestPublish() {
+    if (!selectedRepoId || !specEditorPath || !specEditorDirty) return;
+    publishConfirmOpen = true;
+  }
+
+  async function confirmPublish() {
+    publishConfirmOpen = false;
     if (!selectedRepoId || !specEditorPath || !specEditorDirty) return;
     publishLoading = true;
     publishError = '';
@@ -272,6 +307,10 @@
     } finally {
       publishLoading = false;
     }
+  }
+
+  function cancelPublish() {
+    publishConfirmOpen = false;
   }
 
   function closeSpecEditorWithGuard() {
@@ -946,7 +985,9 @@
                 </div>
               {/if}
             </div>
-            {#if detailNode}
+            {#if specEditorOpen}
+              <!-- Spec editor renders inline in the detail area, replacing the detail panel -->
+            {:else if detailNode}
               <div class="explorer-detail-area">
                 <NodeDetailPanel
                   node={detailNode}
@@ -954,8 +995,9 @@
                   edges={graph.edges ?? []}
                   onClose={() => { detailNode = null; }}
                   onNavigate={(n) => { detailNode = n; }}
+                  onInteractiveQuery={(q) => { activeViewQuery = q; }}
                 />
-                {#if detailNode.spec_path && !specEditorOpen}
+                {#if detailNode.spec_path}
                   <div class="edit-spec-action">
                     <button
                       class="edit-spec-btn"
@@ -977,9 +1019,17 @@
                     </svg>
                   </button>
                 </div>
-                {#if instantImpact && specEditorDirty}
+                {#if instantImpact}
                   <div class="instant-impact" role="status">
                     <span class="instant-label">Instant impact:</span>
+                    {#if instantImpact.connectedSpecs > 0}
+                      <span class="instant-count">{instantImpact.connectedSpecs} connected spec{instantImpact.connectedSpecs !== 1 ? 's' : ''}</span>
+                      <span class="instant-sep">|</span>
+                    {/if}
+                    {#if instantImpact.implementingRepos > 0}
+                      <span class="instant-count">{instantImpact.implementingRepos} repo{instantImpact.implementingRepos !== 1 ? 's' : ''}</span>
+                      <span class="instant-sep">|</span>
+                    {/if}
                     <span class="instant-count">{instantImpact.governedCount} governed node{instantImpact.governedCount !== 1 ? 's' : ''}</span>
                     {#if instantImpact.byType}
                       <span class="instant-types">({instantImpact.byType})</span>
@@ -1118,7 +1168,7 @@
                     </button>
                     <button
                       class="spec-editor-publish-btn"
-                      onclick={publishSpec}
+                      onclick={requestPublish}
                       disabled={publishLoading || !specEditorDirty}
                       type="button"
                       title="Save spec changes and submit for approval"
@@ -1133,6 +1183,33 @@
                   </div>
                 </div>
               </div>
+              {#if publishConfirmOpen}
+                <div class="publish-confirm-overlay" role="dialog" aria-label="Confirm publish">
+                  <div class="publish-confirm-dialog">
+                    <h4 class="publish-confirm-title">Confirm Publish</h4>
+                    <p class="publish-confirm-desc">
+                      Publishing this spec will save your changes and submit them for approval.
+                      After approval, agents will automatically implement the spec changes.
+                    </p>
+                    {#if instantImpact}
+                      <div class="publish-confirm-impact">
+                        <span class="publish-impact-label">Impact:</span>
+                        <span>{instantImpact.governedCount} governed node{instantImpact.governedCount !== 1 ? 's' : ''}</span>
+                        {#if instantImpact.connectedSpecs > 0}
+                          <span>, {instantImpact.connectedSpecs} connected spec{instantImpact.connectedSpecs !== 1 ? 's' : ''}</span>
+                        {/if}
+                        {#if instantImpact.implementingRepos > 0}
+                          <span>, {instantImpact.implementingRepos} repo{instantImpact.implementingRepos !== 1 ? 's' : ''}</span>
+                        {/if}
+                      </div>
+                    {/if}
+                    <div class="publish-confirm-actions">
+                      <button class="publish-confirm-cancel" onclick={cancelPublish} type="button">Cancel</button>
+                      <button class="publish-confirm-ok" onclick={confirmPublish} type="button">Confirm &amp; Publish</button>
+                    </div>
+                  </div>
+                </div>
+              {/if}
             {/if}
             {#if queryEditorOpen}
               <div class="query-editor-panel" role="complementary" aria-label="Manual view query editor">
@@ -2181,6 +2258,7 @@
   }
   .instant-label { font-weight: 600; color: #60a5fa; }
   .instant-count { color: var(--color-text); }
+  .instant-sep { color: var(--color-text-muted); }
   .instant-types { color: var(--color-text-muted); font-family: 'SF Mono', Menlo, monospace; font-size: 11px; }
 
   .spec-editor-predict-error {
@@ -2666,6 +2744,101 @@
   }
 
   .query-editor-run-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /* ── Publish confirmation dialog ──────────────────────────────────── */
+  .publish-confirm-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+  }
+
+  .publish-confirm-dialog {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    padding: var(--space-5);
+    max-width: 360px;
+    width: 90%;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  }
+
+  .publish-confirm-title {
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .publish-confirm-desc {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    line-height: 1.5;
+  }
+
+  .publish-confirm-impact {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: var(--space-2);
+    background: color-mix(in srgb, #60a5fa 8%, transparent);
+    border-radius: var(--radius-sm);
+    border: 1px solid color-mix(in srgb, #60a5fa 20%, transparent);
+  }
+
+  .publish-impact-label {
+    font-weight: 600;
+    color: #60a5fa;
+  }
+
+  .publish-confirm-actions {
+    display: flex;
+    gap: var(--space-2);
+    justify-content: flex-end;
+  }
+
+  .publish-confirm-cancel {
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+  }
+
+  .publish-confirm-cancel:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .publish-confirm-ok {
+    padding: var(--space-2) var(--space-4);
+    background: #22c55e;
+    border: none;
+    border-radius: var(--radius);
+    color: #fff;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .publish-confirm-ok:hover {
+    background: #16a34a;
+  }
+
+  .publish-confirm-ok:focus-visible,
+  .publish-confirm-cancel:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }

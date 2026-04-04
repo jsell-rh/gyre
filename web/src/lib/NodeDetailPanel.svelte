@@ -5,6 +5,7 @@
     edges = [],
     onClose = () => {},
     onNavigate = () => {},
+    onInteractiveQuery = () => {},
   } = $props();
 
   // Compute relationships for the selected node
@@ -547,6 +548,35 @@
     return groups;
   });
 
+  // Compute produced_by persona from last_modified_by or produced_by edge
+  let producedBy = $derived.by(() => {
+    if (!node) return null;
+    if (node.last_modified_by) return node.last_modified_by;
+    if (node.produced_by) return node.produced_by;
+    // Check for produced_by edge
+    for (const e of edges) {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if ((et === 'produced_by' || et === 'last_modified_by') && src === node.id) {
+        const tgtNode = nodes.find(n => n.id === tgt);
+        return tgtNode?.name ?? tgt;
+      }
+    }
+    return null;
+  });
+
+  // Find the type node for a field's type annotation
+  function findFieldTypeNode(field) {
+    if (!field.qualified_name) return null;
+    const typeName = field.qualified_name.split('::').pop();
+    if (!typeName) return null;
+    return nodes.find(n =>
+      (n.node_type === 'type' || n.node_type === 'interface' || n.node_type === 'trait') &&
+      (n.name === typeName || n.qualified_name?.endsWith(`::${typeName}`))
+    ) ?? null;
+  }
+
   function handleNodeClick(targetNode) {
     if (targetNode) {
       onNavigate(targetNode);
@@ -554,7 +584,49 @@
   }
 </script>
 
-{#if node}
+{#if !node}
+  <div class="detail-panel" role="complementary" aria-label="Explorer flows">
+    <div class="detail-header">
+      <div class="detail-title-row">
+        <span class="detail-type-badge">Explorer</span>
+        <button class="detail-close" onclick={onClose} aria-label="Close" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <h3 class="detail-name">Common Flows</h3>
+    </div>
+    <div class="detail-body">
+      <div class="detail-section">
+        <h4 class="detail-section-title">Predefined Traces</h4>
+        <p class="detail-story">Click a flow to trace its path through the architecture graph.</p>
+        <div class="common-flows-list">
+          <button
+            class="common-flow-btn"
+            onclick={() => onInteractiveQuery({ type: 'blast_radius', from_function: 'spawn_agent', depth: 4, label: 'Agent spawn flow' })}
+            type="button"
+          >
+            <span class="common-flow-icon">&#9654;</span>
+            <div class="common-flow-info">
+              <span class="common-flow-name">Agent spawn flow</span>
+              <span class="common-flow-desc">Trace from spawn_agent through containers, gates, and sessions</span>
+            </div>
+          </button>
+          <button
+            class="common-flow-btn"
+            onclick={() => onInteractiveQuery({ type: 'blast_radius', from_function: 'approve_spec', depth: 4, label: 'Spec approval flow' })}
+            type="button"
+          >
+            <span class="common-flow-icon">&#9654;</span>
+            <div class="common-flow-info">
+              <span class="common-flow-name">Spec approval flow</span>
+              <span class="common-flow-desc">Trace from approve_spec through lifecycle, agents, and implementation</span>
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{:else if node}
   <div class="detail-panel" role="complementary" aria-label="Node details">
     <div class="detail-header">
       <div class="detail-title-row">
@@ -655,12 +727,24 @@
             <summary class="detail-section-title">Fields ({relationships.fields.length})</summary>
             <ul class="detail-ref-list">
               {#each relationships.fields as f}
+                {@const fieldTypeTarget = findFieldTypeNode(f)}
                 <li>
                   <button class="detail-ref-link" onclick={() => handleNodeClick(f)} type="button">
                     <span class="ref-type">{f.node_type}</span>
                     <span class="field-name">{f.name}</span>
                     {#if f.qualified_name && f.qualified_name !== f.name}
-                      <span class="field-type-annotation">: {f.qualified_name.split('::').pop()}</span>
+                      {#if fieldTypeTarget}
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <span
+                          class="field-type-annotation field-type-clickable"
+                          role="button"
+                          tabindex="0"
+                          onclick={(e) => { e.stopPropagation(); handleNodeClick(fieldTypeTarget); }}
+                          onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); handleNodeClick(fieldTypeTarget); } }}
+                        >: {f.qualified_name.split('::').pop()}</span>
+                      {:else}
+                        <span class="field-type-annotation">: {f.qualified_name.split('::').pop()}</span>
+                      {/if}
                     {/if}
                   </button>
                 </li>
@@ -707,6 +791,10 @@
         <!-- Story -->
         <details class="detail-collapsible" open>
           <summary class="detail-section-title">Story</summary>
+          <!-- Chronological summary -->
+          <p class="detail-story story-chronological">
+            {#if node.created_at}Created on {new Date(node.created_at * 1000).toLocaleDateString()}{:else}Created at unknown date{/if}{#if relationships.fields.length > 0}, {relationships.fields.length} field{relationships.fields.length !== 1 ? 's' : ''}{/if}{#if node.spec_path || relationships.governedBy}, governed by <code class="story-spec-ref">{node.spec_path ?? relationships.governedBy}</code>{/if}.
+          </p>
           {#if node.doc_comment}
             <p class="detail-doc">{node.doc_comment}</p>
           {/if}
@@ -714,9 +802,6 @@
             <p class="detail-story">{story}</p>
           {/if}
           <div class="story-provenance">
-            {#if node.created_at}
-              <p class="detail-provenance">Created {new Date(node.created_at * 1000).toLocaleDateString()}</p>
-            {/if}
             {#if node.created_sha}
               <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
             {/if}
@@ -730,7 +815,7 @@
               <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
             {/if}
           </div>
-          {#if !story && !node.doc_comment && !node.created_sha && !node.last_modified_by}
+          {#if !story && !node.doc_comment && !node.created_sha && !node.last_modified_by && !node.created_at}
             <p class="detail-story detail-muted">No documentation or history available.</p>
           {/if}
         </details>
@@ -1602,6 +1687,14 @@
           </span>
         </div>
       </div>
+
+      <!-- Produced by persona -->
+      {#if producedBy}
+        <div class="detail-section">
+          <h4 class="detail-section-title">Produced By</h4>
+          <p class="detail-persona"><code>{producedBy}</code></p>
+        </div>
+      {/if}
 
       <!-- Provenance -->
       {#if node.last_modified_by || node.created_sha}
@@ -2511,7 +2604,125 @@
     flex-shrink: 0;
   }
 
+  /* Clickable field type annotations */
+  .field-type-clickable {
+    color: var(--color-link);
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 2px;
+  }
+
+  .field-type-clickable:hover {
+    color: var(--color-primary);
+    text-decoration-style: solid;
+  }
+
+  .field-type-clickable:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 1px;
+    border-radius: 2px;
+  }
+
+  /* Produced by persona */
+  .detail-persona {
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    margin: 0;
+  }
+
+  .detail-persona code {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    padding: 1px 6px;
+    border-radius: 3px;
+    color: var(--color-primary);
+  }
+
+  /* Chronological story summary */
+  .story-chronological {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    line-height: 1.5;
+    margin: 0;
+    padding: var(--space-1) var(--space-2);
+    background: color-mix(in srgb, var(--color-text) 5%, transparent);
+    border-radius: var(--radius-sm);
+    border-left: 2px solid var(--color-primary);
+  }
+
+  .story-spec-ref {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-link);
+    background: color-mix(in srgb, var(--color-link) 10%, transparent);
+    padding: 0 3px;
+    border-radius: 2px;
+  }
+
+  /* Common flows */
+  .common-flows-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+
+  .common-flow-btn {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+    color: var(--color-text);
+    font-family: var(--font-body);
+  }
+
+  .common-flow-btn:hover {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+  }
+
+  .common-flow-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .common-flow-icon {
+    color: var(--color-primary);
+    font-size: var(--text-sm);
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .common-flow-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .common-flow-name {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .common-flow-desc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.4;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .risk-bar-fill { transition: none; }
+    .common-flow-btn { transition: none; }
   }
 </style>
