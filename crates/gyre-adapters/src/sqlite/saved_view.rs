@@ -79,10 +79,19 @@ impl SavedViewRepository for SqliteStorage {
                 updated_at: v.updated_at as i64,
                 is_system: v.is_system,
             };
-            diesel::insert_or_ignore_into(saved_views::table)
-                .values(&row)
-                .execute(&mut *conn)
-                .context("insert saved view")?;
+            if v.is_system {
+                // System views use INSERT OR IGNORE to handle seeding races gracefully
+                diesel::insert_or_ignore_into(saved_views::table)
+                    .values(&row)
+                    .execute(&mut *conn)
+                    .context("insert saved view")?;
+            } else {
+                // User views use regular INSERT to surface duplicate PK errors
+                diesel::insert_into(saved_views::table)
+                    .values(&row)
+                    .execute(&mut *conn)
+                    .context("insert saved view")?;
+            }
             Ok(v)
         })
         .await?

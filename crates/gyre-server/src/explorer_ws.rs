@@ -412,6 +412,31 @@ async fn handle_explorer_session(
                 description,
                 query,
             } => {
+                // Validate name/description length limits
+                if name.len() > 200 {
+                    let err = ExplorerServerMessage::Error {
+                        message: "View name exceeds 200 character limit".to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(
+                            serialize_msg(&err).unwrap_or_default().into(),
+                        ))
+                        .await;
+                    continue;
+                }
+                if let Some(ref desc) = description {
+                    if desc.len() > 2000 {
+                        let err = ExplorerServerMessage::Error {
+                            message: "View description exceeds 2000 character limit".to_string(),
+                        };
+                        let _ = sender
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
+                            .await;
+                        continue;
+                    }
+                }
                 // Validate the view query before saving.
                 match serde_json::from_value::<gyre_common::view_query::ViewQuery>(query.clone()) {
                     Ok(parsed) => {
@@ -2117,7 +2142,8 @@ async fn execute_tool(
                 .input
                 .get("limit")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(30) as usize;
+                .unwrap_or(30)
+                .min(200) as usize; // Cap at 200 to prevent unbounded iteration
 
             let results: Vec<serde_json::Value> = nodes
                 .iter()

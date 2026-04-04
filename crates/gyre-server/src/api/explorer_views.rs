@@ -59,8 +59,16 @@ pub struct ExplorerViewRecord {
 
 impl From<SavedView> for ExplorerViewRecord {
     fn from(v: SavedView) -> Self {
-        let spec = serde_json::from_str(&v.query_json)
-            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let spec = match serde_json::from_str(&v.query_json) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!(
+                    view_id = %v.id,
+                    "Corrupt query_json in saved view — returning empty object: {e}"
+                );
+                serde_json::Value::Object(Default::default())
+            }
+        };
         Self {
             id: v.id.to_string(),
             workspace_id: v.workspace_id.to_string(),
@@ -242,6 +250,21 @@ pub async fn create_explorer_view(
     Json(req): Json<CreateViewRequest>,
 ) -> Result<(StatusCode, Json<ExplorerViewRecord>), ApiError> {
     check_workspace_membership(&state, &workspace_id, &caller).await?;
+
+    // Validate length limits on user-supplied strings
+    if req.name.len() > 200 {
+        return Err(ApiError::BadRequest(
+            "View name exceeds 200 character limit".to_string(),
+        ));
+    }
+    if let Some(ref desc) = req.description {
+        if desc.len() > 2000 {
+            return Err(ApiError::BadRequest(
+                "View description exceeds 2000 character limit".to_string(),
+            ));
+        }
+    }
+
     parse_and_validate(&req.spec)?;
 
     // Validate repo_id belongs to this workspace if provided.
@@ -311,6 +334,22 @@ pub async fn update_explorer_view(
     Json(req): Json<UpdateViewRequest>,
 ) -> Result<Json<ExplorerViewRecord>, ApiError> {
     check_workspace_membership(&state, &workspace_id, &caller).await?;
+
+    // Validate length limits on user-supplied strings
+    if let Some(ref name) = req.name {
+        if name.len() > 200 {
+            return Err(ApiError::BadRequest(
+                "View name exceeds 200 character limit".to_string(),
+            ));
+        }
+    }
+    if let Some(ref desc) = req.description {
+        if desc.len() > 2000 {
+            return Err(ApiError::BadRequest(
+                "View description exceeds 2000 character limit".to_string(),
+            ));
+        }
+    }
     let vid = Id::new(&view_id);
     let existing = state
         .saved_views

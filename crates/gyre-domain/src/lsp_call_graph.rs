@@ -574,6 +574,18 @@ fn read_lsp_message(
         return Ok(None);
     }
 
+    // Cap Content-Length to prevent OOM from malicious/buggy LSP responses (max 64MB)
+    const MAX_LSP_CONTENT_LENGTH: usize = 64 * 1024 * 1024;
+    if content_length > MAX_LSP_CONTENT_LENGTH {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "LSP Content-Length {} exceeds maximum {} bytes",
+                content_length, MAX_LSP_CONTENT_LENGTH
+            ),
+        ));
+    }
+
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body)?;
     let parsed: serde_json::Value = serde_json::from_slice(&body)
@@ -609,7 +621,9 @@ fn read_lsp_message_with_timeout(
 
     // Use poll(2) to wait for data on the stdout fd with a timeout.
     let fd = reader.get_ref().as_raw_fd();
-    let timeout_ms = timeout.as_millis() as i32;
+    // Clamp to i32::MAX (~24.8 days) to prevent overflow wrapping to negative
+    // which would cause poll to return immediately.
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
 
     let mut pollfd = libc::pollfd {
         fd,

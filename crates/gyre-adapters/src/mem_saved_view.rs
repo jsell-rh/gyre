@@ -21,7 +21,25 @@ impl Default for MemSavedViewRepository {
 #[async_trait]
 impl SavedViewRepository for MemSavedViewRepository {
     async fn create(&self, view: SavedView) -> Result<SavedView> {
-        self.views.lock().unwrap().push(view.clone());
+        let mut views = self.views.lock().unwrap();
+        // For system views, skip if duplicate (matches SQLite INSERT OR IGNORE)
+        if view.is_system {
+            let exists = views.iter().any(|v| {
+                v.is_system
+                    && v.workspace_id == view.workspace_id
+                    && v.repo_id == view.repo_id
+                    && v.name == view.name
+            });
+            if exists {
+                return Ok(view);
+            }
+        } else {
+            // For user views, error on duplicate PK
+            if views.iter().any(|v| v.id == view.id) {
+                anyhow::bail!("saved view {} already exists", view.id);
+            }
+        }
+        views.push(view.clone());
         Ok(view)
     }
 
