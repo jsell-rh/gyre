@@ -158,8 +158,14 @@
   // Context menu state
   let contextMenu = $state(null); // { x, y, node }
 
-  // Evaluative lens metric mode
-  let evaluativeMetric = $state('complexity'); // 'complexity' | 'churn' | 'incoming_calls' | 'test_coverage'
+  // Evaluative lens metric mode — defaults to trace-based when data exists
+  let evaluativeMetric = $state('complexity'); // 'complexity' | 'churn' | 'incoming_calls' | 'test_coverage' | 'span_duration' | 'span_count' | 'error_rate'
+  // Auto-select trace metric when trace data becomes available
+  $effect(() => {
+    if (traceData?.spans?.length > 0 && evaluativeMetric === 'complexity') {
+      evaluativeMetric = 'span_duration';
+    }
+  });
   let observableBannerVisible = $state(false); // show "coming soon" banner for observable lens
 
   // ── Ghost overlay state (spec editing preview) ──────────────────────
@@ -4287,15 +4293,18 @@
 
     {#if lens === 'evaluative'}
       <div class="eval-metric-group" role="group" aria-label="Evaluative metric">
-        {#each [['complexity', 'Complexity'], ['churn', 'Churn'], ['incoming_calls', 'Call Count'], ['test_coverage', 'Test Coverage']] as [key, label]}
-          <button class="tb-btn tb-btn-sm" class:active={evaluativeMetric === key} onclick={() => { evaluativeMetric = key; onLensChange('evaluative'); }} type="button">{label}</button>
-        {/each}
         {#if traceData?.spans?.length}
-          <span class="tb-sep-v"></span>
+          <!-- Trace-based metrics (primary evaluative data per spec) -->
           {#each [['span_duration', 'Duration'], ['span_count', 'Spans'], ['error_rate', 'Errors']] as [key, label]}
             <button class="tb-btn tb-btn-sm" class:active={evaluativeMetric === key} onclick={() => { evaluativeMetric = key; onLensChange('evaluative'); }} type="button">{label}</button>
           {/each}
+          <span class="tb-sep-v"></span>
+          <span class="eval-label">Static:</span>
         {/if}
+        <!-- Static analysis metrics (structural overlay for repos without trace data) -->
+        {#each [['complexity', 'Complexity'], ['churn', 'Churn'], ['incoming_calls', 'Call Count'], ['test_coverage', 'Test Coverage']] as [key, label]}
+          <button class="tb-btn tb-btn-sm" class:active={evaluativeMetric === key} onclick={() => { evaluativeMetric = key; onLensChange('evaluative'); }} type="button">{label}</button>
+        {/each}
       </div>
       {#if traceData?.spans?.length}
         <div class="eval-playback" role="group" aria-label="Trace playback">
@@ -4742,6 +4751,7 @@
   .tb-btn-disabled { opacity: 0.35; cursor: not-allowed; }
   .tb-coming-soon { font-size: 9px; opacity: 0.6; font-style: italic; }
   .eval-metric-group { display: flex; gap: 2px; align-items: center; }
+  .eval-label { font-size: 10px; color: #64748b; margin: 0 2px; white-space: nowrap; }
   .eval-playback { display: flex; gap: 4px; align-items: center; margin-left: 4px; }
   .eval-scrubber { width: 80px; accent-color: #ef4444; height: 4px; cursor: pointer; }
   .eval-speed { background: rgba(15,15,26,0.9); color: #94a3b8; border: 1px solid #334155; border-radius: 4px; padding: 2px 4px; font-size: 11px; font-family: 'SF Mono', Menlo, monospace; cursor: pointer; }
