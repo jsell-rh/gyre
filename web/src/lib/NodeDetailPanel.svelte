@@ -208,18 +208,34 @@
     return [...usedBySet.values()];
   });
 
-  // Compute risk summary for type view
-  let typeRisk = $derived.by(() => {
-    if (!node || (node.node_type !== 'type' && node.node_type !== 'table' && node.node_type !== 'component')) return null;
+  // Compute risk summary for type/function/endpoint/trait views
+  let nodeRisk = $derived.by(() => {
+    if (!node) return null;
+    const applicableTypes = ['type', 'table', 'component', 'function', 'endpoint', 'interface', 'trait'];
+    if (!applicableTypes.includes(node.node_type)) return null;
     const churn = node.churn_count_30d ?? 0;
+    const maxChurn = 30; // normalize churn bar against 30 changes/month
+    const churnPct = Math.min(100, Math.round((churn / maxChurn) * 100));
+    const churnLabel = churn > 15 ? 'high' : churn > 5 ? 'medium' : 'low';
     const incomingCalls = relationships.calledBy.length;
     const outgoingCalls = relationships.calls.length;
     const coupling = incomingCalls + outgoingCalls;
     const couplingLabel = coupling > 20 ? 'high' : coupling > 8 ? 'medium' : 'low';
-    const specCoverage = node.spec_path || relationships.governedBy ? 'high' : 'none';
-    const testCoverage = node.test_coverage != null ? `${Math.round(node.test_coverage * 100)}%` : 'unknown';
-    return { churn, coupling, couplingLabel, specCoverage, testCoverage };
+    const hasSpec = !!(node.spec_path || relationships.governedBy);
+    const specCoverage = hasSpec ? 'covered' : 'none';
+    const specConfidence = hasSpec ? (node.confidence ?? 'high') : 'none';
+    const testCoverage = node.test_coverage != null ? Math.round(node.test_coverage * 100) : null;
+    const testReachable = relationships.testedBy.length > 0;
+    const testLabel = testCoverage != null ? `${testCoverage}%` : testReachable ? 'reachable' : 'unknown';
+    const complexity = node.complexity ?? null;
+    const maxComplexity = 50;
+    const complexityPct = complexity != null ? Math.min(100, Math.round((complexity / maxComplexity) * 100)) : null;
+    const complexityLabel = complexity != null ? (complexity > 30 ? 'high' : complexity > 15 ? 'medium' : 'low') : null;
+    return { churn, churnPct, churnLabel, coupling, couplingLabel, hasSpec, specCoverage, specConfidence, testCoverage, testReachable, testLabel, complexity, complexityPct, complexityLabel };
   });
+
+  // Alias for backward compat in type view template
+  let typeRisk = $derived(nodeRisk);
 
   // For endpoint view: compute call flow chain (depth 3) from handler
   let endpointFlow = $derived.by(() => {
@@ -327,6 +343,113 @@
     }
     return gates;
   });
+
+  // For endpoint view: extract request/response body shapes from doc_comment or metadata
+  let endpointShapes = $derived.by(() => {
+    if (!node || node.node_type !== 'endpoint') return null;
+    let requestBody = null;
+    let responseBody = null;
+    let params = [];
+
+    // Parse from doc_comment
+    if (node.doc_comment) {
+      // Look for "Request: ..." or "Body: ..." or "-> ResponseType"
+      const reqMatch = node.doc_comment.match(/(?:request|body|input|accepts)\s*[:=]\s*(.+?)(?:\n|$)/i);
+      if (reqMatch) requestBody = reqMatch[1].trim();
+
+      const resMatch = node.doc_comment.match(/(?:response|returns|output|->)\s*[:=]?\s*(.+?)(?:\n|$)/i);
+      if (resMatch) responseBody = resMatch[1].trim();
+
+      // Extract path/query params: ":param" or "{param}" patterns
+      const paramMatches = node.doc_comment.matchAll(/[:{}](\w+)/g);
+      for (const m of paramMatches) {
+        if (!params.includes(m[1])) params.push(m[1]);
+      }
+    }
+
+    // Parse from metadata
+    if (node.metadata) {
+      try {
+        const meta = typeof node.metadata === 'string' ? JSON.parse(node.metadata) : node.metadata;
+        if (meta.request_body && !requestBody) requestBody = meta.request_body;
+        if (meta.response_body && !responseBody) responseBody = meta.response_body;
+        if (meta.params && params.length === 0) params = Array.isArray(meta.params) ? meta.params : [meta.params];
+      } catch (e) { /* ignore */ }
+    }
+
+    // Try to find request/response type nodes from handler's fields/calls
+    if (!requestBody || !responseBody) {
+      for (const handler of relationships.routesTo) {
+        // Look for types that the handler calls or uses
+        for (const e of edges) {
+          const src = e.source_id ?? e.from_node_id ?? e.from;
+          const tgt = e.target_id ?? e.to_node_id ?? e.to;
+          const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+          if (src === handler.id && (et === 'calls' || et === 'field_of')) {
+            const targetNode = nodes.find(n => n.id === tgt);
+            if (targetNode && targetNode.node_type === 'type') {
+              const name = targetNode.name.toLowerCase();
+              if (!requestBody && (name.includes('request') || name.includes('input') || name.includes('body') || name.includes('payload'))) {
+                requestBody = targetNode.qualified_name ?? targetNode.name;
+              }
+              if (!responseBody && (name.includes('response') || name.includes('output') || name.includes('result') || name.includes('reply'))) {
+                responseBody = targetNode.qualified_name ?? targetNode.name;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Also extract path params from the endpoint name/qualified_name
+    if (params.length === 0 && (node.qualified_name || node.name)) {
+      const routePath = node.qualified_name || node.name;
+      const pathParams = routePath.matchAll(/[:{](\w+)[}]?/g);
+      for (const m of pathParams) {
+        if (!params.includes(m[1])) params.push(m[1]);
+      }
+    }
+
+    if (!requestBody && !responseBody && params.length === 0) return null;
+    return { requestBody, responseBody, params };
+  });
+
+  // For trait methods: extract parameter signatures from doc_comment or qualified_name
+  function extractMethodSignature(method) {
+    let params = '';
+    let returnType = '';
+
+    // Try doc_comment first: "fn name(param: Type) -> Return"
+    if (method.doc_comment) {
+      const sigMatch = method.doc_comment.match(/\(([^)]*)\)/);
+      if (sigMatch) params = sigMatch[1].trim();
+      const retMatch = method.doc_comment.match(/->\s*(.+?)(?:\s*$|\s*\n)/);
+      if (retMatch) returnType = retMatch[1].trim();
+    }
+
+    // Try qualified_name pattern: "Trait::method(Type, Type) -> Type"
+    if (!params && method.qualified_name) {
+      const sigMatch = method.qualified_name.match(/\(([^)]*)\)/);
+      if (sigMatch) params = sigMatch[1].trim();
+    }
+
+    // Try metadata
+    if (method.metadata) {
+      try {
+        const meta = typeof method.metadata === 'string' ? JSON.parse(method.metadata) : method.metadata;
+        if (meta.params && !params) params = meta.params;
+        if (meta.return_type && !returnType) returnType = meta.return_type;
+        if (meta.signature) {
+          const sigMatch = meta.signature.match(/\(([^)]*)\)/);
+          if (sigMatch && !params) params = sigMatch[1].trim();
+          const retMatch = meta.signature.match(/->\s*(.+)/);
+          if (retMatch && !returnType) returnType = retMatch[1].trim();
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    return { params: params || null, returnType: returnType || null };
+  }
 
   // For endpoint nodes: extract request/response info from metadata
   let endpointMeta = $derived.by(() => {
@@ -559,17 +682,23 @@
             <p class="detail-story">{story}</p>
           {/if}
           <div class="story-provenance">
+            {#if node.created_at}
+              <p class="detail-provenance">Created {new Date(node.created_at * 1000).toLocaleDateString()}</p>
+            {/if}
             {#if node.created_sha}
               <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
             {/if}
-            {#if node.last_modified_sha}
+            {#if node.last_modified_by}
+              <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+            {/if}
+            {#if node.last_modified_sha && node.last_modified_sha !== node.created_sha}
               <p class="detail-provenance">Last modified in <code>{node.last_modified_sha.slice(0, 7)}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
             {/if}
             {#if node.churn_count_30d}
               <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
             {/if}
           </div>
-          {#if !story && !node.doc_comment && !node.created_sha}
+          {#if !story && !node.doc_comment && !node.created_sha && !node.last_modified_by}
             <p class="detail-story detail-muted">No documentation or history available.</p>
           {/if}
         </details>
@@ -578,23 +707,35 @@
         {#if typeRisk}
           <details class="detail-collapsible" open>
             <summary class="detail-section-title">Risk Summary</summary>
-            <div class="risk-summary-grid">
-              <span class="risk-metric">
-                <span class="risk-metric-label">Churn</span>
-                <span class="risk-metric-value">{typeRisk.churn}/30d</span>
-              </span>
-              <span class="risk-metric">
-                <span class="risk-metric-label">Coupling</span>
-                <span class="risk-metric-value risk-coupling-{typeRisk.couplingLabel}">{typeRisk.couplingLabel} ({typeRisk.coupling})</span>
-              </span>
-              <span class="risk-metric">
-                <span class="risk-metric-label">Spec</span>
-                <span class="risk-metric-value">{typeRisk.specCoverage}</span>
-              </span>
-              <span class="risk-metric">
-                <span class="risk-metric-label">Tests</span>
-                <span class="risk-metric-value">{typeRisk.testCoverage}</span>
-              </span>
+            <div class="risk-detail-rows">
+              <div class="risk-row">
+                <span class="risk-row-label">Churn</span>
+                <div class="risk-bar-track">
+                  <div class="risk-bar-fill risk-bar-{typeRisk.churnLabel}" style="width: {typeRisk.churnPct}%"></div>
+                </div>
+                <span class="risk-row-value">{typeRisk.churn}/30d</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Coupling</span>
+                <span class="risk-row-value risk-coupling-{typeRisk.couplingLabel}">{typeRisk.couplingLabel} ({typeRisk.coupling})</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Spec</span>
+                <span class="risk-row-value">{#if typeRisk.hasSpec}<span class="risk-badge risk-badge-good">covered</span>{#if typeRisk.specConfidence !== 'high' && typeRisk.specConfidence !== 'none'} <span class="risk-confidence">({typeRisk.specConfidence})</span>{/if}{:else}<span class="risk-badge risk-badge-warn">none</span>{/if}</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Tests</span>
+                <span class="risk-row-value">{typeRisk.testLabel}</span>
+              </div>
+              {#if typeRisk.complexity != null}
+                <div class="risk-row">
+                  <span class="risk-row-label">Complexity</span>
+                  <div class="risk-bar-track">
+                    <div class="risk-bar-fill risk-bar-{typeRisk.complexityLabel}" style="width: {typeRisk.complexityPct}%"></div>
+                  </div>
+                  <span class="risk-row-value">{typeRisk.complexity}</span>
+                </div>
+              {/if}
             </div>
           </details>
         {/if}
@@ -630,17 +771,32 @@
           </div>
         {/if}
 
-        <!-- Methods (contained functions) -->
+        <!-- Methods (contained functions) with signatures -->
         {#if relationships.methods.length > 0}
           <details class="detail-collapsible" open>
             <summary class="detail-section-title">Methods ({relationships.methods.length})</summary>
-            <ul class="detail-ref-list">
+            <ul class="detail-ref-list method-signatures">
               {#each relationships.methods as method}
+                {@const sig = extractMethodSignature(method)}
                 <li>
-                  <button class="detail-ref-link" onclick={() => handleNodeClick(method)} type="button">
-                    <span class="ref-type">fn</span> {method.name}
+                  <button class="detail-ref-link method-link" onclick={() => handleNodeClick(method)} type="button">
+                    <span class="method-sig-line">
+                      <span class="ref-type">fn</span>
+                      <span class="method-name">{method.name}</span>
+                      {#if sig.params !== null}
+                        <span class="method-params">({sig.params})</span>
+                      {:else}
+                        <span class="method-params">()</span>
+                      {/if}
+                      {#if sig.returnType}
+                        <span class="method-return-arrow"> -&gt; </span>
+                        <span class="method-return-type">{sig.returnType}</span>
+                      {/if}
+                    </span>
                     {#if methodCallCounts.get(method.id)}
                       <span class="call-count" title="Call sites">{methodCallCounts.get(method.id)} call{methodCallCounts.get(method.id) !== 1 ? 's' : ''}</span>
+                    {:else}
+                      <span class="call-count call-count-zero" title="No call sites">0 calls</span>
                     {/if}
                   </button>
                 </li>
@@ -684,6 +840,62 @@
                 <li class="detail-more">+{relationships.calledBy.length - 15} more</li>
               {/if}
             </ul>
+          </details>
+        {/if}
+
+        <!-- Story -->
+        <details class="detail-collapsible" open>
+          <summary class="detail-section-title">Story</summary>
+          {#if story}
+            <p class="detail-story">{story}</p>
+          {/if}
+          <div class="story-provenance">
+            {#if node.created_at}
+              <p class="detail-provenance">Created {new Date(node.created_at * 1000).toLocaleDateString()}</p>
+            {/if}
+            {#if node.created_sha}
+              <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
+            {/if}
+            {#if node.last_modified_by}
+              <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+            {/if}
+            {#if node.last_modified_sha && node.last_modified_sha !== node.created_sha}
+              <p class="detail-provenance">Last modified in <code>{node.last_modified_sha.slice(0, 7)}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
+            {/if}
+            {#if node.churn_count_30d}
+              <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
+            {/if}
+          </div>
+          {#if !story && !node.created_sha && !node.last_modified_by}
+            <p class="detail-story detail-muted">No history available.</p>
+          {/if}
+        </details>
+
+        <!-- Risk Summary -->
+        {#if nodeRisk}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Risk Summary</summary>
+            <div class="risk-detail-rows">
+              <div class="risk-row">
+                <span class="risk-row-label">Churn</span>
+                <div class="risk-bar-track">
+                  <div class="risk-bar-fill risk-bar-{nodeRisk.churnLabel}" style="width: {nodeRisk.churnPct}%"></div>
+                </div>
+                <span class="risk-row-value">{nodeRisk.churn}/30d</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Coupling</span>
+                <span class="risk-row-value risk-coupling-{nodeRisk.couplingLabel}">{nodeRisk.couplingLabel} ({nodeRisk.coupling})</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Spec</span>
+                <span class="risk-row-value">{#if nodeRisk.hasSpec}<span class="risk-badge risk-badge-good">covered</span>{:else}<span class="risk-badge risk-badge-warn">none</span>{/if}</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Tests</span>
+                <span class="risk-row-value">{nodeRisk.testLabel}</span>
+              </div>
+            </div>
           </details>
         {/if}
 
@@ -768,6 +980,37 @@
           </details>
         {/if}
 
+        <!-- Request/Response Shapes -->
+        {#if endpointShapes}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Request / Response</summary>
+            <div class="endpoint-shapes">
+              {#if endpointShapes.params.length > 0}
+                <div class="shape-row">
+                  <span class="shape-label">Params</span>
+                  <div class="shape-params">
+                    {#each endpointShapes.params as param}
+                      <code class="shape-param">{param}</code>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+              {#if endpointShapes.requestBody}
+                <div class="shape-row">
+                  <span class="shape-label">Request</span>
+                  <code class="shape-type">{endpointShapes.requestBody}</code>
+                </div>
+              {/if}
+              {#if endpointShapes.responseBody}
+                <div class="shape-row">
+                  <span class="shape-label">Response</span>
+                  <code class="shape-type">{endpointShapes.responseBody}</code>
+                </div>
+              {/if}
+            </div>
+          </details>
+        {/if}
+
         <!-- Gates -->
         {#if endpointGates.length > 0}
           <div class="detail-section">
@@ -809,6 +1052,71 @@
             <h4 class="detail-section-title">Documentation</h4>
             <p class="detail-doc">{node.doc_comment}</p>
           </div>
+        {/if}
+
+        <!-- Story -->
+        <details class="detail-collapsible" open>
+          <summary class="detail-section-title">Story</summary>
+          {#if story}
+            <p class="detail-story">{story}</p>
+          {/if}
+          <div class="story-provenance">
+            {#if node.created_at}
+              <p class="detail-provenance">Created {new Date(node.created_at * 1000).toLocaleDateString()}</p>
+            {/if}
+            {#if node.created_sha}
+              <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
+            {/if}
+            {#if node.last_modified_by}
+              <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+            {/if}
+            {#if node.last_modified_sha && node.last_modified_sha !== node.created_sha}
+              <p class="detail-provenance">Last modified in <code>{node.last_modified_sha.slice(0, 7)}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
+            {/if}
+            {#if node.churn_count_30d}
+              <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
+            {/if}
+          </div>
+          {#if !story && !node.created_sha && !node.last_modified_by}
+            <p class="detail-story detail-muted">No history available.</p>
+          {/if}
+        </details>
+
+        <!-- Risk Summary (endpoint) -->
+        {#if nodeRisk}
+          <details class="detail-collapsible" open>
+            <summary class="detail-section-title">Risk Summary</summary>
+            <div class="risk-detail-rows">
+              <div class="risk-row">
+                <span class="risk-row-label">Churn</span>
+                <div class="risk-bar-track">
+                  <div class="risk-bar-fill risk-bar-{nodeRisk.churnLabel}" style="width: {nodeRisk.churnPct}%"></div>
+                </div>
+                <span class="risk-row-value">{nodeRisk.churn}/30d</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Coupling</span>
+                <span class="risk-row-value risk-coupling-{nodeRisk.couplingLabel}">{nodeRisk.couplingLabel} ({nodeRisk.coupling})</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Spec</span>
+                <span class="risk-row-value">{#if nodeRisk.hasSpec}<span class="risk-badge risk-badge-good">covered</span>{:else}<span class="risk-badge risk-badge-warn">none</span>{/if}</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Tests</span>
+                <span class="risk-row-value">{nodeRisk.testLabel}</span>
+              </div>
+              {#if nodeRisk.complexity != null}
+                <div class="risk-row">
+                  <span class="risk-row-label">Complexity</span>
+                  <div class="risk-bar-track">
+                    <div class="risk-bar-fill risk-bar-{nodeRisk.complexityLabel}" style="width: {nodeRisk.complexityPct}%"></div>
+                  </div>
+                  <span class="risk-row-value">{nodeRisk.complexity}</span>
+                </div>
+              {/if}
+            </div>
+          </details>
         {/if}
 
       <!-- ============================================ -->
@@ -913,12 +1221,32 @@
         {/if}
 
         <!-- Story -->
-        {#if story}
-          <div class="detail-section">
-            <h4 class="detail-section-title">Story</h4>
+        <details class="detail-collapsible" open>
+          <summary class="detail-section-title">Story</summary>
+          {#if story}
             <p class="detail-story">{story}</p>
+          {/if}
+          <div class="story-provenance">
+            {#if node.created_at}
+              <p class="detail-provenance">Created {new Date(node.created_at * 1000).toLocaleDateString()}</p>
+            {/if}
+            {#if node.created_sha}
+              <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
+            {/if}
+            {#if node.last_modified_by}
+              <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+            {/if}
+            {#if node.last_modified_sha && node.last_modified_sha !== node.created_sha}
+              <p class="detail-provenance">Last modified in <code>{node.last_modified_sha.slice(0, 7)}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
+            {/if}
+            {#if node.churn_count_30d}
+              <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
+            {/if}
           </div>
-        {/if}
+          {#if !story && !node.created_sha && !node.last_modified_by}
+            <p class="detail-story detail-muted">No history available.</p>
+          {/if}
+        </details>
 
       <!-- ============================================ -->
       <!-- EDGE VIEW: relationship between two nodes -->
@@ -1112,11 +1440,71 @@
         {/if}
 
         <!-- Story -->
-        {#if story}
-          <div class="detail-section">
-            <h4 class="detail-section-title">Story</h4>
+        <details class="detail-collapsible" open>
+          <summary class="detail-section-title">Story</summary>
+          {#if node.doc_comment}
+            <p class="detail-doc">{node.doc_comment}</p>
+          {/if}
+          {#if story}
             <p class="detail-story">{story}</p>
+          {/if}
+          <div class="story-provenance">
+            {#if node.created_at}
+              <p class="detail-provenance">Created {new Date(node.created_at * 1000).toLocaleDateString()}</p>
+            {/if}
+            {#if node.created_sha}
+              <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
+            {/if}
+            {#if node.last_modified_by}
+              <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+            {/if}
+            {#if node.last_modified_sha && node.last_modified_sha !== node.created_sha}
+              <p class="detail-provenance">Last modified in <code>{node.last_modified_sha.slice(0, 7)}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
+            {/if}
+            {#if node.churn_count_30d}
+              <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
+            {/if}
           </div>
+          {#if !story && !node.doc_comment && !node.created_sha && !node.last_modified_by}
+            <p class="detail-story detail-muted">No documentation or history available.</p>
+          {/if}
+        </details>
+
+        <!-- Risk Summary (function/generic) -->
+        {#if nodeRisk}
+          <details class="detail-collapsible">
+            <summary class="detail-section-title">Risk Summary</summary>
+            <div class="risk-detail-rows">
+              <div class="risk-row">
+                <span class="risk-row-label">Churn</span>
+                <div class="risk-bar-track">
+                  <div class="risk-bar-fill risk-bar-{nodeRisk.churnLabel}" style="width: {nodeRisk.churnPct}%"></div>
+                </div>
+                <span class="risk-row-value">{nodeRisk.churn}/30d</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Coupling</span>
+                <span class="risk-row-value risk-coupling-{nodeRisk.couplingLabel}">{nodeRisk.couplingLabel} ({nodeRisk.coupling})</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Spec</span>
+                <span class="risk-row-value">{#if nodeRisk.hasSpec}<span class="risk-badge risk-badge-good">covered</span>{:else}<span class="risk-badge risk-badge-warn">none</span>{/if}</span>
+              </div>
+              <div class="risk-row">
+                <span class="risk-row-label">Tests</span>
+                <span class="risk-row-value">{nodeRisk.testLabel}</span>
+              </div>
+              {#if nodeRisk.complexity != null}
+                <div class="risk-row">
+                  <span class="risk-row-label">Complexity</span>
+                  <div class="risk-bar-track">
+                    <div class="risk-bar-fill risk-bar-{nodeRisk.complexityLabel}" style="width: {nodeRisk.complexityPct}%"></div>
+                  </div>
+                  <span class="risk-row-value">{nodeRisk.complexity}</span>
+                </div>
+              {/if}
+            </div>
+          </details>
         {/if}
       {/if}
 
@@ -1834,4 +2222,190 @@
   .span-attr-key { color: var(--color-text-muted); min-width: 80px; flex-shrink: 0; font-family: 'SF Mono', Menlo, monospace; }
   .span-attr-value { color: var(--color-text); word-break: break-all; font-family: 'SF Mono', Menlo, monospace; }
   .span-io-summary { font-size: 12px; font-family: 'SF Mono', Menlo, monospace; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; max-height: 120px; overflow-y: auto; }
+
+  /* Risk detail rows with visual bars */
+  .risk-detail-rows {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .risk-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 2px 0;
+  }
+
+  .risk-row-label {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    letter-spacing: 0.03em;
+    min-width: 56px;
+    flex-shrink: 0;
+  }
+
+  .risk-row-value {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: var(--color-text);
+    flex-shrink: 0;
+    min-width: 40px;
+    text-align: right;
+  }
+
+  .risk-bar-track {
+    flex: 1;
+    height: 6px;
+    background: color-mix(in srgb, var(--color-text) 10%, transparent);
+    border-radius: 3px;
+    overflow: hidden;
+    min-width: 40px;
+  }
+
+  .risk-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+
+  .risk-bar-low { background: #22c55e; }
+  .risk-bar-medium { background: #f59e0b; }
+  .risk-bar-high { background: #ef4444; }
+
+  .risk-badge {
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+  }
+
+  .risk-badge-good {
+    background: color-mix(in srgb, #22c55e 15%, transparent);
+    color: #bbf7d0;
+    border: 1px solid color-mix(in srgb, #22c55e 30%, transparent);
+  }
+
+  .risk-badge-warn {
+    background: color-mix(in srgb, #f59e0b 15%, transparent);
+    color: #fde68a;
+    border: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+  }
+
+  .risk-confidence {
+    font-size: 9px;
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  /* Method signatures */
+  .method-signatures .detail-ref-link {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+
+  .method-link {
+    flex-direction: row !important;
+    flex-wrap: wrap;
+    align-items: center !important;
+  }
+
+  .method-sig-line {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .method-name {
+    color: var(--color-link);
+    font-weight: 600;
+  }
+
+  .method-params {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+  }
+
+  .method-return-arrow {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    flex-shrink: 0;
+  }
+
+  .method-return-type {
+    color: var(--color-primary);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 80px;
+  }
+
+  .call-count-zero {
+    opacity: 0.4;
+  }
+
+  /* Endpoint request/response shapes */
+  .endpoint-shapes {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-1) 0;
+  }
+
+  .shape-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .shape-label {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    letter-spacing: 0.03em;
+    min-width: 56px;
+    flex-shrink: 0;
+  }
+
+  .shape-type {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    padding: 1px 6px;
+    border-radius: 3px;
+    word-break: break-all;
+  }
+
+  .shape-params {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .shape-param {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-link);
+    background: color-mix(in srgb, var(--color-link) 10%, transparent);
+    padding: 1px 6px;
+    border-radius: 3px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .risk-bar-fill { transition: none; }
+  }
 </style>
