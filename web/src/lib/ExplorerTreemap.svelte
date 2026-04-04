@@ -45,6 +45,17 @@
     };
   }
 
+  // Precomputed GovernedBy index: Set of node IDs that have a GovernedBy edge.
+  // Rebuilt when edges change, used by specBorderColor for O(1) lookups instead of O(E) scans.
+  let governedByIndex = $derived.by(() => {
+    const idx = new Set();
+    for (const e of edges) {
+      if (e.deleted_at) continue;
+      if (edgeType(e) === 'governed_by') idx.add(edgeSrc(e));
+    }
+    return idx;
+  });
+
   function specBorderColor(node) {
     if (!node) return '#64748b';
     // Green: governed by spec (explicit spec_path or high confidence)
@@ -54,16 +65,8 @@
     // Amber: suggested link (medium or low confidence)
     if (conf === 'medium') return '#eab308';
     if (conf === 'low') return '#eab308';
-    // Check GovernedBy edges for this node (skip deleted edges)
-    const nodeId = node.id;
-    if (nodeId) {
-      for (const e of edges) {
-        if (e.deleted_at) continue; // stale GovernedBy edge from deleted spec
-        const src = edgeSrc(e);
-        const et = edgeType(e);
-        if (et === 'governed_by' && src === nodeId) return '#22c55e';
-      }
-    }
+    // Check precomputed GovernedBy index (O(1) instead of O(E))
+    if (node.id && governedByIndex.has(node.id)) return '#22c55e';
     // Red: no spec coverage
     return '#ef4444';
   }
@@ -440,7 +443,7 @@
         const bh = maxY - minY + 100;
         targetCam.x = cx;
         targetCam.y = cy;
-        targetCam.zoom = Math.min(W / bw, H / bh, 4) * 0.85;
+        targetCam.zoom = Math.max(MIN_ZOOM, Math.min(W / bw, H / bh, 4) * 0.85);
         needsAnim = true;
         scheduleRedraw();
       }
@@ -857,6 +860,8 @@
   // ── Build layout from path tree ────────────────────────────────────
   let layoutNodes = $state([]);
   let layoutNodeMap = $state(new Map());
+  // Track ghost node positions for edge rendering (ghost nodes aren't in layoutNodeMap)
+  let ghostNodePositions = new Map(); // id -> { x, y, w, h }
   let prevNodeCount = 0;
   let prevBreadcrumbLen = -1;
 
@@ -1169,10 +1174,10 @@
 
     if (ln.parentTreeGroup) {
       const ps = Math.min(ln.parentTreeGroup.w * cam.zoom, ln.parentTreeGroup.h * cam.zoom);
-      // Parent must be 500px+ before leaf children appear
-      if (ps < 500) return 0;
+      // Parent must be 450px+ before leaf children appear (aligned with tree-group threshold)
+      if (ps < 450) return 0;
       if (ps < 700) {
-        const pf = (ps - 500) / 200;
+        const pf = (ps - 450) / 250;
         const ms = Math.min(sw, sh);
         const sf = ms < 8 ? Math.max(0, (ms - 4) / 4) : 1.0;
         return pf * sf;
@@ -1214,10 +1219,7 @@
     return Math.min(ln.w * cam.zoom, ln.h * cam.zoom) < 450;
   }
 
-  function shouldShowChildren(ln) {
-    if (ln.kind !== 'tree-group') return false;
-    return Math.min(ln.w * cam.zoom, ln.h * cam.zoom) > 400;
-  }
+  // shouldShowChildren removed — dead code. Use isSummaryMode() (threshold 450px) instead.
 
   // ── Filter visibility ─────────────────────────────────────────────
   // Pre-compute call edge index
@@ -1415,16 +1417,30 @@
   function computeWhere(property, operator, value) {
     const result = new Set();
     const numVal = Number(value);
+    const isNumericOp = !isNaN(numVal);
     for (const n of nodes) {
-      const nodeVal = n[property] ?? 0;
+      const raw = n[property];
+      if (raw == null) continue; // Skip nodes without this property
       let match = false;
-      switch (operator) {
-        case '>': match = nodeVal > numVal; break;
-        case '<': match = nodeVal < numVal; break;
-        case '>=': match = nodeVal >= numVal; break;
-        case '<=': match = nodeVal <= numVal; break;
-        case '=': case '==': match = nodeVal === numVal; break;
-        case '!=': match = nodeVal !== numVal; break;
+      if (isNumericOp) {
+        const nodeVal = Number(raw);
+        if (isNaN(nodeVal)) continue; // Non-numeric node value
+        switch (operator) {
+          case '>': match = nodeVal > numVal; break;
+          case '<': match = nodeVal < numVal; break;
+          case '>=': match = nodeVal >= numVal; break;
+          case '<=': match = nodeVal <= numVal; break;
+          case '=': case '==': match = Math.abs(nodeVal - numVal) < 1e-9; break;
+          case '!=': match = Math.abs(nodeVal - numVal) >= 1e-9; break;
+        }
+      } else {
+        // String comparison for non-numeric values
+        const strVal = String(raw);
+        switch (operator) {
+          case '=': case '==': match = strVal === value; break;
+          case '!=': match = strVal !== value; break;
+          default: match = false; // Relational ops require numeric values
+        }
       }
       if (match) result.add(n.id);
     }
@@ -1920,13 +1936,19 @@
     return connected.size > 1 ? connected : null;
   });
 
-  // ── Text width cache ──────────────────────────────────────────────
+  // ── Text width cache (LRU-bounded) ──────────────────────────────
+  const TEXT_CACHE_MAX = 5000;
   const textWidthCache = new Map();
   function measureText(ctx, text, font) {
     const key = font + '|' + text;
     if (textWidthCache.has(key)) return textWidthCache.get(key);
     ctx.font = font;
     const w = ctx.measureText(text).width;
+    // Evict oldest entries when cache exceeds limit
+    if (textWidthCache.size >= TEXT_CACHE_MAX) {
+      const firstKey = textWidthCache.keys().next().value;
+      textWidthCache.delete(firstKey);
+    }
     textWidthCache.set(key, w);
     return w;
   }
@@ -2343,6 +2365,7 @@
   // ── Ghost overlay drawing ─────────────────────────────────────────
   function drawGhostOverlays(ctx) {
     const basePulse = 0.5 + 0.5 * Math.sin(ghostPulsePhase * Math.PI * 2);
+    ghostNodePositions.clear();
 
     for (const ghost of ghostOverlays) {
       // Try to find existing layout node for change/remove actions
@@ -2425,6 +2448,11 @@
           gh = bestLn.h * 0.7;
         }
       }
+    }
+
+    // Store ghost position so drawGhostEdge can find it
+    if (ghost.id) {
+      ghostNodePositions.set(ghost.id, { x: wx, y: wy, w: gw, h: gh });
     }
 
     const s = worldToScreen(wx, wy);
@@ -2598,8 +2626,9 @@
   }
 
   function drawGhostEdge(ctx, edge, action, pulse) {
-    const srcLn = layoutNodeMap.get(edge.source);
-    const tgtLn = layoutNodeMap.get(edge.target);
+    // Check both real layout nodes and ghost node positions
+    const srcLn = layoutNodeMap.get(edge.source) ?? ghostNodePositions.get(edge.source);
+    const tgtLn = layoutNodeMap.get(edge.target) ?? ghostNodePositions.get(edge.target);
     if (!srcLn || !tgtLn) return;
 
     const ss = worldToScreen(srcLn.x, srcLn.y);
@@ -3094,14 +3123,21 @@
     ctx.restore();
   }
 
+  let minimapDirty = true;
+  let lastMinimapDpr = 0;
   function drawMinimap() {
     const minimap = minimapEl;
     if (!minimap) return;
     const ctx = minimap.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
-    minimap.width = MINIMAP_W * dpr;
-    minimap.height = MINIMAP_H * dpr;
-    ctx.scale(dpr, dpr);
+    // Only resize buffer when DPR changes (resizing clears canvas)
+    if (dpr !== lastMinimapDpr) {
+      minimap.width = MINIMAP_W * dpr;
+      minimap.height = MINIMAP_H * dpr;
+      lastMinimapDpr = dpr;
+      minimapDirty = true;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     ctx.fillStyle = '#0f0f1a';
     ctx.fillRect(0, 0, MINIMAP_W, MINIMAP_H);
@@ -3161,6 +3197,8 @@
     cam.y += (targetCam.y - cam.y) * LERP_SPEED;
     cam.zoom += (targetCam.zoom - cam.zoom) * LERP_SPEED;
     if (Math.abs(cam.zoom - targetCam.zoom) < 0.0005) cam.zoom = targetCam.zoom;
+    // Clamp zoom to prevent NaN/Infinity in screenToWorld calculations
+    cam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, cam.zoom));
   }
 
   let lastAnimTime = 0;
@@ -3582,9 +3620,17 @@
       return;
     }
     const rect = containerEl?.getBoundingClientRect();
+    let menuX = e.clientX - (rect?.left ?? 0);
+    let menuY = e.clientY - (rect?.top ?? 0);
+    // Clamp to viewport to prevent overflow clipping (menu is ~220px wide, ~350px tall)
+    const menuW = 220, menuH = 350;
+    if (rect) {
+      if (menuX + menuW > rect.width) menuX = Math.max(0, rect.width - menuW);
+      if (menuY + menuH > rect.height) menuY = Math.max(0, rect.height - menuH);
+    }
     contextMenu = {
-      x: e.clientX - (rect?.left ?? 0),
-      y: e.clientY - (rect?.top ?? 0),
+      x: menuX,
+      y: menuY,
       node: hit.node,
       hit,
     };
@@ -3615,7 +3661,7 @@
       });
     } else if (action === 'callers') {
       onInteractiveQuery({
-        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls'], direction: 'incoming', depth: 5 },
+        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls'], direction: 'incoming', depth: 15 },
         emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'], dim_unmatched: 0.12 },
         edges: { filter: ['calls'] },
         zoom: 'fit',
@@ -3623,7 +3669,7 @@
       });
     } else if (action === 'callees') {
       onInteractiveQuery({
-        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 5 },
+        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 15 },
         emphasis: { tiered_colors: ['#3b82f6', '#60a5fa', '#93c5fd', '#94a3b8'], dim_unmatched: 0.12 },
         edges: { filter: ['calls', 'routes_to'] },
         zoom: 'fit',
@@ -3918,19 +3964,8 @@
     lastTouchDist = 0;
   }
 
-  // ── Resize ────────────────────────────────────────────────────────
-  $effect(() => {
-    if (!containerEl) return;
-    const ro = new ResizeObserver(entries => {
-      for (const entry of entries) {
-        W = entry.contentRect.width;
-        H = entry.contentRect.height;
-        scheduleRedraw();
-      }
-    });
-    ro.observe(containerEl);
-    return () => ro.disconnect();
-  });
+  // NOTE: ResizeObserver is created once at the top of the component (line ~108).
+  // Do not create a second one here — it causes double W/H updates and double redraws.
 
   // Trigger redraws on reactive state changes (NOT hoveredNodeId — that triggers scheduleRedraw directly)
   $effect(() => {
@@ -4361,15 +4396,21 @@
           if (e.key === 'Escape') { searchOpen = false; searchQuery = ''; scheduleRedraw(); }
           if (e.key === 'ArrowDown' && searchResults.length > 0) {
             e.preventDefault();
-            searchSelectedIdx = Math.min(searchSelectedIdx + 1, searchResults.length - 1);
+            const maxVisible = Math.min(searchResults.length, 20) - 1;
+            searchSelectedIdx = Math.min(searchSelectedIdx + 1, maxVisible);
             const hit = searchResults[searchSelectedIdx];
             zoomToNode(hit.id);
+            // Scroll selected item into view
+            const items = containerEl?.querySelectorAll('.search-result-item');
+            items?.[searchSelectedIdx]?.scrollIntoView({ block: 'nearest' });
           }
           if (e.key === 'ArrowUp' && searchResults.length > 0) {
             e.preventDefault();
             searchSelectedIdx = Math.max(searchSelectedIdx - 1, 0);
             const hit = searchResults[searchSelectedIdx];
             zoomToNode(hit.id);
+            const items = containerEl?.querySelectorAll('.search-result-item');
+            items?.[searchSelectedIdx]?.scrollIntoView({ block: 'nearest' });
           }
           if (e.key === 'Enter' && searchResults.length > 0) {
             const hit = searchResults[searchSelectedIdx];
@@ -4389,8 +4430,8 @@
       </button>
     </div>
     {#if searchResults.length > 0}
-      <div class="canvas-search-results" role="listbox" aria-label="Search results">
-        {#each searchResults.slice(0, 8) as result, idx}
+      <div class="canvas-search-results" role="listbox" aria-label="Search results" style="max-height: 320px; overflow-y: auto;">
+        {#each searchResults.slice(0, 20) as result, idx}
           <button class="search-result-item" class:active={idx === searchSelectedIdx} role="option"
             onclick={() => {
               canvasState = { ...canvasState, selectedNode: { id: result.id, name: result.name, node_type: result.node_type, qualified_name: result.qualified_name } };
