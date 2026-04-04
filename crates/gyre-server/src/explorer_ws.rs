@@ -1229,10 +1229,8 @@ async fn execute_tool(
             let target_id = tool_call.input.get("target_id").and_then(|v| v.as_str());
 
             // Pre-build node name lookup for O(1) access instead of O(N) per edge
-            let node_names: std::collections::HashMap<&gyre_common::Id, &str> = nodes
-                .iter()
-                .map(|n| (&n.id, n.name.as_str()))
-                .collect();
+            let node_names: std::collections::HashMap<&gyre_common::Id, &str> =
+                nodes.iter().map(|n| (&n.id, n.name.as_str())).collect();
 
             let filtered: Vec<serde_json::Value> = edges
                 .iter()
