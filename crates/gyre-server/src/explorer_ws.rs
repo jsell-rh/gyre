@@ -47,7 +47,25 @@ use tracing::{info, warn};
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
-/// Global per-user concurrent session counter.
+/// Maximum accumulated text buffer from SDK subprocess (1 MB).
+const MAX_SDK_ACCUMULATED_TEXT: usize = 1_024 * 1_024;
+
+/// Maximum per-session graph cache size (nodes + edges combined count).
+const MAX_GRAPH_CACHE_ENTRIES: usize = 50_000;
+
+/// Safely serialize an ExplorerServerMessage to JSON, returning None on failure.
+fn serialize_msg(msg: &ExplorerServerMessage) -> Option<String> {
+    match serde_json::to_string(msg) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            warn!("Failed to serialize explorer message: {e}");
+            None
+        }
+    }
+}
+
+/// Global per-user concurrent session counter, keyed by (tenant_id, agent_id)
+/// to prevent cross-tenant interference.
 /// Uses std::sync::Mutex for Drop compatibility (Drop cannot be async).
 static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, usize>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
@@ -96,7 +114,8 @@ async fn handle_explorer_session(
     let (mut sender, mut receiver) = socket.split();
 
     // Per-user concurrent session limit (prevents unbounded LLM cost).
-    let session_user = auth.agent_id.clone();
+    // Key includes tenant_id to prevent cross-tenant interference.
+    let session_user = format!("{}:{}", auth.tenant_id, auth.agent_id);
     let session_allowed = {
         let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
         let count = sessions.entry(session_user.clone()).or_default();
@@ -114,7 +133,9 @@ async fn handle_explorer_session(
             ),
         };
         let _ = sender
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .send(Message::Text(
+                serialize_msg(&err).unwrap_or_default().into(),
+            ))
             .await;
         return;
     }
@@ -142,7 +163,9 @@ async fn handle_explorer_session(
                 message: format!("Repository not found: {repo_id}"),
             };
             let _ = sender
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .send(Message::Text(
+                    serialize_msg(&err).unwrap_or_default().into(),
+                ))
                 .await;
             return;
         }
@@ -152,7 +175,9 @@ async fn handle_explorer_session(
                 message: "Repository lookup failed".to_string(),
             };
             let _ = sender
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .send(Message::Text(
+                    serialize_msg(&err).unwrap_or_default().into(),
+                ))
                 .await;
             return;
         }
@@ -165,7 +190,9 @@ async fn handle_explorer_session(
                     message: "Access denied: repo not in your tenant".to_string(),
                 };
                 let _ = sender
-                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .send(Message::Text(
+                        serialize_msg(&err).unwrap_or_default().into(),
+                    ))
                     .await;
                 return;
             }
@@ -176,7 +203,9 @@ async fn handle_explorer_session(
                 message: "Access denied: workspace not found".to_string(),
             };
             let _ = sender
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .send(Message::Text(
+                    serialize_msg(&err).unwrap_or_default().into(),
+                ))
                 .await;
             return;
         }
@@ -197,7 +226,9 @@ async fn handle_explorer_session(
                     message: "Access denied: not a member of this workspace".to_string(),
                 };
                 let _ = sender
-                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .send(Message::Text(
+                        serialize_msg(&err).unwrap_or_default().into(),
+                    ))
                     .await;
                 return;
             }
@@ -210,7 +241,9 @@ async fn handle_explorer_session(
                     message: "Access denied: membership check failed".to_string(),
                 };
                 let _ = sender
-                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .send(Message::Text(
+                        serialize_msg(&err).unwrap_or_default().into(),
+                    ))
                     .await;
                 return;
             }
@@ -272,7 +305,9 @@ async fn handle_explorer_session(
                     message: "Invalid message format".to_string(),
                 };
                 let _ = sender
-                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .send(Message::Text(
+                        serialize_msg(&err).unwrap_or_default().into(),
+                    ))
                     .await;
                 continue;
             }
@@ -290,7 +325,9 @@ async fn handle_explorer_session(
                         ),
                     };
                     let _ = sender
-                        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                        .send(Message::Text(
+                            serialize_msg(&err).unwrap_or_default().into(),
+                        ))
                         .await;
                     continue;
                 }
@@ -303,7 +340,9 @@ async fn handle_explorer_session(
                         message: "Please wait before sending another message.".to_string(),
                     };
                     let _ = sender
-                        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                        .send(Message::Text(
+                            serialize_msg(&err).unwrap_or_default().into(),
+                        ))
                         .await;
                     continue;
                 }
@@ -324,9 +363,13 @@ async fn handle_explorer_session(
                             "Session message limit reached. Please reconnect for a fresh session."
                                 .to_string(),
                     };
+                    // Send error and flush before closing to ensure client receives it
                     let _ = sender
-                        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                        .send(Message::Text(
+                            serialize_msg(&err).unwrap_or_default().into(),
+                        ))
                         .await;
+                    let _ = sender.flush().await;
                     let _ = sender.close().await;
                     break;
                 }
@@ -354,7 +397,9 @@ async fn handle_explorer_session(
                             message: "Explorer query failed. Please try again.".to_string(),
                         };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
                             .await;
                     }
                 }
@@ -376,7 +421,9 @@ async fn handle_explorer_session(
                                 message: format!("Invalid view query: {}", errors.join("; ")),
                             };
                             let _ = sender
-                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .send(Message::Text(
+                                    serialize_msg(&err).unwrap_or_default().into(),
+                                ))
                                 .await;
                             continue;
                         }
@@ -386,7 +433,9 @@ async fn handle_explorer_session(
                             message: format!("Invalid view query format: {e}"),
                         };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
                             .await;
                         continue;
                     }
@@ -401,7 +450,9 @@ async fn handle_explorer_session(
                                 .to_string(),
                         };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
                             .await;
                         continue;
                     }
@@ -414,7 +465,7 @@ async fn handle_explorer_session(
                     tenant_id: Id::new(&auth.tenant_id),
                     name,
                     description,
-                    query_json: serde_json::to_string(&query).unwrap_or_default(),
+                    query_json: serde_json::to_string(&query).unwrap_or_else(|_| "{}".to_string()),
                     created_by: auth.agent_id.clone(),
                     created_at: now,
                     updated_at: now,
@@ -438,7 +489,7 @@ async fn handle_explorer_session(
                                 let msg = ExplorerServerMessage::Views { views: summaries };
                                 let _ = sender
                                     .send(Message::Text(
-                                        serde_json::to_string(&msg).unwrap().into(),
+                                        serialize_msg(&msg).unwrap_or_default().into(),
                                     ))
                                     .await;
                             }
@@ -454,7 +505,7 @@ async fn handle_explorer_session(
                                 };
                                 let _ = sender
                                     .send(Message::Text(
-                                        serde_json::to_string(&msg).unwrap().into(),
+                                        serialize_msg(&msg).unwrap_or_default().into(),
                                     ))
                                     .await;
                             }
@@ -466,7 +517,9 @@ async fn handle_explorer_session(
                             message: "Failed to save view. Please try again.".to_string(),
                         };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
                             .await;
                     }
                 }
@@ -487,7 +540,9 @@ async fn handle_explorer_session(
                                 message: "View does not belong to this repository".to_string(),
                             };
                             let _ = sender
-                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .send(Message::Text(
+                                    serialize_msg(&err).unwrap_or_default().into(),
+                                ))
                                 .await;
                             continue;
                         }
@@ -497,7 +552,9 @@ async fn handle_explorer_session(
                                 message: "Access denied".to_string(),
                             };
                             let _ = sender
-                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .send(Message::Text(
+                                    serialize_msg(&err).unwrap_or_default().into(),
+                                ))
                                 .await;
                             continue;
                         }
@@ -510,7 +567,7 @@ async fn handle_explorer_session(
                                 };
                                 let _ = sender
                                     .send(Message::Text(
-                                        serde_json::to_string(&err).unwrap().into(),
+                                        serialize_msg(&err).unwrap_or_default().into(),
                                     ))
                                     .await;
                                 continue;
@@ -589,7 +646,7 @@ async fn handle_explorer_session(
                             };
                             let _ = sender
                                 .send(Message::Text(
-                                    serde_json::to_string(&warn_msg).unwrap().into(),
+                                    serialize_msg(&warn_msg).unwrap_or_default().into(),
                                 ))
                                 .await;
                         }
@@ -598,7 +655,9 @@ async fn handle_explorer_session(
                             explanation: None,
                         };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&msg).unwrap_or_default().into(),
+                            ))
                             .await;
                     }
                     Ok(None) => {
@@ -606,7 +665,9 @@ async fn handle_explorer_session(
                             message: format!("View not found: {view_id}"),
                         };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
                             .await;
                     }
                     Err(e) => {
@@ -615,7 +676,9 @@ async fn handle_explorer_session(
                             message: "Failed to load view. Please try again.".to_string(),
                         };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
                             .await;
                     }
                 }
@@ -635,7 +698,9 @@ async fn handle_explorer_session(
                                 message: "View does not belong to this repository".to_string(),
                             };
                             let _ = sender
-                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .send(Message::Text(
+                                    serialize_msg(&err).unwrap_or_default().into(),
+                                ))
                                 .await;
                             continue;
                         }
@@ -644,7 +709,9 @@ async fn handle_explorer_session(
                                 message: "Access denied".to_string(),
                             };
                             let _ = sender
-                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .send(Message::Text(
+                                    serialize_msg(&err).unwrap_or_default().into(),
+                                ))
                                 .await;
                             continue;
                         }
@@ -654,7 +721,9 @@ async fn handle_explorer_session(
                                 message: "Cannot delete system views".to_string(),
                             };
                             let _ = sender
-                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .send(Message::Text(
+                                    serialize_msg(&err).unwrap_or_default().into(),
+                                ))
                                 .await;
                             continue;
                         }
@@ -665,7 +734,9 @@ async fn handle_explorer_session(
                                     .to_string(),
                             };
                             let _ = sender
-                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .send(Message::Text(
+                                    serialize_msg(&err).unwrap_or_default().into(),
+                                ))
                                 .await;
                             continue;
                         }
@@ -686,7 +757,7 @@ async fn handle_explorer_session(
                                     let msg = ExplorerServerMessage::Views { views: summaries };
                                     let _ = sender
                                         .send(Message::Text(
-                                            serde_json::to_string(&msg).unwrap().into(),
+                                            serialize_msg(&msg).unwrap_or_default().into(),
                                         ))
                                         .await;
                                 }
@@ -698,7 +769,7 @@ async fn handle_explorer_session(
                                 };
                                 let _ = sender
                                     .send(Message::Text(
-                                        serde_json::to_string(&err).unwrap().into(),
+                                        serialize_msg(&err).unwrap_or_default().into(),
                                     ))
                                     .await;
                             }
@@ -709,7 +780,9 @@ async fn handle_explorer_session(
                             message: format!("View not found: {view_id}"),
                         };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
                             .await;
                     }
                     Err(e) => {
@@ -718,7 +791,9 @@ async fn handle_explorer_session(
                             message: "Failed to look up view".to_string(),
                         };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
                             .await;
                     }
                 }
@@ -775,7 +850,9 @@ async fn handle_explorer_session(
 
                         let msg = ExplorerServerMessage::Views { views: summaries };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&msg).unwrap_or_default().into(),
+                            ))
                             .await;
                     }
                     Err(e) => {
@@ -784,7 +861,9 @@ async fn handle_explorer_session(
                             message: "Failed to list views. Please try again.".to_string(),
                         };
                         let _ = sender
-                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
                             .await;
                     }
                 }
@@ -803,7 +882,9 @@ async fn send_status(
         status: status.to_string(),
     };
     sender
-        .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+        .send(Message::Text(
+            serialize_msg(&msg).unwrap_or_default().into(),
+        ))
         .await
         .is_ok()
 }
@@ -834,7 +915,9 @@ async fn stream_text(
             done,
         };
         return sender
-            .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+            .send(Message::Text(
+                serialize_msg(&msg).unwrap_or_default().into(),
+            ))
             .await
             .is_ok();
     }
@@ -866,7 +949,9 @@ async fn stream_text(
             done: is_last && done,
         };
         if sender
-            .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
+            .send(Message::Text(
+                serialize_msg(&msg).unwrap_or_default().into(),
+            ))
             .await
             .is_err()
         {
@@ -980,20 +1065,33 @@ async fn run_explorer_agent_sdk(
     let system_prompt = build_system_prompt();
     let model = std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
 
-    // Serialize conversation history for the SDK (flatten blocks to text)
+    // Serialize conversation history for the SDK, preserving tool call context
     let history_json: Vec<serde_json::Value> = conversation_history
         .iter()
         .map(|m| {
             let text = match &m.content {
                 ConversationContent::Text(t) => t.clone(),
-                ConversationContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                ConversationContent::Blocks(blocks) => {
+                    let mut parts = Vec::new();
+                    for b in blocks {
+                        match b {
+                            ContentBlock::Text { text } => parts.push(text.clone()),
+                            ContentBlock::ToolUse { name, input, .. } => {
+                                parts.push(format!(
+                                    "[Called tool '{}' with: {}]",
+                                    name,
+                                    serde_json::to_string(input).unwrap_or_default()
+                                ));
+                            }
+                            ContentBlock::ToolResult { content, .. } => {
+                                // Truncate large tool results to keep context manageable
+                                let truncated: String = content.chars().take(500).collect();
+                                parts.push(format!("[Tool result: {}]", truncated));
+                            }
+                        }
+                    }
+                    parts.join("\n")
+                }
             };
             json!({ "role": m.role, "content": text })
         })
@@ -1012,8 +1110,28 @@ async fn run_explorer_agent_sdk(
 
     let sdk_script = std::env::var("GYRE_EXPLORER_SDK_PATH")
         .unwrap_or_else(|_| "scripts/explorer-agent.mjs".to_string());
+    // Clear environment and only pass needed variables to prevent
+    // leaking DATABASE_URL, API keys, etc. to the subprocess.
     let mut child = tokio::process::Command::new("node")
         .arg(&sdk_script)
+        .env_clear()
+        .env("GYRE_API_URL", &server_url)
+        .env("GYRE_API_TOKEN", token)
+        .env("GYRE_LLM_MODEL", &model)
+        .env("GYRE_REPO_ID", repo_id)
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", std::env::var("HOME").unwrap_or_default())
+        .env("NODE_PATH", std::env::var("NODE_PATH").unwrap_or_default())
+        // Forward Vertex AI credentials if present
+        .envs(std::env::vars().filter(|(k, _)| {
+            k.starts_with("GOOGLE_")
+                || k.starts_with("GCLOUD_")
+                || k.starts_with("CLOUDSDK_")
+                || k == "VERTEX_PROJECT"
+                || k == "VERTEX_LOCATION"
+                || k.starts_with("GYRE_VERTEX_")
+                || k.starts_with("ANTHROPIC_")
+        }))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1063,7 +1181,17 @@ async fn run_explorer_agent_sdk(
                                     msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
                                 let done =
                                     msg.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
-                                accumulated_text.push_str(content);
+                                // Cap accumulated text to prevent memory exhaustion
+                                if accumulated_text.len() + content.len()
+                                    <= MAX_SDK_ACCUMULATED_TEXT
+                                {
+                                    accumulated_text.push_str(content);
+                                } else if accumulated_text.len() < MAX_SDK_ACCUMULATED_TEXT {
+                                    let remaining =
+                                        MAX_SDK_ACCUMULATED_TEXT - accumulated_text.len();
+                                    accumulated_text.push_str(&content[..remaining]);
+                                    warn!("Explorer SDK accumulated text exceeded {MAX_SDK_ACCUMULATED_TEXT} bytes, truncating");
+                                }
                                 if !stream_text(sender, content, done).await {
                                     break; // Client disconnected
                                 }
@@ -1080,7 +1208,7 @@ async fn run_explorer_agent_sdk(
                                     };
                                     if sender
                                         .send(Message::Text(
-                                            serde_json::to_string(&view_msg).unwrap().into(),
+                                            serialize_msg(&view_msg).unwrap_or_default().into(),
                                         ))
                                         .await
                                         .is_err()
@@ -1106,7 +1234,7 @@ async fn run_explorer_agent_sdk(
                                 };
                                 if sender
                                     .send(Message::Text(
-                                        serde_json::to_string(&err).unwrap().into(),
+                                        serialize_msg(&err).unwrap_or_default().into(),
                                     ))
                                     .await
                                     .is_err()
@@ -1246,20 +1374,49 @@ async fn run_explorer_agent(
     // Load graph data (cached across messages in the session).
     let rid = Id::new(repo_id);
     if cached_nodes.is_none() {
-        *cached_nodes = Some(
-            state
-                .graph_store
-                .list_nodes(&rid, None)
-                .await
-                .unwrap_or_default(),
-        );
-        *cached_edges = Some(
-            state
-                .graph_store
-                .list_edges(&rid, None)
-                .await
-                .unwrap_or_default(),
-        );
+        match state.graph_store.list_nodes(&rid, None).await {
+            Ok(n) => {
+                let edge_result = state.graph_store.list_edges(&rid, None).await;
+                match edge_result {
+                    Ok(e) => {
+                        // Enforce cache size limit to prevent memory exhaustion
+                        if n.len() + e.len() > MAX_GRAPH_CACHE_ENTRIES {
+                            warn!(
+                                "Graph too large for session cache ({} nodes + {} edges > {}), truncating",
+                                n.len(), e.len(), MAX_GRAPH_CACHE_ENTRIES
+                            );
+                            *cached_nodes =
+                                Some(n.into_iter().take(MAX_GRAPH_CACHE_ENTRIES / 2).collect());
+                            *cached_edges =
+                                Some(e.into_iter().take(MAX_GRAPH_CACHE_ENTRIES / 2).collect());
+                        } else {
+                            *cached_nodes = Some(n);
+                            *cached_edges = Some(e);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to load graph edges: {e}");
+                        stream_text(
+                            sender,
+                            "Failed to load graph data. The graph store may be unavailable.",
+                            true,
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to load graph nodes: {e}");
+                stream_text(
+                    sender,
+                    "Failed to load graph data. The graph store may be unavailable.",
+                    true,
+                )
+                .await;
+                return Ok(());
+            }
+        }
     }
     let nodes = cached_nodes.as_ref().unwrap();
     let edges = cached_edges.as_ref().unwrap();
@@ -1305,14 +1462,33 @@ async fn run_explorer_agent(
     let canvas_json = {
         let mut ctx = serde_json::Map::new();
         if let Some(ref sel) = canvas_state.selected_node {
-            ctx.insert(
-                "selected_node".to_string(),
-                json!({
-                    "name": sel.qualified_name.as_deref().unwrap_or(&sel.name),
-                    "type": sel.node_type,
-                    "id": sel.id,
-                }),
-            );
+            // Enrich selected node context with graph data for better LLM reasoning
+            let mut node_ctx = json!({
+                "name": sel.qualified_name.as_deref().unwrap_or(&sel.name),
+                "type": sel.node_type,
+                "id": sel.id,
+            });
+            // Look up full node details from the graph cache
+            if let Some(ref graph_nodes) = cached_nodes {
+                if let Some(full_node) = graph_nodes.iter().find(|n| n.id.to_string() == sel.id) {
+                    if !full_node.file_path.is_empty() {
+                        node_ctx["file_path"] = json!(full_node.file_path);
+                    }
+                    if full_node.line_start > 0 {
+                        node_ctx["line_start"] = json!(full_node.line_start);
+                    }
+                    if let Some(ref sp) = full_node.spec_path {
+                        node_ctx["spec_path"] = json!(sp);
+                    }
+                    if let Some(c) = full_node.complexity {
+                        node_ctx["complexity"] = json!(c);
+                    }
+                    if let Some(tc) = full_node.test_coverage {
+                        node_ctx["test_coverage"] = json!(tc);
+                    }
+                }
+            }
+            ctx.insert("selected_node".to_string(), node_ctx);
         }
         if !canvas_state.visible_tree_groups.is_empty() {
             ctx.insert(
@@ -1376,17 +1552,30 @@ async fn run_explorer_agent(
         // Build a concise summary of dropped messages instead of silently discarding.
         let dropped_count = conversation_history.len() - keep_recent;
         let mut topics = Vec::new();
+        let mut tool_names_used = Vec::new();
         for msg in conversation_history.iter().take(dropped_count) {
             let text = match &msg.content {
                 ConversationContent::Text(t) => t.clone(),
-                ConversationContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
+                ConversationContent::Blocks(blocks) => {
+                    let mut parts = Vec::new();
+                    for b in blocks {
+                        match b {
+                            ContentBlock::Text { text } => parts.push(text.clone()),
+                            ContentBlock::ToolUse { name, .. } => {
+                                tool_names_used.push(name.clone());
+                            }
+                            ContentBlock::ToolResult { content, .. } => {
+                                // Include a brief snippet of tool results
+                                let snippet: String = content.chars().take(60).collect();
+                                parts.push(format!(
+                                    "[tool result: {}...]",
+                                    snippet.replace('\n', " ")
+                                ));
+                            }
+                        }
+                    }
+                    parts.join(" ")
+                }
             };
             // Extract first 80 chars of each message as a topic hint
             if msg.role == "user" && !text.is_empty() {
@@ -1400,6 +1589,13 @@ async fn run_explorer_agent(
         } else {
             topics.join("; ")
         };
+        let tool_summary = if tool_names_used.is_empty() {
+            String::new()
+        } else {
+            tool_names_used.sort();
+            tool_names_used.dedup();
+            format!(" Tools used: {}", tool_names_used.join(", "))
+        };
 
         let mut recent: Vec<ConversationMessage> =
             conversation_history.split_off(conversation_history.len() - keep_recent);
@@ -1409,8 +1605,8 @@ async fn run_explorer_agent(
         conversation_history.push(ConversationMessage {
             role: "user".to_string(),
             content: ConversationContent::Text(format!(
-                "[System: {} earlier messages were summarized. Topics discussed: {}]",
-                dropped_count, topic_summary
+                "[System: {} earlier messages were summarized. Topics discussed: {}.{}]",
+                dropped_count, topic_summary, tool_summary
             )),
         });
         conversation_history.push(ConversationMessage {
@@ -1442,6 +1638,7 @@ async fn run_explorer_agent(
     // Each call may involve tool use OR view query refinement — they share
     // the same budget to cap per-query cost as specified in the spec.
     let mut refinement_count = 0;
+    let mut view_query_sent = false;
     let max_total_turns = MAX_AGENT_TURNS;
     for turn in 0..max_total_turns {
         let response = llm_port
@@ -1496,27 +1693,39 @@ async fn run_explorer_agent(
                 };
 
                 if let Some(ref dr) = dry_run_result {
-                    // Filter out the "may be cluttered" warning for scopes that
-                    // legitimately produce many nodes. Forcing refinement on these
-                    // wastes LLM turns trying to "fix" a query that's correct.
+                    // Collect actionable warnings. Include "may be cluttered"
+                    // warnings so the LLM knows when to narrow scope, but
+                    // downgrade them: only trigger refinement if there are
+                    // also non-clutter warnings or the result is very large.
                     let actionable_warnings: Vec<&String> = dr
                         .warnings
                         .iter()
                         .filter(|w| {
-                            if !w.contains("may be cluttered") {
-                                return true; // non-clutter warnings always actionable
+                            // Validation errors are always actionable
+                            if w.starts_with("Validation:")
+                                || w.starts_with("Computed expression error:")
+                            {
+                                return true;
                             }
-                            // Skip clutter warnings for scopes that naturally match many nodes
-                            let skip = matches!(
-                                serde_json::from_value::<gyre_common::view_query::ViewQuery>(
-                                    query_json.clone()
-                                ),
-                                Ok(q) if matches!(q.scope,
-                                    gyre_common::view_query::Scope::All
-                                    | gyre_common::view_query::Scope::TestGaps
-                                )
-                            );
-                            !skip
+                            // "0 nodes" is actionable unless it's an interactive query
+                            if w.contains("matched 0 nodes") {
+                                return true;
+                            }
+                            // Clutter warnings are informational for All/TestGaps scopes
+                            if w.contains("may be cluttered") {
+                                let is_broad_scope = matches!(
+                                    serde_json::from_value::<gyre_common::view_query::ViewQuery>(
+                                        query_json.clone()
+                                    ),
+                                    Ok(q) if matches!(q.scope,
+                                        gyre_common::view_query::Scope::All
+                                        | gyre_common::view_query::Scope::TestGaps
+                                    )
+                                );
+                                // Still report to LLM, but only trigger refinement for narrow scopes
+                                return !is_broad_scope;
+                            }
+                            true
                         })
                         .collect();
                     if !actionable_warnings.is_empty() && refinement_count < MAX_AGENT_TURNS {
@@ -1571,7 +1780,7 @@ async fn run_explorer_agent(
                     };
                     if sender
                         .send(Message::Text(
-                            serde_json::to_string(&done_msg).unwrap().into(),
+                            serialize_msg(&done_msg).unwrap_or_default().into(),
                         ))
                         .await
                         .is_err()
@@ -1591,9 +1800,10 @@ async fn run_explorer_agent(
                     query: query_json.clone(),
                     explanation: explanation_text,
                 };
+                view_query_sent = true;
                 if sender
                     .send(Message::Text(
-                        serde_json::to_string(&view_msg).unwrap().into(),
+                        serialize_msg(&view_msg).unwrap_or_default().into(),
                     ))
                     .await
                     .is_err()
@@ -1611,15 +1821,16 @@ async fn run_explorer_agent(
                 content: ConversationContent::Text(response.text.clone()),
             });
 
-            // If max_tokens, send a truncation warning
-            if response.stop_reason == "max_tokens" && !response.text.is_empty() {
+            // If max_tokens and no view_query was already sent (avoid double-done)
+            if response.stop_reason == "max_tokens" && !response.text.is_empty() && !view_query_sent
+            {
                 let done_msg = ExplorerServerMessage::Text {
                     content: "\n\n*(Response truncated due to length)*".to_string(),
                     done: true,
                 };
                 let _ = sender
                     .send(Message::Text(
-                        serde_json::to_string(&done_msg).unwrap().into(),
+                        serialize_msg(&done_msg).unwrap_or_default().into(),
                     ))
                     .await;
             }
