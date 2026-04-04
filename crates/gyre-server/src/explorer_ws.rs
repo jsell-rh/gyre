@@ -1361,6 +1361,161 @@ async fn run_explorer_agent_sdk(
     Ok(())
 }
 
+/// Fallback when no LLM is configured — generate template-based view queries
+/// from simple keyword matching. Better than a dead-end "not configured" message.
+async fn handle_no_llm_fallback(
+    user_question: &str,
+    canvas_state: &gyre_common::view_query::CanvasState,
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    cached_nodes: &mut Option<Vec<gyre_common::graph::GraphNode>>,
+    cached_edges: &mut Option<Vec<gyre_common::graph::GraphEdge>>,
+    repo_id: &str,
+    state: &AppState,
+) -> anyhow::Result<()> {
+    // Ensure graph is loaded
+    if cached_nodes.is_none() {
+        let rid = Id::new(repo_id);
+        if let Ok(n) = state.graph_store.list_nodes(&rid, None).await {
+            if let Ok(e) = state.graph_store.list_edges(&rid, None).await {
+                *cached_nodes = Some(n);
+                *cached_edges = Some(e);
+            }
+        }
+    }
+
+    let q = user_question.to_lowercase();
+    let selected_name = canvas_state
+        .selected_node
+        .as_ref()
+        .map(|n| n.name.clone())
+        .unwrap_or_default();
+
+    // Pattern matching for common questions
+    if q.contains("blast") || q.contains("break") || q.contains("impact") {
+        let target = if !selected_name.is_empty() {
+            selected_name.clone()
+        } else {
+            // Try to extract a name from the question
+            q.split_whitespace()
+                .find(|w| w.len() > 3 && w.chars().next().map_or(false, |c| c.is_uppercase()))
+                .unwrap_or("$selected")
+                .to_string()
+        };
+        stream_text(sender, &format!("Showing blast radius for **{}**. Click any node to see its impact.\n\n*Note: LLM is not configured — using template query. Set GYRE_VERTEX_PROJECT for conversational exploration.*", target), true).await;
+        let query = json!({
+            "scope": { "type": "focus", "node": target, "edges": ["calls", "implements", "field_of"], "direction": "incoming", "depth": 10 },
+            "emphasis": { "tiered_colors": ["#ef4444", "#f97316", "#eab308", "#94a3b8"], "dim_unmatched": 0.12 },
+            "zoom": "fit",
+            "annotation": { "title": format!("Blast radius: {}", target) }
+        });
+        let msg = ExplorerServerMessage::ViewQuery {
+            query,
+            explanation: None,
+        };
+        let _ = sender
+            .send(Message::Text(
+                serialize_msg(&msg).unwrap_or_default().into(),
+            ))
+            .await;
+    } else if q.contains("test")
+        && (q.contains("gap") || q.contains("coverage") || q.contains("untested"))
+    {
+        stream_text(sender, "Showing test coverage gaps — functions not reachable from any test.\n\n*Note: LLM is not configured — using template query.*", true).await;
+        let query = json!({
+            "scope": { "type": "test_gaps" },
+            "emphasis": { "highlight": { "matched": { "color": "#ef4444", "label": "Untested" } }, "dim_unmatched": 0.3 },
+            "zoom": "fit",
+            "annotation": { "title": "Test coverage gaps" }
+        });
+        let msg = ExplorerServerMessage::ViewQuery {
+            query,
+            explanation: None,
+        };
+        let _ = sender
+            .send(Message::Text(
+                serialize_msg(&msg).unwrap_or_default().into(),
+            ))
+            .await;
+    } else if q.contains("hot") || q.contains("most called") || q.contains("critical") {
+        stream_text(sender, "Showing hot paths — most-called functions.\n\n*Note: LLM is not configured — using template query.*", true).await;
+        let query = json!({
+            "scope": { "type": "all" },
+            "emphasis": { "heat": { "metric": "incoming_calls", "palette": "blue-red" } },
+            "zoom": "fit",
+            "annotation": { "title": "Hot paths" }
+        });
+        let msg = ExplorerServerMessage::ViewQuery {
+            query,
+            explanation: None,
+        };
+        let _ = sender
+            .send(Message::Text(
+                serialize_msg(&msg).unwrap_or_default().into(),
+            ))
+            .await;
+    } else if q.contains("complex") {
+        stream_text(
+            sender,
+            "Showing complexity map.\n\n*Note: LLM is not configured — using template query.*",
+            true,
+        )
+        .await;
+        let query = json!({
+            "scope": { "type": "all" },
+            "emphasis": { "heat": { "metric": "complexity", "palette": "blue-red" } },
+            "zoom": "fit",
+            "annotation": { "title": "Complexity map" }
+        });
+        let msg = ExplorerServerMessage::ViewQuery {
+            query,
+            explanation: None,
+        };
+        let _ = sender
+            .send(Message::Text(
+                serialize_msg(&msg).unwrap_or_default().into(),
+            ))
+            .await;
+    } else {
+        // Default: try a search and show results as a focus query if possible
+        let mut found = String::new();
+        if let Some(ref nodes) = cached_nodes {
+            for n in nodes.iter().filter(|n| n.deleted_at.is_none()) {
+                if n.name.to_lowercase().contains(&q)
+                    || n.qualified_name.to_lowercase().contains(&q)
+                {
+                    found = n.name.clone();
+                    break;
+                }
+            }
+        }
+        if !found.is_empty() {
+            stream_text(sender, &format!("Found **{}** — showing its connections.\n\n*Note: LLM is not configured. Set GYRE_VERTEX_PROJECT for conversational exploration.*", found), true).await;
+            let query = json!({
+                "scope": { "type": "focus", "node": found, "edges": ["calls", "implements", "contains"], "direction": "both", "depth": 3 },
+                "emphasis": { "dim_unmatched": 0.15 },
+                "zoom": "fit",
+                "annotation": { "title": format!("Connections: {}", found) }
+            });
+            let msg = ExplorerServerMessage::ViewQuery {
+                query,
+                explanation: None,
+            };
+            let _ = sender
+                .send(Message::Text(
+                    serialize_msg(&msg).unwrap_or_default().into(),
+                ))
+                .await;
+        } else {
+            stream_text(
+                sender,
+                "LLM is not configured — conversational exploration requires GYRE_VERTEX_PROJECT and GYRE_VERTEX_LOCATION.\n\nYou can still use saved views, the filter panel, and search (/) to explore the codebase. Try asking about \"blast radius\", \"test gaps\", \"hot paths\", or \"complexity\".",
+                true,
+            ).await;
+        }
+    }
+    Ok(())
+}
+
 // ── Explorer agent loop ──────────────────────────────────────────────────────
 
 async fn run_explorer_agent(
@@ -1430,13 +1585,18 @@ async fn run_explorer_agent(
     let llm = match &state.llm {
         Some(llm) => llm.clone(),
         None => {
-            stream_text(
+            // No LLM configured — provide a useful local-only fallback.
+            // Generate template-based view queries from the user's question.
+            return handle_no_llm_fallback(
+                user_question,
+                canvas_state,
                 sender,
-                "LLM is not configured. Set GYRE_VERTEX_PROJECT and GYRE_VERTEX_LOCATION to enable conversational exploration.",
-                true,
+                cached_nodes,
+                cached_edges,
+                repo_id,
+                state,
             )
             .await;
-            return Ok(());
         }
     };
 
