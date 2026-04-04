@@ -327,11 +327,14 @@ fn evaluate_one(
         Predicate::GovernedBy(path) => eval_governed_by(&subject_nodes, path, base),
         Predicate::Calls(target) => eval_calls(&subject_nodes, target, nodes, edges, base, false),
         Predicate::NotCalls(target) => eval_calls(&subject_nodes, target, nodes, edges, base, true),
-        Predicate::TestCoverage(cmp, threshold) => {
-            eval_numeric_predicate(&subject_nodes, cmp, *threshold, "test_coverage", base, |n| {
-                n.test_coverage
-            })
-        }
+        Predicate::TestCoverage(cmp, threshold) => eval_numeric_predicate(
+            &subject_nodes,
+            cmp,
+            *threshold,
+            "test_coverage",
+            base,
+            |n| n.test_coverage,
+        ),
         Predicate::Complexity(cmp, threshold) => {
             eval_numeric_predicate(&subject_nodes, cmp, *threshold, "complexity", base, |n| {
                 n.complexity.map(|c| c as f64)
@@ -347,8 +350,7 @@ fn evaluate_one(
             let count = edges
                 .iter()
                 .filter(|e| {
-                    e.edge_type == EdgeType::FieldOf
-                        && subject_ids.contains(&e.target_id.as_str())
+                    e.edge_type == EdgeType::FieldOf && subject_ids.contains(&e.target_id.as_str())
                 })
                 .count();
             let passed = compare_usize(count, cmp, *threshold);

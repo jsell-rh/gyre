@@ -806,9 +806,7 @@ fn resolve_computed_expression(
                         "incoming_calls" => Some(count_incoming_calls(&nid, incoming) as f64),
                         "outgoing_calls" => Some(count_outgoing_calls(&nid, outgoing) as f64),
                         "field_count" => Some(count_fields(&nid, incoming) as f64),
-                        "test_fragility" => {
-                            Some(*fragility_map.get(&nid).unwrap_or(&0) as f64)
-                        }
+                        "test_fragility" => Some(*fragility_map.get(&nid).unwrap_or(&0) as f64),
                         "risk_score" => {
                             let churn = n.churn_count_30d as f64;
                             let complexity = n.complexity.unwrap_or(1) as f64;

@@ -229,6 +229,15 @@
     }));
   }
 
+  function deleteView(view, event) {
+    event.stopPropagation();
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (view.is_system) return; // Cannot delete system views
+    ws.send(JSON.stringify({ type: 'delete_view', view_id: view.id }));
+    // Optimistically remove from local list
+    onSavedViewsUpdate(savedViews.filter(v => v.id !== view.id));
+  }
+
   // ── Keyboard ─────────────────────────────────────────────────────────────
   function onInputKeydown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -348,18 +357,28 @@
               <div class="saved-views-empty">{$t('explorer_chat.no_saved_views')}</div>
             {:else}
               {#each savedViews as view}
-                <button
-                  class="saved-view-item"
-                  role="option"
-                  aria-selected={false}
-                  onclick={() => loadView(view)}
-                  type="button"
-                >
-                  <span class="saved-view-name">{view.name}</span>
-                  {#if view.created_at}
-                    <span class="saved-view-date">{formatTime(view.created_at)}</span>
+                <div class="saved-view-row">
+                  <button
+                    class="saved-view-item"
+                    role="option"
+                    aria-selected={false}
+                    onclick={() => loadView(view)}
+                    type="button"
+                  >
+                    <span class="saved-view-name">{view.name}</span>
+                    {#if view.created_at}
+                      <span class="saved-view-date">{formatTime(view.created_at)}</span>
+                    {/if}
+                  </button>
+                  {#if !view.is_system}
+                    <button class="saved-view-delete" onclick={(e) => deleteView(view, e)} type="button"
+                      title="Delete view" aria-label="Delete view {view.name}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                      </svg>
+                    </button>
                   {/if}
-                </button>
+                </div>
               {/each}
             {/if}
           </div>
@@ -647,11 +666,18 @@
     font-style: italic;
   }
 
+  .saved-view-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
   .saved-view-item {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     padding: var(--space-2) var(--space-3);
     background: transparent;
     border: none;
@@ -662,6 +688,21 @@
     text-align: left;
     transition: background var(--transition-fast);
   }
+
+  .saved-view-delete {
+    flex-shrink: 0;
+    padding: 4px;
+    margin-right: 4px;
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    border-radius: 4px;
+    opacity: 0;
+    transition: opacity var(--transition-fast), color var(--transition-fast);
+  }
+  .saved-view-row:hover .saved-view-delete { opacity: 1; }
+  .saved-view-delete:hover { color: #ef4444; background: rgba(239, 68, 68, 0.1); }
 
   .saved-view-item:hover {
     background: var(--color-surface);

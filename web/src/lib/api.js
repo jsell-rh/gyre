@@ -552,6 +552,8 @@ export const api = {
   savedViews: (repoId) => request(`/repos/${repoId}/views`),
   createSavedView: (repoId, data) =>
     request(`/repos/${repoId}/views`, { method: 'POST', body: JSON.stringify(data) }),
+  updateSavedView: (repoId, viewId, data) =>
+    request(`/repos/${repoId}/views/${viewId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteSavedView: (repoId, viewId) =>
     request(`/repos/${repoId}/views/${viewId}`, { method: 'DELETE' }),
   // Deprecated: workspace-scoped explorer views (legacy KV-based, use savedViews instead)

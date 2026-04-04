@@ -363,6 +363,37 @@
   });
   let searchHighlightIds = $derived(new Set(searchResults.map(n => n.id)));
   let searchInputEl = $state(null);
+  let searchSelectedIdx = $state(0); // Index into searchResults for keyboard navigation
+
+  // Auto-zoom to fit search results when query changes
+  $effect(() => {
+    if (searchOpen && searchResults.length > 0 && searchResults.length <= 20) {
+      // Compute bounding box of matched nodes and zoom to fit them
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      let found = 0;
+      for (const r of searchResults) {
+        const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === r.id);
+        if (ln) {
+          minX = Math.min(minX, ln.x - ln.w / 2);
+          maxX = Math.max(maxX, ln.x + ln.w / 2);
+          minY = Math.min(minY, ln.y - ln.h / 2);
+          maxY = Math.max(maxY, ln.y + ln.h / 2);
+          found++;
+        }
+      }
+      if (found > 0) {
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const bw = maxX - minX + 100;
+        const bh = maxY - minY + 100;
+        targetCam.x = cx;
+        targetCam.y = cy;
+        targetCam.zoom = Math.min(W / bw, H / bh, 4) * 0.85;
+        needsAnim = true;
+        scheduleRedraw();
+      }
+    }
+  });
 
   function zoomToNode(nodeId) {
     const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === nodeId);
@@ -2004,11 +2035,16 @@
       if (ss > 0 && ss < 10) return;
       if (!isTreeGroup && op < 0.01) return;
 
-      // Semantic zoom: hide implementation detail at overview zoom levels
+      // Semantic zoom: deliberate information hierarchy per zoom level
+      // Overview (< 0.12): packages, modules only — boundaries and interfaces
+      // Mid-level (0.12-0.25): + types, interfaces, specs — the essential design
+      // Detail (0.25-0.5): + endpoints, tables — integration points
+      // Full detail (> 0.5): + functions, fields, constants — implementation
       if (!isTreeGroup && ln.node) {
         const nt = ln.node.node_type ?? '';
-        if (cam.zoom < 0.15 && ['function', 'field', 'type', 'constant', 'endpoint'].includes(nt)) return;
-        if (cam.zoom < 0.3 && ['function', 'field'].includes(nt)) return;
+        if (cam.zoom < 0.12 && !['package', 'module'].includes(nt)) return;
+        if (cam.zoom < 0.25 && ['function', 'field', 'constant'].includes(nt)) return;
+        if (cam.zoom < 0.5 && ['field', 'constant'].includes(nt)) return;
       }
 
       // Draw this node if it has any opacity
@@ -2181,6 +2217,19 @@
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(String(stepNum), bx, by);
+        // Show governing spec annotation below badge if space permits
+        const n = ln.node;
+        if (n?.spec_path && sw > 60 && sh > 30) {
+          const specLabel = n.spec_path.split('/').pop()?.replace('.md', '') ?? '';
+          if (specLabel) {
+            const specFs = Math.max(7, Math.min(9, sw * 0.06));
+            ctx.fillStyle = 'rgba(34, 197, 94, 0.8)';
+            ctx.font = `400 ${specFs}px system-ui`;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.fillText(`\u2190 ${specLabel}`, bx + badgeR + 3, by - specFs / 2);
+          }
+        }
         ctx.restore();
       }
     }
@@ -3030,12 +3079,16 @@
       if (ghostPulsePhase < prev) ghostAnimCycles++;
     }
 
-    // Advance drill-down fade transition
-    if (drillFadeTarget && drillFadeAlpha > 0.15) {
-      drillFadeAlpha = Math.max(0.15, drillFadeAlpha - 0.06);
+    // Advance drill-down fade transition (smooth ease-out for entering, ease-in for leaving)
+    if (drillFadeTarget && drillFadeAlpha > 0.12) {
+      // Ease-out: fast at start, slower near end for smooth perception
+      const delta = (drillFadeAlpha - 0.12) * 0.12;
+      drillFadeAlpha = Math.max(0.12, drillFadeAlpha - Math.max(delta, 0.01));
     } else if (!drillFadeTarget && drillFadeAlpha < 1.0) {
-      drillFadeAlpha = Math.min(1.0, drillFadeAlpha + 0.06);
-    } else if (drillFadeTarget && drillFadeAlpha <= 0.15) {
+      // Ease-in: gradual restoration
+      const delta = (1.0 - drillFadeAlpha) * 0.1;
+      drillFadeAlpha = Math.min(1.0, drillFadeAlpha + Math.max(delta, 0.01));
+    } else if (drillFadeTarget && drillFadeAlpha <= 0.12) {
       drillFadeTarget = null; // Fade complete
     }
 
@@ -4089,11 +4142,23 @@
         class="canvas-search-input"
         placeholder="Search entities..."
         value={searchQuery}
-        oninput={(e) => { searchQuery = e.target.value; scheduleRedraw(); }}
+        oninput={(e) => { searchQuery = e.target.value; searchSelectedIdx = 0; scheduleRedraw(); }}
         onkeydown={(e) => {
           if (e.key === 'Escape') { searchOpen = false; searchQuery = ''; scheduleRedraw(); }
+          if (e.key === 'ArrowDown' && searchResults.length > 0) {
+            e.preventDefault();
+            searchSelectedIdx = Math.min(searchSelectedIdx + 1, searchResults.length - 1);
+            const hit = searchResults[searchSelectedIdx];
+            zoomToNode(hit.id);
+          }
+          if (e.key === 'ArrowUp' && searchResults.length > 0) {
+            e.preventDefault();
+            searchSelectedIdx = Math.max(searchSelectedIdx - 1, 0);
+            const hit = searchResults[searchSelectedIdx];
+            zoomToNode(hit.id);
+          }
           if (e.key === 'Enter' && searchResults.length > 0) {
-            const hit = searchResults[0];
+            const hit = searchResults[searchSelectedIdx];
             canvasState = { ...canvasState, selectedNode: { id: hit.id, name: hit.name, node_type: hit.node_type, qualified_name: hit.qualified_name } };
             onNodeDetail(hit);
             zoomToNode(hit.id);
@@ -4111,8 +4176,8 @@
     </div>
     {#if searchResults.length > 0}
       <div class="canvas-search-results" role="listbox" aria-label="Search results">
-        {#each searchResults.slice(0, 8) as result}
-          <button class="search-result-item" role="option"
+        {#each searchResults.slice(0, 8) as result, idx}
+          <button class="search-result-item" class:active={idx === searchSelectedIdx} role="option"
             onclick={() => {
               canvasState = { ...canvasState, selectedNode: { id: result.id, name: result.name, node_type: result.node_type, qualified_name: result.qualified_name } };
               onNodeDetail(result);
