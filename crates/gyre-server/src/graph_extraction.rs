@@ -805,11 +805,21 @@ pub fn extract_lsp_edges(
         }
     }
 
-    if lsp_result.new_edges_found > 0 {
+    if lsp_result.new_edges_found > 0 || lsp_result.incomplete {
         tracing::info!(
             definitions = lsp_result.definitions_queried,
+            total = lsp_result.total_definitions,
             new_edges = lsp_result.new_edges_found,
-            "LSP call graph extraction complete"
+            incomplete = lsp_result.incomplete,
+            "LSP call graph extraction {}",
+            if lsp_result.incomplete {
+                format!(
+                    "incomplete ({}/{})",
+                    lsp_result.definitions_queried, lsp_result.total_definitions
+                )
+            } else {
+                "complete".to_string()
+            }
         );
     }
 

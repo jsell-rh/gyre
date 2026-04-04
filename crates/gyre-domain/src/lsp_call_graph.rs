@@ -85,6 +85,10 @@ pub struct LspCallGraphResult {
     pub definitions_queried: usize,
     /// Number of new call edges found.
     pub new_edges_found: usize,
+    /// Total function nodes that should have been queried.
+    pub total_definitions: usize,
+    /// Whether extraction was cut short by the overall deadline.
+    pub incomplete: bool,
 }
 
 /// Check if rust-analyzer is available on the PATH.
@@ -119,6 +123,8 @@ pub fn extract_call_graph(
         errors: Vec::new(),
         definitions_queried: 0,
         new_edges_found: 0,
+        total_definitions: 0,
+        incomplete: false,
     };
 
     if !rust_analyzer_available() {
@@ -277,14 +283,21 @@ pub fn extract_call_graph(
         .unwrap_or_default()
         .as_secs();
 
-    // No artificial cap — query all function nodes. For large repos
-    // (~1800 nodes), this completes in ~20 seconds per the spec estimate.
+    result.total_definitions = function_nodes.len();
+
+    // Query all function nodes. For large repos (~1800 nodes), this completes
+    // in ~20 seconds per the spec estimate. The 120s overall deadline caps
+    // extraction for very large repos.
     for (idx, func_node) in function_nodes.iter().enumerate() {
         // Check overall deadline to prevent runaway extraction.
         if Instant::now() > overall_deadline {
+            result.incomplete = true;
             result.errors.push(format!(
-                "Overall extraction timeout after {} definitions",
-                result.definitions_queried
+                "Overall extraction timeout after {}/{} definitions ({}% complete, {} edges found)",
+                result.definitions_queried,
+                result.total_definitions,
+                (result.definitions_queried * 100) / result.total_definitions.max(1),
+                result.new_edges_found,
             ));
             break;
         }
@@ -570,9 +583,19 @@ fn read_lsp_message_with_timeout(
 ) -> std::io::Result<Option<serde_json::Value>> {
     use std::os::unix::io::AsRawFd;
 
-    // If the BufReader already has buffered data, skip the poll and read directly.
-    if !reader.buffer().is_empty() {
-        return read_lsp_message(reader);
+    // If the BufReader already has a complete LSP header buffered, skip the poll
+    // and read directly. We check for "\r\n\r\n" (header terminator) — if only a
+    // partial header is buffered, we still need to poll for more data to avoid
+    // blocking indefinitely in read_lsp_message's read_line loop.
+    {
+        let buf = reader.buffer();
+        if !buf.is_empty() {
+            // Check if we have a complete header (contains \r\n\r\n)
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                return read_lsp_message(reader);
+            }
+            // Partial header buffered — fall through to poll for more data
+        }
     }
 
     // Use poll(2) to wait for data on the stdout fd with a timeout.
