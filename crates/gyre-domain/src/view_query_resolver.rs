@@ -702,6 +702,11 @@ fn resolve_scope_with_adjacency(
                         }
                     }
                     result.extend(depth_map.into_keys());
+                } else {
+                    warnings.push(format!(
+                        "Concept seed node '{}' not found in graph — check spelling or use qualified_name",
+                        seed_name
+                    ));
                 }
             }
             (result, all_depths)
@@ -804,7 +809,13 @@ fn resolve_computed_expression(
         if parts.len() == 3 {
             let prop = parts[0];
             let op = parts[1];
-            let val: f64 = parts[2].parse().unwrap_or(0.0);
+            let val: f64 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    // Invalid number — return empty set rather than silently treating as 0.0
+                    return HashSet::new();
+                }
+            };
             // Precompute test fragility once (batch BFS) instead of per-node.
             let fragility_map = if prop == "test_fragility" {
                 compute_all_test_fragility(active_nodes, outgoing, incoming)
@@ -1151,8 +1162,8 @@ fn resolve_computed_expression(
         return HashSet::new();
     }
 
-    // Fallback: unrecognized expression.
-    // validate_computed_expression() will catch this during dry-run and produce a warning.
+    // Fallback: unrecognized expression — returns empty set.
+    // validate_computed_expression() should be called before resolution to catch these.
     HashSet::new()
 }
 
@@ -1249,7 +1260,11 @@ fn resolve_node_ref(reference: &str, selected_node_id: Option<&str>) -> String {
 
 /// Find a node by ID first, then fall back to name matching.
 /// Accepts `&[&GraphNode]` to avoid cloning node slices.
+/// Returns None for empty references (e.g. unresolved $clicked with no selection).
 fn find_node_by_ref<'a>(nodes: &[&'a GraphNode], reference: &str) -> Option<&'a GraphNode> {
+    if reference.is_empty() {
+        return None;
+    }
     // Try direct ID match first (for resolved $clicked/$selected).
     nodes
         .iter()
@@ -1596,7 +1611,8 @@ pub fn dry_run(
         .collect();
     if matched_edges.len() > MAX_MATCHED_EDGES {
         warnings.push(format!(
-            "Matched edges capped at {MAX_MATCHED_EDGES} (total exceeded limit)"
+            "Matched edges capped at {MAX_MATCHED_EDGES} (total: {} edges before truncation)",
+            matched_edges.len()
         ));
     }
     let matched_edges: Vec<MatchedEdge> =

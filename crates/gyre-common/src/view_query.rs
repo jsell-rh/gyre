@@ -311,10 +311,42 @@ impl ViewQuery {
             }
         }
 
-        // Validate tiered_colors is non-empty when present
+        // Validate tiered_colors is non-empty when present + validate color format
         if let Some(ref colors) = self.emphasis.tiered_colors {
             if colors.is_empty() {
                 errors.push("tiered_colors array must not be empty when provided".to_string());
+            }
+            for c in colors {
+                if !Self::is_valid_color(c) {
+                    errors.push(format!(
+                        "Invalid color '{}' in tiered_colors — expected hex (#rgb, #rrggbb, #rrggbbaa), named CSS color, or hsl/rgb function",
+                        c
+                    ));
+                }
+            }
+        }
+
+        // Validate badge template length
+        if let Some(ref badges) = self.emphasis.badges {
+            if let Some(ref tmpl) = badges.template {
+                if tmpl.len() > 500 {
+                    errors.push(format!(
+                        "Badge template length {} exceeds maximum of 500 characters",
+                        tmpl.len()
+                    ));
+                }
+            }
+        }
+
+        // Validate callout color fields
+        for callout in &self.callouts {
+            if let Some(ref c) = callout.color {
+                if !Self::is_valid_color(c) {
+                    errors.push(format!(
+                        "Invalid color '{}' in callout for node '{}' — expected hex, named CSS color, or hsl/rgb function",
+                        c, callout.node
+                    ));
+                }
             }
         }
 
@@ -386,11 +418,26 @@ impl ViewQuery {
         "$reachable(",
     ];
 
+    /// Maximum recursion depth for nested computed expressions.
+    const MAX_COMPUTED_DEPTH: u32 = 20;
+
     /// Recursively validate a computed expression, including inner expressions
     /// within $intersect, $union, $diff.
     fn validate_computed_expression(expr: &str, errors: &mut Vec<String>) {
+        Self::validate_computed_expression_inner(expr, errors, 0);
+    }
+
+    fn validate_computed_expression_inner(expr: &str, errors: &mut Vec<String>, depth: u32) {
         let expr = expr.trim();
         if expr.is_empty() {
+            return;
+        }
+
+        if depth > Self::MAX_COMPUTED_DEPTH {
+            errors.push(format!(
+                "Computed expression nesting depth exceeds maximum of {}",
+                Self::MAX_COMPUTED_DEPTH
+            ));
             return;
         }
 
@@ -402,14 +449,29 @@ impl ViewQuery {
             return;
         }
 
-        // Check balanced parens
+        // Structural parentheses validation: check nesting is well-formed
         if expr.contains('(') {
-            let open = expr.chars().filter(|c| *c == '(').count();
-            let close = expr.chars().filter(|c| *c == ')').count();
-            if open != close {
+            let mut depth_paren: i32 = 0;
+            for ch in expr.chars() {
+                match ch {
+                    '(' => depth_paren += 1,
+                    ')' => {
+                        depth_paren -= 1;
+                        if depth_paren < 0 {
+                            errors.push(format!(
+                                "Malformed parentheses in computed expression: closing ')' before matching '(' in '{}'",
+                                expr
+                            ));
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if depth_paren != 0 {
                 errors.push(format!(
-                    "Unbalanced parentheses in computed expression: {} open, {} close",
-                    open, close
+                    "Unbalanced parentheses in computed expression: {} unclosed '(' in '{}'",
+                    depth_paren, expr
                 ));
                 return;
             }
@@ -425,7 +487,11 @@ impl ViewQuery {
                     for part in &parts {
                         let trimmed = part.trim();
                         if !trimmed.is_empty() {
-                            Self::validate_computed_expression(trimmed, errors);
+                            Self::validate_computed_expression_inner(
+                                trimmed,
+                                errors,
+                                depth + 1,
+                            );
                         }
                     }
                 }
@@ -506,6 +572,32 @@ impl ViewQuery {
         }
         parts.push(&s[start..]);
         parts
+    }
+
+    /// Check if a string is a valid CSS color value.
+    /// Accepts: hex (#rgb, #rrggbb, #rrggbbaa), named CSS colors,
+    /// hsl/rgb/rgba/hsla functions, and common color keywords.
+    fn is_valid_color(s: &str) -> bool {
+        let s = s.trim();
+        if s.is_empty() {
+            return false;
+        }
+        // Hex colors
+        if s.starts_with('#') {
+            let hex = &s[1..];
+            return matches!(hex.len(), 3 | 4 | 6 | 8)
+                && hex.chars().all(|c| c.is_ascii_hexdigit());
+        }
+        // CSS functions
+        if s.starts_with("rgb(")
+            || s.starts_with("rgba(")
+            || s.starts_with("hsl(")
+            || s.starts_with("hsla(")
+        {
+            return s.ends_with(')');
+        }
+        // Named colors (subset of common ones + allow any alpha-only string <= 30 chars)
+        s.len() <= 30 && s.chars().all(|c| c.is_ascii_alphabetic())
     }
 }
 
