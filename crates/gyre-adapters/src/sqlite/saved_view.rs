@@ -112,9 +112,6 @@ impl SavedViewRepository for SqliteStorage {
         .await?
     }
 
-    // TODO: Add tenant_id parameter to the port trait and filter in SQL
-    // instead of relying on repo_id alone. Currently the caller must ensure
-    // tenant isolation at a higher layer.
     async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<SavedView>> {
         let pool = Arc::clone(&self.pool);
         let rid = repo_id.clone();
@@ -130,9 +127,6 @@ impl SavedViewRepository for SqliteStorage {
         .await?
     }
 
-    // TODO: Add tenant_id parameter to the port trait and filter in SQL
-    // instead of relying on workspace_id alone. Currently the caller must
-    // ensure tenant isolation at a higher layer.
     async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<SavedView>> {
         let pool = Arc::clone(&self.pool);
         let wid = workspace_id.clone();
@@ -143,6 +137,23 @@ impl SavedViewRepository for SqliteStorage {
                 .order(saved_views::created_at.asc())
                 .load::<SavedViewRow>(&mut *conn)
                 .context("list saved views by workspace")?;
+            Ok(rows.into_iter().map(SavedViewRow::into_view).collect())
+        })
+        .await?
+    }
+
+    async fn list_by_repo_and_tenant(&self, repo_id: &Id, tenant_id: &Id) -> Result<Vec<SavedView>> {
+        let pool = Arc::clone(&self.pool);
+        let rid = repo_id.clone();
+        let tid = tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<SavedView>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = saved_views::table
+                .filter(saved_views::repo_id.eq(rid.as_str()))
+                .filter(saved_views::tenant_id.eq(tid.as_str()))
+                .order(saved_views::created_at.asc())
+                .load::<SavedViewRow>(&mut *conn)
+                .context("list saved views by repo and tenant")?;
             Ok(rows.into_iter().map(SavedViewRow::into_view).collect())
         })
         .await?

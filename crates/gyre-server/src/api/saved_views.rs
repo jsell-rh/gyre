@@ -79,7 +79,8 @@ pub async fn list_views(
     auth: AuthenticatedAgent,
 ) -> Result<Json<Vec<ViewResponse>>, (axum::http::StatusCode, String)> {
     let rid = Id::new(&repo_id);
-    let views = state.saved_views.list_by_repo(&rid).await.map_err(|e| {
+    let tid = Id::new(&auth.tenant_id);
+    let views = state.saved_views.list_by_repo_and_tenant(&rid, &tid).await.map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to list views: {e}"),
@@ -87,6 +88,7 @@ pub async fn list_views(
     })?;
 
     // Seed system default views on first access (lazy initialization).
+    // Check for system views specifically to avoid re-seeding when user deletes personal views.
     if !views.iter().any(|v| v.is_system) {
         let now = now_secs();
         let workspace_id = resolve_workspace_id(&state, &repo_id).await;
@@ -106,8 +108,8 @@ pub async fn list_views(
             };
             let _ = state.saved_views.create(view).await;
         }
-        // Re-fetch after seeding.
-        let refreshed = state.saved_views.list_by_repo(&rid).await.map_err(|e| {
+        // Re-fetch after seeding (already tenant-filtered at SQL level).
+        let refreshed = state.saved_views.list_by_repo_and_tenant(&rid, &tid).await.map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to list views: {e}"),
@@ -116,7 +118,6 @@ pub async fn list_views(
         return Ok(Json(
             refreshed
                 .into_iter()
-                .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
                 .map(ViewResponse::from)
                 .collect(),
         ));
@@ -125,7 +126,6 @@ pub async fn list_views(
     Ok(Json(
         views
             .into_iter()
-            .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
             .map(ViewResponse::from)
             .collect(),
     ))

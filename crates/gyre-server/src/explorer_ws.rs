@@ -489,11 +489,11 @@ async fn handle_explorer_session(
                 match state.saved_views.create(view).await {
                     Ok(_v) => {
                         // Re-fetch the full view list so the client gets all views, not just the new one.
-                        match state.saved_views.list_by_repo(&rid).await {
+                        let tenant_id = Id::new(&auth.tenant_id);
+                        match state.saved_views.list_by_repo_and_tenant(&rid, &tenant_id).await {
                             Ok(all_views) => {
                                 let summaries: Vec<SavedViewSummary> = all_views
                                     .into_iter()
-                                    .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
                                     .map(|v| SavedViewSummary {
                                         id: v.id.to_string(),
                                         name: v.name,
@@ -760,10 +760,10 @@ async fn handle_explorer_session(
                         match state.saved_views.delete(&vid).await {
                             Ok(_) => {
                                 // Return updated view list
-                                if let Ok(all_views) = state.saved_views.list_by_repo(&rid).await {
+                                let tenant_id = Id::new(&auth.tenant_id);
+                                if let Ok(all_views) = state.saved_views.list_by_repo_and_tenant(&rid, &tenant_id).await {
                                     let summaries: Vec<SavedViewSummary> = all_views
                                         .into_iter()
-                                        .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
                                         .map(|v| SavedViewSummary {
                                             id: v.id.to_string(),
                                             name: v.name,
@@ -818,12 +818,12 @@ async fn handle_explorer_session(
             }
 
             ExplorerClientMessage::ListViews => {
-                match state.saved_views.list_by_repo(&rid).await {
+                let tenant_id = Id::new(&auth.tenant_id);
+                match state.saved_views.list_by_repo_and_tenant(&rid, &tenant_id).await {
                     Ok(views) => {
-                        // Filter to views in the user's tenant.
+                        // Views are already filtered by tenant_id at the SQL level.
                         let mut summaries: Vec<SavedViewSummary> = views
                             .into_iter()
-                            .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
                             .map(|v| SavedViewSummary {
                                 id: v.id.to_string(),
                                 name: v.name,

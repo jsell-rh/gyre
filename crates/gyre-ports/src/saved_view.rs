@@ -28,6 +28,20 @@ pub trait SavedViewRepository: Send + Sync {
     async fn get(&self, id: &Id) -> Result<Option<SavedView>>;
     async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<SavedView>>;
     async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<SavedView>>;
+    /// List views for a repo, filtered by tenant_id at the SQL level.
+    /// Prefer this over list_by_repo + post-filter for defense-in-depth.
+    async fn list_by_repo_and_tenant(
+        &self,
+        repo_id: &Id,
+        tenant_id: &Id,
+    ) -> Result<Vec<SavedView>> {
+        // Default: fall back to list_by_repo + filter (backwards compat)
+        let views = self.list_by_repo(repo_id).await?;
+        Ok(views
+            .into_iter()
+            .filter(|v| v.tenant_id == *tenant_id)
+            .collect())
+    }
     async fn update(&self, view: SavedView) -> Result<SavedView>;
     async fn delete(&self, id: &Id) -> Result<()>;
 }
