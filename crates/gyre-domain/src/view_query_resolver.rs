@@ -565,10 +565,7 @@ fn resolve_scope_with_adjacency(
                     selected_node_id,
                 );
                 if result.is_empty() {
-                    warnings.push(format!(
-                        "Computed expression '{}' matched 0 nodes",
-                        expr
-                    ));
+                    warnings.push(format!("Computed expression '{}' matched 0 nodes", expr));
                 }
                 (result, no_depths())
             } else {
@@ -3597,5 +3594,360 @@ mod tests {
         let result = find_node_by_name(&nodes, "Auth");
         assert!(result.is_some());
         assert_eq!(result.unwrap().name, "AuthService");
+    }
+
+    // ── Scope::Diff tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_scope_diff_temporal() {
+        let mut n1 = make_node("n1", "OldType", NodeType::Type);
+        n1.created_at = 1000;
+        n1.last_modified_at = 1500;
+        let mut n2 = make_node("n2", "NewType", NodeType::Type);
+        n2.created_at = 2000;
+        n2.last_modified_at = 2000;
+        let mut n3 = make_node("n3", "AncientType", NodeType::Type);
+        n3.created_at = 500;
+        n3.last_modified_at = 500;
+
+        let nodes = vec![n1, n2, n3];
+        let edges = vec![];
+        let scope = Scope::Diff {
+            from_commit: "~1000".to_string(),
+            to_commit: "~2000".to_string(),
+        };
+        let result = resolve_scope(&scope, &nodes, &edges, None);
+        // n1 modified at 1500 (in range 1000-2000) and n2 created at 2000 (at boundary)
+        assert!(result.contains("n1"), "n1 modified in range");
+        assert!(result.contains("n2"), "n2 created in range");
+        assert!(!result.contains("n3"), "n3 before range");
+    }
+
+    #[test]
+    fn test_scope_diff_same_commit_warns() {
+        let nodes = vec![make_node("n1", "Foo", NodeType::Type)];
+        let edges = vec![];
+        let scope = Scope::Diff {
+            from_commit: "abc123".to_string(),
+            to_commit: "abc123".to_string(),
+        };
+        let result = resolve_scope_with_depths(&scope, &nodes, &edges, None);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("same commit")),
+            "Should warn about identical commits"
+        );
+    }
+
+    #[test]
+    fn test_scope_diff_sha_prefix_matching() {
+        let mut n1 = make_node("n1", "Changed", NodeType::Type);
+        n1.last_modified_sha = "abcdef1234567890".to_string();
+        n1.created_sha = "1111111111111111".to_string(); // different from from_commit
+        let nodes = vec![n1];
+        let edges = vec![];
+        // Short SHA prefix (6 chars) should match via prefix
+        let scope = Scope::Diff {
+            from_commit: "000000".to_string(),
+            to_commit: "abcdef".to_string(),
+        };
+        let result = resolve_scope(&scope, &nodes, &edges, None);
+        assert!(
+            result.contains("n1"),
+            "6-char SHA prefix should match last_modified_sha"
+        );
+    }
+
+    // ── Unicode safety tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_split_balanced_args_unicode() {
+        // Multi-byte UTF-8 chars should not cause panics
+        let result = split_balanced_args("$where(名前, =, 5), $callers(関数)");
+        assert_eq!(result.len(), 2);
+        assert!(result[0].contains("名前"));
+        assert!(result[1].contains("関数"));
+    }
+
+    #[test]
+    fn test_find_balanced_comma_unicode() {
+        let result = find_balanced_comma("$where(café, =, 5), other");
+        assert!(result.is_some());
+        // The comma should be after the closing paren
+        let pos = result.unwrap();
+        assert_eq!(&"$where(café, =, 5), other"[pos..pos + 1], ",");
+    }
+
+    // ── $where edge cases ──────────────────────────────────────────────
+
+    #[test]
+    fn test_where_unrecognized_property() {
+        let n1 = make_node("n1", "Foo", NodeType::Type);
+        let nodes = vec![n1];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let edges = vec![];
+        let (outgoing, incoming) = build_adjacency(&edges);
+        // Unknown property should return empty set
+        let result = resolve_computed_expression(
+            "$where(nonexistent_prop, >, 0)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(
+            result.is_empty(),
+            "Unrecognized property should match nothing"
+        );
+    }
+
+    #[test]
+    fn test_where_non_numeric_value() {
+        let n1 = make_node("n1", "Foo", NodeType::Type);
+        let nodes = vec![n1];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let edges = vec![];
+        let (outgoing, incoming) = build_adjacency(&edges);
+        // Non-numeric value should return empty set
+        let result = resolve_computed_expression(
+            "$where(complexity, >, not_a_number)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(
+            result.is_empty(),
+            "Non-numeric value should return empty set"
+        );
+    }
+
+    // ── parse_edge_type / parse_node_type tests ────────────────────────
+
+    #[test]
+    fn test_parse_edge_type_valid() {
+        assert_eq!(parse_edge_type("calls"), Some(EdgeType::Calls));
+        assert_eq!(parse_edge_type("Calls"), Some(EdgeType::Calls));
+        assert_eq!(parse_edge_type("CALLS"), Some(EdgeType::Calls));
+        assert_eq!(parse_edge_type("depends_on"), Some(EdgeType::DependsOn));
+        assert_eq!(parse_edge_type("dependson"), Some(EdgeType::DependsOn));
+        assert_eq!(parse_edge_type("governed_by"), Some(EdgeType::GovernedBy));
+    }
+
+    #[test]
+    fn test_parse_edge_type_invalid() {
+        assert_eq!(parse_edge_type("invalid_edge"), None);
+        assert_eq!(parse_edge_type(""), None);
+        assert_eq!(parse_edge_type("call"), None); // typo — no 's'
+    }
+
+    #[test]
+    fn test_parse_node_type_valid() {
+        assert_eq!(parse_node_type("type"), Some(NodeType::Type));
+        assert_eq!(parse_node_type("Type"), Some(NodeType::Type));
+        assert_eq!(parse_node_type("function"), Some(NodeType::Function));
+        assert_eq!(parse_node_type("endpoint"), Some(NodeType::Endpoint));
+        assert_eq!(parse_node_type("spec"), Some(NodeType::Spec));
+    }
+
+    #[test]
+    fn test_parse_node_type_invalid() {
+        assert_eq!(parse_node_type("clase"), None); // typo
+        assert_eq!(parse_node_type(""), None);
+        assert_eq!(parse_node_type("struct"), None); // not a valid node type name
+    }
+
+    // ── normalize_computed_expression tests ─────────────────────────────
+
+    #[test]
+    fn test_normalize_spaces_before_paren() {
+        assert_eq!(
+            normalize_computed_expression("$callers (Foo)"),
+            "$callers(Foo)"
+        );
+        assert_eq!(
+            normalize_computed_expression("$callers  (Foo, 5)"),
+            "$callers(Foo, 5)"
+        );
+    }
+
+    #[test]
+    fn test_normalize_preserves_inner_content() {
+        assert_eq!(
+            normalize_computed_expression("$where(complexity, '>', 20)"),
+            "$where(complexity, '>', 20)"
+        );
+    }
+
+    #[test]
+    fn test_normalize_no_paren() {
+        assert_eq!(
+            normalize_computed_expression("$test_unreachable"),
+            "$test_unreachable"
+        );
+    }
+
+    #[test]
+    fn test_normalize_tabs_and_spaces() {
+        assert_eq!(
+            normalize_computed_expression("$callers\t(Foo)"),
+            "$callers\t(Foo)" // tabs are not normalized (only spaces before paren)
+        );
+    }
+
+    // ── validate_computed_expression tests ──────────────────────────────
+
+    #[test]
+    fn test_validate_typo_expression() {
+        // $caller (missing 's') should be flagged as unrecognized
+        let result = validate_computed_expression("$caller(Foo)");
+        assert!(result.is_some(), "Typo expression should be invalid");
+        assert!(
+            result.unwrap().contains("Unrecognized"),
+            "Should say unrecognized"
+        );
+    }
+
+    #[test]
+    fn test_validate_valid_expressions() {
+        assert!(validate_computed_expression("$test_unreachable").is_none());
+        assert!(validate_computed_expression("$callers(Foo)").is_none());
+        assert!(validate_computed_expression("$where(complexity, '>', 20)").is_none());
+        assert!(validate_computed_expression(
+            "$intersect($test_unreachable, $where(complexity, '>', 5))"
+        )
+        .is_none());
+    }
+
+    // ── Computed expression filter warnings in dry_run ──────────────────
+
+    #[test]
+    fn test_filter_scope_warns_on_unrecognized_node_type() {
+        let nodes = vec![make_node("n1", "Foo", NodeType::Type)];
+        let edges = vec![];
+        let query = ViewQuery {
+            scope: Scope::Filter {
+                node_types: vec!["typo_type".to_string()],
+                computed: None,
+                name_pattern: None,
+            },
+            ..ViewQuery {
+                scope: Scope::All,
+                emphasis: Default::default(),
+                edges: Default::default(),
+                zoom: Default::default(),
+                annotation: Default::default(),
+                groups: vec![],
+                callouts: vec![],
+                narrative: vec![],
+            }
+        };
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unrecognized node type")),
+            "Should warn about unrecognized node type: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_edge_filter_warns_on_unrecognized_edge_type() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Type),
+            make_node("n2", "B", NodeType::Type),
+        ];
+        let edges = vec![make_edge("e1", "n1", "n2", EdgeType::Calls)];
+        let mut query = ViewQuery {
+            scope: Scope::All,
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        query.edges.filter = vec!["typo_edge".to_string()];
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unrecognized edge type")),
+            "Should warn about unrecognized edge type: {:?}",
+            result.warnings
+        );
+    }
+
+    // ── Risk score consistency test ──────────────────────────────────────
+
+    #[test]
+    fn test_risk_score_no_complexity_excluded() {
+        let mut n1 = make_node("n1", "HasComplexity", NodeType::Function);
+        n1.complexity = Some(10);
+        n1.churn_count_30d = 5;
+        n1.test_coverage = Some(0.5);
+        let mut n2 = make_node("n2", "NoComplexity", NodeType::Function);
+        n2.complexity = None;
+        n2.churn_count_30d = 5;
+        n2.test_coverage = Some(0.5);
+
+        let nodes = vec![n1, n2];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let edges = vec![];
+        let (outgoing, incoming) = build_adjacency(&edges);
+
+        // $where(risk_score, >, 0) should only include nodes with complexity data
+        let result = resolve_computed_expression(
+            "$where(risk_score, >, 0)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(
+            result.contains("n1"),
+            "Node with complexity should be included"
+        );
+        assert!(
+            !result.contains("n2"),
+            "Node without complexity should be excluded"
+        );
+
+        // Heat emphasis should also exclude nodes without complexity
+        let query = ViewQuery {
+            scope: Scope::All,
+            emphasis: gyre_common::view_query::Emphasis {
+                heat: Some(gyre_common::view_query::HeatConfig {
+                    metric: "risk_score".to_string(),
+                    palette: "blue-red".to_string(),
+                }),
+                ..Default::default()
+            },
+            ..ViewQuery {
+                scope: Scope::All,
+                emphasis: Default::default(),
+                edges: Default::default(),
+                zoom: Default::default(),
+                annotation: Default::default(),
+                groups: vec![],
+                callouts: vec![],
+                narrative: vec![],
+            }
+        };
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert!(
+            result.node_metrics.contains_key("n1"),
+            "n1 should have risk metric"
+        );
+        assert!(
+            !result.node_metrics.contains_key("n2"),
+            "n2 should not have risk metric"
+        );
     }
 }
