@@ -1481,21 +1481,27 @@ async fn run_explorer_agent(
                 };
 
                 if let Some(ref dr) = dry_run_result {
-                    // Filter out the "may be cluttered" warning for all-scope queries —
-                    // it's expected that all-scope matches many nodes and forcing refinement
-                    // would waste 3 LLM turns trying to "fix" a valid query.
+                    // Filter out the "may be cluttered" warning for scopes that
+                    // legitimately produce many nodes. Forcing refinement on these
+                    // wastes LLM turns trying to "fix" a query that's correct.
                     let actionable_warnings: Vec<&String> = dr
                         .warnings
                         .iter()
                         .filter(|w| {
-                            let is_all_scope = matches!(
+                            if !w.contains("may be cluttered") {
+                                return true; // non-clutter warnings always actionable
+                            }
+                            // Skip clutter warnings for scopes that naturally match many nodes
+                            let skip = matches!(
                                 serde_json::from_value::<gyre_common::view_query::ViewQuery>(
                                     query_json.clone()
                                 ),
-                                Ok(q) if matches!(q.scope, gyre_common::view_query::Scope::All)
+                                Ok(q) if matches!(q.scope,
+                                    gyre_common::view_query::Scope::All
+                                    | gyre_common::view_query::Scope::TestGaps
+                                )
                             );
-                            // Skip "may be cluttered" for all-scope
-                            !(is_all_scope && w.contains("may be cluttered"))
+                            !skip
                         })
                         .collect();
                     if !actionable_warnings.is_empty() && refinement_count < MAX_AGENT_TURNS {

@@ -852,6 +852,11 @@
                   detailNode = n;
                   if (n?._action === 'view_spec' && n.spec_path) {
                     openSpecEditor(n.spec_path);
+                  } else if (n?._action === 'view_code' && n.file_path) {
+                    // Open in code: show file in detail panel.
+                    // The NodeDetailPanel displays Location (file_path:line).
+                    // This preserves canvas state unlike opening a new browser tab.
+                    detailNode = n;
                   }
                 }}
                 onInteractiveQuery={(q) => { activeViewQuery = q; }}

@@ -3608,11 +3608,9 @@
     } else if (action === 'history') {
       onNodeDetail({ ...node, _action: 'view_history' });
     } else if (action === 'open_in_code') {
-      const filePath = node.file_path ?? '';
-      const line = node.line_start ?? 1;
-      // Open file in the repo's source view at the given line
-      const codeUrl = `/${repoId}/blob/main/${filePath}#L${line}`;
-      window.open(codeUrl, '_blank');
+      // Open in the detail panel's code tab instead of a new browser tab,
+      // preserving all canvas state (zoom, query, conversation, drill-down).
+      onNodeDetail({ ...node, _action: 'view_code' });
     } else if (action === 'drill') {
       // Drill into this node via Contains edges with smooth zoom transition
       const children = treeData.parentToChildren.get(node.id) ?? [];
