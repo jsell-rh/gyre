@@ -53,7 +53,9 @@
   let messagesEl = $state(null);
   let inputEl = $state(null);
   let streamingText = $state('');
-  let streamingTimeout = null; // Auto-finalize after 30s of no chunks
+  let streamingTimeout = null; // Auto-finalize after 65s of no chunks (server LLM timeout is 60s)
+  let saveViewInputOpen = $state(false);
+  let saveViewInputValue = $state('');
   let savedViewsDropdownOpen = $state(false);
   let activeViewId = $state(null);
 
@@ -92,10 +94,12 @@
       }]);
       return;
     }
-    // Browser WebSocket API does not support custom headers, so auth token
-    // must be passed via query parameter. The server strips the token from
-    // access logs to prevent leakage. Future: implement ticket-based auth
-    // (POST /api/v1/explorer/ticket → short-lived ticket → WS ?ticket=).
+    // SECURITY NOTE: Browser WebSocket API does not support custom headers,
+    // so auth token is passed via query parameter. This means the token may
+    // appear in server access logs, proxy logs, and browser history.
+    // Mitigations: (1) server strips token from access logs, (2) TLS encrypts
+    // the URL in transit. Preferred future approach: ticket-based auth
+    // (POST /api/v1/explorer/ticket → short-lived single-use ticket → WS ?ticket=).
     // Derive WebSocket base from current page URL (works for CDN, proxy, and direct)
     // Uses document.baseURI to respect <base href> if set, falling back to location.
     const base = new URL('/api/v1/', document.baseURI || window.location.href);
@@ -126,6 +130,9 @@
 
     socket.onclose = () => {
       ws = null;
+      // Clear streaming timeout to prevent stale "[Response timed out]" injection
+      // into a future reconnected session.
+      if (streamingTimeout) { clearTimeout(streamingTimeout); streamingTimeout = null; }
       // Finalize any orphaned streaming text on disconnect
       // (prevents indefinite accumulation if server crashes mid-stream)
       if (streamingText.trim()) {
@@ -178,7 +185,8 @@
           const chunk = typeof msg.content === 'string' ? msg.content : String(msg.content ?? '');
           streamingText += chunk;
           status = 'thinking';
-          // Reset streaming timeout: auto-finalize if no chunks for 30s
+          // Reset streaming timeout: auto-finalize if no chunks for 65s
+          // (server-side LLM timeout is 60s; 65s = server timeout + 5s buffer)
           if (streamingTimeout) clearTimeout(streamingTimeout);
           streamingTimeout = setTimeout(() => {
             if (streamingText.trim()) {
@@ -187,7 +195,7 @@
               status = 'ready';
               scrollToBottom();
             }
-          }, 30000);
+          }, 65000);
         } else {
           // Final text message (done=true)
           if (streamingTimeout) { clearTimeout(streamingTimeout); streamingTimeout = null; }
@@ -273,18 +281,24 @@
 
     const text = inputText.trim();
     inputText = '';
-    sessionMessageCount++;
 
     messages = capMessages([...messages, { id: nextMsgId++, role: 'user', content: text, timestamp: Date.now() }]);
     scrollToBottom();
 
-    ws.send(JSON.stringify({
-      type: 'message',
-      text: text,
-      canvas_state: canvasState,
-    }));
-
-    status = 'thinking';
+    try {
+      ws.send(JSON.stringify({
+        type: 'message',
+        text: text,
+        canvas_state: canvasState,
+      }));
+      // Increment AFTER successful send so failed sends don't count toward
+      // the session limit (which would eventually block the client).
+      sessionMessageCount++;
+      status = 'thinking';
+    } catch (err) {
+      console.error('[ExplorerChat] WebSocket send failed:', err);
+      messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: '*Failed to send message. Please check your connection.*', timestamp: Date.now(), isError: true }]);
+    }
   }
 
   // ── Saved views ──────────────────────────────────────────────────────────
@@ -297,16 +311,39 @@
 
   function saveCurrentView() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const name = prompt($t('explorer_chat.save_view_name'));
-    if (!name?.trim()) return;
+    // Show inline input instead of blocking prompt()
+    saveViewInputValue = '';
+    saveViewInputOpen = true;
+  }
+
+  function confirmSaveView() {
+    const name = saveViewInputValue.trim();
+    saveViewInputOpen = false;
+    saveViewInputValue = '';
+    if (!name || !ws || ws.readyState !== WebSocket.OPEN) return;
     // Find the last view query from conversation
     const lastViewQuery = [...messages].reverse().find(m => m.viewQuery)?.viewQuery ?? {};
     ws.send(JSON.stringify({
       type: 'save_view',
-      name: name.trim(),
+      name: name,
       description: `Saved from explorer chat`,
       query: lastViewQuery,
     }));
+  }
+
+  function cancelSaveView() {
+    saveViewInputOpen = false;
+    saveViewInputValue = '';
+  }
+
+  function onSaveViewKeydown(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      confirmSaveView();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelSaveView();
+    }
   }
 
   function deleteView(view, event) {
@@ -403,6 +440,16 @@
       e.stopPropagation();
     }
   }
+
+  // Auto-focus save view input when dialog opens
+  $effect(() => {
+    if (saveViewInputOpen) {
+      requestAnimationFrame(() => {
+        const el = document.getElementById('save-view-input');
+        el?.focus();
+      });
+    }
+  });
 
   $effect(() => {
     if (savedViewsDropdownOpen) {
@@ -646,6 +693,31 @@
     </button>
   </div>
 </div>
+
+<!-- Save view inline input overlay -->
+{#if saveViewInputOpen}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="save-view-overlay" onclick={cancelSaveView}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="save-view-dialog" onclick={(e) => e.stopPropagation()}>
+      <label class="save-view-label" for="save-view-input">{$t('explorer_chat.save_view_name', { default: 'View name' })}</label>
+      <input
+        id="save-view-input"
+        class="save-view-input"
+        type="text"
+        bind:value={saveViewInputValue}
+        onkeydown={onSaveViewKeydown}
+        placeholder="My view..."
+      />
+      <div class="save-view-actions">
+        <button class="save-view-cancel" onclick={cancelSaveView} type="button">Cancel</button>
+        <button class="save-view-confirm" onclick={confirmSaveView} disabled={!saveViewInputValue.trim()} type="button">Save</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <!-- Click-away for dropdown -->
 {#if savedViewsDropdownOpen}
@@ -1222,6 +1294,86 @@
   .send-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  /* ── Save view dialog ─────────────────────────────────────────── */
+  .save-view-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .save-view-dialog {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    min-width: 260px;
+    max-width: 360px;
+    box-shadow: 0 8px 24px color-mix(in srgb, black 40%, transparent);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .save-view-label {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .save-view-input {
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    outline: none;
+  }
+
+  .save-view-input:focus {
+    border-color: var(--color-focus);
+    box-shadow: 0 0 0 2px var(--color-focus);
+  }
+
+  .save-view-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .save-view-cancel {
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+    cursor: pointer;
+  }
+
+  .save-view-confirm {
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-primary, #3b82f6);
+    border: none;
+    border-radius: var(--radius);
+    color: #fff;
+    font-size: var(--text-sm);
+    font-family: var(--font-body);
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .save-view-confirm:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   @media (prefers-reduced-motion: reduce) {
