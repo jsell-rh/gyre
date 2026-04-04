@@ -142,9 +142,9 @@
   let ghostPulsePhase = $state(0); // 0..1 pulsing animation
   let ghostAnimCycles = $state(0); // count of completed pulse cycles
 
-  // Trace path numbering state (BFS order badges for "Trace from here")
+  // Trace path numbering state (DFS execution order badges for "Trace from here")
   let tracePathOrder = $state(new Map()); // nodeId → step number (1-based)
-  let tracePathEdges = $state([]); // [{fromId, toId, edgeType}] in BFS order
+  let tracePathEdges = $state([]); // [{fromId, toId, edgeType}] in DFS order
 
   // Pre-compute incoming call counts to avoid O(N*E) per anomaly check
   let incomingCallCounts = $derived.by(() => {
@@ -245,26 +245,44 @@
         });
       }
     }
-    // Pattern 6: Co-change detection — modules that always change together but have no shared spec
-    // Group nodes by last_modified_sha to find co-change clusters
-    const shaGroups = new Map(); // sha → [node]
+    // Pattern 6: Co-change detection — modules that change together but have no shared spec.
+    // Two heuristics: (a) same commit SHA, (b) modified within the same time window (1 hour).
+    // This catches co-changes in separate commits within the same PR.
+    const coChangeGroups = new Map(); // key → [node]
     for (const n of nodes) {
-      if (n.deleted_at || !n.last_modified_sha || n.node_type === 'tree-group') continue;
-      if (!shaGroups.has(n.last_modified_sha)) shaGroups.set(n.last_modified_sha, []);
-      shaGroups.get(n.last_modified_sha).push(n);
+      if (n.deleted_at || n.node_type === 'tree-group') continue;
+      // Group by SHA (exact same commit)
+      if (n.last_modified_sha) {
+        const key = `sha:${n.last_modified_sha}`;
+        if (!coChangeGroups.has(key)) coChangeGroups.set(key, []);
+        coChangeGroups.get(key).push(n);
+      }
+      // Group by time window (same hour, to catch separate commits in same PR)
+      if (n.last_modified_at) {
+        const hourBucket = Math.floor(n.last_modified_at / 3600);
+        const key = `time:${hourBucket}`;
+        if (!coChangeGroups.has(key)) coChangeGroups.set(key, []);
+        coChangeGroups.get(key).push(n);
+      }
     }
-    // Find groups of 3+ nodes from different modules that share a commit but no shared spec
-    for (const [, group] of shaGroups) {
+    // Deduplicate: track which node pairs we've already reported
+    const reportedPairs = new Set();
+    // Find groups of 3+ nodes from different modules that share a change pattern but no shared spec
+    for (const [, group] of coChangeGroups) {
       if (group.length < 3) continue;
       const modules = new Set(group.map(n => n.file_path?.split('/').slice(0, -1).join('/') ?? ''));
       if (modules.size < 2) continue; // Same module, not interesting
       const specs = new Set(group.filter(n => n.spec_path).map(n => n.spec_path));
       if (specs.size > 0) continue; // Have shared spec governance
+      // Dedup by first 2 node IDs
+      const pairKey = group.slice(0, 2).map(n => n.id).sort().join(',');
+      if (reportedPairs.has(pairKey)) continue;
+      reportedPairs.add(pairKey);
       const names = group.slice(0, 3).map(n => n.name ?? '?').join(', ');
       results.push({
         nodeId: group[0].id,
         nodeName: names,
-        message: `${group.length} modules always change together but have no shared spec`,
+        message: `${group.length} nodes across ${modules.size} modules change together but have no shared spec`,
         severity: 'medium',
       });
     }
@@ -1754,12 +1772,28 @@
         // Fallback: compute metric value client-side (using pre-computed index for calls)
         if (metric === 'incoming_calls') {
           value = incomingCallCounts.get(nodeId) ?? 0;
+        } else if (metric === 'outgoing_calls') {
+          // Count outgoing Calls edges from this node
+          for (const nb of (adjacency.get(nodeId) ?? [])) {
+            if (nb.edgeType === 'calls' && !nb.reverse) value++;
+          }
         } else if (metric === 'complexity') {
           value = node.complexity ?? 0;
         } else if (metric === 'churn' || metric === 'churn_count_30d') {
           value = node.churn_count_30d ?? node.churn ?? 0;
         } else if (metric === 'test_coverage') {
           value = (node.test_coverage ?? 0) * 100;
+        } else if (metric === 'field_count') {
+          // Count FieldOf edges targeting this node
+          for (const nb of (adjacency.get(nodeId) ?? [])) {
+            if (nb.edgeType === 'field_of' && nb.reverse) value++;
+          }
+        } else if (metric === 'risk_score') {
+          // risk_score = churn × complexity × (1 - test_coverage)
+          const churn = node.churn_count_30d ?? node.churn ?? 0;
+          const complexity = node.complexity ?? 0;
+          const testCov = node.test_coverage ?? 0;
+          value = churn * complexity * (1 - testCov);
         } else if (metric === 'test_fragility') {
           // Count callers that are test nodes (test fragility = how many tests touch this)
           for (const nb of (adjacency.get(nodeId) ?? [])) {
@@ -1771,7 +1805,9 @@
           }
         }
       }
-      if (value === 0) return null;
+      // For heat maps, value=0 is valid (means low/none) — show the low end
+      // of the palette. Only skip if this node type shouldn't be colored.
+      if (value === 0 && metric !== 'risk_score' && metric !== 'test_coverage') return null;
       // Normalize: find max across all nodes (cached in the query resolver)
       const maxVal = heatMaxValues.get(metric) ?? 1;
       const t = Math.min(1, value / maxVal);
@@ -2682,10 +2718,20 @@
     const churnWidth = 1 + Math.min((n?.churn_count_30d ?? 0) / 3, 4);
     let borderWidth = ln.id === selectedNodeId ? 2 : churnWidth;
     if (qColor && ln.id !== selectedNodeId) {
-      borderColor = qColor;
       if (isHeatMap) {
-        // Heat map mode: fill already applied above, just set border to heat color
-        borderWidth = 1.5;
+        // Heat map mode: keep spec governance border color (structural info)
+        // but add a subtle inner glow with the heat color. The heat fill is
+        // applied above; spec border remains visible per spec requirement
+        // "structural topology is always visible underneath."
+        borderWidth = churnWidth;
+        // Draw a thin inner border with heat color for visual emphasis
+        ctx.save();
+        ctx.strokeStyle = qColor;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.5;
+        roundRect(ctx, s.x - sw / 2 + 2, s.y - sh / 2 + 2, sw - 4, sh - 4, Math.max(0, r - 2));
+        ctx.stroke();
+        ctx.restore();
       } else {
         // Non-heat query highlight: tint fill + glow border
         ctx.fillStyle = qColor + '44';
@@ -3815,7 +3861,9 @@
     scheduleRedraw();
   });
 
-  // Compute trace path BFS ordering and connecting edges when a trace query is active
+  // Compute trace path DFS ordering and connecting edges when a trace query is active.
+  // Uses depth-first ordering to represent execution order (call stack) rather than
+  // breadth-first (wavefront), so A→B→C shows A's full chain before sibling branches.
   $effect(() => {
     // Detect trace queries: focus scope with outgoing direction (Calls/RoutesTo traversal)
     const isTrace = activeQuery?.scope?.type === 'focus' &&
@@ -3826,30 +3874,86 @@
       tracePathEdges = [];
       return;
     }
-    // Sort matched nodes by BFS depth, then assign step numbers
-    const entries = [...queryMatchedWithDepth.entries()].sort((a, b) => a[1] - b[1]);
-    const ordered = new Map();
-    for (let i = 0; i < entries.length; i++) {
-      ordered.set(entries[i][0], i + 1);
-    }
-    tracePathOrder = ordered;
 
-    // Build ordered edge list connecting consecutive BFS layers
-    const traceEdges = [];
-    const matchedSet = new Set(ordered.keys());
+    // Build outgoing adjacency for DFS from matched edges
+    const matchedIds = new Set(queryMatchedWithDepth.keys());
+    const outAdj = new Map();
     for (const e of edges) {
       const srcId = e.source_id ?? e.from_node_id ?? e.from;
       const tgtId = e.target_id ?? e.to_node_id ?? e.to;
       const et = (e.edge_type ?? e.type ?? '').toLowerCase();
-      if (matchedSet.has(srcId) && matchedSet.has(tgtId)) {
-        const srcStep = ordered.get(srcId);
-        const tgtStep = ordered.get(tgtId);
-        if (srcStep < tgtStep) {
-          traceEdges.push({ fromId: srcId, toId: tgtId, edgeType: et, fromStep: srcStep, toStep: tgtStep });
+      if ((et === 'calls' || et === 'routes_to' || et === 'routesto') &&
+          matchedIds.has(srcId) && matchedIds.has(tgtId)) {
+        if (!outAdj.has(srcId)) outAdj.set(srcId, []);
+        outAdj.get(srcId).push({ toId: tgtId, edgeType: et });
+      }
+    }
+
+    // Find root node (the focus node)
+    const rootNode = activeQuery.scope.node;
+    let rootId = null;
+    if (rootNode === '$clicked' || rootNode === '$selected') {
+      rootId = canvasState.selectedNode?.id;
+    } else {
+      // Find by name
+      const found = nodes.find(n => n.name === rootNode || n.qualified_name === rootNode || n.id === rootNode);
+      rootId = found?.id;
+    }
+
+    if (!rootId || !matchedIds.has(rootId)) {
+      // Fallback: use BFS depth ordering
+      const entries = [...queryMatchedWithDepth.entries()].sort((a, b) => a[1] - b[1]);
+      const ordered = new Map();
+      for (let i = 0; i < entries.length; i++) ordered.set(entries[i][0], i + 1);
+      tracePathOrder = ordered;
+      tracePathEdges = [];
+      return;
+    }
+
+    // DFS traversal to assign execution order
+    const ordered = new Map();
+    const traceEdges = [];
+    const visited = new Set();
+    let step = 0;
+
+    function dfs(nodeId) {
+      if (visited.has(nodeId)) return;
+      visited.add(nodeId);
+      step++;
+      ordered.set(nodeId, step);
+
+      const children = outAdj.get(nodeId) ?? [];
+      // Sort children by name for deterministic ordering
+      children.sort((a, b) => {
+        const na = nodes.find(n => n.id === a.toId)?.name ?? '';
+        const nb = nodes.find(n => n.id === b.toId)?.name ?? '';
+        return na.localeCompare(nb);
+      });
+
+      for (const child of children) {
+        if (!visited.has(child.toId)) {
+          traceEdges.push({
+            fromId: nodeId, toId: child.toId,
+            edgeType: child.edgeType,
+            fromStep: ordered.get(nodeId),
+            toStep: step + 1
+          });
+          dfs(child.toId);
         }
       }
     }
-    traceEdges.sort((a, b) => a.fromStep - b.fromStep || a.toStep - b.toStep);
+
+    dfs(rootId);
+
+    // Add remaining matched nodes not reachable via DFS (disconnected components)
+    for (const nodeId of matchedIds) {
+      if (!ordered.has(nodeId)) {
+        step++;
+        ordered.set(nodeId, step);
+      }
+    }
+
+    tracePathOrder = ordered;
     tracePathEdges = traceEdges;
   });
 
