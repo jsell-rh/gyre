@@ -4103,4 +4103,103 @@ mod tests {
         );
         assert!(result2.contains("n1"), "4-char SHA prefix should match");
     }
+
+    // ── Filter scope: computed + node_types combined ─────────────────────
+
+    #[test]
+    fn test_filter_scope_computed_and_node_types_combined() {
+        // When a Filter scope has BOTH computed and node_types, both should apply.
+        // Previously computed took priority and node_types was silently ignored.
+        let mut n1 = make_node("n1", "HighComplexFunc", NodeType::Function);
+        n1.complexity = Some(10);
+        let mut n2 = make_node("n2", "HighComplexType", NodeType::Type);
+        n2.complexity = Some(15);
+        let mut n3 = make_node("n3", "LowComplexFunc", NodeType::Function);
+        n3.complexity = Some(2);
+        let mut n4 = make_node("n4", "HighComplexModule", NodeType::Module);
+        n4.complexity = Some(20);
+
+        let nodes = vec![n1, n2, n3, n4];
+        let edges: Vec<GraphEdge> = vec![];
+        let query = ViewQuery {
+            scope: Scope::Filter {
+                node_types: vec!["function".to_string(), "type".to_string()],
+                computed: Some("$where(complexity, '>', 5)".to_string()),
+                name_pattern: None,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &edges, None);
+        // matched_node_names uses qualified_name (pkg.Name format from make_node)
+        assert_eq!(
+            result.matched_nodes, 2,
+            "Should match 2 nodes (function + type with complexity > 5)"
+        );
+        assert!(
+            result
+                .matched_node_names
+                .iter()
+                .any(|n| n.contains("HighComplexFunc")),
+            "Function with high complexity should be included, got: {:?}",
+            result.matched_node_names
+        );
+        assert!(
+            result
+                .matched_node_names
+                .iter()
+                .any(|n| n.contains("HighComplexType")),
+            "Type with high complexity should be included"
+        );
+        assert!(
+            !result
+                .matched_node_names
+                .iter()
+                .any(|n| n.contains("LowComplexFunc")),
+            "Low complexity function should be excluded"
+        );
+        assert!(
+            !result
+                .matched_node_names
+                .iter()
+                .any(|n| n.contains("HighComplexModule")),
+            "Module should be excluded because node_types filter says only function+type"
+        );
+    }
+
+    #[test]
+    fn test_filter_scope_computed_only_no_node_types_includes_all_types() {
+        // When computed is set but node_types is empty, all node types should pass
+        let mut n1 = make_node("n1", "Func", NodeType::Function);
+        n1.complexity = Some(10);
+        let mut n2 = make_node("n2", "Mod", NodeType::Module);
+        n2.complexity = Some(10);
+
+        let nodes = vec![n1, n2];
+        let edges: Vec<GraphEdge> = vec![];
+        let query = ViewQuery {
+            scope: Scope::Filter {
+                node_types: vec![],
+                computed: Some("$where(complexity, '>', 5)".to_string()),
+                name_pattern: None,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert_eq!(
+            result.matched_nodes, 2,
+            "Both nodes should match when no node_types filter"
+        );
+    }
 }
