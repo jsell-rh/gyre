@@ -806,7 +806,15 @@ fn resolve_computed_expression(
     incoming: &HashMap<String, Vec<(String, EdgeType)>>,
     selected_node_id: Option<&str>,
 ) -> HashSet<String> {
-    resolve_computed_expression_inner(expr, active_nodes, edges, outgoing, incoming, selected_node_id, 0)
+    resolve_computed_expression_inner(
+        expr,
+        active_nodes,
+        edges,
+        outgoing,
+        incoming,
+        selected_node_id,
+        0,
+    )
 }
 
 fn resolve_computed_expression_inner(
@@ -926,10 +934,22 @@ fn resolve_computed_expression_inner(
             let a_expr = inner[..comma_pos].trim();
             let b_expr = inner[comma_pos + 1..].trim();
             let set_a = resolve_computed_expression_inner(
-                a_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
+                a_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+                depth + 1,
             );
             let set_b = resolve_computed_expression_inner(
-                b_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
+                b_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+                depth + 1,
             );
             return set_a.intersection(&set_b).cloned().collect();
         }
@@ -942,10 +962,22 @@ fn resolve_computed_expression_inner(
             let a_expr = inner[..comma_pos].trim();
             let b_expr = inner[comma_pos + 1..].trim();
             let set_a = resolve_computed_expression_inner(
-                a_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
+                a_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+                depth + 1,
             );
             let set_b = resolve_computed_expression_inner(
-                b_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
+                b_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+                depth + 1,
             );
             return set_a.union(&set_b).cloned().collect();
         }
@@ -958,10 +990,22 @@ fn resolve_computed_expression_inner(
             let a_expr = inner[..comma_pos].trim();
             let b_expr = inner[comma_pos + 1..].trim();
             let set_a = resolve_computed_expression_inner(
-                a_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
+                a_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+                depth + 1,
             );
             let set_b = resolve_computed_expression_inner(
-                b_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
+                b_expr,
+                active_nodes,
+                edges,
+                outgoing,
+                incoming,
+                selected_node_id,
+                depth + 1,
             );
             return set_a.difference(&set_b).cloned().collect();
         }
@@ -1213,7 +1257,10 @@ fn resolve_computed_expression_inner(
     // Fallback: unrecognized expression — return empty set.
     // validate_computed_expression() should be called before resolution to catch these.
     #[cfg(debug_assertions)]
-    eprintln!("[view_query_resolver] Unrecognized computed expression: '{}'", trimmed);
+    eprintln!(
+        "[view_query_resolver] Unrecognized computed expression: '{}'",
+        trimmed
+    );
     HashSet::new()
 }
 
@@ -3946,5 +3993,95 @@ mod tests {
             !result.node_metrics.contains_key("n2"),
             "n2 should not have risk metric"
         );
+    }
+
+    // ── Scope::Diff tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_diff_scope_temporal() {
+        let mut n1 = make_node("n1", "A", NodeType::Function);
+        n1.created_at = 1000;
+        n1.last_modified_at = 1200;
+        let mut n2 = make_node("n2", "B", NodeType::Function);
+        n2.created_at = 1500;
+        n2.last_modified_at = 1600;
+        let mut n3 = make_node("n3", "C", NodeType::Function);
+        n3.created_at = 2000;
+        n3.last_modified_at = 2100;
+        let nodes = vec![n1, n2, n3];
+        let edges: Vec<GraphEdge> = vec![];
+        let result = resolve_scope(
+            &Scope::Diff {
+                from_commit: "~1400".to_string(),
+                to_commit: "~1700".to_string(),
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        // B was created at 1500 (within 1400..1700)
+        assert!(result.contains("n2"), "B should be in diff range");
+        // A was created at 1000 (before range), modified at 1200 (before range)
+        assert!(!result.contains("n1"), "A should not be in range");
+        // C was created at 2000 (after range)
+        assert!(!result.contains("n3"), "C should not be in range");
+    }
+
+    #[test]
+    fn test_diff_scope_same_commit_warning() {
+        let nodes = vec![make_node("n1", "A", NodeType::Function)];
+        let edges: Vec<GraphEdge> = vec![];
+        let query = ViewQuery {
+            scope: Scope::Diff {
+                from_commit: "abcd1234".to_string(),
+                to_commit: "abcd1234".to_string(),
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("same commit")),
+            "Should warn when from and to are identical"
+        );
+    }
+
+    #[test]
+    fn test_diff_scope_sha_requires_min_4_chars() {
+        let mut node = make_node("n1", "A", NodeType::Function);
+        node.last_modified_sha = "abcdef1234567890".to_string();
+        node.created_sha = "1111111111111111".to_string();
+        let nodes = vec![node];
+        let edges: Vec<GraphEdge> = vec![];
+        // Short SHA "ab" (2 chars) should not match
+        let result = resolve_scope(
+            &Scope::Diff {
+                from_commit: "0000".to_string(),
+                to_commit: "ab".to_string(),
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        assert!(
+            !result.contains("n1"),
+            "2-char SHA should not match due to min 4-char requirement"
+        );
+        // Full SHA prefix (4+ chars) should match
+        let result2 = resolve_scope(
+            &Scope::Diff {
+                from_commit: "0000".to_string(),
+                to_commit: "abcd".to_string(),
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        assert!(result2.contains("n1"), "4-char SHA prefix should match");
     }
 }

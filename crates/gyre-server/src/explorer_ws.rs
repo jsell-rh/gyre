@@ -490,7 +490,11 @@ async fn handle_explorer_session(
                     Ok(_v) => {
                         // Re-fetch the full view list so the client gets all views, not just the new one.
                         let tenant_id = Id::new(&auth.tenant_id);
-                        match state.saved_views.list_by_repo_and_tenant(&rid, &tenant_id).await {
+                        match state
+                            .saved_views
+                            .list_by_repo_and_tenant(&rid, &tenant_id)
+                            .await
+                        {
                             Ok(all_views) => {
                                 let summaries: Vec<SavedViewSummary> = all_views
                                     .into_iter()
@@ -761,7 +765,11 @@ async fn handle_explorer_session(
                             Ok(_) => {
                                 // Return updated view list
                                 let tenant_id = Id::new(&auth.tenant_id);
-                                if let Ok(all_views) = state.saved_views.list_by_repo_and_tenant(&rid, &tenant_id).await {
+                                if let Ok(all_views) = state
+                                    .saved_views
+                                    .list_by_repo_and_tenant(&rid, &tenant_id)
+                                    .await
+                                {
                                     let summaries: Vec<SavedViewSummary> = all_views
                                         .into_iter()
                                         .map(|v| SavedViewSummary {
@@ -819,7 +827,11 @@ async fn handle_explorer_session(
 
             ExplorerClientMessage::ListViews => {
                 let tenant_id = Id::new(&auth.tenant_id);
-                match state.saved_views.list_by_repo_and_tenant(&rid, &tenant_id).await {
+                match state
+                    .saved_views
+                    .list_by_repo_and_tenant(&rid, &tenant_id)
+                    .await
+                {
                     Ok(views) => {
                         // Views are already filtered by tenant_id at the SQL level.
                         let mut summaries: Vec<SavedViewSummary> = views
@@ -1158,8 +1170,25 @@ async fn run_explorer_agent_sdk(
         }))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        // Create a new process group so we can kill the entire tree on timeout
+        .process_group(0);
     let mut child = child_cmd.spawn()?;
+
+    // Helper: kill the process group (child + all descendants) on Unix.
+    // Falls back to child.kill() on other platforms.
+    #[allow(unused_variables)]
+    let kill_tree = |child: &tokio::process::Child| {
+        #[cfg(unix)]
+        if let Some(pid) = child.id() {
+            // Signal the entire process group (negative PID).
+            // process_group(0) above creates a new group with the child as leader.
+            use std::process::Command;
+            let _ = Command::new("kill")
+                .args(["-TERM", "--", &format!("-{}", pid)])
+                .status();
+        }
+    };
 
     // Write input to stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -1184,7 +1213,8 @@ async fn run_explorer_agent_sdk(
             let line_result = tokio::time::timeout_at(deadline, lines.next_line()).await;
             match line_result {
                 Err(_) => {
-                    // Timeout: kill the child process and bail.
+                    // Timeout: kill the entire process tree and bail.
+                    kill_tree(&child);
                     let _ = child.kill().await;
                     warn!("Explorer SDK process timed out after {SDK_TIMEOUT_SECS}s");
                     anyhow::bail!(
@@ -1278,6 +1308,7 @@ async fn run_explorer_agent_sdk(
     // Wait for the child with the same deadline.
     match tokio::time::timeout_at(deadline, child.wait()).await {
         Err(_) => {
+            kill_tree(&child);
             let _ = child.kill().await;
             warn!("Explorer SDK process timed out waiting for exit");
             anyhow::bail!("Explorer SDK process timed out after {SDK_TIMEOUT_SECS} seconds");
@@ -1411,7 +1442,8 @@ async fn run_explorer_agent(
                             );
                             // Sort by last_modified_at descending so we keep recent nodes
                             let mut sorted_nodes = n;
-                            sorted_nodes.sort_by(|a, b| b.last_modified_at.cmp(&a.last_modified_at));
+                            sorted_nodes
+                                .sort_by(|a, b| b.last_modified_at.cmp(&a.last_modified_at));
                             let kept_node_ids: std::collections::HashSet<String> = sorted_nodes
                                 .iter()
                                 .take(MAX_GRAPH_CACHE_ENTRIES / 2)
@@ -1732,7 +1764,9 @@ async fn run_explorer_agent(
                         ))
                     }
                 } else {
-                    warn!("Failed to deserialize view query for self-check — rejecting invalid query");
+                    warn!(
+                        "Failed to deserialize view query for self-check — rejecting invalid query"
+                    );
                     // Don't send unvalidated queries to the frontend.
                     // Stream a warning instead and skip the view query.
                     stream_text(
@@ -2415,8 +2449,14 @@ This shows all callers of TaskPort."#;
 
     #[test]
     fn test_max_agent_turns() {
-        assert_eq!(MAX_AGENT_TURNS, 5, "Total LLM budget: 5 turns (tool-use + refinement)");
-        assert_eq!(MAX_REFINEMENT_TURNS, 3, "Spec requires max 3 refinement turns");
+        assert_eq!(
+            MAX_AGENT_TURNS, 5,
+            "Total LLM budget: 5 turns (tool-use + refinement)"
+        );
+        assert_eq!(
+            MAX_REFINEMENT_TURNS, 3,
+            "Spec requires max 3 refinement turns"
+        );
     }
 
     #[test]
@@ -2656,6 +2696,9 @@ Done."#;
         // 5 total LLM calls per user message (tool-use + self-check refinements)
         assert_eq!(MAX_AGENT_TURNS, 5, "Max total turns should be 5");
         // Spec caps refinement-only turns at 3
-        assert_eq!(MAX_REFINEMENT_TURNS, 3, "Max refinement turns should be 3 per spec");
+        assert_eq!(
+            MAX_REFINEMENT_TURNS, 3,
+            "Max refinement turns should be 3 per spec"
+        );
     }
 }
