@@ -133,13 +133,49 @@
   let tracePathOrder = $state(new Map()); // nodeId → step number (1-based)
   let tracePathEdges = $state([]); // [{fromId, toId, edgeType}] in BFS order
 
+  // Pre-compute incoming call counts to avoid O(N*E) per anomaly check
+  let incomingCallCounts = $derived.by(() => {
+    const counts = new Map();
+    for (const e of edges) {
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (et === 'calls' && tgt) {
+        counts.set(tgt, (counts.get(tgt) ?? 0) + 1);
+      }
+    }
+    return counts;
+  });
+
   // Anomaly detection state (evaluative lens)
   let anomalies = $derived.by(() => {
     if (lens !== 'evaluative') return [];
     const results = [];
+    const nodeById = new Map();
+    for (const n of nodes) nodeById.set(n.id, n);
+
+    // Pre-compute trait implementation counts
+    const traitImplCounts = new Map(); // traitId → { total, tested }
+    for (const e of edges) {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (et === 'implements') {
+        const tgtNode = nodeById.get(tgt);
+        if (tgtNode && (tgtNode.node_type === 'interface' || tgtNode.node_type === 'trait')) {
+          if (!traitImplCounts.has(tgt)) traitImplCounts.set(tgt, { total: 0, tested: 0 });
+          const entry = traitImplCounts.get(tgt);
+          entry.total++;
+          const srcNode = nodeById.get(src);
+          if (srcNode?.test_coverage > 0 || srcNode?.test_node) entry.tested++;
+        }
+      }
+    }
+
     for (const n of nodes) {
       if (n.node_type === 'tree-group' || n.deleted_at) continue;
-      // High complexity + low test coverage
+      const calls = incomingCallCounts.get(n.id) ?? 0;
+
+      // Pattern 1: High complexity + low test coverage
       if ((n.complexity ?? 0) > 15 && (n.test_coverage ?? 0) < 0.3) {
         results.push({
           nodeId: n.id,
@@ -148,41 +184,41 @@
           severity: 'high',
         });
       }
-      // Heavily depended on with no spec
-      const incomingCalls = edges.filter(e => {
-        const tgt = e.target_id ?? e.to_node_id ?? e.to;
-        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
-        return tgt === n.id && et === 'calls';
-      }).length;
-      if (incomingCalls > 5 && !n.spec_path) {
+      // Pattern 2: Heavily depended on with no spec
+      if (calls > 5 && !n.spec_path) {
         results.push({
           nodeId: n.id,
           nodeName: n.name ?? n.qualified_name ?? '?',
-          message: `Heavily depended on (${incomingCalls} callers) with no spec`,
+          message: `Heavily depended on (${calls} callers) with no spec`,
           severity: 'medium',
         });
       }
-      // Orphan module — no callers
-      if (n.node_type === 'function' && !n.test_node) {
-        const hasCallers = edges.some(e => {
-          const tgt = e.target_id ?? e.to_node_id ?? e.to;
-          const et = (e.edge_type ?? e.type ?? '').toLowerCase();
-          return tgt === n.id && et === 'calls';
-        });
-        if (!hasCallers) {
+      // Pattern 3: Trait has N implementations but only M tested
+      if (n.node_type === 'interface' || n.node_type === 'trait') {
+        const entry = traitImplCounts.get(n.id);
+        if (entry && entry.total > 1 && entry.tested < entry.total) {
           results.push({
             nodeId: n.id,
             nodeName: n.name ?? n.qualified_name ?? '?',
-            message: 'Orphan module \u2014 no callers',
-            severity: 'low',
+            message: `${entry.total} implementations but only ${entry.tested} tested`,
+            severity: 'medium',
           });
         }
       }
+      // Pattern 4: Orphan function — no callers (possible dead code)
+      if (n.node_type === 'function' && !n.test_node && calls === 0) {
+        results.push({
+          nodeId: n.id,
+          nodeName: n.name ?? n.qualified_name ?? '?',
+          message: 'No callers \u2014 possible dead code',
+          severity: 'low',
+        });
+      }
     }
-    // Sort by severity (high first), then take top 5
+    // Sort by severity (high first), then take top 8
     const order = { high: 0, medium: 1, low: 2 };
     results.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
-    return results.slice(0, 5);
+    return results.slice(0, 8);
   });
   let anomalyPanelOpen = $state(true);
 
@@ -646,7 +682,7 @@
         items.push({
           kind: 'graph',
           graphNode: gn,
-          weight: Math.max(1, descendantCounts.get(gn.id) ?? 1),
+          weight: nodeWeight(gn),
         });
       }
 
@@ -704,11 +740,22 @@
     }
 
     // Layout actual graph nodes (functions, types, etc.) as leaf cells
+    // Compute effective weight for a node: combines complexity and churn
+    // to fulfill the spec's "size indicates complexity or churn" requirement.
+    function nodeWeight(n) {
+      const complexity = n.complexity ?? 0;
+      const churn = n.churn_count_30d ?? n.churn ?? 0;
+      const descendants = descendantCounts.get(n.id) ?? 1;
+      // Weighted sum: complexity is primary, churn is secondary signal
+      const signal = complexity + churn * 0.5;
+      return Math.max(1, signal > 0 ? signal : descendants);
+    }
+
     function layoutLeafNodes(graphNodes, x, y, w, h, parentLn, depth) {
       const items = graphNodes.map(n => ({
         id: n.id,
         node: n,
-        weight: Math.max(1, n.complexity ?? (descendantCounts.get(n.id) ?? 1)),
+        weight: nodeWeight(n),
       }));
       const rects = squarify(items, x, y, w, h);
       const gap = Math.max(1, Math.min(4, Math.min(w, h) * 0.008));
@@ -931,6 +978,191 @@
     return adj;
   });
 
+  // ── Computed reference helpers (view-query-grammar.md) ───────────────
+  // These resolve computed expressions like $callers(), $callees(), etc.
+  // against the client-side adjacency graph for the filter scope.
+
+  function resolveNodeByName(name) {
+    return nodes.find(n => n.name === name || n.qualified_name === name || n.id === name);
+  }
+
+  function computeCallers(nodeName, depth = 10) {
+    const start = resolveNodeByName(nodeName);
+    if (!start) return new Set();
+    const result = new Set([start.id]);
+    const q = [{ id: start.id, d: 0 }];
+    while (q.length > 0) {
+      const { id, d } = q.shift();
+      if (d >= depth) continue;
+      for (const nb of (adjacency.get(id) ?? [])) {
+        if (nb.edgeType === 'calls' && nb.reverse && !result.has(nb.targetId)) {
+          result.add(nb.targetId);
+          q.push({ id: nb.targetId, d: d + 1 });
+        }
+      }
+    }
+    return result;
+  }
+
+  function computeCallees(nodeName, depth = 10) {
+    const start = resolveNodeByName(nodeName);
+    if (!start) return new Set();
+    const result = new Set([start.id]);
+    const q = [{ id: start.id, d: 0 }];
+    while (q.length > 0) {
+      const { id, d } = q.shift();
+      if (d >= depth) continue;
+      for (const nb of (adjacency.get(id) ?? [])) {
+        if (nb.edgeType === 'calls' && !nb.reverse && !result.has(nb.targetId)) {
+          result.add(nb.targetId);
+          q.push({ id: nb.targetId, d: d + 1 });
+        }
+      }
+    }
+    return result;
+  }
+
+  function computeImplementors(nodeName) {
+    const start = resolveNodeByName(nodeName);
+    if (!start) return new Set();
+    const result = new Set();
+    for (const nb of (adjacency.get(start.id) ?? [])) {
+      if (nb.edgeType === 'implements' && nb.reverse) result.add(nb.targetId);
+    }
+    return result;
+  }
+
+  function computeGovernedBy(specPath) {
+    const result = new Set();
+    for (const n of nodes) {
+      if (n.spec_path === specPath) result.add(n.id);
+    }
+    for (const e of edges) {
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (et === 'governed_by') {
+        const tgt = e.target_id ?? e.to_node_id ?? e.to;
+        const tgtNode = nodes.find(n => n.id === tgt);
+        if (tgtNode && (tgtNode.name === specPath || tgtNode.spec_path === specPath)) {
+          result.add(e.source_id ?? e.from_node_id ?? e.from);
+        }
+      }
+    }
+    return result;
+  }
+
+  function computeTestUnreachable() {
+    const testN = nodes.filter(n => n.test_node);
+    const reachable = new Set(testN.map(n => n.id));
+    const q = [...reachable];
+    while (q.length > 0) {
+      const id = q.shift();
+      for (const nb of (adjacency.get(id) ?? [])) {
+        if (reachable.has(nb.targetId) || nb.edgeType !== 'calls' || nb.reverse) continue;
+        reachable.add(nb.targetId);
+        q.push(nb.targetId);
+      }
+    }
+    const result = new Set();
+    for (const n of nodes) {
+      if (!n.test_node && n.node_type === 'function' && !reachable.has(n.id)) result.add(n.id);
+    }
+    return result;
+  }
+
+  function computeTestReachable() {
+    const testN = nodes.filter(n => n.test_node);
+    const reachable = new Set(testN.map(n => n.id));
+    const q = [...reachable];
+    while (q.length > 0) {
+      const id = q.shift();
+      for (const nb of (adjacency.get(id) ?? [])) {
+        if (reachable.has(nb.targetId) || nb.edgeType !== 'calls' || nb.reverse) continue;
+        reachable.add(nb.targetId);
+        q.push(nb.targetId);
+      }
+    }
+    return reachable;
+  }
+
+  function computeWhere(property, operator, value) {
+    const result = new Set();
+    const numVal = Number(value);
+    for (const n of nodes) {
+      const nodeVal = n[property] ?? 0;
+      let match = false;
+      switch (operator) {
+        case '>': match = nodeVal > numVal; break;
+        case '<': match = nodeVal < numVal; break;
+        case '>=': match = nodeVal >= numVal; break;
+        case '<=': match = nodeVal <= numVal; break;
+        case '=': case '==': match = nodeVal === numVal; break;
+        case '!=': match = nodeVal !== numVal; break;
+      }
+      if (match) result.add(n.id);
+    }
+    return result;
+  }
+
+  function computedSetOp(op, setA, setB) {
+    switch (op) {
+      case 'intersect': {
+        const result = new Set();
+        for (const id of setA) { if (setB.has(id)) result.add(id); }
+        return result;
+      }
+      case 'union': return new Set([...setA, ...setB]);
+      case 'diff': {
+        const result = new Set();
+        for (const id of setA) { if (!setB.has(id)) result.add(id); }
+        return result;
+      }
+      default: return setA;
+    }
+  }
+
+  // Resolve a computed expression string like "$callers(FooService, 5)" or "$test_unreachable"
+  function resolveComputed(expr) {
+    if (!expr || typeof expr !== 'string') return null;
+    const e = expr.trim();
+
+    // Simple references
+    if (e === '$test_unreachable') return computeTestUnreachable();
+    if (e === '$test_reachable') return computeTestReachable();
+
+    // Function-style: $fn(args)
+    const fnMatch = e.match(/^\$(\w+)\((.+)\)$/);
+    if (fnMatch) {
+      const fn = fnMatch[1];
+      const args = fnMatch[2].split(/,\s*/);
+      switch (fn) {
+        case 'callers': return computeCallers(args[0], args[1] ? parseInt(args[1]) : 10);
+        case 'callees': return computeCallees(args[0], args[1] ? parseInt(args[1]) : 10);
+        case 'implementors': return computeImplementors(args[0]);
+        case 'governed_by': return computeGovernedBy(args[0]);
+        case 'where': return computeWhere(args[0], args[1]?.replace(/'/g, ''), args[2]?.replace(/'/g, ''));
+        case 'intersect': {
+          const a = resolveComputed(args[0]);
+          const b = resolveComputed(args[1]);
+          if (a && b) return computedSetOp('intersect', a, b);
+          return a ?? b ?? new Set();
+        }
+        case 'union': {
+          const a = resolveComputed(args[0]);
+          const b = resolveComputed(args[1]);
+          if (a && b) return computedSetOp('union', a, b);
+          return a ?? b ?? new Set();
+        }
+        case 'diff': {
+          const a = resolveComputed(args[0]);
+          const b = resolveComputed(args[1]);
+          if (a && b) return computedSetOp('diff', a, b);
+          return a ?? new Set();
+        }
+      }
+    }
+    return null;
+  }
+
   let queryMatchedWithDepth = $derived.by(() => {
     if (!activeQuery?.scope) return null;
     const scope = activeQuery.scope;
@@ -983,6 +1215,16 @@
     }
 
     if (scope.type === 'filter') {
+      // If a computed expression is specified, resolve it first
+      if (scope.computed) {
+        const computedSet = resolveComputed(scope.computed);
+        if (computedSet && computedSet.size > 0) {
+          const matched = new Map();
+          for (const id of computedSet) matched.set(id, 0);
+          return matched;
+        }
+        return null;
+      }
       const matched = new Map();
       for (const n of nodes) {
         let m = true;
@@ -1090,13 +1332,10 @@
     const heat = activeQuery.emphasis?.heat;
     if (heat?.metric && node) {
       const metric = heat.metric;
-      // Compute metric value for this node
+      // Compute metric value for this node (using pre-computed index for calls)
       let value = 0;
       if (metric === 'incoming_calls') {
-        for (const e of edges) {
-          const tgt = e.target_id ?? e.to_node_id ?? e.to;
-          if (tgt === nodeId && (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls') value++;
-        }
+        value = incomingCallCounts.get(nodeId) ?? 0;
       } else if (metric === 'complexity') {
         value = node.complexity ?? 0;
       } else if (metric === 'churn' || metric === 'churn_count_30d') {
@@ -1104,11 +1343,10 @@
       } else if (metric === 'test_coverage') {
         value = (node.test_coverage ?? 0) * 100;
       } else if (metric === 'test_fragility') {
-        // Count distinct test paths reaching this node
-        for (const e of edges) {
-          const tgt = e.target_id ?? e.to_node_id ?? e.to;
-          if (tgt === nodeId && (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls') {
-            const src = e.source_id ?? e.from_node_id ?? e.from;
+        // Count callers that are test nodes (test fragility = how many tests touch this)
+        for (const nb of (adjacency.get(nodeId) ?? [])) {
+          if (nb.edgeType === 'calls' && nb.reverse) {
+            const src = nb.targetId;
             const srcNode = nodes.find(n => n.id === src);
             if (srcNode?.test_node) value++;
           }
@@ -1152,10 +1390,7 @@
     for (const node of nodes) {
       let v = 0;
       if (metric === 'incoming_calls') {
-        for (const e of edges) {
-          const tgt = e.target_id ?? e.to_node_id ?? e.to;
-          if (tgt === node.id && (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls') v++;
-        }
+        v = incomingCallCounts.get(node.id) ?? 0;
       } else if (metric === 'complexity') {
         v = node.complexity ?? 0;
       } else if (metric === 'churn' || metric === 'churn_count_30d') {
