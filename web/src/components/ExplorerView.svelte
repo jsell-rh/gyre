@@ -978,7 +978,22 @@
                     {/if}
                     {#if repoRisks?.length > 0}
                       <div class="arch-insight-section">
-                        <h3 class="arch-insight-title">Risk Hotspots ({repoRisks.length})</h3>
+                        <h3 class="arch-insight-title">
+                          Risk Hotspots ({repoRisks.length})
+                          <button
+                            class="timeline-scrub-toggle"
+                            onclick={() => {
+                              activeViewQuery = {
+                                scope: { type: 'filter', computed: "$where(complexity, '>', 5)" },
+                                emphasis: { heat: { metric: 'risk_score', palette: 'blue-red' }, dim_unmatched: 0.3 },
+                                zoom: 'fit',
+                                annotation: { title: 'Risk Map', description: 'Heat by risk_score: churn × complexity × (1 − test_coverage)' },
+                              };
+                            }}
+                            type="button"
+                            title="Apply risk heat map overlay to canvas"
+                          >Show on Canvas</button>
+                        </h3>
                         <p class="arch-insight-desc">Nodes scored for complexity, coupling, or churn that may warrant attention.</p>
                         <ul class="arch-risk-list">
                           {#each repoRisks.slice(0, 10) as node}
