@@ -484,6 +484,20 @@
         <span class="budget-display" data-testid="budget-display">{$t('repo_mode.budget_label', { values: { pct: budgetPct } })}</span>
       {/if}
 
+      <!-- Quick stats -->
+      {#if !mrsLoading && repoMrs.length > 0}
+        {@const openMrs = repoMrs.filter(m => m.status === 'open').length}
+        {@const failedGates = repoMrs.filter(m => m._gates?.failed > 0).length}
+        {#if openMrs > 0 || failedGates > 0}
+          <span class="meta-sep" aria-hidden="true">·</span>
+          {#if failedGates > 0}
+            <button class="meta-stat meta-stat-danger" onclick={() => onTabChange?.('mrs')} title="{failedGates} MR{failedGates !== 1 ? 's' : ''} with failed gates">{failedGates} failed</button>
+          {:else if openMrs > 0}
+            <button class="meta-stat" onclick={() => onTabChange?.('mrs')} title="{openMrs} open merge request{openMrs !== 1 ? 's' : ''}">{openMrs} open MR{openMrs !== 1 ? 's' : ''}</button>
+          {/if}
+        {/if}
+      {/if}
+
       <!-- Clone URL -->
       {#if cloneUrl}
         <span class="meta-sep" aria-hidden="true">·</span>
@@ -998,6 +1012,26 @@
     color: var(--color-text-muted);
     font-size: var(--text-sm);
   }
+
+  .meta-stat {
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    transition: color var(--transition-fast);
+  }
+
+  .meta-stat:hover { color: var(--color-primary); }
+
+  .meta-stat-danger {
+    color: var(--color-danger);
+    font-weight: 600;
+  }
+
+  .meta-stat-danger:hover { color: var(--color-danger); opacity: 0.8; }
 
   /* Agent count button */
   .agent-count-btn {
