@@ -17,6 +17,8 @@
     filters = null,
     traceData = null, // { spans: [], root_spans: [] } from GateTraceResponse
     queryResult = null, // { node_metrics: Record<string, number>, ... } from dry-run resolve
+    assertionResults = [], // [{ line, assertion_text, passed, explanation }] from spec assertion check
+    assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
   } = $props();
 
   // ── Interactive $clicked mode ──────────────────────────────────────────
@@ -601,7 +603,7 @@
 
   // ── Evaluative lens: OTLP trace particle animation ──────────────────────
   let evalPlaying = $state(false);
-  let evalSpeed = $state(1.0);
+  let evalSpeed = $state(1.0); // Clamped to [0.25, 5.0] per spec
   let evalScrubber = $state(0); // 0..1 normalized time position
   let evalParticles = $state([]); // [{edgeKey, progress, span, color}]
 
@@ -684,7 +686,8 @@
     // Advance scrubber: normalize playback to ~5 seconds for 1x speed
     // regardless of actual trace duration (microsecond or minute-long)
     const normalizedDuration = 5.0; // seconds for full playback at 1x
-    const step = (dt / 1000) * evalSpeed / normalizedDuration;
+    const clampedSpeed = Math.max(0.25, Math.min(5.0, evalSpeed));
+    const step = (dt / 1000) * clampedSpeed / normalizedDuration;
     evalScrubber = Math.min(1, evalScrubber + step);
     if (evalScrubber >= 1) {
       evalPlaying = false; // Stop at end (single-play mode)
@@ -3172,6 +3175,41 @@
       }
     }
 
+    // Spec assertion badges (§9: green checkmark / red X on governed nodes)
+    if (assertionBadges.size > 0 && n?.id && sw > 40 && sh > 20) {
+      const badge = assertionBadges.get(n.id);
+      if (badge) {
+        const bx = s.x + sw / 2 - 4;
+        const by = s.y + sh / 2 - 4;
+        const bfs = Math.max(7, Math.min(10, sw * 0.08));
+        ctx.save();
+        if (badge.failed > 0) {
+          // Red X badge for failing assertions
+          ctx.fillStyle = '#7f1d1d';
+          ctx.beginPath();
+          ctx.roundRect(bx - bfs * 2.5, by - bfs - 2, bfs * 2.5, bfs + 4, 3);
+          ctx.fill();
+          ctx.fillStyle = '#fca5a5';
+          ctx.font = `700 ${bfs}px system-ui`;
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`✗ ${badge.failed}/${badge.total}`, bx - 2, by);
+        } else {
+          // Green checkmark badge for all passing assertions
+          ctx.fillStyle = '#14532d';
+          ctx.beginPath();
+          ctx.roundRect(bx - bfs * 2.5, by - bfs - 2, bfs * 2.5, bfs + 4, 3);
+          ctx.fill();
+          ctx.fillStyle = '#86efac';
+          ctx.font = `700 ${bfs}px system-ui`;
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`✓ ${badge.total}`, bx - 2, by);
+        }
+        ctx.restore();
+      }
+    }
+
     // Hovered state
     if (ln.id === hoveredNodeId) {
       ctx.strokeStyle = '#93c5fd';
@@ -4508,6 +4546,32 @@
     destroyed = true;
     if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
     if (zoomDecayFrame) { cancelAnimationFrame(zoomDecayFrame); zoomDecayFrame = null; }
+  });
+
+  // ── Spec assertion badge state ──────────────────────────────────────
+  // Maps governed node IDs to assertion pass/fail status when spec editor is open.
+  // Assertions reference subjects like module("name"), type("name") — match against graph nodes.
+  let assertionBadges = $derived.by(() => {
+    if (!assertionSpecPath || !assertionResults?.length) return new Map();
+    const badges = new Map(); // nodeId → { passed: number, failed: number, total: number }
+    for (const r of assertionResults) {
+      // Extract subject from assertion_text: module("X"), type("X"), function("X"), endpoint("X")
+      const subjMatch = r.assertion_text?.match(/^(module|type|function|endpoint)\("([^"]+)"\)/);
+      if (!subjMatch) continue;
+      const subjName = subjMatch[2];
+      // Find matching node
+      const node = nodes.find(n =>
+        n.name === subjName || n.qualified_name === subjName ||
+        n.qualified_name?.endsWith(`::${subjName}`) || n.qualified_name?.endsWith(`.${subjName}`)
+      );
+      if (!node) continue;
+      if (!badges.has(node.id)) badges.set(node.id, { passed: 0, failed: 0, total: 0 });
+      const b = badges.get(node.id);
+      b.total++;
+      if (r.passed) b.passed++;
+      else b.failed++;
+    }
+    return badges;
   });
 
   let legendItems = $derived(lens === 'evaluative' ? [

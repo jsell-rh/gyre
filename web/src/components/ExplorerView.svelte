@@ -1015,6 +1015,8 @@
                 {ghostOverlays}
                 {traceData}
                 queryResult={viewQueryResult}
+                assertionResults={specAssertionResults}
+                assertionSpecPath={specEditorOpen ? specEditorPath : null}
               />
               <!-- Architecture Insights — collapsible panel inside canvas area -->
               {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
