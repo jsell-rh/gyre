@@ -1134,6 +1134,7 @@ pub struct PredictRequest {
 pub async fn predict_graph(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    caller: AuthenticatedAgent,
     body: Option<Json<PredictRequest>>,
 ) -> Result<Json<PredictResponse>, ApiError> {
     let req = body.map(|b| b.0).unwrap_or_default();
@@ -1145,6 +1146,20 @@ pub async fn predict_graph(
         .await
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    // Per-user/repo sliding-window rate limit: 10 req/60 s.
+    {
+        let mut limiter = state.llm_rate_limiter.lock().await;
+        if let Err(retry_after) = check_rate_limit(
+            &mut limiter,
+            &caller.agent_id,
+            &id,
+            LLM_RATE_LIMIT,
+            LLM_WINDOW_SECS,
+        ) {
+            return Err(ApiError::RateLimited(retry_after));
+        }
+    }
 
     // Require LLM to be configured.
     let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
