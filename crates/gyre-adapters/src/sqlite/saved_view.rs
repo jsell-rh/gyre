@@ -142,7 +142,11 @@ impl SavedViewRepository for SqliteStorage {
         .await?
     }
 
-    async fn list_by_repo_and_tenant(&self, repo_id: &Id, tenant_id: &Id) -> Result<Vec<SavedView>> {
+    async fn list_by_repo_and_tenant(
+        &self,
+        repo_id: &Id,
+        tenant_id: &Id,
+    ) -> Result<Vec<SavedView>> {
         let pool = Arc::clone(&self.pool);
         let rid = repo_id.clone();
         let tid = tenant_id.clone();

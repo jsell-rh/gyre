@@ -80,12 +80,16 @@ pub async fn list_views(
 ) -> Result<Json<Vec<ViewResponse>>, (axum::http::StatusCode, String)> {
     let rid = Id::new(&repo_id);
     let tid = Id::new(&auth.tenant_id);
-    let views = state.saved_views.list_by_repo_and_tenant(&rid, &tid).await.map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to list views: {e}"),
-        )
-    })?;
+    let views = state
+        .saved_views
+        .list_by_repo_and_tenant(&rid, &tid)
+        .await
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to list views: {e}"),
+            )
+        })?;
 
     // Seed system default views on first access (lazy initialization).
     // Check for system views specifically to avoid re-seeding when user deletes personal views.
@@ -109,26 +113,22 @@ pub async fn list_views(
             let _ = state.saved_views.create(view).await;
         }
         // Re-fetch after seeding (already tenant-filtered at SQL level).
-        let refreshed = state.saved_views.list_by_repo_and_tenant(&rid, &tid).await.map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to list views: {e}"),
-            )
-        })?;
+        let refreshed = state
+            .saved_views
+            .list_by_repo_and_tenant(&rid, &tid)
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to list views: {e}"),
+                )
+            })?;
         return Ok(Json(
-            refreshed
-                .into_iter()
-                .map(ViewResponse::from)
-                .collect(),
+            refreshed.into_iter().map(ViewResponse::from).collect(),
         ));
     }
 
-    Ok(Json(
-        views
-            .into_iter()
-            .map(ViewResponse::from)
-            .collect(),
-    ))
+    Ok(Json(views.into_iter().map(ViewResponse::from).collect()))
 }
 
 /// System default views per the explorer-implementation.md spec.
