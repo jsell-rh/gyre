@@ -1676,7 +1676,7 @@ async fn test_saved_views_crud() {
             }),
         )
         .await;
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 201);
     let view: Value = resp.json().await.unwrap();
     let view_id = view["id"].as_str().unwrap();
     assert_eq!(view["name"].as_str().unwrap(), "Test View");
