@@ -534,6 +534,142 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+// ── Claude Agent SDK subprocess runner ──────────────────────────────────────
+
+/// Run the explorer agent via the Claude Agent SDK (Node.js subprocess).
+///
+/// Spawns `scripts/explorer-agent.mjs`, pipes the request as JSON to stdin,
+/// reads JSON lines from stdout, and forwards text/view_query/status messages
+/// to the WebSocket client.
+///
+/// Opt-in via `GYRE_EXPLORER_SDK=1` env var.
+async fn run_explorer_agent_sdk(
+    state: &AppState,
+    repo_id: &str,
+    user_question: &str,
+    canvas_state: &gyre_common::view_query::CanvasState,
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    conversation_history: &mut Vec<ConversationMessage>,
+) -> anyhow::Result<()> {
+    let server_url = format!(
+        "http://localhost:{}",
+        std::env::var("GYRE_PORT").unwrap_or_else(|_| "3000".into())
+    );
+    let token = &state.auth_token;
+    let system_prompt = build_system_prompt();
+    let model = std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+
+    // Serialize conversation history for the SDK (flatten blocks to text)
+    let history_json: Vec<serde_json::Value> = conversation_history
+        .iter()
+        .map(|m| {
+            let text = match &m.content {
+                ConversationContent::Text(t) => t.clone(),
+                ConversationContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            json!({ "role": m.role, "content": text })
+        })
+        .collect();
+
+    let input = json!({
+        "question": user_question,
+        "canvas_state": canvas_state,
+        "repo_id": repo_id,
+        "server_url": server_url,
+        "token": token,
+        "model": model,
+        "system_prompt": system_prompt,
+        "history": history_json,
+    });
+
+    let mut child = tokio::process::Command::new("node")
+        .arg("scripts/explorer-agent.mjs")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    // Write input to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(input.to_string().as_bytes()).await?;
+        drop(stdin);
+    }
+
+    // Read stdout line by line and forward to WebSocket
+    if let Some(stdout) = child.stdout.take() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
+                let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match msg_type {
+                    "text" => {
+                        let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                        let done = msg.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
+                        if !stream_text(sender, content, done).await {
+                            break;
+                        }
+                    }
+                    "view_query" => {
+                        if let Some(query) = msg.get("query") {
+                            let view_msg = ExplorerServerMessage::ViewQuery {
+                                query: query.clone(),
+                            };
+                            let _ = sender
+                                .send(Message::Text(
+                                    serde_json::to_string(&view_msg).unwrap().into(),
+                                ))
+                                .await;
+                        }
+                    }
+                    "status" => {
+                        if let Some(status) = msg.get("status").and_then(|s| s.as_str()) {
+                            send_status(sender, status).await;
+                        }
+                    }
+                    "error" => {
+                        let err_msg = msg
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Explorer SDK error");
+                        let err = ExplorerServerMessage::Error {
+                            message: err_msg.to_string(),
+                        };
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .await;
+                    }
+                    "done" => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await?;
+    if !status.success() {
+        // Read stderr for diagnostics
+        anyhow::bail!("Explorer SDK process exited with status: {}", status);
+    }
+
+    // Add to conversation history so subsequent messages have context
+    conversation_history.push(ConversationMessage {
+        role: "user".to_string(),
+        content: ConversationContent::Text(user_question.to_string()),
+    });
+
+    Ok(())
+}
+
 // ── Explorer agent loop ──────────────────────────────────────────────────────
 
 async fn run_explorer_agent(
@@ -546,6 +682,23 @@ async fn run_explorer_agent(
     cached_nodes: &mut Option<Vec<gyre_common::graph::GraphNode>>,
     cached_edges: &mut Option<Vec<gyre_common::graph::GraphEdge>>,
 ) -> anyhow::Result<()> {
+    // Check if SDK-based explorer agent should be used.
+    // Opt-in via GYRE_EXPLORER_SDK=1, or auto-enable when no LLM port is configured
+    // but the SDK script exists (allows using the SDK as the sole LLM backend).
+    let use_sdk = std::env::var("GYRE_EXPLORER_SDK").unwrap_or_default() == "1"
+        || (std::path::Path::new("scripts/explorer-agent.mjs").exists() && state.llm.is_none());
+    if use_sdk {
+        return run_explorer_agent_sdk(
+            state,
+            repo_id,
+            user_question,
+            canvas_state,
+            sender,
+            conversation_history,
+        )
+        .await;
+    }
+
     let llm = match &state.llm {
         Some(llm) => llm.clone(),
         None => {
