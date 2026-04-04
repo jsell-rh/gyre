@@ -573,6 +573,35 @@
   let graphModules = $state(null);
   let graphTimeline = $state(null);
 
+  // Timeline scrubber state: when active, filters graph to show system at selected point
+  let timelineScrubActive = $state(false);
+  let timelineScrubIndex = $state(-1); // index into graphTimeline array, -1 = current
+
+  // When timeline scrub is active, compute filtered nodes/edges to show state at that point
+  let timelineFilteredGraph = $derived.by(() => {
+    if (!timelineScrubActive || timelineScrubIndex < 0 || !graphTimeline?.length || !graph?.nodes?.length) return null;
+    const delta = graphTimeline[timelineScrubIndex];
+    if (!delta?.timestamp) return null;
+    const cutoff = typeof delta.timestamp === 'number' ? delta.timestamp : Math.floor(new Date(delta.timestamp).getTime() / 1000);
+    // Filter to nodes that existed at or before the cutoff time
+    const filteredNodes = graph.nodes.filter(n => {
+      // If node has first_seen_at, only include if it was seen before cutoff
+      const firstSeen = n.first_seen_at ?? n.created_at ?? 0;
+      const ts = typeof firstSeen === 'number' ? firstSeen : Math.floor(new Date(firstSeen).getTime() / 1000);
+      return ts <= cutoff;
+    });
+    const nodeIds = new Set(filteredNodes.map(n => n.id));
+    const filteredEdges = graph.edges.filter(e => {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      return nodeIds.has(src) && nodeIds.has(tgt);
+    });
+    return { nodes: filteredNodes, edges: filteredEdges };
+  });
+
+  // The effective graph passed to canvas: either time-filtered or full
+  let effectiveGraph = $derived(timelineFilteredGraph ?? graph);
+
   // Single effect for repo change: reset state then load dependencies.
   // Using a single effect avoids Svelte 5 scheduling race where the reset
   // effect could execute after the load effect on the same tick.
@@ -703,12 +732,15 @@
         {#if graph}
           <div class="graph-stats">
             <span class="stat">
-              <span class="stat-val">{graph.nodes?.length ?? 0}</span>
+              <span class="stat-val">{effectiveGraph.nodes?.length ?? 0}</span>
               <span class="stat-label">{$t('explorer_canvas.nodes')}</span>
+              {#if timelineScrubActive}
+                <span class="stat-time-travel" title="Time travel active">⏳</span>
+              {/if}
             </span>
             <span class="stat-sep">·</span>
             <span class="stat">
-              <span class="stat-val">{graph.edges?.length ?? 0}</span>
+              <span class="stat-val">{effectiveGraph.edges?.length ?? 0}</span>
               <span class="stat-label">{$t('explorer_canvas.edges')}</span>
             </span>
           </div>
@@ -841,8 +873,8 @@
             <div class="explorer-canvas-area">
               <ExplorerTreemap
                 repoId={selectedRepoId}
-                nodes={graph.nodes ?? []}
-                edges={graph.edges ?? []}
+                nodes={effectiveGraph.nodes ?? []}
+                edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
                 filter={explorerFilter}
                 lens={explorerLens}
@@ -962,28 +994,70 @@
                       </div>
                     {/if}
 
-                    <!-- Architecture Timeline (deltas over time) -->
+                    <!-- Architecture Timeline with interactive scrubber -->
                     {#if graphTimeline?.length > 0}
                       <div class="arch-insight-section">
-                        <h3 class="arch-insight-title">Architecture Timeline ({graphTimeline.length} changes)</h3>
-                        <p class="arch-insight-desc">How the architecture has evolved over time.</p>
-                        <div class="arch-timeline">
-                          {#each graphTimeline.slice(0, 10) as delta}
-                            <div class="arch-timeline-entry">
-                              <span class="arch-timeline-time">{delta.timestamp ? new Date(typeof delta.timestamp === 'number' ? delta.timestamp * 1000 : delta.timestamp).toLocaleDateString() : '\u2014'}</span>
-                              <span class="arch-timeline-label">{delta.change_type ?? delta.event ?? 'change'}</span>
-                              {#if delta.added_count || delta.removed_count}
-                                <span class="arch-timeline-stats">
-                                  {#if delta.added_count}<span class="diff-ins">+{delta.added_count}</span>{/if}
-                                  {#if delta.removed_count}<span class="diff-del">-{delta.removed_count}</span>{/if}
+                        <h3 class="arch-insight-title">
+                          Architecture Timeline ({graphTimeline.length} changes)
+                          <button
+                            class="timeline-scrub-toggle"
+                            class:active={timelineScrubActive}
+                            onclick={() => {
+                              timelineScrubActive = !timelineScrubActive;
+                              if (!timelineScrubActive) timelineScrubIndex = -1;
+                              else timelineScrubIndex = graphTimeline.length - 1;
+                            }}
+                            type="button"
+                            title={timelineScrubActive ? 'Exit time travel' : 'Scrub through architectural history'}
+                          >{timelineScrubActive ? 'Exit Time Travel' : 'Time Travel'}</button>
+                        </h3>
+                        {#if timelineScrubActive}
+                          <div class="timeline-scrubber">
+                            <input
+                              type="range"
+                              min="0"
+                              max={graphTimeline.length - 1}
+                              bind:value={timelineScrubIndex}
+                              class="timeline-slider"
+                              aria-label="Timeline scrubber"
+                            />
+                            <div class="timeline-scrub-info">
+                              {#if timelineScrubIndex >= 0 && graphTimeline[timelineScrubIndex]}
+                                {@const delta = graphTimeline[timelineScrubIndex]}
+                                <span class="timeline-scrub-date">
+                                  {delta.timestamp ? new Date(typeof delta.timestamp === 'number' ? delta.timestamp * 1000 : delta.timestamp).toLocaleDateString() : '\u2014'}
                                 </span>
-                              {/if}
-                              {#if delta.commit_sha}
-                                <code class="mono" style="font-size: var(--text-xs); color: var(--color-text-muted)">{delta.commit_sha.slice(0, 7)}</code>
+                                <span class="timeline-scrub-event">{delta.change_type ?? delta.event ?? 'change'}</span>
+                                {#if delta.added_count || delta.removed_count}
+                                  <span class="arch-timeline-stats">
+                                    {#if delta.added_count}<span class="diff-ins">+{delta.added_count}</span>{/if}
+                                    {#if delta.removed_count}<span class="diff-del">-{delta.removed_count}</span>{/if}
+                                  </span>
+                                {/if}
+                                <span class="timeline-scrub-nodes">{effectiveGraph.nodes?.length ?? 0} nodes</span>
                               {/if}
                             </div>
-                          {/each}
-                        </div>
+                          </div>
+                        {:else}
+                          <p class="arch-insight-desc">How the architecture has evolved over time.</p>
+                          <div class="arch-timeline">
+                            {#each graphTimeline.slice(0, 10) as delta}
+                              <div class="arch-timeline-entry">
+                                <span class="arch-timeline-time">{delta.timestamp ? new Date(typeof delta.timestamp === 'number' ? delta.timestamp * 1000 : delta.timestamp).toLocaleDateString() : '\u2014'}</span>
+                                <span class="arch-timeline-label">{delta.change_type ?? delta.event ?? 'change'}</span>
+                                {#if delta.added_count || delta.removed_count}
+                                  <span class="arch-timeline-stats">
+                                    {#if delta.added_count}<span class="diff-ins">+{delta.added_count}</span>{/if}
+                                    {#if delta.removed_count}<span class="diff-del">-{delta.removed_count}</span>{/if}
+                                  </span>
+                                {/if}
+                                {#if delta.commit_sha}
+                                  <code class="mono" style="font-size: var(--text-xs); color: var(--color-text-muted)">{delta.commit_sha.slice(0, 7)}</code>
+                                {/if}
+                              </div>
+                            {/each}
+                          </div>
+                        {/if}
                       </div>
                     {/if}
                   </div>
@@ -2072,6 +2146,48 @@
 
   .diff-ins { color: var(--color-success); }
   .diff-del { color: var(--color-danger); }
+
+  /* Timeline scrubber (time travel) */
+  .timeline-scrub-toggle {
+    margin-left: var(--space-2);
+    padding: 2px 8px;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .timeline-scrub-toggle:hover { background: var(--color-surface-hover); color: var(--color-text); }
+  .timeline-scrub-toggle.active {
+    background: var(--color-primary-muted);
+    color: var(--color-primary);
+    border-color: var(--color-primary);
+  }
+  .timeline-scrubber {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) 0;
+  }
+  .timeline-slider {
+    width: 100%;
+    accent-color: var(--color-primary);
+    cursor: pointer;
+  }
+  .timeline-scrub-info {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-wrap: wrap;
+  }
+  .timeline-scrub-date { font-weight: 600; color: var(--color-text); }
+  .timeline-scrub-event { color: var(--color-text-secondary); }
+  .timeline-scrub-nodes { font-family: var(--font-mono); color: var(--color-primary); }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
