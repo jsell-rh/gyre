@@ -822,18 +822,14 @@ impl ExtractionContext {
         for (fn_id, type_name) in returns {
             // Try to find the return type in name_to_id
             // First try exact match, then suffix match
-            let target_id = self
-                .name_to_id
-                .get(&type_name)
-                .cloned()
-                .or_else(|| {
-                    // Suffix match: find any node whose qualified name ends with ::type_name
-                    let suffix = format!("::{}", type_name);
-                    self.name_to_id
-                        .iter()
-                        .find(|(k, _)| k.ends_with(&suffix) || *k == &type_name)
-                        .map(|(_, v)| v.clone())
-                });
+            let target_id = self.name_to_id.get(&type_name).cloned().or_else(|| {
+                // Suffix match: find any node whose qualified name ends with ::type_name
+                let suffix = format!("::{}", type_name);
+                self.name_to_id
+                    .iter()
+                    .find(|(k, _)| k.ends_with(&suffix) || *k == &type_name)
+                    .map(|(_, v)| v.clone())
+            });
             if let Some(target_id) = target_id {
                 let key = (fn_id.to_string(), target_id.to_string());
                 if seen.insert(key) {
@@ -1408,8 +1404,7 @@ fn path_to_string(path: &syn::Path) -> String {
                     format!("{}<{}>", ident, inner.join(", "))
                 }
                 syn::PathArguments::Parenthesized(args) => {
-                    let inputs: Vec<String> =
-                        args.inputs.iter().map(type_to_string).collect();
+                    let inputs: Vec<String> = args.inputs.iter().map(type_to_string).collect();
                     format!("{}({})", ident, inputs.join(", "))
                 }
             }

@@ -487,11 +487,7 @@ impl ViewQuery {
                     for part in &parts {
                         let trimmed = part.trim();
                         if !trimmed.is_empty() {
-                            Self::validate_computed_expression_inner(
-                                trimmed,
-                                errors,
-                                depth + 1,
-                            );
+                            Self::validate_computed_expression_inner(trimmed, errors, depth + 1);
                         }
                     }
                 }
