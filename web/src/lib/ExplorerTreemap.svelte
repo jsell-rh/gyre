@@ -283,22 +283,48 @@
   let searchHighlightIds = $derived(new Set(searchResults.map(n => n.id)));
   let searchInputEl = $state(null);
 
-  function onLensChange(newLens) {
-    if (newLens === 'evaluative') {
-      // When switching to evaluative lens, apply a heat map query overlay
-      const evalQuery = {
-        scope: { type: 'all' },
-        emphasis: { heat: { metric: evaluativeMetric, palette: 'blue-red' } },
-        annotation: { title: `Evaluative: ${evaluativeMetric.replace('_', ' ')}`, description: 'Node heat shows relative metric intensity' },
-        _evaluative: true, // Tag so we can identify evaluative queries
-      };
-      onInteractiveQuery(evalQuery);
-    } else if (newLens === 'structural') {
-      // Clear any evaluative-lens query when switching back
-      if (activeQuery?._evaluative || activeQuery?.annotation?.title?.startsWith('Evaluative:')) {
-        onInteractiveQuery(null);
-      }
+  // Evaluative heat map config — separate from view queries so it overlays
+  // on top of any active query rather than replacing it
+  let evaluativeHeatConfig = $derived.by(() => {
+    if (lens !== 'evaluative') return null;
+    return { metric: evaluativeMetric, palette: 'blue-red' };
+  });
+
+  // Pre-compute evaluative heat max values
+  let evalHeatMaxValues = $derived.by(() => {
+    if (!evaluativeHeatConfig) return new Map();
+    const metric = evaluativeHeatConfig.metric;
+    let max = 0;
+    for (const node of nodes) {
+      let v = 0;
+      if (metric === 'incoming_calls') v = incomingCallCounts.get(node.id) ?? 0;
+      else if (metric === 'complexity') v = node.complexity ?? 0;
+      else if (metric === 'churn' || metric === 'churn_count_30d') v = node.churn_count_30d ?? node.churn ?? 0;
+      else if (metric === 'test_coverage') v = (node.test_coverage ?? 0) * 100;
+      if (v > max) max = v;
     }
+    const m = new Map();
+    m.set(metric, max || 1);
+    return m;
+  });
+
+  function evaluativeNodeColor(nodeId, node) {
+    if (!evaluativeHeatConfig || !node) return null;
+    const metric = evaluativeHeatConfig.metric;
+    let value = 0;
+    if (metric === 'incoming_calls') value = incomingCallCounts.get(nodeId) ?? 0;
+    else if (metric === 'complexity') value = node.complexity ?? 0;
+    else if (metric === 'churn' || metric === 'churn_count_30d') value = node.churn_count_30d ?? node.churn ?? 0;
+    else if (metric === 'test_coverage') value = (node.test_coverage ?? 0) * 100;
+    if (value === 0) return null;
+    const maxVal = evalHeatMaxValues.get(metric) ?? 1;
+    const t = Math.min(1, value / maxVal);
+    return heatColor(t, evaluativeHeatConfig.palette);
+  }
+
+  function onLensChange(newLens) {
+    // Lens toggle simply changes the lens state — no query manipulation needed.
+    // The evaluative overlay is computed independently from any active query.
     scheduleRedraw();
   }
 
@@ -2218,6 +2244,23 @@
     roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
     ctx.stroke();
 
+    // Evaluative lens overlay: semi-transparent heat color on top of structural
+    const evalColor = evaluativeNodeColor(n?.id, n);
+    if (evalColor && !qColor) {
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = evalColor;
+      roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+      ctx.fill();
+      // Evaluative border glow
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = evalColor;
+      ctx.lineWidth = 2;
+      roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+      ctx.stroke();
+      ctx.restore();
+    }
+
     // Label
     if (sw > 30 && sh > 14) {
       const fontSize = Math.max(8, Math.min(13, Math.min(sw * 0.14, sh * 0.4)));
@@ -2250,7 +2293,7 @@
       if (badges?.metric && n) {
         let badgeValue = 0;
         if (badges.metric === 'incoming_calls') {
-          badgeValue = edges.filter(e => (e.target_id ?? e.to_node_id ?? e.to) === n.id && (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls').length;
+          badgeValue = incomingCallCounts.get(n.id) ?? 0;
         } else if (badges.metric === 'complexity') badgeValue = n.complexity ?? 0;
         else if (badges.metric === 'churn') badgeValue = n.churn_count_30d ?? 0;
         else if (badges.metric === 'test_coverage') badgeValue = n.test_coverage != null ? Math.round(n.test_coverage * 100) : 0;
@@ -2270,6 +2313,32 @@
           ctx.textAlign = 'right';
           ctx.textBaseline = 'top';
           ctx.fillText(badgeText, bx - 3, by);
+          ctx.restore();
+        }
+      }
+      // Evaluative metric badge (when evaluative lens is active)
+      if (evalColor && n && sw > 50 && sh > 30) {
+        let metricVal = 0;
+        let metricLabel = '';
+        if (evaluativeMetric === 'incoming_calls') { metricVal = incomingCallCounts.get(n.id) ?? 0; metricLabel = `${metricVal} calls`; }
+        else if (evaluativeMetric === 'complexity') { metricVal = n.complexity ?? 0; metricLabel = `cx:${metricVal}`; }
+        else if (evaluativeMetric === 'churn' || evaluativeMetric === 'churn_count_30d') { metricVal = n.churn_count_30d ?? n.churn ?? 0; metricLabel = `${metricVal} churn`; }
+        else if (evaluativeMetric === 'test_coverage') { metricVal = Math.round((n.test_coverage ?? 0) * 100); metricLabel = `${metricVal}% cov`; }
+        if (metricVal > 0) {
+          const bx = s.x + sw / 2 - 4;
+          const by = s.y - sh / 2 + 4;
+          const bfs = Math.max(7, Math.min(9, sw * 0.08));
+          ctx.save();
+          ctx.font = `700 ${bfs}px 'SF Mono', Menlo, monospace`;
+          const bw = measureText(ctx, metricLabel, ctx.font) + 6;
+          ctx.fillStyle = evalColor + '88';
+          ctx.beginPath();
+          ctx.roundRect(bx - bw, by - 2, bw, bfs + 4, 3);
+          ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'top';
+          ctx.fillText(metricLabel, bx - 3, by);
           ctx.restore();
         }
       }
