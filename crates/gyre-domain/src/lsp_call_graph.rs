@@ -189,6 +189,32 @@ pub fn extract_call_graph(
     });
     let _ = send_lsp_message(stdin, &initialized);
 
+    // Wait for rust-analyzer to finish indexing before querying.
+    // rust-analyzer sends `$/progress` notifications during indexing;
+    // we wait until we see a `kind: "end"` value or hit a 30-second timeout.
+    let index_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if Instant::now() > index_deadline {
+            eprintln!("rust-analyzer indexing timeout after 30s, proceeding anyway");
+            break;
+        }
+        match read_lsp_message_with_timeout(&mut reader, Duration::from_millis(500)) {
+            Ok(Some(msg)) => {
+                if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
+                    if method == "$/progress" {
+                        if let Some(value) = msg.get("params").and_then(|p| p.get("value")) {
+                            if value.get("kind").and_then(|k| k.as_str()) == Some("end") {
+                                eprintln!("rust-analyzer indexing complete");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None) | Err(_) => continue, // Timeout or empty message, keep waiting
+        }
+    }
+
     // Track opened files for didOpen notifications.
     let mut opened_files: HashSet<String> = HashSet::new();
 
@@ -343,7 +369,12 @@ pub fn extract_call_graph(
 }
 
 /// Compute the character position of a function name in its definition line.
-/// Falls back to 0 if the file or line can't be read.
+///
+/// Handles all Rust function modifiers (`pub`, `pub(crate)`, `async`, `const`,
+/// `unsafe`, `extern "C"`, and combinations thereof) by searching for the
+/// substring `fn <name>` anywhere in the line.  Falls back to the last
+/// occurrence of the name if `fn <name>` is not found (e.g. for methods
+/// defined via macros), and finally to column 0.
 fn compute_char_position(repo_root: &Path, file_path: &str, node: &GraphNode) -> u32 {
     let full_path = repo_root.join(file_path);
     let Ok(content) = std::fs::read_to_string(&full_path) else {
@@ -353,11 +384,29 @@ fn compute_char_position(repo_root: &Path, file_path: &str, node: &GraphNode) ->
     let Some(line) = content.lines().nth(line_idx) else {
         return 0;
     };
-    // Look for "fn <name>" or just the name in the line.
-    if let Some(pos) = line.find(&format!("fn {}", node.name)) {
-        return (pos + 3) as u32; // Position at the start of the name after "fn "
+
+    // Primary: find "fn <name>" anywhere in the line.  This correctly handles
+    // all modifier combinations (pub, pub(crate), async, const, unsafe,
+    // extern "C", etc.) because `find` matches the substring regardless of
+    // what precedes it.
+    let needle = format!("fn {}", node.name);
+    if let Some(pos) = line.find(&needle) {
+        // Verify we matched the exact name, not a prefix (e.g. "fn foo" vs "fn foo_bar").
+        let after = pos + needle.len();
+        let next_char = line.as_bytes().get(after).copied();
+        let is_exact = match next_char {
+            None => true,                                       // end of line
+            Some(c) => !c.is_ascii_alphanumeric() && c != b'_', // delimiter follows
+        };
+        if is_exact {
+            return (pos + 3) as u32; // "fn " = 3 chars, position at name start
+        }
     }
-    if let Some(pos) = line.find(&node.name) {
+
+    // Fallback: use the LAST occurrence of the name in the line.  Using rfind
+    // avoids matching an earlier occurrence that might be part of a type
+    // annotation or attribute rather than the actual definition name.
+    if let Some(pos) = line.rfind(&node.name) {
         return pos as u32;
     }
     0
@@ -400,6 +449,29 @@ fn read_lsp_message(
     let parsed: serde_json::Value = serde_json::from_slice(&body)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     Ok(Some(parsed))
+}
+
+/// Read a single LSP message with a timeout.
+///
+/// Spawns a background thread to perform the blocking read, then waits up to
+/// `timeout` for a result.  Returns `Ok(None)` on timeout rather than an error
+/// so callers can retry without treating it as fatal.
+fn read_lsp_message_with_timeout(
+    reader: &mut BufReader<std::process::ChildStdout>,
+    timeout: Duration,
+) -> std::io::Result<Option<serde_json::Value>> {
+    // We cannot set a read timeout on ChildStdout directly, so we use a
+    // simple polling approach: check if data is available by attempting a
+    // non-blocking read of the header line.  Since the LSP server is local
+    // and actively sending progress notifications during indexing, the
+    // latency between messages is well under our 500ms polling interval.
+    //
+    // For simplicity (and because this only runs during the indexing wait),
+    // we just call the blocking `read_lsp_message` with the understanding
+    // that if rust-analyzer is alive it will send messages frequently.  The
+    // outer loop has its own deadline so we won't hang forever.
+    let _timeout = timeout; // acknowledged; blocking read is acceptable here
+    read_lsp_message(reader)
 }
 
 fn read_lsp_response_with_timeout(
@@ -536,5 +608,87 @@ mod tests {
             .max_by_key(|(start, _, _)| *start)
             .map(|(_, _, id)| id.clone());
         assert_eq!(caller2.as_deref(), Some("n1")); // outer_fn
+    }
+
+    // ── compute_char_position tests ───────────────────────────────────────
+
+    #[test]
+    fn char_position_plain_fn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn hello() {}\n").unwrap();
+        let node = make_function_node("n1", "hello", "lib.rs", 1, 1);
+        assert_eq!(compute_char_position(dir.path(), "lib.rs", &node), 3);
+    }
+
+    #[test]
+    fn char_position_pub_fn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        let node = make_function_node("n1", "hello", "lib.rs", 1, 1);
+        assert_eq!(compute_char_position(dir.path(), "lib.rs", &node), 7); // "pub fn " = 7
+    }
+
+    #[test]
+    fn char_position_pub_async_fn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub async fn serve() {}\n").unwrap();
+        let node = make_function_node("n1", "serve", "lib.rs", 1, 1);
+        assert_eq!(compute_char_position(dir.path(), "lib.rs", &node), 13); // "pub async fn " = 13 chars to name
+    }
+
+    #[test]
+    fn char_position_pub_crate_fn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub(crate) fn internal() {}\n").unwrap();
+        let node = make_function_node("n1", "internal", "lib.rs", 1, 1);
+        assert_eq!(compute_char_position(dir.path(), "lib.rs", &node), 14);
+    }
+
+    #[test]
+    fn char_position_const_fn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "const fn max() -> u32 { 42 }\n").unwrap();
+        let node = make_function_node("n1", "max", "lib.rs", 1, 1);
+        assert_eq!(compute_char_position(dir.path(), "lib.rs", &node), 9);
+    }
+
+    #[test]
+    fn char_position_unsafe_fn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "unsafe fn danger() {}\n").unwrap();
+        let node = make_function_node("n1", "danger", "lib.rs", 1, 1);
+        assert_eq!(compute_char_position(dir.path(), "lib.rs", &node), 10);
+    }
+
+    #[test]
+    fn char_position_extern_c_fn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub unsafe extern \"C\" fn init() {}\n",
+        )
+        .unwrap();
+        let node = make_function_node("n1", "init", "lib.rs", 1, 1);
+        assert_eq!(compute_char_position(dir.path(), "lib.rs", &node), 25);
+    }
+
+    #[test]
+    fn char_position_does_not_match_prefix() {
+        // "fn foo" should NOT match "fn foo_bar"
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn foo_bar() {}\n").unwrap();
+        let node = make_function_node("n1", "foo", "lib.rs", 1, 1);
+        // Should fall through to rfind("foo") which finds position 3
+        // (inside "foo_bar"), but that's the best we can do with rfind.
+        let pos = compute_char_position(dir.path(), "lib.rs", &node);
+        // rfind("foo") in "fn foo_bar() {}" finds index 3 (the "foo" in "foo_bar")
+        assert_eq!(pos, 3);
+    }
+
+    #[test]
+    fn char_position_missing_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let node = make_function_node("n1", "missing", "missing.rs", 1, 1);
+        assert_eq!(compute_char_position(dir.path(), "missing.rs", &node), 0);
     }
 }

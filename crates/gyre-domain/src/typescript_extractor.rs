@@ -374,7 +374,7 @@ impl ExtractionContext {
 
         // --- Express route detection ---
         let express_routes = collect_express_routes(&content, root);
-        for (route_path, method, line) in &express_routes {
+        for (route_path, method, line, handler_name) in &express_routes {
             let endpoint_name = route_path
                 .replace('/', "_")
                 .trim_start_matches('_')
@@ -399,8 +399,17 @@ impl ExtractionContext {
             self.name_to_id.insert(endpoint_qname, ep_id.clone());
             self.nodes.push(ep_node);
 
-            let edge = self.make_edge(EdgeType::Contains, module_id.clone(), ep_id);
+            let edge = self.make_edge(EdgeType::Contains, module_id.clone(), ep_id.clone());
             self.edges.push(edge);
+
+            // Create RoutesTo edge from endpoint to named handler function.
+            if let Some(handler) = handler_name {
+                let handler_qname = format!("{module_qname}.{handler}");
+                if let Some(handler_id) = self.name_to_id.get(&handler_qname) {
+                    let routes_edge = self.make_edge(EdgeType::RoutesTo, ep_id, handler_id.clone());
+                    self.edges.push(routes_edge);
+                }
+            }
         }
 
         // --- Next.js API route detection ---
@@ -756,8 +765,13 @@ const ROUTER_NAMES: &[&str] = &["app", "router", "server", "route"];
 
 /// Collect Express-style route registrations: `app.get('/path', handler)`.
 ///
-/// Returns `(route_path, http_method, line_number)`.
-fn collect_express_routes(content: &str, node: tree_sitter::Node) -> Vec<(String, String, u32)> {
+/// Returns `(route_path, http_method, line_number, handler_name)`.
+/// `handler_name` is `Some` when the second argument is an identifier (named
+/// handler reference like `getUsers`), `None` for inline arrow functions.
+fn collect_express_routes(
+    content: &str,
+    node: tree_sitter::Node,
+) -> Vec<(String, String, u32, Option<String>)> {
     let mut results = Vec::new();
     collect_express_routes_inner(content, node, &mut results);
     results
@@ -766,7 +780,7 @@ fn collect_express_routes(content: &str, node: tree_sitter::Node) -> Vec<(String
 fn collect_express_routes_inner(
     content: &str,
     node: tree_sitter::Node,
-    results: &mut Vec<(String, String, u32)>,
+    results: &mut Vec<(String, String, u32, Option<String>)>,
 ) {
     if node.kind() == "call_expression" {
         if let Some(route) = try_extract_express_route(content, node) {
@@ -783,10 +797,12 @@ fn collect_express_routes_inner(
 /// Try to extract an Express route from a call_expression node.
 ///
 /// Matches: `app.get("/users", handler)`, `router.post("/items", createItem)`, etc.
+///
+/// Returns `(path, method, line, handler_name)`.
 fn try_extract_express_route(
     content: &str,
     call_node: tree_sitter::Node,
-) -> Option<(String, String, u32)> {
+) -> Option<(String, String, u32, Option<String>)> {
     let function_node = call_node.child_by_field_name("function")?;
     if function_node.kind() != "member_expression" {
         return None;
@@ -809,14 +825,25 @@ fn try_extract_express_route(
     // Extract the path from the first string argument
     let args_node = call_node.child_by_field_name("arguments")?;
     let mut cursor = args_node.walk();
-    let first_arg = args_node.named_children(&mut cursor).next()?;
+    let mut named_args = args_node.named_children(&mut cursor);
+    let first_arg = named_args.next()?;
     let path = extract_string_literal(content, first_arg)?;
     if !path.starts_with('/') {
         return None;
     }
 
+    // Try to extract the handler name from the second argument (if it's an identifier).
+    // Handles `app.get("/users", getUsers)` but not inline arrow/function expressions.
+    let handler_name = named_args.next().and_then(|arg| {
+        if arg.kind() == "identifier" {
+            Some(content[arg.byte_range()].to_string())
+        } else {
+            None
+        }
+    });
+
     let line = call_node.start_position().row as u32 + 1;
-    Some((path, method_name.to_string(), line))
+    Some((path, method_name.to_string(), line, handler_name))
 }
 
 /// Recursively collect `(api_path, line_number)` for all `fetch`/`axios.*` call
