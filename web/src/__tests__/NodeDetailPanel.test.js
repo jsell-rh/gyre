@@ -138,4 +138,74 @@ describe('NodeDetailPanel', () => {
     const closeBtn = container.querySelector('.detail-close');
     expect(closeBtn).toBeTruthy();
   });
+
+  it('renders edge detail view', () => {
+    const edgeNode = {
+      id: 'edge-n1-n2',
+      name: 'User → TaskPort',
+      node_type: 'edge',
+      edge_type: 'implements',
+      source_node: TYPE_NODE,
+      target_node: INTERFACE_NODE,
+    };
+    const { container } = render(NodeDetailPanel, {
+      props: { node: edgeNode, nodes: NODES, edges: EDGES },
+    });
+    expect(container.querySelector('.detail-edge-type code')?.textContent).toContain('implements');
+    const endpoints = container.querySelectorAll('.detail-edge-endpoint');
+    expect(endpoints.length).toBe(2);
+  });
+
+  it('renders span detail view', () => {
+    const spanNode = {
+      id: 'span-s1',
+      name: 'test_operation',
+      node_type: 'span',
+      span_id: 's1',
+      duration_us: 1500,
+      status: 'ok',
+      service_name: 'test-service',
+      attributes: { 'http.method': 'GET', 'http.url': '/api/users' },
+      input_summary: 'GET /api/users',
+      output_summary: '{"users": [...]}',
+    };
+    const { container } = render(NodeDetailPanel, {
+      props: { node: spanNode, nodes: NODES, edges: EDGES },
+    });
+    const grid = container.querySelector('.span-detail-grid');
+    expect(grid).toBeTruthy();
+    expect(grid.textContent).toContain('test_operation');
+    expect(grid.textContent).toContain('1.5ms');
+    expect(grid.textContent).toContain('test-service');
+    // Attributes
+    const attrs = container.querySelectorAll('.span-attr-row');
+    expect(attrs.length).toBe(2);
+    // Input/output
+    expect(container.querySelector('.span-io-summary')?.textContent).toContain('GET /api/users');
+  });
+
+  it('renders span error status with red styling', () => {
+    const spanNode = {
+      id: 'span-s2',
+      name: 'failing_operation',
+      node_type: 'span',
+      duration_us: 500,
+      status: 'error',
+    };
+    const { container } = render(NodeDetailPanel, {
+      props: { node: spanNode, nodes: NODES, edges: EDGES },
+    });
+    const errorStatus = container.querySelector('.span-error');
+    expect(errorStatus).toBeTruthy();
+    expect(errorStatus.textContent).toBe('error');
+  });
+
+  it('shows usedBy relationships for type nodes', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES },
+    });
+    // Verify usedBy section is populated via edges
+    const sectionTitles = Array.from(container.querySelectorAll('.detail-section-title')).map(t => t.textContent);
+    expect(sectionTitles).toContain('Used By (1)');
+  });
 });
