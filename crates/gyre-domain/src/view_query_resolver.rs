@@ -563,27 +563,70 @@ fn resolve_scope_with_adjacency(
             from_commit,
             to_commit,
         } => {
+            // Find nodes that changed between two commits by looking at SHA matches.
+            // A node is "changed" if its created_sha or last_modified_sha matches ANY
+            // commit in the range. Since we don't have git history, we use a best-effort
+            // approach: include nodes whose last_modified_sha or created_sha matches
+            // the to_commit (modified in the target), AND exclude nodes that were
+            // created before the from_commit by checking created_sha.
+            //
+            // Also supports timestamp-based diff when commit SHAs contain "~" prefix
+            // (e.g., "~1712000000" for epoch seconds) for temporal queries.
             let from_lower = from_commit.to_lowercase();
             let to_lower = to_commit.to_lowercase();
-            let result = active_nodes
-                .iter()
-                .filter(|n| {
-                    let created = n.created_sha.to_lowercase();
-                    let modified = n.last_modified_sha.to_lowercase();
-                    let changed_to = if to_lower.len() >= 7 {
-                        modified.starts_with(&to_lower) || created.starts_with(&to_lower)
+
+            // If from_commit starts with "~", interpret as epoch timestamp range
+            let from_ts = from_lower
+                .strip_prefix('~')
+                .and_then(|s| s.parse::<u64>().ok());
+            let to_ts = to_lower
+                .strip_prefix('~')
+                .and_then(|s| s.parse::<u64>().ok());
+
+            let result = if let (Some(from_epoch), Some(to_epoch)) = (from_ts, to_ts) {
+                // Temporal diff: nodes created or modified between the two timestamps
+                active_nodes
+                    .iter()
+                    .filter(|n| {
+                        let modified = n.last_modified_at;
+                        let created = n.created_at;
+                        // Node was created or modified within the time range
+                        (created > from_epoch && created <= to_epoch)
+                            || (modified > from_epoch && modified <= to_epoch)
+                    })
+                    .map(|n| n.id.to_string())
+                    .collect()
+            } else {
+                // SHA-based diff: nodes whose created_sha or last_modified_sha
+                // matches to_commit but NOT from_commit (prefix matching for short SHAs).
+                let sha_matches = |sha: &str, target: &str| -> bool {
+                    if target.is_empty() {
+                        return false;
+                    }
+                    let sha_lower = sha.to_lowercase();
+                    if target.len() >= 7 {
+                        sha_lower.starts_with(target)
                     } else {
-                        modified == to_lower || created == to_lower
-                    };
-                    let existed_at_from = if from_lower.len() >= 7 {
-                        created.starts_with(&from_lower) || modified.starts_with(&from_lower)
-                    } else {
-                        created == from_lower
-                    };
-                    changed_to && !existed_at_from
-                })
-                .map(|n| n.id.to_string())
-                .collect();
+                        sha_lower == *target
+                    }
+                };
+
+                active_nodes
+                    .iter()
+                    .filter(|n| {
+                        let created_matches_to =
+                            sha_matches(&n.created_sha, &to_lower);
+                        let modified_matches_to =
+                            sha_matches(&n.last_modified_sha, &to_lower);
+                        let created_matches_from =
+                            sha_matches(&n.created_sha, &from_lower);
+
+                        // Node was created or modified at to_commit, but not created at from_commit
+                        (created_matches_to || modified_matches_to) && !created_matches_from
+                    })
+                    .map(|n| n.id.to_string())
+                    .collect()
+            };
             (result, no_depths())
         }
 
@@ -631,6 +674,38 @@ fn resolve_scope_with_adjacency(
     ScopeResult { matched, depths }
 }
 
+/// Normalize whitespace in computed expressions.
+/// Handles cases like "$callers (Foo)" → "$callers(Foo)" and extra internal spaces.
+fn normalize_computed_expression(expr: &str) -> String {
+    let mut result = String::with_capacity(expr.len());
+    let chars: Vec<char> = expr.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' {
+            // Read the function name
+            result.push(chars[i]);
+            i += 1;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                result.push(chars[i]);
+                i += 1;
+            }
+            // Skip whitespace before opening paren
+            while i < chars.len() && chars[i] == ' ' {
+                i += 1;
+            }
+            // If next char is '(', push it (we consumed the space)
+            if i < chars.len() && chars[i] == '(' {
+                result.push(chars[i]);
+                i += 1;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
 /// Attempt to resolve computed expressions.
 /// Supports: $test_unreachable, $test_reachable, $clicked, $selected,
 /// $where(...), $intersect(...), $diff(...), $union(...),
@@ -645,7 +720,9 @@ fn resolve_computed_expression(
     incoming: &HashMap<String, Vec<(String, EdgeType)>>,
     selected_node_id: Option<&str>,
 ) -> HashSet<String> {
-    let trimmed = expr.trim();
+    // Normalize whitespace before parentheses: "$callers (Foo)" -> "$callers(Foo)"
+    let normalized = normalize_computed_expression(expr);
+    let trimmed = normalized.trim();
 
     // $clicked / $selected resolve to the selected node
     if trimmed == "$clicked" || trimmed == "$selected" {
@@ -699,21 +776,15 @@ fn resolve_computed_expression(
                         "outgoing_calls" => Some(count_outgoing_calls(&nid, outgoing) as f64),
                         "field_count" => Some(count_fields(&nid, incoming) as f64),
                         "test_fragility" => {
-                            // For test_fragility in $where, we use a simpler metric:
-                            // count of incoming Calls edges from test functions (direct test coverage).
-                            // This avoids the expensive per-node BFS.
-                            let test_callers = incoming.get(&nid).map_or(0, |neighbors| {
-                                neighbors
-                                    .iter()
-                                    .filter(|(caller_id, et)| {
-                                        *et == EdgeType::Calls
-                                            && active_nodes.iter().any(|n| {
-                                                n.id.to_string() == *caller_id && n.test_node
-                                            })
-                                    })
-                                    .count()
-                            });
-                            Some(test_callers as f64)
+                            // Use the same per-test BFS algorithm as $test_fragility(node)
+                            // for consistent semantics. Counts distinct test paths reaching
+                            // the node, not just direct callers from test functions.
+                            Some(compute_test_fragility_count(
+                                &nid,
+                                active_nodes,
+                                outgoing,
+                                incoming,
+                            ) as f64)
                         }
                         _ => None,
                     };
@@ -1046,7 +1117,8 @@ fn resolve_computed_expression(
 /// Validate a computed expression string and return any syntax errors.
 /// Returns None if the expression is valid, Some(error) if not.
 pub fn validate_computed_expression(expr: &str) -> Option<String> {
-    let trimmed = expr.trim();
+    let normalized = normalize_computed_expression(expr);
+    let trimmed = normalized.trim();
     if trimmed.is_empty() {
         return Some("Empty expression".to_string());
     }
