@@ -50,10 +50,6 @@ vi.mock('../lib/api.js', () => ({
   },
 }));
 
-vi.mock('../lib/ExplorerCanvas.svelte', () => ({
-  default: function ExplorerCanvasStub() {},
-}));
-
 vi.mock('../lib/toast.svelte.js', () => ({
   toastInfo: vi.fn(),
   toastSuccess: vi.fn(),

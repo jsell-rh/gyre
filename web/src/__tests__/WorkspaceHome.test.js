@@ -32,11 +32,6 @@ vi.mock('../lib/api.js', () => ({
   },
 }));
 
-// ExplorerCanvas is complex — stub it out
-vi.mock('../lib/ExplorerCanvas.svelte', () => ({
-  default: function ExplorerCanvasStub() {},
-}));
-
 import WorkspaceHome from '../components/WorkspaceHome.svelte';
 
 describe('WorkspaceHome', () => {

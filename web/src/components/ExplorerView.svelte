@@ -68,7 +68,11 @@
     specEditorError = '';
     specEditorLoading = true;
     predictError = '';
+    predictLoading = false;
     ghostOverlays = [];
+    predictAffectedSpecs = [];
+    predictEstimatedCost = null;
+    predictConfidence = null;
     try {
       const spec = await api.specContent(specPath, selectedRepoId);
       const content = spec?.content ?? spec?.body ?? spec?.text ?? '';
@@ -324,10 +328,6 @@
     ghostOverlays = [];
   });
 
-  let conceptFilterIds = $derived.by(() =>
-    conceptNodes ? new Set(conceptNodes.map(n => n.id)) : null
-  );
-
   // ── Repo dependencies & risk metrics ────────────────────────────────
   let repoDeps = $state(null);
   let repoDepsLoading = $state(false);
@@ -337,36 +337,36 @@
   let graphModules = $state(null);
   let graphTimeline = $state(null);
 
+  // Single effect for repo change: reset state then load dependencies.
+  // Using a single effect avoids Svelte 5 scheduling race where the reset
+  // effect could execute after the load effect on the same tick.
   $effect(() => {
     if (!selectedRepoId) return;
-    if (repoDeps !== null) return; // already loaded
+    // Reset
+    repoDeps = null;
+    repoRisks = null;
+    graphTypes = null;
+    graphModules = null;
+    graphTimeline = null;
+    // Load
     repoDepsLoading = true;
     repoRisksLoading = true;
+    const currentRepoId = selectedRepoId;
     Promise.all([
-      api.repoDependencies(selectedRepoId).catch(() => []),
-      api.repoDependents(selectedRepoId).catch(() => []),
-      api.repoGraphRisks(selectedRepoId).catch(() => []),
-      api.repoGraphTypes(selectedRepoId).catch(() => ({ nodes: [] })),
-      api.repoGraphModules(selectedRepoId).catch(() => ({ nodes: [] })),
-      api.repoGraphTimeline(selectedRepoId).catch(() => []),
+      api.repoDependencies(currentRepoId).catch(() => []),
+      api.repoDependents(currentRepoId).catch(() => []),
+      api.repoGraphRisks(currentRepoId).catch(() => []),
+      api.repoGraphTypes(currentRepoId).catch(() => ({ nodes: [] })),
+      api.repoGraphModules(currentRepoId).catch(() => ({ nodes: [] })),
+      api.repoGraphTimeline(currentRepoId).catch(() => []),
     ]).then(([deps, depts, risks, types, modules, timeline]) => {
+      if (selectedRepoId !== currentRepoId) return; // stale
       repoDeps = { dependencies: Array.isArray(deps) ? deps : [], dependents: Array.isArray(depts) ? depts : [] };
       repoRisks = Array.isArray(risks) ? risks : [];
       graphTypes = types?.nodes ?? (Array.isArray(types) ? types : []);
       graphModules = modules?.nodes ?? (Array.isArray(modules) ? modules : []);
       graphTimeline = Array.isArray(timeline) ? timeline : [];
     }).finally(() => { repoDepsLoading = false; repoRisksLoading = false; });
-  });
-
-  // Reset when repo changes
-  $effect(() => {
-    if (selectedRepoId) {
-      repoDeps = null;
-      repoRisks = null;
-      graphTypes = null;
-      graphModules = null;
-      graphTimeline = null;
-    }
   });
 </script>
 
