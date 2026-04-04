@@ -352,6 +352,26 @@ async fn do_extract(
         "knowledge graph extraction (pass 1) complete"
     );
 
+    // --- Step 6b: spec assertion checking (post-extraction) -------------------
+    // Scan spec/markdown files in the repo tree for `<!-- gyre:assert ... -->`
+    // comments, evaluate them against the fresh graph, and create inbox
+    // notifications for any failures.
+    {
+        let spec_edges: Vec<GraphEdge> = new_edge_map.values().cloned().collect();
+        if let Err(e) = check_spec_assertions_on_push(
+            tmp.path(),
+            &final_nodes,
+            &spec_edges,
+            &repo_id_parsed,
+            &agent_ctx,
+            divergence_ports.as_ref(),
+        )
+        .await
+        {
+            warn!(%repo_id, "spec assertion check failed (non-fatal): {e}");
+        }
+    }
+
     // --- Step 7: Non-blocking Pass 2 (LSP) -----------------------------------
     // Per lsp-call-graph.md, the graph is usable after Pass 1 with partial call data.
     // Pass 2 runs in the background and merges additional edges when done.
@@ -794,6 +814,151 @@ pub fn extract_lsp_edges(
     }
 
     lsp_result.edges
+}
+
+/// Post-extraction spec assertion check.
+///
+/// Scans the extracted repo tree for markdown files containing
+/// `<!-- gyre:assert ... -->` comments, evaluates each assertion against the
+/// fresh graph data, and creates inbox notifications for failures.
+async fn check_spec_assertions_on_push(
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    repo_id: &Id,
+    agent_ctx: &Option<AgentPushContext>,
+    divergence_ports: Option<&DivergencePorts<'_>>,
+) -> anyhow::Result<()> {
+    use gyre_domain::spec_assertions;
+
+    // Collect markdown files from specs/ directory (if it exists).
+    let specs_dir = repo_root.join("specs");
+    if !specs_dir.is_dir() {
+        return Ok(());
+    }
+
+    let mut failed_assertions: Vec<(String, spec_assertions::AssertionResult)> = Vec::new();
+
+    // Walk the specs directory for markdown files.
+    fn walk_md_files(dir: &Path, results: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk_md_files(&path, results);
+                } else if path
+                    .extension()
+                    .map_or(false, |ext| ext == "md" || ext == "markdown")
+                {
+                    results.push(path);
+                }
+            }
+        }
+    }
+
+    let mut md_files = Vec::new();
+    walk_md_files(&specs_dir, &mut md_files);
+
+    for md_path in &md_files {
+        let content = match std::fs::read_to_string(md_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Quick check: skip files without assertion comments.
+        if !content.contains("gyre:assert") {
+            continue;
+        }
+
+        let relative_path = md_path
+            .strip_prefix(repo_root)
+            .unwrap_or(md_path)
+            .to_string_lossy()
+            .to_string();
+
+        let parsed = spec_assertions::parse_assertions(&content);
+        if parsed.is_empty() {
+            continue;
+        }
+
+        let results = spec_assertions::evaluate_assertions(&parsed, nodes, edges);
+        for result in results {
+            if !result.passed {
+                failed_assertions.push((relative_path.clone(), result));
+            }
+        }
+    }
+
+    if failed_assertions.is_empty() {
+        return Ok(());
+    }
+
+    info!(
+        %repo_id,
+        failures = failed_assertions.len(),
+        "spec assertion failures detected on push"
+    );
+
+    // Create notifications for assertion failures (when agent context and
+    // divergence ports are available).
+    if let (Some(ctx), Some(ports)) = (agent_ctx, divergence_ports) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let body = serde_json::json!({
+            "repo_id": repo_id.as_str(),
+            "failures": failed_assertions.iter().map(|(path, r)| {
+                serde_json::json!({
+                    "spec_path": path,
+                    "line": r.line,
+                    "assertion": r.assertion_text,
+                    "explanation": r.explanation,
+                })
+            }).collect::<Vec<_>>(),
+        })
+        .to_string();
+
+        let title = format!(
+            "Spec assertion failures: {} assertion(s) failed",
+            failed_assertions.len()
+        );
+
+        let ws_id = Id::new(&ctx.workspace_id);
+        let members = ports.membership_repo.list_by_workspace(&ws_id).await?;
+
+        for member in members {
+            let should_notify = matches!(
+                member.role,
+                WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+            );
+            if !should_notify {
+                continue;
+            }
+
+            let mut notif = Notification::new(
+                Id::new(Uuid::new_v4().to_string()),
+                ws_id.clone(),
+                member.user_id.clone(),
+                NotificationType::SpecAssertionFailure,
+                &title,
+                &ctx.tenant_id,
+                now,
+            );
+            notif.body = Some(body.clone());
+            notif.repo_id = Some(repo_id.as_str().to_string());
+
+            if let Err(e) = ports.notification_repo.create(&notif).await {
+                warn!(
+                    user_id = %member.user_id,
+                    "failed to create spec assertion notification: {e}"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Parse `nodes_added` from a delta_json string.
