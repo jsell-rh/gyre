@@ -132,6 +132,39 @@ async fn handle_explorer_session(
             return;
         }
     }
+    // Check workspace-level membership: the user must have a membership record
+    // for this workspace (any role suffices for read-only explorer access).
+    if let Some(ref user_id) = auth.user_id {
+        match state
+            .workspace_memberships
+            .find_by_user_and_workspace(user_id, &repo_workspace_id)
+            .await
+        {
+            Ok(Some(_)) => { /* has membership, proceed */ }
+            Ok(None) => {
+                let err = ExplorerServerMessage::Error {
+                    message: "Access denied: not a member of this workspace".to_string(),
+                };
+                let _ = sender
+                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .await;
+                return;
+            }
+            Err(e) => {
+                warn!(
+                    "Workspace membership check failed for user {}: {e}",
+                    user_id
+                );
+                let err = ExplorerServerMessage::Error {
+                    message: "Access denied: membership check failed".to_string(),
+                };
+                let _ = sender
+                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .await;
+                return;
+            }
+        }
+    }
 
     info!(repo_id = %repo_id, user = %auth.agent_id, "Explorer WebSocket session started");
 
