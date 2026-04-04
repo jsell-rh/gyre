@@ -803,13 +803,21 @@
           {/if}
           <div class="story-provenance">
             {#if node.created_sha}
-              <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
+              <p class="detail-provenance">
+                <span class="provenance-icon">&#x1f4dd;</span>
+                Created in <code>{node.created_sha.slice(0, 7)}</code>{#if node.created_by} by <code class="persona-tag">{node.created_by}</code>{/if}
+              </p>
             {/if}
             {#if node.last_modified_by}
-              <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+              <p class="detail-provenance">
+                <span class="provenance-icon">&#x270d;</span>
+                Last modified by <code class="persona-tag">{node.last_modified_by}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}
+              </p>
             {/if}
             {#if node.last_modified_sha && node.last_modified_sha !== node.created_sha}
-              <p class="detail-provenance">Last modified in <code>{node.last_modified_sha.slice(0, 7)}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
+              <p class="detail-provenance">
+                Commit <code>{node.last_modified_sha.slice(0, 7)}</code>
+              </p>
             {/if}
             {#if node.churn_count_30d}
               <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
@@ -974,10 +982,10 @@
               <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
             {/if}
             {#if node.last_modified_by}
-              <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+              <p class="detail-provenance"><span class="provenance-icon">&#x270d;</span> Last modified by <code class="persona-tag">{node.last_modified_by}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
             {/if}
             {#if node.last_modified_sha && node.last_modified_sha !== node.created_sha}
-              <p class="detail-provenance">Last modified in <code>{node.last_modified_sha.slice(0, 7)}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
+              <p class="detail-provenance">Commit <code>{node.last_modified_sha.slice(0, 7)}</code></p>
             {/if}
             {#if node.churn_count_30d}
               <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
@@ -1185,10 +1193,10 @@
               <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
             {/if}
             {#if node.last_modified_by}
-              <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+              <p class="detail-provenance"><span class="provenance-icon">&#x270d;</span> Last modified by <code class="persona-tag">{node.last_modified_by}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
             {/if}
             {#if node.last_modified_sha && node.last_modified_sha !== node.created_sha}
-              <p class="detail-provenance">Last modified in <code>{node.last_modified_sha.slice(0, 7)}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
+              <p class="detail-provenance">Commit <code>{node.last_modified_sha.slice(0, 7)}</code></p>
             {/if}
             {#if node.churn_count_30d}
               <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
@@ -1351,10 +1359,10 @@
               <p class="detail-provenance">Created in <code>{node.created_sha.slice(0, 7)}</code></p>
             {/if}
             {#if node.last_modified_by}
-              <p class="detail-provenance">Last modified by <code>{node.last_modified_by}</code></p>
+              <p class="detail-provenance"><span class="provenance-icon">&#x270d;</span> Last modified by <code class="persona-tag">{node.last_modified_by}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
             {/if}
             {#if node.last_modified_sha && node.last_modified_sha !== node.created_sha}
-              <p class="detail-provenance">Last modified in <code>{node.last_modified_sha.slice(0, 7)}</code>{#if node.last_modified_at}, {timeAgo(new Date(node.last_modified_at * 1000))}{/if}</p>
+              <p class="detail-provenance">Commit <code>{node.last_modified_sha.slice(0, 7)}</code></p>
             {/if}
             {#if node.churn_count_30d}
               <p class="detail-provenance">{node.churn_count_30d} modification{node.churn_count_30d !== 1 ? 's' : ''} in last 30 days</p>
@@ -1875,6 +1883,14 @@
     background: color-mix(in srgb, var(--color-text) 8%, transparent);
     padding: 1px 4px;
     border-radius: 3px;
+  }
+  .persona-tag {
+    background: color-mix(in srgb, #60a5fa 15%, transparent);
+    border: 1px solid color-mix(in srgb, #60a5fa 25%, transparent);
+  }
+  .provenance-icon {
+    font-size: 10px;
+    margin-right: 2px;
   }
 
   .detail-ref-list {
