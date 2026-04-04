@@ -119,6 +119,7 @@ fn parse_node_type(s: &str) -> Option<NodeType> {
         "table" => Some(NodeType::Table),
         "constant" => Some(NodeType::Constant),
         "field" => Some(NodeType::Field),
+        "spec" => Some(NodeType::Spec),
         _ => None,
     }
 }
@@ -135,6 +136,7 @@ fn node_type_str(nt: &NodeType) -> &'static str {
         NodeType::Table => "table",
         NodeType::Constant => "constant",
         NodeType::Field => "field",
+        NodeType::Spec => "spec",
     }
 }
 
@@ -248,48 +250,43 @@ fn bfs_traverse_with_depths(
     visited
 }
 
-/// Find a node by name or qualified_name (case-insensitive partial match).
-/// Accepts `&[&GraphNode]` to avoid cloning node slices.
+/// Find a node by name or qualified_name (case-insensitive).
+/// Deterministic: exact match first, then shortest partial match with alphabetical tiebreak.
 fn find_node_by_name<'a>(nodes: &[&'a GraphNode], name: &str) -> Option<&'a GraphNode> {
-    let lower = name.to_lowercase();
-    // Exact match first.
-    let exact = nodes
-        .iter()
-        .find(|n| n.qualified_name.to_lowercase() == lower || n.name.to_lowercase() == lower);
-    if let Some(found) = exact {
-        return Some(found);
-    }
-    // Partial match fallback.
-    nodes
-        .iter()
-        .find(|n| {
-            n.qualified_name.to_lowercase().contains(&lower)
-                || n.name.to_lowercase().contains(&lower)
-        })
-        .copied()
+    find_node_by_name_with_match_type(nodes, name).map(|(n, _)| n)
 }
 
 /// Find a node by name, returning whether the match was partial (not exact).
+/// Deterministic: exact match first, then shortest partial match with alphabetical tiebreak.
 fn find_node_by_name_with_match_type<'a>(
     nodes: &[&'a GraphNode],
     name: &str,
 ) -> Option<(&'a GraphNode, bool)> {
     let lower = name.to_lowercase();
-    // Exact match first.
+    // Exact match first (qualified_name then name).
     if let Some(exact) = nodes
         .iter()
         .find(|n| n.qualified_name.to_lowercase() == lower || n.name.to_lowercase() == lower)
     {
         return Some((exact, false));
     }
-    // Partial match fallback.
-    nodes
+    // Partial match fallback: pick shortest name match (most specific),
+    // with alphabetical tiebreak for determinism.
+    let mut candidates: Vec<&'a GraphNode> = nodes
         .iter()
-        .find(|n| {
+        .filter(|n| {
             n.qualified_name.to_lowercase().contains(&lower)
                 || n.name.to_lowercase().contains(&lower)
         })
-        .map(|n| (*n, true))
+        .copied()
+        .collect();
+    candidates.sort_by(|a, b| {
+        a.name
+            .len()
+            .cmp(&b.name.len())
+            .then_with(|| a.qualified_name.cmp(&b.qualified_name))
+    });
+    candidates.first().map(|n| (*n, true))
 }
 
 /// Edge types traversed for test reachability analysis.
@@ -792,6 +789,12 @@ fn resolve_computed_expression(
             let prop = parts[0];
             let op = parts[1];
             let val: f64 = parts[2].parse().unwrap_or(0.0);
+            // Precompute test fragility once (batch BFS) instead of per-node.
+            let fragility_map = if prop == "test_fragility" {
+                compute_all_test_fragility(active_nodes, outgoing, incoming)
+            } else {
+                HashMap::new()
+            };
             return active_nodes
                 .iter()
                 .filter(|n| {
@@ -804,15 +807,13 @@ fn resolve_computed_expression(
                         "outgoing_calls" => Some(count_outgoing_calls(&nid, outgoing) as f64),
                         "field_count" => Some(count_fields(&nid, incoming) as f64),
                         "test_fragility" => {
-                            // Use the same per-test BFS algorithm as $test_fragility(node)
-                            // for consistent semantics. Counts distinct test paths reaching
-                            // the node, not just direct callers from test functions.
-                            Some(compute_test_fragility_count(
-                                &nid,
-                                active_nodes,
-                                outgoing,
-                                incoming,
-                            ) as f64)
+                            Some(*fragility_map.get(&nid).unwrap_or(&0) as f64)
+                        }
+                        "risk_score" => {
+                            let churn = n.churn_count_30d as f64;
+                            let complexity = n.complexity.unwrap_or(1) as f64;
+                            let test_gap = 1.0 - n.test_coverage.unwrap_or(0.0);
+                            Some(churn * complexity * test_gap)
                         }
                         _ => None,
                     };
@@ -1579,6 +1580,15 @@ pub fn dry_run(
                     "test_coverage" => node_map.get(id).and_then(|n| n.test_coverage),
                     "field_count" => Some(count_fields(id, &adjacency_incoming) as f64),
                     "test_fragility" => Some(*fragility_map.get(id).unwrap_or(&0) as f64),
+                    "risk_score" => {
+                        // Composite risk: churn × complexity × (1 - test_coverage)
+                        node_map.get(id).map(|n| {
+                            let churn = n.churn_count_30d as f64;
+                            let complexity = n.complexity.unwrap_or(1) as f64;
+                            let test_gap = 1.0 - n.test_coverage.unwrap_or(0.0);
+                            churn * complexity * test_gap
+                        })
+                    }
                     _ => {
                         if !heat.metric.is_empty() {
                             // Log unrecognized metric once via warning (already validated)

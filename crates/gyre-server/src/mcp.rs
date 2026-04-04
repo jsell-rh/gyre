@@ -1285,6 +1285,7 @@ async fn handle_graph_nodes(state: &AppState, args: &Value) -> Value {
             "table" => Some(gyre_common::NodeType::Table),
             "constant" => Some(gyre_common::NodeType::Constant),
             "field" => Some(gyre_common::NodeType::Field),
+            "spec" => Some(gyre_common::NodeType::Spec),
             _ => None,
         });
 

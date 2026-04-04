@@ -1772,49 +1772,58 @@ fn parse_view_query_from_text(text: &str) -> (String, Option<serde_json::Value>)
     (text_parts.join("\n\n"), view_query)
 }
 
-/// Returns the 4 system default views seeded on first ListViews access:
+/// Returns the system default views seeded on first ListViews access.
+/// These MUST match saved_views::system_default_views() semantics.
 /// (name, description, query_json).
 fn system_default_views() -> Vec<(&'static str, &'static str, serde_json::Value)> {
     vec![
         (
             "Architecture Overview",
-            "Top-level module structure with containment and dependency edges",
+            "Full codebase structure",
             json!({
-                "scope": { "type": "filter", "node_types": ["package", "module"] },
-                "edges": { "filter": ["contains", "depends_on"] },
-                "emphasis": { "dim_unmatched": 0.15 },
-                "zoom": "fit",
-                "annotation": { "title": "Architecture Overview", "description": "Top-level modules and their dependencies" }
+                "scope": { "type": "all" },
+                "zoom": "fit"
             }),
         ),
         (
             "Test Coverage Gaps",
-            "Functions and methods not reachable from any test node",
+            "Functions not reachable from any test",
             json!({
                 "scope": { "type": "test_gaps" },
-                "emphasis": { "highlight": { "matched": { "color": "#ef4444", "label": "Untested" } }, "dim_unmatched": 0.1 },
+                "emphasis": { "highlight": { "matched": { "color": "#ef4444", "label": "Untested" } }, "dim_unmatched": 0.3 },
                 "zoom": "fit",
-                "annotation": { "title": "Test Coverage Gaps", "description": "{{count}} functions with no test coverage" }
+                "annotation": { "title": "Test coverage gaps", "description": "{{count}} functions not reachable from any test" }
             }),
         ),
         (
             "Hot Paths",
-            "Functions with the highest incoming call counts (potential bottlenecks)",
+            "Most-called functions",
             json!({
-                "scope": { "type": "filter", "node_types": ["function"], "computed": "$where(incoming_calls, '>=', 5)" },
+                "scope": { "type": "all" },
                 "emphasis": { "heat": { "metric": "incoming_calls", "palette": "blue-red" } },
                 "zoom": "fit",
-                "annotation": { "title": "Hot Paths", "description": "{{count}} functions with 5+ callers" }
+                "annotation": { "title": "Hot paths" }
             }),
         ),
         (
-            "Blast Radius",
-            "Click any node to see everything it affects (outgoing calls and dependents)",
+            "Blast Radius (click)",
+            "Click any node to see what calls/uses it",
             json!({
-                "scope": { "type": "focus", "node": "$clicked", "edges": ["calls", "depends_on"], "direction": "outgoing", "depth": 3 },
-                "emphasis": { "tiered_colors": ["#ef4444", "#f97316", "#eab308", "#94a3b8"], "dim_unmatched": 0.1 },
+                "scope": { "type": "focus", "node": "$clicked", "edges": ["calls", "implements", "field_of", "depends_on"], "direction": "incoming", "depth": 10 },
+                "emphasis": { "tiered_colors": ["#ef4444", "#f97316", "#eab308", "#94a3b8"], "dim_unmatched": 0.12 },
+                "edges": { "filter": ["calls", "implements", "field_of", "depends_on"] },
                 "zoom": "fit",
-                "annotation": { "title": "Blast Radius: $name", "description": "Downstream impact up to 3 hops" }
+                "annotation": { "title": "Blast radius: $name", "description": "{{count}} transitive callers/implementors" }
+            }),
+        ),
+        (
+            "Risk Map",
+            "Composite risk: high churn × low test coverage × high complexity",
+            json!({
+                "scope": { "type": "filter", "node_types": ["function", "type"], "computed": "$where(complexity, '>', 5)" },
+                "emphasis": { "heat": { "metric": "risk_score", "palette": "blue-red" } },
+                "zoom": "fit",
+                "annotation": { "title": "Risk Map", "description": "{{count}} nodes by composite risk (churn × complexity × (1 - test_coverage))" }
             }),
         ),
     ]
@@ -2093,13 +2102,14 @@ Done."#;
     #[test]
     fn test_system_default_views_are_valid() {
         let defaults = system_default_views();
-        assert_eq!(defaults.len(), 4, "Should have 4 system default views");
+        assert_eq!(defaults.len(), 5, "Should have 5 system default views");
 
         let expected_names = [
             "Architecture Overview",
             "Test Coverage Gaps",
             "Hot Paths",
-            "Blast Radius",
+            "Blast Radius (click)",
+            "Risk Map",
         ];
         for (i, (name, description, query_json)) in defaults.iter().enumerate() {
             assert_eq!(*name, expected_names[i]);

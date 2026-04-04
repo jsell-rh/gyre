@@ -17,6 +17,8 @@ pub enum NodeType {
     Table,
     Constant,
     Field,
+    /// A specification document — first-class artifact per Vision Principle 3.
+    Spec,
 }
 
 /// Typed relationship between two graph nodes.

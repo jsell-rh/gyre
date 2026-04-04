@@ -234,6 +234,7 @@ impl ViewQuery {
         "test_coverage",
         "field_count",
         "test_fragility",
+        "risk_score",
     ];
 
     /// Validate a ViewQuery and return a list of errors (empty = valid).
@@ -367,6 +368,34 @@ impl ViewQuery {
                             "Unbalanced parentheses in computed expression: {} open, {} close",
                             open, close
                         ));
+                    }
+                }
+                // Validate $where arguments: $where(metric, op, value)
+                if normalized.starts_with("$where(") && normalized.ends_with(')') {
+                    let inner = &normalized[7..normalized.len() - 1];
+                    let parts: Vec<&str> =
+                        inner.splitn(3, ',').map(|s| s.trim().trim_matches('\'').trim_matches('"')).collect();
+                    if parts.len() != 3 {
+                        errors.push(format!(
+                            "$where requires 3 arguments (metric, operator, value), got {}",
+                            parts.len()
+                        ));
+                    } else {
+                        let known_where_metrics = [
+                            "complexity", "churn", "churn_count_30d", "incoming_calls",
+                            "outgoing_calls", "test_coverage", "field_count", "test_fragility",
+                            "risk_score",
+                        ];
+                        if !known_where_metrics.contains(&parts[0]) {
+                            errors.push(format!("Unknown $where metric '{}'", parts[0]));
+                        }
+                        let known_ops = [">", ">=", "<", "<=", "==", "="];
+                        if !known_ops.contains(&parts[1]) {
+                            errors.push(format!("Unknown $where operator '{}'", parts[1]));
+                        }
+                        if parts[2].parse::<f64>().is_err() {
+                            errors.push(format!("$where value '{}' is not a number", parts[2]));
+                        }
                     }
                 }
             }

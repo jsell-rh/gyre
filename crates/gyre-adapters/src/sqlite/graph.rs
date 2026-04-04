@@ -32,6 +32,7 @@ fn node_type_to_str(nt: &NodeType) -> &'static str {
         NodeType::Table => "table",
         NodeType::Constant => "constant",
         NodeType::Field => "field",
+        NodeType::Spec => "spec",
     }
 }
 
@@ -47,6 +48,7 @@ fn str_to_node_type(s: &str) -> Result<NodeType> {
         "table" => Ok(NodeType::Table),
         "constant" => Ok(NodeType::Constant),
         "field" => Ok(NodeType::Field),
+        "spec" => Ok(NodeType::Spec),
         other => Err(anyhow!("unknown node type: {other}")),
     }
 }

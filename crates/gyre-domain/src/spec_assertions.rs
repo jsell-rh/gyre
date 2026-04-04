@@ -57,6 +57,14 @@ pub enum Predicate {
     Calls(String),
     /// `NOT calls("target")` -- subject must NOT have a Calls edge to target.
     NotCalls(String),
+    /// `test_coverage >= 0.8` -- subject's test_coverage meets threshold.
+    TestCoverage(Comparison, f64),
+    /// `complexity <= 20` -- subject's complexity meets threshold.
+    Complexity(Comparison, f64),
+    /// `churn <= 10` -- subject's churn_count_30d meets threshold.
+    Churn(Comparison, f64),
+    /// `field_count <= 15` -- number of FieldOf edges meets threshold.
+    FieldCount(Comparison, usize),
 }
 
 /// Comparison operator for numeric predicates.
@@ -217,6 +225,38 @@ fn parse_predicate(text: &str) -> Option<Predicate> {
         return Some(Predicate::Calls(target));
     }
 
+    // test_coverage >= 0.8
+    if let Some(rest) = text.strip_prefix("test_coverage") {
+        let rest = rest.trim();
+        let (cmp, rest) = parse_comparison(rest)?;
+        let n: f64 = rest.trim().parse().ok()?;
+        return Some(Predicate::TestCoverage(cmp, n));
+    }
+
+    // complexity <= 20
+    if let Some(rest) = text.strip_prefix("complexity") {
+        let rest = rest.trim();
+        let (cmp, rest) = parse_comparison(rest)?;
+        let n: f64 = rest.trim().parse().ok()?;
+        return Some(Predicate::Complexity(cmp, n));
+    }
+
+    // churn <= 10
+    if let Some(rest) = text.strip_prefix("churn") {
+        let rest = rest.trim();
+        let (cmp, rest) = parse_comparison(rest)?;
+        let n: f64 = rest.trim().parse().ok()?;
+        return Some(Predicate::Churn(cmp, n));
+    }
+
+    // field_count <= 15
+    if let Some(rest) = text.strip_prefix("field_count") {
+        let rest = rest.trim();
+        let (cmp, rest) = parse_comparison(rest)?;
+        let n: usize = rest.trim().parse().ok()?;
+        return Some(Predicate::FieldCount(cmp, n));
+    }
+
     None
 }
 
@@ -287,6 +327,38 @@ fn evaluate_one(
         Predicate::GovernedBy(path) => eval_governed_by(&subject_nodes, path, base),
         Predicate::Calls(target) => eval_calls(&subject_nodes, target, nodes, edges, base, false),
         Predicate::NotCalls(target) => eval_calls(&subject_nodes, target, nodes, edges, base, true),
+        Predicate::TestCoverage(cmp, threshold) => {
+            eval_numeric_predicate(&subject_nodes, cmp, *threshold, "test_coverage", base, |n| {
+                n.test_coverage
+            })
+        }
+        Predicate::Complexity(cmp, threshold) => {
+            eval_numeric_predicate(&subject_nodes, cmp, *threshold, "complexity", base, |n| {
+                n.complexity.map(|c| c as f64)
+            })
+        }
+        Predicate::Churn(cmp, threshold) => {
+            eval_numeric_predicate(&subject_nodes, cmp, *threshold, "churn", base, |n| {
+                Some(n.churn_count_30d as f64)
+            })
+        }
+        Predicate::FieldCount(cmp, threshold) => {
+            let subject_ids: Vec<&str> = subject_nodes.iter().map(|n| n.id.as_str()).collect();
+            let count = edges
+                .iter()
+                .filter(|e| {
+                    e.edge_type == EdgeType::FieldOf
+                        && subject_ids.contains(&e.target_id.as_str())
+                })
+                .count();
+            let passed = compare_usize(count, cmp, *threshold);
+            let cmp_str = comparison_str(cmp);
+            AssertionResult {
+                passed,
+                explanation: format!("field_count is {count} ({cmp_str} {threshold} = {passed})"),
+                ..base
+            }
+        }
     }
 }
 
@@ -503,6 +575,66 @@ fn eval_calls(
             },
             ..base
         }
+    }
+}
+
+fn comparison_str(cmp: &Comparison) -> &'static str {
+    match cmp {
+        Comparison::Gte => ">=",
+        Comparison::Gt => ">",
+        Comparison::Lte => "<=",
+        Comparison::Lt => "<",
+        Comparison::Eq => "==",
+    }
+}
+
+fn compare_f64(actual: f64, cmp: &Comparison, threshold: f64) -> bool {
+    match cmp {
+        Comparison::Gte => actual >= threshold,
+        Comparison::Gt => actual > threshold,
+        Comparison::Lte => actual <= threshold,
+        Comparison::Lt => actual < threshold,
+        Comparison::Eq => (actual - threshold).abs() < f64::EPSILON,
+    }
+}
+
+fn compare_usize(actual: usize, cmp: &Comparison, threshold: usize) -> bool {
+    match cmp {
+        Comparison::Gte => actual >= threshold,
+        Comparison::Gt => actual > threshold,
+        Comparison::Lte => actual <= threshold,
+        Comparison::Lt => actual < threshold,
+        Comparison::Eq => actual == threshold,
+    }
+}
+
+fn eval_numeric_predicate<F>(
+    subject_nodes: &[&GraphNode],
+    cmp: &Comparison,
+    threshold: f64,
+    metric_name: &str,
+    base: AssertionResult,
+    extract: F,
+) -> AssertionResult
+where
+    F: Fn(&GraphNode) -> Option<f64>,
+{
+    // Evaluate against first subject node that has the metric
+    for n in subject_nodes {
+        if let Some(val) = extract(n) {
+            let passed = compare_f64(val, cmp, threshold);
+            let cmp_str = comparison_str(cmp);
+            return AssertionResult {
+                passed,
+                explanation: format!("{metric_name} is {val} ({cmp_str} {threshold} = {passed})"),
+                ..base
+            };
+        }
+    }
+    AssertionResult {
+        passed: false,
+        explanation: format!("No {metric_name} data available for subject"),
+        ..base
     }
 }
 
