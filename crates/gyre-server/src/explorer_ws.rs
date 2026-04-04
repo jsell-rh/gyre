@@ -93,9 +93,8 @@ const MAX_CONVERSATION_HISTORY: usize = 20;
 const MAX_USER_MESSAGE_LENGTH: usize = 10_000;
 
 /// Minimum interval between LLM-triggering user messages (rate limiting), in milliseconds.
-/// Only applies to `Message` type — CRUD operations (SaveView, LoadView, ListViews,
-/// DeleteView) are not rate-limited as they're cheap DB queries (Vision Principle 6:
-/// "challenge every ceremony").
+/// Applies to `Message` type. SaveView/DeleteView have a separate rate limit
+/// (max 10 per 60s). LoadView/ListViews are not rate-limited (read-only DB queries).
 const MIN_MESSAGE_INTERVAL_MS: u64 = 1000;
 
 /// WebSocket ping interval in seconds (keeps connections alive through proxies).
@@ -271,6 +270,8 @@ async fn handle_explorer_session(
     let mut last_message_time = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
+    // Rate limiter for SaveView/DeleteView: max 10 operations per 60 seconds.
+    let mut view_op_timestamps: Vec<std::time::Instant> = Vec::new();
     // Graph data cache with TTL (30s). Re-fetch when stale, not on every message.
     let mut cached_nodes: Option<Vec<gyre_common::graph::GraphNode>> = None;
     let mut cached_edges: Option<Vec<gyre_common::graph::GraphEdge>> = None;
@@ -420,6 +421,23 @@ async fn handle_explorer_session(
                 description,
                 query,
             } => {
+                // Rate limit: max 10 SaveView/DeleteView ops per 60 seconds
+                let now_view = std::time::Instant::now();
+                view_op_timestamps.retain(|t| now_view.duration_since(*t).as_secs() < 60);
+                if view_op_timestamps.len() >= 10 {
+                    let err = ExplorerServerMessage::Error {
+                        message: "Too many view operations. Please wait before saving again."
+                            .to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(
+                            serialize_msg(&err).unwrap_or_default().into(),
+                        ))
+                        .await;
+                    continue;
+                }
+                view_op_timestamps.push(now_view);
+
                 // Validate name/description length limits
                 if name.len() > 200 {
                     let err = ExplorerServerMessage::Error {
@@ -710,6 +728,23 @@ async fn handle_explorer_session(
             }
 
             ExplorerClientMessage::DeleteView { view_id } => {
+                // Rate limit: max 10 SaveView/DeleteView ops per 60 seconds
+                let now_view = std::time::Instant::now();
+                view_op_timestamps.retain(|t| now_view.duration_since(*t).as_secs() < 60);
+                if view_op_timestamps.len() >= 10 {
+                    let err = ExplorerServerMessage::Error {
+                        message: "Too many view operations. Please wait before deleting again."
+                            .to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(
+                            serialize_msg(&err).unwrap_or_default().into(),
+                        ))
+                        .await;
+                    continue;
+                }
+                view_op_timestamps.push(now_view);
+
                 let vid = Id::new(&view_id);
                 match state.saved_views.get(&vid).await {
                     Ok(Some(v)) => {
@@ -1395,11 +1430,27 @@ async fn handle_no_llm_fallback(
         let target = if !selected_name.is_empty() {
             selected_name.clone()
         } else {
-            // Try to extract a name from the question
-            q.split_whitespace()
-                .find(|w| w.len() > 3 && w.chars().next().map_or(false, |c| c.is_uppercase()))
-                .unwrap_or("$selected")
-                .to_string()
+            // Try to extract a capitalized name from the original question
+            // (not `q` which is lowercased). Filter out common English words.
+            {
+                const STOP_WORDS: &[&str] = &[
+                    "What", "Would", "Where", "When", "Which", "While", "With", "Will", "Could",
+                    "Should", "About", "After", "Before", "Between", "Does", "From", "Have",
+                    "Here", "Just", "Like", "Make", "Many", "More", "Most", "Much", "Must", "Need",
+                    "Only", "Other", "Over", "Some", "Such", "Take", "Than", "That", "Their",
+                    "Them", "Then", "There", "These", "They", "This", "Those", "Through", "Under",
+                    "Very", "Were", "Your",
+                ];
+                user_question
+                    .split_whitespace()
+                    .find(|w| {
+                        w.len() > 3
+                            && w.chars().next().map_or(false, |c| c.is_uppercase())
+                            && !STOP_WORDS.iter().any(|sw| sw.eq_ignore_ascii_case(w))
+                    })
+                    .unwrap_or("$selected")
+                    .to_string()
+            }
         };
         stream_text(sender, &format!("Showing blast radius for **{}**. Click any node to see its impact.\n\n*Note: LLM is not configured — using template query. Set GYRE_VERTEX_PROJECT for conversational exploration.*", target), true).await;
         let query = json!({
@@ -1616,13 +1667,30 @@ async fn run_explorer_agent(
                             let original_nodes = n.len();
                             let original_edges = e.len();
                             warn!(
-                                "Graph too large for session cache ({} nodes + {} edges > {}), truncating — keeping most recently modified nodes",
+                                "Graph too large for session cache ({} nodes + {} edges > {}), truncating — keeping most important nodes (by connectivity + recency)",
                                 original_nodes, original_edges, MAX_GRAPH_CACHE_ENTRIES
                             );
-                            // Sort by last_modified_at descending so we keep recent nodes
+                            // Sort by importance: highly-connected foundational nodes
+                            // should be kept even if they haven't been modified recently.
+                            // Build incoming-edge-count map, then sort by
+                            // incoming_count DESC, last_modified_at DESC.
+                            let mut incoming_count: std::collections::HashMap<String, usize> =
+                                std::collections::HashMap::new();
+                            for edge in &e {
+                                *incoming_count
+                                    .entry(edge.target_id.to_string())
+                                    .or_insert(0) += 1;
+                            }
                             let mut sorted_nodes = n;
-                            sorted_nodes
-                                .sort_by(|a, b| b.last_modified_at.cmp(&a.last_modified_at));
+                            sorted_nodes.sort_by(|a, b| {
+                                let a_inc =
+                                    incoming_count.get(&a.id.to_string()).copied().unwrap_or(0);
+                                let b_inc =
+                                    incoming_count.get(&b.id.to_string()).copied().unwrap_or(0);
+                                b_inc
+                                    .cmp(&a_inc)
+                                    .then_with(|| b.last_modified_at.cmp(&a.last_modified_at))
+                            });
                             let kept_count = MAX_GRAPH_CACHE_ENTRIES / 2;
                             let kept_node_ids: std::collections::HashSet<String> = sorted_nodes
                                 .iter()
@@ -1643,8 +1711,8 @@ async fn run_explorer_agent(
                             // Warn the user via WebSocket (Vision Principle 2: "surface the signal")
                             let warning_msg = format!(
                                 "Note: This repository has a large graph ({} nodes, {} edges). \
-                                 Showing the {} most recently modified nodes. \
-                                 Older architectural elements may not appear in queries.",
+                                 Showing the {} most important nodes (by connectivity and recency). \
+                                 Some less-connected, older nodes may not appear in queries.",
                                 original_nodes, original_edges, kept_count
                             );
                             stream_text(sender, &warning_msg, false).await;
