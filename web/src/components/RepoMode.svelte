@@ -91,7 +91,25 @@
     let aborted = false;
     allAgentsLoading = true;
     api.agents({ repoId })
-      .then(list => { if (!aborted) { allAgents = Array.isArray(list) ? list : []; allAgentsLoading = false; allAgentsLoaded = true; } })
+      .then(async (list) => {
+        if (aborted) return;
+        let agentList = Array.isArray(list) ? list : [];
+        // Enrich agents missing spec_path from their task (best-effort)
+        const needsSpec = agentList.filter(a => !a.spec_path && (a.task_id ?? a.current_task_id));
+        if (needsSpec.length > 0) {
+          const results = await Promise.all(needsSpec.map(a => {
+            const tid = a.task_id ?? a.current_task_id;
+            return api.task(tid).then(t => ({ agentId: a.id, spec_path: t?.spec_path })).catch(() => null);
+          }));
+          const specMap = Object.fromEntries(results.filter(r => r?.spec_path).map(r => [r.agentId, r.spec_path]));
+          if (Object.keys(specMap).length > 0) {
+            agentList = agentList.map(a => specMap[a.id] ? { ...a, spec_path: specMap[a.id] } : a);
+          }
+        }
+        allAgents = agentList;
+        allAgentsLoading = false;
+        allAgentsLoaded = true;
+      })
       .catch(() => { if (!aborted) { allAgents = []; allAgentsLoading = false; allAgentsLoaded = true; } });
     return () => { aborted = true; };
   });
@@ -792,8 +810,8 @@
               <tr>
                 <th>Status</th>
                 <th>Name</th>
+                <th>Spec</th>
                 <th>Task</th>
-                <th>Branch</th>
                 <th>MR</th>
                 <th>Duration</th>
                 <th>Cost</th>
@@ -812,8 +830,8 @@
                     <span class="agent-status-explain">{#if agent.status === 'active' && elapsedSec != null}running {humanDuration(elapsedSec)}{:else if (agent.status === 'completed' || agent.status === 'idle') && completedDur != null}done in {humanDuration(completedDur)}{:else if agent.status === 'failed' && completedDur != null}failed after {humanDuration(completedDur)}{:else if agent.status === 'failed'}click for logs{/if}</span>
                   </td>
                   <td class="cell-title"><button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', agent.id, agent); }}>{agent.name ?? entityName('agent', agent.id)}</button></td>
+                  <td class="cell-mono">{#if agent.spec_path}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('spec', agent.spec_path, { path: agent.spec_path, repo_id: repo?.id }); }} title={agent.spec_path}>{specShortName(agent.spec_path)}</button>{/if}</td>
                   <td class="cell-mono">{#if taskId}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('task', taskId, {}); }} title={taskId}>{entityName('task', taskId)}</button>{/if}</td>
-                  <td class="cell-mono">{agent.branch ?? ''}</td>
                   <td class="cell-mono">{#if agent.mr_id}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', agent.mr_id, {}); }}>{entityName('mr', agent.mr_id)}</button>{/if}</td>
                   <td class="cell-time">{#if completedDur != null}{humanDuration(completedDur)}{:else if agent.status === 'active' && elapsedSec != null}{humanDuration(elapsedSec)}{/if}</td>
                   <td class="cell-mono">{#if totalTokens > 0}<span class="token-count" title="{totalTokens.toLocaleString()} tokens">{totalTokens > 999999 ? (totalTokens / 1000000).toFixed(1) + 'M' : totalTokens > 999 ? (totalTokens / 1000).toFixed(0) + 'k' : totalTokens}</span>{/if}</td>
