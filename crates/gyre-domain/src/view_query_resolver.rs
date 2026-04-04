@@ -1211,9 +1211,10 @@ fn resolve_computed_expression_inner(
         return spec_node_ids;
     }
 
-    // $test_fragility(node) — returns the count of distinct test paths as a metric,
-    // but for set operations returns the node if count > 0.
-    // Uses batch computation for consistency with $where(test_fragility, ...).
+    // $test_fragility(node) — set membership test: returns {node} if the node's
+    // test_fragility count > 0. For scalar comparisons (e.g., filtering nodes with
+    // fragility above a threshold), use $where(test_fragility, '>', N) instead.
+    // The test_fragility metric is also available in $where() and heat-map emphasis.
     if trimmed.starts_with("$test_fragility(") && trimmed.ends_with(')') {
         let node_name = trimmed[16..trimmed.len() - 1]
             .trim()
