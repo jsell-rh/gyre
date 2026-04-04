@@ -1237,6 +1237,38 @@ pub async fn predict_graph(
     }))
 }
 
+// ── View query dry-run ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ViewQueryDryRunRequest {
+    pub query: gyre_common::view_query::ViewQuery,
+    #[serde(default)]
+    pub selected_node_id: Option<String>,
+}
+
+pub async fn view_query_dryrun(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<ViewQueryDryRunRequest>,
+) -> Result<Json<gyre_domain::view_query_resolver::DryRunResult>, ApiError> {
+    let repo_id = Id::new(&id);
+    let nodes = state
+        .graph_store
+        .list_nodes(&repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    let edges = state
+        .graph_store
+        .list_edges(&repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let selected = req.selected_node_id.as_deref();
+    let result = gyre_domain::view_query_resolver::dry_run(&req.query, &nodes, &edges, selected);
+
+    Ok(Json(result))
+}
+
 // ── Helper for tests ──────────────────────────────────────────────────────────
 
 fn _new_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {

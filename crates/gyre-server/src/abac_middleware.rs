@@ -159,6 +159,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/diff", "graph", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/link", "graph", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/predict", "graph", None),
+                RouteResourceMapping::api("/api/v1/repos/:id/graph/query-dryrun", "graph", None),
                 // ── Agents ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/agents", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/spawn", "agent", Some("spawn")),

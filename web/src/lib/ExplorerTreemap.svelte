@@ -16,6 +16,7 @@
     ghostOverlays = [],
     filters = null,
     traceData = null, // { spans: [], root_spans: [] } from GateTraceResponse
+    queryResult = null, // { node_metrics: Record<string, number>, ... } from dry-run resolve
   } = $props();
 
   // ── Interactive $clicked mode ──────────────────────────────────────────
@@ -121,6 +122,7 @@
 
   // Evaluative lens metric mode
   let evaluativeMetric = $state('complexity'); // 'complexity' | 'churn' | 'incoming_calls' | 'test_coverage'
+  let observableBannerVisible = $state(false); // show "coming soon" banner for observable lens
 
   // ── Ghost overlay state (spec editing preview) ──────────────────────
   // ghostOverlays: [{ id, name, type, action: 'add'|'change'|'remove', edges?: [] }]
@@ -444,6 +446,23 @@
     }
     evalParticles = newParticles;
   }
+
+  // Computed elapsed time string for trace playback display
+  let traceElapsedDisplay = $derived.by(() => {
+    if (!traceSpanTimeline) return '';
+    const elapsed = evalScrubber * traceSpanTimeline.totalDuration; // microseconds
+    if (elapsed < 1000) return `${Math.round(elapsed)}\u00B5s`;
+    if (elapsed < 1000000) return `${(elapsed / 1000).toFixed(1)}ms`;
+    return `${(elapsed / 1000000).toFixed(2)}s`;
+  });
+
+  let traceTotalDisplay = $derived.by(() => {
+    if (!traceSpanTimeline) return '';
+    const total = traceSpanTimeline.totalDuration;
+    if (total < 1000) return `${Math.round(total)}\u00B5s`;
+    if (total < 1000000) return `${(total / 1000).toFixed(1)}ms`;
+    return `${(total / 1000000).toFixed(2)}s`;
+  });
 
   // Inertial zoom velocity
   let zoomVelocity = 0;
@@ -1481,23 +1500,30 @@
     const heat = activeQuery.emphasis?.heat;
     if (heat?.metric && node) {
       const metric = heat.metric;
-      // Compute metric value for this node (using pre-computed index for calls)
       let value = 0;
-      if (metric === 'incoming_calls') {
-        value = incomingCallCounts.get(nodeId) ?? 0;
-      } else if (metric === 'complexity') {
-        value = node.complexity ?? 0;
-      } else if (metric === 'churn' || metric === 'churn_count_30d') {
-        value = node.churn_count_30d ?? node.churn ?? 0;
-      } else if (metric === 'test_coverage') {
-        value = (node.test_coverage ?? 0) * 100;
-      } else if (metric === 'test_fragility') {
-        // Count callers that are test nodes (test fragility = how many tests touch this)
-        for (const nb of (adjacency.get(nodeId) ?? [])) {
-          if (nb.edgeType === 'calls' && nb.reverse) {
-            const src = nb.targetId;
-            const srcNode = nodes.find(n => n.id === src);
-            if (srcNode?.test_node) value++;
+
+      // Prefer server-provided node_metrics from dry-run queryResult
+      const serverMetrics = queryResult?.node_metrics;
+      if (serverMetrics && typeof serverMetrics === 'object' && nodeId in serverMetrics) {
+        value = serverMetrics[nodeId] ?? 0;
+      } else {
+        // Fallback: compute metric value client-side (using pre-computed index for calls)
+        if (metric === 'incoming_calls') {
+          value = incomingCallCounts.get(nodeId) ?? 0;
+        } else if (metric === 'complexity') {
+          value = node.complexity ?? 0;
+        } else if (metric === 'churn' || metric === 'churn_count_30d') {
+          value = node.churn_count_30d ?? node.churn ?? 0;
+        } else if (metric === 'test_coverage') {
+          value = (node.test_coverage ?? 0) * 100;
+        } else if (metric === 'test_fragility') {
+          // Count callers that are test nodes (test fragility = how many tests touch this)
+          for (const nb of (adjacency.get(nodeId) ?? [])) {
+            if (nb.edgeType === 'calls' && nb.reverse) {
+              const src = nb.targetId;
+              const srcNode = nodes.find(n => n.id === src);
+              if (srcNode?.test_node) value++;
+            }
           }
         }
       }
@@ -1536,6 +1562,16 @@
     if (!activeQuery?.emphasis?.heat?.metric) return map;
     const metric = activeQuery.emphasis.heat.metric;
     let max = 0;
+
+    // If server-provided node_metrics exist (from dry-run queryResult), use those for max
+    const serverMetrics = queryResult?.node_metrics;
+    if (serverMetrics && typeof serverMetrics === 'object') {
+      for (const v of Object.values(serverMetrics)) {
+        if (v > max) max = v;
+      }
+    }
+
+    // Also scan client-side metrics (fallback or supplement)
     for (const node of nodes) {
       let v = 0;
       if (metric === 'incoming_calls') {
@@ -2343,8 +2379,12 @@
 
     // Fill — spec coverage as PRIMARY color in structural lens (green=governed, amber=suggested, red=no spec)
     const qColor = queryNodeColor(ln);
+    const isHeatMap = !!activeQuery?.emphasis?.heat?.metric;
     let fillColor = 'rgba(20,28,48,0.9)';
-    if (lens === 'structural' && !qColor) {
+    if (isHeatMap && qColor) {
+      // Heat map mode: use the heat color as the primary fill with strong alpha
+      fillColor = qColor + 'cc'; // ~80% alpha
+    } else if (lens === 'structural' && !qColor) {
       // Check GovernedBy edges for this node
       let hasGovEdge = false;
       const nodeId = n?.id;
@@ -2374,20 +2414,25 @@
     let borderWidth = ln.id === selectedNodeId ? 2 : churnWidth;
     if (qColor && ln.id !== selectedNodeId) {
       borderColor = qColor;
-      // Fill tint
-      ctx.fillStyle = qColor + '44';
-      roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
-      ctx.fill();
-      // Glow
-      ctx.save();
-      ctx.shadowColor = qColor;
-      ctx.shadowBlur = 8;
-      ctx.strokeStyle = qColor;
-      ctx.lineWidth = 2.5;
-      roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
-      ctx.stroke();
-      ctx.restore();
-      borderWidth = 2;
+      if (isHeatMap) {
+        // Heat map mode: fill already applied above, just set border to heat color
+        borderWidth = 1.5;
+      } else {
+        // Non-heat query highlight: tint fill + glow border
+        ctx.fillStyle = qColor + '44';
+        roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+        ctx.fill();
+        // Glow
+        ctx.save();
+        ctx.shadowColor = qColor;
+        ctx.shadowBlur = 8;
+        ctx.strokeStyle = qColor;
+        ctx.lineWidth = 2.5;
+        roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+        ctx.stroke();
+        ctx.restore();
+        borderWidth = 2;
+      }
     }
 
     ctx.strokeStyle = borderColor;
@@ -3211,6 +3256,55 @@
     }
   }
 
+  // Navigate breadcrumb with smooth zoom-out animation.
+  // index=-1 means go to root, otherwise go to breadcrumb[index].
+  function navigateBreadcrumb(index) {
+    const prevBreadcrumb = [...breadcrumb];
+    if (index < 0) {
+      breadcrumb = [];
+    } else {
+      breadcrumb = breadcrumb.slice(0, index + 1);
+    }
+    selectedNodeId = null;
+    canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })) };
+    onNodeDetail(null);
+
+    // Smooth zoom-out: animate camera to the target parent node or fit all.
+    if (breadcrumb.length === 0) {
+      // Going to root: fit the entire tree
+      const allBounds = computeAllNodesBounds();
+      if (allBounds) {
+        targetCam.x = allBounds.cx;
+        targetCam.y = allBounds.cy;
+        targetCam.zoom = Math.min(W / (allBounds.w + 100), H / (allBounds.h + 100), 2) * 0.9;
+      }
+    } else {
+      // Going to a parent: zoom out to show that node's children
+      const parentId = breadcrumb[breadcrumb.length - 1].id;
+      const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === parentId);
+      if (ln) {
+        targetCam.x = ln.x;
+        targetCam.y = ln.y;
+        targetCam.zoom = Math.min(W / (ln.w + 60), H / (ln.h + 60), 4) * 0.85;
+      }
+    }
+    needsAnim = true;
+    scheduleRedraw();
+  }
+
+  // Compute bounding box of all visible layout nodes.
+  function computeAllNodesBounds() {
+    if (layoutNodes.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const ln of layoutNodes) {
+      minX = Math.min(minX, ln.x - ln.w / 2);
+      minY = Math.min(minY, ln.y - ln.h / 2);
+      maxX = Math.max(maxX, ln.x + ln.w / 2);
+      maxY = Math.max(maxY, ln.y + ln.h / 2);
+    }
+    return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: maxX - minX, h: maxY - minY };
+  }
+
   // Keyboard: Escape to zoom out to root, / to search
   function onKeyDown(e) {
     if (e.key === '/' && !searchOpen) {
@@ -3369,7 +3463,7 @@
 
   // Trigger redraws on reactive state changes (NOT hoveredNodeId — that triggers scheduleRedraw directly)
   $effect(() => {
-    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens, ghostOverlays];
+    const _ = [selectedNodeId, activeQuery, queryMatchedIds, queryCallouts, connectedHighlight, filter, lens, ghostOverlays, queryResult];
     scheduleRedraw();
   });
 
@@ -3526,7 +3620,7 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn" disabled type="button">Observable <span class="observable-note">(requires production telemetry)</span></button>
+      <button class="tb-btn" onclick={() => { observableBannerVisible = true; setTimeout(() => { observableBannerVisible = false; }, 4000); }} type="button" title="Observable lens (coming soon)">Observable</button>
     </div>
 
     {#if lens === 'evaluative'}
@@ -3829,14 +3923,54 @@
   <!-- Breadcrumb -->
   {#if breadcrumb.length > 0}
     <div class="treemap-breadcrumb" role="navigation" aria-label="Drill-down path">
-      <button class="breadcrumb-item root" onclick={() => { breadcrumb = []; selectedNodeId = null; onNodeDetail(null); }} type="button" aria-label="Go to root">
+      <button class="breadcrumb-item root" onclick={() => { navigateBreadcrumb(-1); }} type="button" aria-label="Go to root">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
         Root
       </button>
       {#each breadcrumb as crumb, i}
         <span class="breadcrumb-sep" aria-hidden="true">&rsaquo;</span>
-        <button class="breadcrumb-item" class:current={i === breadcrumb.length - 1} onclick={() => { breadcrumb = breadcrumb.slice(0, i + 1); selectedNodeId = null; onNodeDetail(null); }} type="button">{crumb.name}</button>
+        <button class="breadcrumb-item" class:current={i === breadcrumb.length - 1} onclick={() => { navigateBreadcrumb(i); }} type="button">{crumb.name}</button>
       {/each}
+    </div>
+  {/if}
+
+  <!-- Observable lens "coming soon" banner -->
+  {#if observableBannerVisible}
+    <div class="observable-banner" role="status" aria-live="polite">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      <span>Coming soon: Requires production telemetry integration</span>
+      <button class="observable-banner-close" onclick={() => { observableBannerVisible = false; }} type="button" title="Dismiss">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+  {/if}
+
+  <!-- Evaluative trace playback overlay bar -->
+  {#if lens === 'evaluative' && traceData?.spans?.length}
+    <div class="trace-playback-bar" role="toolbar" aria-label="Trace playback controls">
+      <button class="trace-pb-btn" onclick={() => { evalPlaying = !evalPlaying; if (evalPlaying) scheduleRedraw(); }} type="button" title={evalPlaying ? 'Pause trace playback' : 'Play trace playback'}>
+        {#if evalPlaying}
+          <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+        {:else}
+          <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="5,3 19,12 5,21"/></svg>
+        {/if}
+      </button>
+      <input type="range" min="0" max="1000" value={Math.round(evalScrubber * 1000)}
+        oninput={(e) => { evalScrubber = parseInt(e.target.value) / 1000; scheduleRedraw(); }}
+        class="trace-pb-scrubber" title="Trace timeline position" />
+      <span class="trace-pb-time">{traceElapsedDisplay} / {traceTotalDisplay}</span>
+      <div class="trace-pb-sep"></div>
+      <select class="trace-pb-speed" value={evalSpeed}
+        onchange={(e) => { evalSpeed = parseFloat(e.target.value); }}>
+        <option value="0.25">0.25x</option>
+        <option value="0.5">0.5x</option>
+        <option value="1">1x</option>
+        <option value="2">2x</option>
+        <option value="5">5x</option>
+      </select>
+      <span class="trace-pb-particles">{evalParticles.length} active spans</span>
     </div>
   {/if}
 
@@ -3890,7 +4024,6 @@
   .tb-btn:hover:not(:disabled) { background: rgba(51,65,85,0.5); color: #e2e8f0; }
   .tb-btn.active { background: #1e293b; color: #e2e8f0; box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-  .observable-note { font-size: 10px; font-style: italic; color: #64748b; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .eval-metric-group { display: flex; gap: 2px; align-items: center; }
   .eval-playback { display: flex; gap: 4px; align-items: center; margin-left: 4px; }
@@ -3898,6 +4031,52 @@
   .eval-speed { background: rgba(15,15,26,0.9); color: #94a3b8; border: 1px solid #334155; border-radius: 4px; padding: 2px 4px; font-size: 11px; font-family: 'SF Mono', Menlo, monospace; cursor: pointer; }
   .eval-particle-count { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; white-space: nowrap; }
   .eval-no-trace { font-size: 11px; color: #64748b; font-style: italic; margin-left: 4px; }
+
+  /* Observable lens "coming soon" banner */
+  .observable-banner {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 45;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 16px; background: rgba(15, 15, 26, 0.95); border: 1px solid #334155;
+    border-radius: 8px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(16px);
+    font-size: 12px; color: #94a3b8; font-family: system-ui, -apple-system, sans-serif;
+    animation: observable-fade-in 0.2s ease-out;
+  }
+  .observable-banner-close {
+    display: flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; background: transparent; border: none;
+    border-radius: 4px; color: #64748b; cursor: pointer; margin-left: 4px;
+  }
+  .observable-banner-close:hover { background: #1e293b; color: #e2e8f0; }
+  @keyframes observable-fade-in { from { opacity: 0; transform: translateX(-50%) translateY(-8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+
+  /* Trace playback overlay bar */
+  .trace-playback-bar {
+    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 40;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 16px; background: rgba(15, 15, 26, 0.95); border: 1px solid #334155;
+    border-radius: 8px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(16px);
+  }
+  .trace-pb-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; border: none; border-radius: 6px;
+    background: #1e293b; color: #60a5fa; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .trace-pb-btn:hover { background: #334155; color: #93c5fd; }
+  .trace-pb-scrubber { width: 160px; accent-color: #60a5fa; height: 4px; cursor: pointer; }
+  .trace-pb-time {
+    font-size: 11px; color: #e2e8f0; font-family: 'SF Mono', Menlo, monospace;
+    white-space: nowrap; min-width: 100px;
+  }
+  .trace-pb-sep { width: 1px; height: 20px; background: #334155; }
+  .trace-pb-speed {
+    background: rgba(15, 15, 26, 0.9); color: #94a3b8; border: 1px solid #334155;
+    border-radius: 4px; padding: 4px 6px; font-size: 11px;
+    font-family: 'SF Mono', Menlo, monospace; cursor: pointer;
+  }
+  .trace-pb-particles { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; white-space: nowrap; }
 
   .tb-sep { width: 1px; height: 20px; background: #334155; margin: 0 4px; }
 

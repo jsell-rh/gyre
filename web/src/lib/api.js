@@ -663,4 +663,10 @@ export const api = {
       throw e;
     }
   },
+  // View query dry-run — resolves a view query server-side, returns node_metrics etc.
+  graphQueryDryrun: (repoId, query, selectedNodeId) =>
+    request(`/repos/${repoId}/graph/query-dryrun`, {
+      method: 'POST',
+      body: JSON.stringify({ query, selected_node_id: selectedNodeId ?? null }),
+    }),
 };

@@ -56,6 +56,24 @@
   let predictLoading = $state(false);
   let predictError = $state('');
   let ghostOverlays = $state([]);
+  // View query dry-run result (contains node_metrics for heat map)
+  let viewQueryResult = $state(null);
+
+  // Fetch dry-run result when a view query with heat emphasis is active
+  $effect(() => {
+    const q = activeViewQuery;
+    const repoId = selectedRepoId;
+    if (!q?.emphasis?.heat?.metric || !repoId) {
+      viewQueryResult = null;
+      return;
+    }
+    // Fire and forget — result updates viewQueryResult asynchronously
+    const selectedId = explorerCanvasState?.selectedNode?.id ?? null;
+    api.graphQueryDryrun(repoId, q, selectedId)
+      .then(result => { viewQueryResult = result; })
+      .catch(() => { viewQueryResult = null; });
+  });
+
   // Evaluative lens: trace data from most recent MR
   let traceData = $state(null);
   let predictAffectedSpecs = $state([]);
@@ -216,6 +234,43 @@
   let filterVisible = $state(false);
   let insightsCollapsed = $state(true);
   let activeFilters = $state(null);
+
+  // Manual view query editor state
+  let queryEditorOpen = $state(false);
+  let queryEditorText = $state('');
+  let queryEditorError = $state('');
+
+  const queryPresets = [
+    { label: 'Blast Radius', query: { type: 'blast_radius', from_node: null, depth: 3 } },
+    { label: 'Test Gaps', query: { type: 'test_gaps', min_complexity: 5 } },
+    { label: 'Hot Paths', query: { type: 'hot_paths', metric: 'churn', top_n: 10 } },
+  ];
+
+  function runManualQuery() {
+    queryEditorError = '';
+    const text = queryEditorText.trim();
+    if (!text) {
+      queryEditorError = 'Query cannot be empty';
+      return;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      activeViewQuery = parsed;
+    } catch (e) {
+      queryEditorError = `Invalid JSON: ${e.message}`;
+    }
+  }
+
+  function clearManualQuery() {
+    queryEditorText = '';
+    queryEditorError = '';
+    activeViewQuery = null;
+  }
+
+  function applyPreset(preset) {
+    queryEditorText = JSON.stringify(preset.query, null, 2);
+    queryEditorError = '';
+  }
 
   function onFilterChange(filters) {
     activeFilters = filters;
@@ -385,6 +440,7 @@
     if (e.key === 'Escape' && !isTyping) {
       // Escape cascade: close the most recent overlay first
       if (specEditorOpen) { closeSpecEditorWithGuard(); return; }
+      if (queryEditorOpen) { queryEditorOpen = false; return; }
       if (detailNode) { detailNode = null; return; }
       if (activeViewQuery) { activeViewQuery = null; return; }
       return;
@@ -588,6 +644,21 @@
           </svg>
         </button>
 
+        <!-- Manual query editor toggle -->
+        <button
+          class="ctrl-btn icon-btn"
+          class:active={queryEditorOpen}
+          onclick={() => { queryEditorOpen = !queryEditorOpen; }}
+          title="Manual view query editor"
+          aria-label="Toggle manual view query editor"
+          aria-pressed={queryEditorOpen}
+          type="button"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+            <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+          </svg>
+        </button>
+
         <!-- Concept search -->
         <div class="search-input-wrap">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="search-icon" aria-hidden="true">
@@ -688,6 +759,7 @@
                 onInteractiveQuery={(q) => { activeViewQuery = q; }}
                 {ghostOverlays}
                 {traceData}
+                queryResult={viewQueryResult}
               />
               <!-- Architecture Insights — collapsible panel inside canvas area -->
               {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
@@ -965,6 +1037,55 @@
                       {/if}
                     </button>
                   </div>
+                </div>
+              </div>
+            {/if}
+            {#if queryEditorOpen}
+              <div class="query-editor-panel" role="complementary" aria-label="Manual view query editor">
+                <div class="query-editor-header">
+                  <h3 class="query-editor-title">View Query Editor</h3>
+                  <button class="query-editor-close" onclick={() => { queryEditorOpen = false; }} aria-label="Close query editor" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" aria-hidden="true">
+                      <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                  </button>
+                </div>
+                <div class="query-editor-presets">
+                  <span class="query-editor-presets-label">Presets:</span>
+                  {#each queryPresets as preset}
+                    <button
+                      class="query-preset-btn"
+                      onclick={() => applyPreset(preset)}
+                      type="button"
+                    >{preset.label}</button>
+                  {/each}
+                </div>
+                <div class="query-editor-body">
+                  <textarea
+                    class="query-editor-textarea"
+                    bind:value={queryEditorText}
+                    placeholder={'{"type": "blast_radius", "from_node": "...", "depth": 3}'}
+                    spellcheck="false"
+                    aria-label="View query JSON"
+                  ></textarea>
+                </div>
+                {#if queryEditorError}
+                  <div class="query-editor-error" role="alert">
+                    {queryEditorError}
+                  </div>
+                {/if}
+                <div class="query-editor-actions">
+                  <button
+                    class="query-editor-clear-btn"
+                    onclick={clearManualQuery}
+                    type="button"
+                  >Clear</button>
+                  <button
+                    class="query-editor-run-btn"
+                    onclick={runManualQuery}
+                    disabled={!queryEditorText.trim()}
+                    type="button"
+                  >Run Query</button>
                 </div>
               </div>
             {/if}
@@ -2193,6 +2314,204 @@
     outline-offset: 2px;
   }
 
+  /* ── Manual View Query Editor panel ─────────────────────────────── */
+  .query-editor-panel {
+    width: 340px;
+    min-width: 280px;
+    max-width: 420px;
+    border-left: 1px solid var(--color-border);
+    background: var(--color-surface);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .query-editor-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+    background: var(--color-surface-elevated);
+  }
+
+  .query-editor-title {
+    margin: 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .query-editor-close {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    padding: var(--space-1);
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .query-editor-close:hover {
+    color: var(--color-text);
+    background: var(--color-surface);
+  }
+
+  .query-editor-close:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .query-editor-presets {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  .query-editor-presets-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .query-preset-btn {
+    padding: 2px var(--space-2);
+    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--color-primary);
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .query-preset-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 20%, transparent);
+    border-color: var(--color-primary);
+  }
+
+  .query-preset-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .query-editor-body {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .query-editor-textarea {
+    flex: 1;
+    width: 100%;
+    resize: none;
+    border: none;
+    outline: none;
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.6;
+    tab-size: 2;
+    min-height: 120px;
+  }
+
+  .query-editor-textarea::placeholder {
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .query-editor-textarea:focus {
+    background: color-mix(in srgb, var(--color-surface-elevated) 50%, var(--color-surface));
+  }
+
+  .query-editor-error {
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-xs);
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--color-danger) 20%, transparent);
+    flex-shrink: 0;
+  }
+
+  .query-editor-actions {
+    display: flex;
+    gap: var(--space-2);
+    justify-content: flex-end;
+    padding: var(--space-3) var(--space-4);
+    border-top: 1px solid var(--color-border);
+    flex-shrink: 0;
+    background: var(--color-surface-elevated);
+  }
+
+  .query-editor-clear-btn {
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .query-editor-clear-btn:hover {
+    background: var(--color-surface);
+    border-color: var(--color-text-muted);
+  }
+
+  .query-editor-clear-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .query-editor-run-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: var(--color-primary);
+    border: 1px solid var(--color-primary);
+    border-radius: var(--radius);
+    color: var(--color-text-inverse);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast), opacity var(--transition-fast);
+  }
+
+  .query-editor-run-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-primary) 85%, black);
+  }
+
+  .query-editor-run-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .query-editor-run-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
   @media (max-width: 900px) {
     .explorer-split {
       flex-direction: column;
@@ -2212,6 +2531,14 @@
       border-left: none;
       border-top: 1px solid var(--color-border);
       max-height: 50%;
+    }
+    .query-editor-panel {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      border-left: none;
+      border-top: 1px solid var(--color-border);
+      max-height: 40%;
     }
   }
 </style>
