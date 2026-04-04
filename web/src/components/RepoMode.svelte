@@ -530,7 +530,7 @@
         onclick={() => onTabChange?.(tab.id)}
         title={tab.titleKey ? $t(tab.titleKey) : $t(tab.labelKey)}
       >
-        {$t(tab.labelKey)}{#if tab.id === 'decisions' && decisionsCount > 0}<span class="tab-badge">{decisionsCount > 99 ? '99+' : decisionsCount}</span>{:else if tab.id === 'agents' && activeAgents.length > 0}<span class="tab-badge tab-badge-info">{activeAgents.length}</span>{/if}
+        {$t(tab.labelKey)}{#if tab.id === 'decisions' && decisionsCount > 0}<span class="tab-badge">{decisionsCount > 99 ? '99+' : decisionsCount}</span>{:else if tab.id === 'agents' && activeAgents.length > 0}<span class="tab-badge tab-badge-info">{activeAgents.length}</span>{:else if tab.id === 'tasks' && repoTasks.length > 0}<span class="tab-count">{repoTasks.length}</span>{:else if tab.id === 'mrs' && repoMrs.length > 0}<span class="tab-count">{repoMrs.length}</span>{/if}
       </button>
     {/each}
   </div>
@@ -1164,6 +1164,14 @@
 
   .tab-badge-info {
     background: var(--color-info, #1e90ff);
+  }
+
+  .tab-count {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    margin-left: 3px;
+    font-family: var(--font-mono);
+    vertical-align: middle;
   }
 
   /* ── Tab content ────────────────────────────────────────────────────── */
