@@ -168,6 +168,26 @@ pub async fn create_view(
     Json(req): Json<CreateViewRequest>,
 ) -> Result<Json<ViewResponse>, (axum::http::StatusCode, String)> {
     let now = now_secs();
+
+    // Validate the view query against the ViewQuery schema before storing.
+    let _parsed_query: gyre_common::view_query::ViewQuery =
+        serde_json::from_value(req.query.clone()).map_err(|e| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("Invalid view query: {e}"),
+            )
+        })?;
+    let validation_errors = _parsed_query.validate();
+    if !validation_errors.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!(
+                "View query validation failed: {}",
+                validation_errors.join("; ")
+            ),
+        ));
+    }
+
     let query_json = serde_json::to_string(&req.query).map_err(|e| {
         (
             axum::http::StatusCode::BAD_REQUEST,

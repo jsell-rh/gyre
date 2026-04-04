@@ -261,8 +261,19 @@ pub struct CanvasState {
     pub active_lens: Option<String>,
     pub active_query: Option<serde_json::Value>,
     /// Recent user interactions (clicks, zooms, query presets) for conversational context.
+    /// Accepts both structured objects (preferred) and plain strings (legacy).
     #[serde(default)]
-    pub recent_interactions: Vec<String>,
+    pub recent_interactions: Vec<InteractionRecord>,
+}
+
+/// Structured record of a user interaction on the canvas.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractionRecord {
+    pub action: String,
+    #[serde(default)]
+    pub node: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 // ── WebSocket Protocol Messages ──────────────────────────────────────────────
@@ -284,6 +295,8 @@ pub enum ExplorerClientMessage {
     },
     /// Load a saved view.
     LoadView { view_id: String },
+    /// Delete a saved view.
+    DeleteView { view_id: String },
     /// List saved views for this repo.
     ListViews,
 }

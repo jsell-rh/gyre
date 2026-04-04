@@ -614,12 +614,9 @@ fn resolve_scope_with_adjacency(
                 active_nodes
                     .iter()
                     .filter(|n| {
-                        let created_matches_to =
-                            sha_matches(&n.created_sha, &to_lower);
-                        let modified_matches_to =
-                            sha_matches(&n.last_modified_sha, &to_lower);
-                        let created_matches_from =
-                            sha_matches(&n.created_sha, &from_lower);
+                        let created_matches_to = sha_matches(&n.created_sha, &to_lower);
+                        let modified_matches_to = sha_matches(&n.last_modified_sha, &to_lower);
+                        let created_matches_from = sha_matches(&n.created_sha, &from_lower);
 
                         // Node was created or modified at to_commit, but not created at from_commit
                         (created_matches_to || modified_matches_to) && !created_matches_from

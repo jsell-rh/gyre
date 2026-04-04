@@ -135,9 +135,9 @@ async fn handle_explorer_session(
     let mut last_message_time = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
-    // Cache graph data for the session (avoid re-fetching per message).
-    let mut cached_nodes: Option<Vec<gyre_common::graph::GraphNode>> = None;
-    let mut cached_edges: Option<Vec<gyre_common::graph::GraphEdge>> = None;
+    // Graph data per message (re-fetched each time for freshness).
+    let mut cached_nodes: Option<Vec<gyre_common::graph::GraphNode>>;
+    let mut cached_edges: Option<Vec<gyre_common::graph::GraphEdge>>;
 
     // Ping/pong keepalive: keeps connections alive through proxies/load balancers.
     let mut ping_interval =
@@ -214,12 +214,12 @@ async fn handle_explorer_session(
                 // Session message limit: prevent unbounded history growth.
                 message_count += 1;
 
-                // Invalidate graph cache frequently to pick up push/sync changes.
-                // Every 3 messages keeps data reasonably fresh without excessive DB load.
-                if message_count % 3 == 0 {
-                    cached_nodes = None;
-                    cached_edges = None;
-                }
+                // Invalidate graph cache on every message to ensure fresh data.
+                // The graph_store read is fast (in-memory SQLite), and stale data
+                // during active development is a correctness issue for an architecture
+                // explorer ("current realized architecture" should be current).
+                cached_nodes = None;
+                cached_edges = None;
                 if message_count > MAX_SESSION_MESSAGES {
                     let err = ExplorerServerMessage::Error {
                         message:
@@ -269,6 +269,31 @@ async fn handle_explorer_session(
                 description,
                 query,
             } => {
+                // Validate the view query before saving.
+                match serde_json::from_value::<gyre_common::view_query::ViewQuery>(query.clone()) {
+                    Ok(parsed) => {
+                        let errors = parsed.validate();
+                        if !errors.is_empty() {
+                            let err = ExplorerServerMessage::Error {
+                                message: format!("Invalid view query: {}", errors.join("; ")),
+                            };
+                            let _ = sender
+                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .await;
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        let err = ExplorerServerMessage::Error {
+                            message: format!("Invalid view query format: {e}"),
+                        };
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .await;
+                        continue;
+                    }
+                }
+
                 // Use workspace_id from the repo we already validated.
                 let workspace_id = match state.repos.find_by_id(&rid).await {
                     Ok(Some(r)) => r.workspace_id.to_string(),
@@ -396,6 +421,94 @@ async fn handle_explorer_session(
                         warn!(view_id = %view_id, error = ?e, "Failed to load view");
                         let err = ExplorerServerMessage::Error {
                             message: "Failed to load view. Please try again.".to_string(),
+                        };
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .await;
+                    }
+                }
+            }
+
+            ExplorerClientMessage::DeleteView { view_id } => {
+                let vid = Id::new(&view_id);
+                match state.saved_views.get(&vid).await {
+                    Ok(Some(v)) => {
+                        // Verify the view belongs to this repo and tenant.
+                        if v.repo_id.as_str() != repo_id {
+                            let err = ExplorerServerMessage::Error {
+                                message: "View does not belong to this repository".to_string(),
+                            };
+                            let _ = sender
+                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .await;
+                            continue;
+                        }
+                        if v.tenant_id.as_str() != auth.tenant_id {
+                            let err = ExplorerServerMessage::Error {
+                                message: "Access denied".to_string(),
+                            };
+                            let _ = sender
+                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .await;
+                            continue;
+                        }
+                        // Don't allow deleting system views.
+                        if v.is_system {
+                            let err = ExplorerServerMessage::Error {
+                                message: "Cannot delete system views".to_string(),
+                            };
+                            let _ = sender
+                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .await;
+                            continue;
+                        }
+                        match state.saved_views.delete(&vid).await {
+                            Ok(_) => {
+                                // Return updated view list
+                                if let Ok(all_views) = state.saved_views.list_by_repo(&rid).await {
+                                    let summaries: Vec<SavedViewSummary> = all_views
+                                        .into_iter()
+                                        .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
+                                        .map(|v| SavedViewSummary {
+                                            id: v.id.to_string(),
+                                            name: v.name,
+                                            description: v.description,
+                                            created_at: v.created_at,
+                                        })
+                                        .collect();
+                                    let msg = ExplorerServerMessage::Views { views: summaries };
+                                    let _ = sender
+                                        .send(Message::Text(
+                                            serde_json::to_string(&msg).unwrap().into(),
+                                        ))
+                                        .await;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(view_id = %view_id, error = ?e, "Failed to delete view");
+                                let err = ExplorerServerMessage::Error {
+                                    message: "Failed to delete view".to_string(),
+                                };
+                                let _ = sender
+                                    .send(Message::Text(
+                                        serde_json::to_string(&err).unwrap().into(),
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        let err = ExplorerServerMessage::Error {
+                            message: format!("View not found: {view_id}"),
+                        };
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(view_id = %view_id, error = ?e, "Failed to look up view");
+                        let err = ExplorerServerMessage::Error {
+                            message: "Failed to look up view".to_string(),
                         };
                         let _ = sender
                             .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
@@ -561,6 +674,17 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
                     "edge_type": { "type": "string", "description": "Filter by: contains, implements, depends_on, calls, field_of, returns, routes_to, governed_by" },
                     "source_id": { "type": "string", "description": "Filter by source node" },
                     "target_id": { "type": "string", "description": "Filter by target node" }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: "node_provenance".to_string(),
+            description: "Get provenance (creation/modification history) for specific nodes. Shows who created or modified the node, when, and in which commit.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "string", "description": "Node ID to get provenance for" },
+                    "name_pattern": { "type": "string", "description": "Find nodes by name and return their provenance" }
                 }
             }),
         },
@@ -910,13 +1034,20 @@ async fn run_explorer_agent(
             .into_iter()
             .rev()
             .collect();
+        let interaction_strs: Vec<String> = last_5
+            .iter()
+            .map(|i| {
+                let mut s = i.action.clone();
+                if let Some(ref node) = i.node {
+                    s.push_str(": ");
+                    s.push_str(node);
+                }
+                s
+            })
+            .collect();
         canvas_context_parts.push(format!(
             "Recent interactions: {}",
-            last_5
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            interaction_strs.join(", ")
         ));
     }
     let canvas_summary = if canvas_context_parts.is_empty() {
@@ -1274,6 +1405,56 @@ async fn execute_tool(
                 serde_json::to_string_pretty(&filtered).unwrap_or_default()
             )
         }
+        "node_provenance" => {
+            let node_id = tool_call.input.get("node_id").and_then(|v| v.as_str());
+            let name_pattern = tool_call
+                .input
+                .get("name_pattern")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_lowercase());
+
+            let target_nodes: Vec<&gyre_common::graph::GraphNode> = nodes
+                .iter()
+                .filter(|n| n.deleted_at.is_none())
+                .filter(|n| {
+                    if let Some(nid) = node_id {
+                        n.id.to_string() == nid
+                    } else if let Some(ref pat) = name_pattern {
+                        n.name.to_lowercase().contains(pat)
+                            || n.qualified_name.to_lowercase().contains(pat)
+                    } else {
+                        false
+                    }
+                })
+                .take(10)
+                .collect();
+
+            let provenance: Vec<serde_json::Value> = target_nodes
+                .iter()
+                .map(|n| {
+                    json!({
+                        "id": n.id.to_string(),
+                        "name": n.name,
+                        "qualified_name": n.qualified_name,
+                        "node_type": format!("{:?}", n.node_type).to_lowercase(),
+                        "created_sha": n.created_sha,
+                        "created_at": n.created_at,
+                        "last_modified_sha": n.last_modified_sha,
+                        "last_modified_by": n.last_modified_by,
+                        "last_modified_at": n.last_modified_at,
+                        "first_seen_at": n.first_seen_at,
+                        "file_path": n.file_path,
+                        "spec_path": n.spec_path,
+                    })
+                })
+                .collect();
+
+            format!(
+                "{} nodes:\n{}",
+                provenance.len(),
+                serde_json::to_string_pretty(&provenance).unwrap_or_default()
+            )
+        }
         "search" => {
             let query = tool_call
                 .input
@@ -1354,6 +1535,7 @@ User messages may include a [Canvas: ...] prefix showing what's currently select
 - Never invent node names — always verify via graph_nodes or search first
 - When explaining structure, cite the specific edge types connecting nodes
 - If you're unsure whether a node exists, search for it before referencing it
+- For provenance questions (who created/modified what, when), use node_provenance to get creation and modification history
 
 ## View Query Grammar
 
@@ -1483,12 +1665,13 @@ This shows all callers of TaskPort."#;
     #[test]
     fn test_explorer_tools_are_defined() {
         let tools = explorer_tool_definitions();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 6);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"graph_summary"));
         assert!(names.contains(&"graph_query_dryrun"));
         assert!(names.contains(&"graph_nodes"));
         assert!(names.contains(&"graph_edges"));
+        assert!(names.contains(&"node_provenance"));
         assert!(names.contains(&"search"));
     }
 

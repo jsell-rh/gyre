@@ -900,6 +900,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gyre-common",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
