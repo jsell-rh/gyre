@@ -467,6 +467,7 @@
   // on top of any active query rather than replacing it
   let evaluativeHeatConfig = $derived.by(() => {
     if (lens !== 'evaluative') return null;
+    // When trace data exists and metric is span_duration, use trace-based heat
     return { metric: evaluativeMetric, palette: 'blue-red' };
   });
 
@@ -476,11 +477,7 @@
     const metric = evaluativeHeatConfig.metric;
     let max = 0;
     for (const node of nodes) {
-      let v = 0;
-      if (metric === 'incoming_calls') v = incomingCallCounts.get(node.id) ?? 0;
-      else if (metric === 'complexity') v = node.complexity ?? 0;
-      else if (metric === 'churn' || metric === 'churn_count_30d') v = node.churn_count_30d ?? node.churn ?? 0;
-      else if (metric === 'test_coverage') v = (node.test_coverage ?? 0) * 100;
+      let v = getNodeMetricValue(metric, node);
       if (v > max) max = v;
     }
     const m = new Map();
@@ -488,18 +485,43 @@
     return m;
   });
 
+  // Centralized metric value accessor for evaluative lens
+  function getNodeMetricValue(metric, node) {
+    if (!node) return 0;
+    if (metric === 'incoming_calls') return incomingCallCounts.get(node.id) ?? 0;
+    if (metric === 'complexity') return node.complexity ?? 0;
+    if (metric === 'churn' || metric === 'churn_count_30d') return node.churn_count_30d ?? node.churn ?? 0;
+    if (metric === 'test_coverage') return (node.test_coverage ?? 0) * 100;
+    // Trace-based metrics (requires nodeSpanStats)
+    if (metric === 'span_duration') {
+      const stats = nodeSpanStats.get(node.id);
+      return stats ? stats.meanDuration : 0;
+    }
+    if (metric === 'span_count') {
+      const stats = nodeSpanStats.get(node.id);
+      return stats ? stats.spanCount : 0;
+    }
+    if (metric === 'error_rate') {
+      const stats = nodeSpanStats.get(node.id);
+      return stats ? stats.errorRate * 100 : 0;
+    }
+    return 0;
+  }
+
   function evaluativeNodeColor(nodeId, node) {
     if (!evaluativeHeatConfig || !node) return null;
     const metric = evaluativeHeatConfig.metric;
-    let value = 0;
-    if (metric === 'incoming_calls') value = incomingCallCounts.get(nodeId) ?? 0;
-    else if (metric === 'complexity') value = node.complexity ?? 0;
-    else if (metric === 'churn' || metric === 'churn_count_30d') value = node.churn_count_30d ?? node.churn ?? 0;
-    else if (metric === 'test_coverage') value = (node.test_coverage ?? 0) * 100;
+    const value = getNodeMetricValue(metric, node);
     if (value === 0) return null;
     const maxVal = evalHeatMaxValues.get(metric) ?? 1;
     const t = Math.min(1, value / maxVal);
     return heatColor(t, evaluativeHeatConfig.palette);
+  }
+
+  // Check if node has failed spans (for red glow effect)
+  function nodeHasErrors(nodeId) {
+    const stats = nodeSpanStats.get(nodeId);
+    return stats && stats.errorRate > 0;
   }
 
   function onLensChange(newLens) {
@@ -2770,17 +2792,8 @@
       // Heat map mode: use the heat color as the primary fill with strong alpha
       fillColor = qColor + 'cc'; // ~80% alpha
     } else if (lens === 'structural' && !qColor) {
-      // Check GovernedBy edges for this node
-      let hasGovEdge = false;
-      const nodeId = n?.id;
-      if (nodeId) {
-        for (const e of edges) {
-          if (e.deleted_at) continue;
-          const src = edgeSrc(e);
-          const et = edgeType(e);
-          if (et === 'governed_by' && src === nodeId) { hasGovEdge = true; break; }
-        }
-      }
+      // Check precomputed GovernedBy index (O(1) instead of O(E))
+      const hasGovEdge = n?.id && governedByIndex.has(n.id);
       if (n?.spec_path || hasGovEdge) {
         fillColor = 'rgba(34,197,94,0.30)';                             // green (has spec)
       } else {
@@ -2853,6 +2866,20 @@
       ctx.restore();
     }
 
+    // Red glow on nodes with failed spans (evaluative lens)
+    if (lens === 'evaluative' && n?.id && nodeHasErrors(n.id) && sw > 20) {
+      ctx.save();
+      ctx.shadowColor = '#ef4444';
+      ctx.shadowBlur = 12;
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 2.5;
+      ctx.globalAlpha = 0.7;
+      roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
+
     // Label
     if (sw > 30 && sh > 14) {
       const fontSize = Math.max(8, Math.min(13, Math.min(sw * 0.14, sh * 0.4)));
@@ -2916,6 +2943,19 @@
         else if (evaluativeMetric === 'complexity') { metricVal = n.complexity ?? 0; metricLabel = `cx:${metricVal}`; }
         else if (evaluativeMetric === 'churn' || evaluativeMetric === 'churn_count_30d') { metricVal = n.churn_count_30d ?? n.churn ?? 0; metricLabel = `${metricVal} churn`; }
         else if (evaluativeMetric === 'test_coverage') { metricVal = Math.round((n.test_coverage ?? 0) * 100); metricLabel = `${metricVal}% cov`; }
+        // Trace-based metrics from span data
+        else if (evaluativeMetric === 'span_duration') {
+          const stats = nodeSpanStats.get(n.id);
+          if (stats) { metricVal = stats.meanDuration; metricLabel = metricVal < 1000 ? `${Math.round(metricVal)}\u00B5s` : `${(metricVal / 1000).toFixed(1)}ms`; }
+        }
+        else if (evaluativeMetric === 'span_count') {
+          const stats = nodeSpanStats.get(n.id);
+          if (stats) { metricVal = stats.spanCount; metricLabel = `${metricVal} spans`; }
+        }
+        else if (evaluativeMetric === 'error_rate') {
+          const stats = nodeSpanStats.get(n.id);
+          if (stats) { metricVal = stats.errorRate * 100; metricLabel = `${metricVal.toFixed(0)}% err`; }
+        }
         if (metricVal > 0) {
           const bx = s.x + sw / 2 - 4;
           const by = s.y - sh / 2 + 4;
@@ -4202,6 +4242,12 @@
         {#each [['complexity', 'Complexity'], ['churn', 'Churn'], ['incoming_calls', 'Call Count'], ['test_coverage', 'Test Coverage']] as [key, label]}
           <button class="tb-btn tb-btn-sm" class:active={evaluativeMetric === key} onclick={() => { evaluativeMetric = key; onLensChange('evaluative'); }} type="button">{label}</button>
         {/each}
+        {#if traceData?.spans?.length}
+          <span class="tb-sep-v"></span>
+          {#each [['span_duration', 'Duration'], ['span_count', 'Spans'], ['error_rate', 'Errors']] as [key, label]}
+            <button class="tb-btn tb-btn-sm" class:active={evaluativeMetric === key} onclick={() => { evaluativeMetric = key; onLensChange('evaluative'); }} type="button">{label}</button>
+          {/each}
+        {/if}
       </div>
       {#if traceData?.spans?.length}
         <div class="eval-playback" role="group" aria-label="Trace playback">
@@ -4696,6 +4742,7 @@
   .trace-pb-particles { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; white-space: nowrap; }
 
   .tb-sep { width: 1px; height: 20px; background: #334155; margin: 0 4px; }
+  .tb-sep-v { width: 1px; height: 16px; background: #475569; margin: 0 2px; display: inline-block; vertical-align: middle; }
 
   .treemap-legend { display: flex; align-items: center; gap: 12px; margin-left: auto; }
   .legend-item { display: flex; align-items: center; gap: 4px; }
