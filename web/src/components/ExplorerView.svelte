@@ -47,8 +47,9 @@
   let detailNode = $state(null);
 
   // ── Breadcrumb URL deep-linking ──────────────────────────────────────
-  // Encode breadcrumb path in URL hash so refresh/sharing preserves drill-down.
-  // Format: #drill=id1:name1/id2:name2
+  // Encode breadcrumb path in URL hash using semantic names for readable URLs.
+  // Format: #drill=name1/name2/name3 (human-readable, shareable)
+  // Falls back to id:name if name is ambiguous (contains '/').
   $effect(() => {
     const bc = explorerCanvasState?.breadcrumb;
     if (!bc || bc.length === 0) {
@@ -58,7 +59,13 @@
       }
       return;
     }
-    const encoded = bc.map(b => `${encodeURIComponent(b.id)}:${encodeURIComponent(b.name)}`).join('/');
+    // Use semantic names for readable URLs: "repo > package > module > type"
+    const encoded = bc.map(b => {
+      const name = b.name || '?';
+      // If name contains path separators, encode the ID too for unambiguous lookup
+      if (name.includes('/')) return `${encodeURIComponent(b.id)}:${encodeURIComponent(name)}`;
+      return encodeURIComponent(name);
+    }).join('/');
     history.replaceState(null, '', `${window.location.pathname}${window.location.search}#drill=${encoded}`);
   });
 

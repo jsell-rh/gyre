@@ -1795,10 +1795,20 @@ async fn run_explorer_agent(
                         "Failed to deserialize view query for self-check — rejecting invalid query"
                     );
                     // Don't send unvalidated queries to the frontend.
-                    // Stream a warning instead and skip the view query.
+                    // Stream a warning with the raw JSON so the user can see what was attempted.
+                    let raw_preview = serde_json::to_string_pretty(&raw_query)
+                        .unwrap_or_else(|_| raw_query.to_string());
+                    let truncated = if raw_preview.len() > 500 {
+                        format!("{}...", &raw_preview[..500])
+                    } else {
+                        raw_preview
+                    };
                     stream_text(
                         sender,
-                        "\n\n*Warning: Generated view query had invalid structure and was not applied.*",
+                        &format!(
+                            "\n\n*Warning: Generated view query had invalid structure and was not applied.*\n\n```json\n{}\n```",
+                            truncated
+                        ),
                         true,
                     ).await;
                     break;

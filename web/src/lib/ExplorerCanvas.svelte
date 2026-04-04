@@ -63,8 +63,9 @@
     const hasGovEdge = node.id && governedByIndex.has(node.id);
     // Green: governed by spec with high confidence or explicit GovernedBy edge
     if (conf === 'high' || hasGovEdge) return '#22c55e';
-    // Green: explicit spec_path with no confidence rating (backwards compat for spec nodes)
-    if (node.spec_path && !conf) return '#22c55e';
+    // Amber: spec_path present without explicit confidence — treat as heuristic match,
+    // not high confidence. Only GovernedBy edges or explicit 'high' confidence get green.
+    if (node.spec_path && !conf) return '#eab308';
     // Amber: spec_path present but low/medium confidence (heuristic match)
     if (node.spec_path && (conf === 'medium' || conf === 'low')) return '#eab308';
     if (conf === 'medium') return '#eab308';
