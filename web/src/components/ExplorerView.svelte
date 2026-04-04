@@ -101,6 +101,37 @@
     predictConfidence = null;
   }
 
+  // Instant preview tier: compute link graph impact without LLM (§3 Instant tier)
+  let instantImpact = $derived.by(() => {
+    if (!specEditorOpen || !specEditorDirty || !graph?.nodes?.length || !graph?.edges?.length) return null;
+    // Find nodes governed by this spec path
+    const governedNodeIds = new Set();
+    for (const e of (graph.edges ?? [])) {
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (et === 'governed_by') {
+        const src = e.source_id ?? e.from_node_id ?? e.from;
+        const tgtNode = (graph.nodes ?? []).find(n => n.id === (e.target_id ?? e.to_node_id ?? e.to));
+        if (tgtNode?.spec_path === specEditorPath || tgtNode?.name === specEditorPath) {
+          governedNodeIds.add(src);
+        }
+      }
+    }
+    // Also find nodes with spec_path matching
+    for (const n of (graph.nodes ?? [])) {
+      if (n.spec_path === specEditorPath) governedNodeIds.add(n.id);
+    }
+    // Count affected repos, nodes, and dependent specs
+    const affectedNodes = (graph.nodes ?? []).filter(n => governedNodeIds.has(n.id));
+    const affectedTypes = new Map();
+    for (const n of affectedNodes) {
+      affectedTypes.set(n.node_type ?? 'unknown', (affectedTypes.get(n.node_type ?? 'unknown') ?? 0) + 1);
+    }
+    return {
+      governedCount: governedNodeIds.size,
+      byType: [...affectedTypes.entries()].map(([t, c]) => `${c} ${t}${c !== 1 ? 's' : ''}`).join(', '),
+    };
+  });
+
   async function runPrediction() {
     if (!selectedRepoId || !specEditorPath || predictLoading) return;
     predictLoading = true;
@@ -835,6 +866,15 @@
                   {/if}
                 </div>
                 <div class="spec-editor-footer">
+                  {#if instantImpact && specEditorDirty}
+                    <div class="instant-impact" role="status">
+                      <span class="instant-label">Instant impact:</span>
+                      <span class="instant-count">{instantImpact.governedCount} governed node{instantImpact.governedCount !== 1 ? 's' : ''}</span>
+                      {#if instantImpact.byType}
+                        <span class="instant-types">({instantImpact.byType})</span>
+                      {/if}
+                    </div>
+                  {/if}
                   {#if predictError}
                     <div class="spec-editor-predict-error" role="alert">
                       {$t('explorer_view.spec_editor_predict_error', { values: { error: predictError } })}
@@ -1912,6 +1952,18 @@
     gap: var(--space-2);
     background: var(--color-surface-elevated);
   }
+
+  .instant-impact {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: var(--space-1) 0;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .instant-label { font-weight: 600; color: #60a5fa; }
+  .instant-count { color: var(--color-text); }
+  .instant-types { color: var(--color-text-muted); font-family: 'SF Mono', Menlo, monospace; font-size: 11px; }
 
   .spec-editor-predict-error {
     font-size: var(--text-xs);

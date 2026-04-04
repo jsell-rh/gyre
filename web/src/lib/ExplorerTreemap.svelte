@@ -216,7 +216,24 @@
           });
         }
       }
-      // Pattern 4: Orphan function — no callers (possible dead code)
+      // Pattern 4: Type/interface created by agent but has no governing spec
+      if ((n.node_type === 'type' || n.node_type === 'interface') && !n.spec_path && n.last_modified_by) {
+        let hasGovEdge = false;
+        for (const e of edges) {
+          const src = e.source_id ?? e.from_node_id ?? e.from;
+          const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+          if (et === 'governed_by' && src === n.id) { hasGovEdge = true; break; }
+        }
+        if (!hasGovEdge) {
+          results.push({
+            nodeId: n.id,
+            nodeName: n.name ?? n.qualified_name ?? '?',
+            message: `Agent-created ${n.node_type} has no governing spec`,
+            severity: 'medium',
+          });
+        }
+      }
+      // Pattern 5: Orphan function — no callers (possible dead code)
       if (n.node_type === 'function' && !n.test_node && calls === 0) {
         results.push({
           nodeId: n.id,
