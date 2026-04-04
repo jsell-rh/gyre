@@ -55,6 +55,9 @@
   let predictLoading = $state(false);
   let predictError = $state('');
   let ghostOverlays = $state([]);
+  let predictAffectedSpecs = $state([]);
+  let predictEstimatedCost = $state(null);
+  let predictConfidence = $state(null);
 
   async function openSpecEditor(specPath) {
     if (!specPath || !selectedRepoId) return;
@@ -86,6 +89,9 @@
     specEditorError = '';
     predictError = '';
     ghostOverlays = [];
+    predictAffectedSpecs = [];
+    predictEstimatedCost = null;
+    predictConfidence = null;
   }
 
   async function runPrediction() {
@@ -93,20 +99,42 @@
     predictLoading = true;
     predictError = '';
     ghostOverlays = [];
+    predictAffectedSpecs = [];
+    predictEstimatedCost = null;
+    predictConfidence = null;
     try {
       const result = await api.graphPredict(selectedRepoId, {
         spec_path: specEditorPath,
         draft_content: specEditorContent,
       });
+
+      // Extract prediction-level metadata
+      predictAffectedSpecs = result?.affected_specs ?? [];
+      predictEstimatedCost = result?.estimated_agent_cost ?? result?.cost ?? null;
+      predictConfidence = result?.confidence ?? null;
+
+      // Build ghost overlays with per-node confidence and reason
       const overlays = [];
       for (const item of (result?.added ?? [])) {
-        overlays.push({ id: item.id ?? `ghost-add-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'new node', type: item.node_type ?? item.type ?? 'unknown', action: 'add' });
+        overlays.push({ id: item.id ?? `ghost-add-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'new node', type: item.node_type ?? item.type ?? 'unknown', action: 'add', confidence: item.confidence, reason: item.reason });
       }
       for (const item of (result?.changed ?? [])) {
-        overlays.push({ id: item.id ?? `ghost-change-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'changed node', type: item.node_type ?? item.type ?? 'unknown', action: 'change' });
+        overlays.push({ id: item.id ?? `ghost-change-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'changed node', type: item.node_type ?? item.type ?? 'unknown', action: 'change', confidence: item.confidence, reason: item.reason });
       }
       for (const item of (result?.removed ?? [])) {
-        overlays.push({ id: item.id ?? `ghost-remove-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'removed node', type: item.node_type ?? item.type ?? 'unknown', action: 'remove' });
+        overlays.push({ id: item.id ?? `ghost-remove-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'removed node', type: item.node_type ?? item.type ?? 'unknown', action: 'remove', confidence: item.confidence, reason: item.reason });
+      }
+
+      // Also check for predictions array (alternative response format)
+      for (const item of (result?.predictions ?? [])) {
+        overlays.push({
+          id: item.node_id ?? item.id ?? `ghost-pred-${overlays.length}`,
+          name: item.name ?? 'predicted',
+          type: item.node_type ?? item.type ?? 'unknown',
+          action: item.action ?? 'change',
+          confidence: item.confidence,
+          reason: item.reason,
+        });
       }
       ghostOverlays = overlays;
     } catch (e) {
@@ -610,8 +638,49 @@
                   {/if}
                   {#if ghostOverlays.length > 0}
                     <div class="spec-editor-predict-result" role="status">
-                      {ghostOverlays.length} predicted {ghostOverlays.length === 1 ? 'change' : 'changes'}
+                      <span class="predict-summary">
+                        {ghostOverlays.length} predicted {ghostOverlays.length === 1 ? 'change' : 'changes'}
+                        {#if predictConfidence}
+                          <span class="predict-confidence" class:high={predictConfidence === 'high'} class:medium={predictConfidence === 'medium'} class:low={predictConfidence === 'low'}>
+                            {predictConfidence} confidence
+                          </span>
+                        {/if}
+                      </span>
+                      {#if predictEstimatedCost}
+                        <span class="predict-cost" title="Estimated agent cost to implement">
+                          ~{typeof predictEstimatedCost === 'number' ? `$${predictEstimatedCost.toFixed(2)}` : predictEstimatedCost} est. cost
+                        </span>
+                      {/if}
                     </div>
+                    {#if ghostOverlays.some(g => g.reason)}
+                      <div class="predict-details">
+                        {#each ghostOverlays.filter(g => g.reason) as ghost}
+                          <div class="predict-detail-item">
+                            <span class="predict-detail-action" class:add={ghost.action === 'add'} class:change={ghost.action === 'change'} class:remove={ghost.action === 'remove'}>
+                              {ghost.action === 'add' ? '+' : ghost.action === 'remove' ? '\u2212' : '\u0394'}
+                            </span>
+                            <span class="predict-detail-name">{ghost.name}</span>
+                            {#if ghost.confidence}
+                              <span class="predict-detail-conf" title="Confidence">{ghost.confidence}</span>
+                            {/if}
+                            <span class="predict-detail-reason">{ghost.reason}</span>
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
+                    {#if predictAffectedSpecs.length > 0}
+                      <div class="predict-affected-specs">
+                        <span class="predict-affected-label">Affected specs:</span>
+                        {#each predictAffectedSpecs as sp}
+                          <button
+                            class="predict-affected-spec-btn"
+                            onclick={() => openSpecEditor(sp)}
+                            title="Open {sp}"
+                            type="button"
+                          >{sp.split('/').pop()}</button>
+                        {/each}
+                      </div>
+                    {/if}
                   {/if}
                   <div class="spec-editor-actions">
                     <button
@@ -641,6 +710,7 @@
                 repoId={selectedRepoId}
                 canvasState={explorerCanvasState}
                 onViewQuery={(q) => { activeViewQuery = q; }}
+                onOpenSpec={(path) => openSpecEditor(path)}
                 savedViews={explorerSavedViews}
                 onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
               />
@@ -1710,6 +1780,138 @@
     color: var(--color-success);
     font-weight: 500;
     padding: var(--space-1) 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .predict-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .predict-confidence {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-full);
+  }
+
+  .predict-confidence.high {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 15%, transparent);
+  }
+
+  .predict-confidence.medium {
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+  }
+
+  .predict-confidence.low {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+  }
+
+  .predict-cost {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .predict-details {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+
+  .predict-detail-item {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    line-height: 1.4;
+  }
+
+  .predict-detail-action {
+    font-weight: 700;
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+    width: 14px;
+    text-align: center;
+  }
+
+  .predict-detail-action.add { color: var(--color-success); }
+  .predict-detail-action.change { color: var(--color-warning); }
+  .predict-detail-action.remove { color: var(--color-danger); }
+
+  .predict-detail-name {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    color: var(--color-text);
+    flex-shrink: 0;
+  }
+
+  .predict-detail-conf {
+    font-size: 9px;
+    color: var(--color-text-muted);
+    padding: 0 3px;
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+
+  .predict-detail-reason {
+    color: var(--color-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .predict-affected-specs {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+    padding-top: var(--space-1);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .predict-affected-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .predict-affected-spec-btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px var(--space-2);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 25%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--color-warning);
+    font-size: 10px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .predict-affected-spec-btn:hover {
+    background: color-mix(in srgb, var(--color-warning) 20%, transparent);
+    border-color: var(--color-warning);
+  }
+
+  .predict-affected-spec-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .spec-editor-actions {

@@ -7,9 +7,21 @@
     repoId = '',
     canvasState = {},
     onViewQuery = () => {},
+    onOpenSpec = null,
     savedViews = [],
     onSavedViewsUpdate = () => {},
   } = $props();
+
+  // ── Spec path detection ─────────────────────────────────────────────────
+  // Extracts spec paths (specs/.../*.md) from message content
+  const SPEC_PATH_RE = /\b(specs\/[\w\-\/]+\.md)\b/g;
+
+  function extractSpecPaths(content) {
+    if (!content) return [];
+    const matches = [...content.matchAll(SPEC_PATH_RE)];
+    // Deduplicate
+    return [...new Set(matches.map(m => m[1]))];
+  }
 
   // ── Constants ────────────────────────────────────────────────────────────
   const AUTH_TOKEN_KEY = 'gyre_auth_token';
@@ -220,6 +232,18 @@
     }
   }
 
+  // ── Spec link click delegation ────────────────────────────────────────────
+  function onMessagesClick(e) {
+    const specLink = e.target.closest('.md-spec-link');
+    if (specLink) {
+      e.preventDefault();
+      const specPath = specLink.dataset.specPath;
+      if (specPath && onOpenSpec) {
+        onOpenSpec(specPath);
+      }
+    }
+  }
+
   // ── Scroll ───────────────────────────────────────────────────────────────
   function scrollToBottom() {
     requestAnimationFrame(() => {
@@ -344,7 +368,9 @@
   </div>
 
   <!-- Messages area -->
-  <div class="chat-messages" bind:this={messagesEl} role="log" aria-live="polite">
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="chat-messages" bind:this={messagesEl} role="log" aria-live="polite" onclick={onMessagesClick}>
     {#if messages.length === 0 && !streamingText}
       <div class="chat-welcome">
         <div class="welcome-icon" aria-hidden="true">
@@ -395,6 +421,28 @@
               </svg>
               {$t('explorer_chat.apply_view')}
             </button>
+          {/if}
+          {#if msg.role === 'assistant' && onOpenSpec}
+            {@const specPaths = extractSpecPaths(msg.content)}
+            {#if specPaths.length > 0}
+              <div class="message-spec-refs">
+                <span class="spec-refs-label">Specs mentioned:</span>
+                {#each specPaths as path}
+                  <button
+                    class="spec-ref-btn"
+                    onclick={() => onOpenSpec(path)}
+                    title="Open {path} in spec editor"
+                    type="button"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11" aria-hidden="true">
+                      <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+                      <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                    {path.split('/').pop()}
+                  </button>
+                {/each}
+              </div>
+            {/if}
           {/if}
         </div>
       {/each}
@@ -786,6 +834,24 @@
     text-decoration: underline;
   }
 
+  .message-content :global(a.md-spec-link) {
+    color: var(--color-warning);
+    text-decoration: none;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    padding: 1px 4px;
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 25%, transparent);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .message-content :global(a.md-spec-link:hover) {
+    background: color-mix(in srgb, var(--color-warning) 20%, transparent);
+    border-color: var(--color-warning);
+  }
+
   .message-content :global(strong) {
     font-weight: 600;
     color: var(--color-text);
@@ -814,6 +880,48 @@
   }
 
   .apply-view-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /* ── Spec path references ────────────────────────────────────────── */
+  .message-spec-refs {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-top: var(--space-1);
+  }
+
+  .spec-refs-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .spec-ref-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px var(--space-2);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-warning);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .spec-ref-btn:hover {
+    background: color-mix(in srgb, var(--color-warning) 20%, transparent);
+    border-color: var(--color-warning);
+  }
+
+  .spec-ref-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }

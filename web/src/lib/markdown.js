@@ -29,7 +29,9 @@ function inlineMarkdown(line) {
         return text; // Strip dangerous links, show text only
       }
       return `<a href="${url}" target="_blank" rel="noopener">${text}</a>`;
-    });
+    })
+    // Spec paths — make clickable with data attribute for event delegation
+    .replace(/\b(specs\/[\w\-\/]+\.md)\b/g, '<a href="#" class="md-spec-link" data-spec-path="$1" title="Open $1 in spec editor">$1</a>');
 }
 
 export function renderMarkdown(md) {

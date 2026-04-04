@@ -1555,7 +1555,9 @@
     const r = Math.min(6, sw * 0.08);
 
     ctx.save();
-    ctx.globalAlpha = 0.4 + 0.3 * pulse;
+    // Modulate opacity by confidence: high=full, medium=medium, low=faint
+    const confAlpha = ghost.confidence === 'low' ? 0.25 : ghost.confidence === 'medium' ? 0.45 : 0.55;
+    ctx.globalAlpha = confAlpha + 0.25 * pulse;
 
     // Pulsing green dotted border
     ctx.setLineDash([6, 4]);
@@ -1585,12 +1587,30 @@
       }
       ctx.fillText(label, s.x, s.y);
 
-      // Type label below
-      if (sh > 30 && sw > 50 && ghost.type) {
+      // Type label + confidence indicator below
+      const hasType = sh > 30 && sw > 50 && ghost.type;
+      if (hasType) {
         const typeSize = Math.max(7, fontSize * 0.7);
         ctx.fillStyle = 'rgba(34, 197, 94, 0.6)';
         ctx.font = `400 ${typeSize}px system-ui`;
-        ctx.fillText(ghost.type, s.x, s.y + fontSize * 0.7 + 2);
+        const typeLabel = ghost.confidence ? `${ghost.type} (${ghost.confidence})` : ghost.type;
+        ctx.fillText(typeLabel, s.x, s.y + fontSize * 0.7 + 2);
+      }
+
+      // Reason text below type (if enough vertical space)
+      if (sh > 50 && sw > 80 && ghost.reason) {
+        const reasonSize = Math.max(7, fontSize * 0.6);
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.4)';
+        ctx.font = `400 ${reasonSize}px system-ui`;
+        let reason = ghost.reason;
+        const reasonMaxW = sw - 12;
+        const rw = measureText(ctx, reason, ctx.font);
+        if (rw > reasonMaxW) {
+          while (measureText(ctx, reason + '\u2026', ctx.font) > reasonMaxW && reason.length > 5) reason = reason.slice(0, -1);
+          reason += '\u2026';
+        }
+        const reasonY = hasType ? s.y + fontSize * 0.7 + reasonSize + 6 : s.y + fontSize * 0.7 + 4;
+        ctx.fillText(reason, s.x, reasonY);
       }
     }
 
@@ -1608,7 +1628,8 @@
     const r = Math.min(6, sw * 0.08);
 
     ctx.save();
-    ctx.globalAlpha = 0.5 + 0.3 * pulse;
+    const confAlpha = ghost.confidence === 'low' ? 0.3 : ghost.confidence === 'medium' ? 0.5 : 0.6;
+    ctx.globalAlpha = confAlpha + 0.25 * pulse;
 
     // Yellow highlight overlay
     ctx.fillStyle = 'rgba(234, 179, 8, 0.12)';
@@ -1638,6 +1659,23 @@
       ctx.fillText(badgeText, bx, by);
     }
 
+    // Reason text (if space permits)
+    if (sw > 80 && sh > 30 && ghost.reason) {
+      const reasonSize = Math.max(7, Math.min(10, sw * 0.06));
+      ctx.fillStyle = 'rgba(234, 179, 8, 0.5)';
+      ctx.font = `400 ${reasonSize}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      let reason = ghost.reason;
+      const reasonMaxW = sw - 12;
+      const rw = measureText(ctx, reason, ctx.font);
+      if (rw > reasonMaxW) {
+        while (measureText(ctx, reason + '\u2026', ctx.font) > reasonMaxW && reason.length > 5) reason = reason.slice(0, -1);
+        reason += '\u2026';
+      }
+      ctx.fillText(reason, s.x, s.y + sh / 2 - reasonSize - 4);
+    }
+
     ctx.setLineDash([]);
     ctx.restore();
   }
@@ -1652,7 +1690,8 @@
     const r = Math.min(6, sw * 0.08);
 
     ctx.save();
-    ctx.globalAlpha = 0.4 + 0.2 * pulse;
+    const confAlpha = ghost.confidence === 'low' ? 0.25 : ghost.confidence === 'medium' ? 0.35 : 0.45;
+    ctx.globalAlpha = confAlpha + 0.2 * pulse;
 
     // Red semi-transparent overlay
     ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
@@ -2712,13 +2751,24 @@
       </div>
       <div class="ghost-legend-chips">
         {#if ghostOverlays.some(g => g.action === 'add')}
-          <span class="ghost-chip ghost-chip-add">+ New</span>
+          <span class="ghost-chip ghost-chip-add">+ New ({ghostOverlays.filter(g => g.action === 'add').length})</span>
         {/if}
         {#if ghostOverlays.some(g => g.action === 'change')}
-          <span class="ghost-chip ghost-chip-change">{'\u0394'} Changed</span>
+          <span class="ghost-chip ghost-chip-change">{'\u0394'} Changed ({ghostOverlays.filter(g => g.action === 'change').length})</span>
         {/if}
         {#if ghostOverlays.some(g => g.action === 'remove')}
-          <span class="ghost-chip ghost-chip-remove">{'\u2212'} Removed</span>
+          <span class="ghost-chip ghost-chip-remove">{'\u2212'} Removed ({ghostOverlays.filter(g => g.action === 'remove').length})</span>
+        {/if}
+        {#if ghostOverlays.some(g => g.confidence)}
+          {@const confs = ghostOverlays.filter(g => g.confidence)}
+          {@const highCount = confs.filter(g => g.confidence === 'high').length}
+          {@const medCount = confs.filter(g => g.confidence === 'medium').length}
+          {@const lowCount = confs.filter(g => g.confidence === 'low').length}
+          <span class="ghost-chip ghost-chip-conf" title="Prediction confidence breakdown">
+            {#if highCount > 0}<span class="conf-high">{highCount}H</span>{/if}
+            {#if medCount > 0}<span class="conf-med">{medCount}M</span>{/if}
+            {#if lowCount > 0}<span class="conf-low">{lowCount}L</span>{/if}
+          </span>
         {/if}
       </div>
     </div>
@@ -3358,6 +3408,14 @@
     color: #ef4444; background: rgba(239, 68, 68, 0.15);
     border: 1px solid rgba(239, 68, 68, 0.3);
   }
+  .ghost-chip-conf {
+    color: #94a3b8; background: rgba(148, 163, 184, 0.1);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    display: inline-flex; gap: 4px;
+  }
+  .conf-high { color: #22c55e; }
+  .conf-med { color: #eab308; }
+  .conf-low { color: #ef4444; }
 
   @keyframes ghost-pulse {
     0%, 100% { opacity: 0.4; transform: scale(0.8); }
