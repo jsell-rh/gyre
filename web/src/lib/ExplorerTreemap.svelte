@@ -14,6 +14,7 @@
     onNodeDetail = () => {},
     onInteractiveQuery = () => {},
     ghostOverlays = [],
+    filters = null,
   } = $props();
 
   // ── Interactive $clicked mode ──────────────────────────────────────────
@@ -44,11 +45,24 @@
 
   function specBorderColor(node) {
     if (!node) return '#64748b';
+    // Green: governed by spec (explicit spec_path or high confidence)
+    if (node.spec_path) return '#22c55e';
     const conf = node.spec_confidence;
     if (conf === 'high') return '#22c55e';
+    // Amber: suggested link (medium or low confidence)
     if (conf === 'medium') return '#eab308';
     if (conf === 'low') return '#f97316';
-    return '#64748b';
+    // Check GovernedBy edges for this node
+    const nodeId = node.id;
+    if (nodeId) {
+      for (const e of edges) {
+        const src = e.source_id ?? e.from_node_id ?? e.from;
+        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+        if (et === 'governed_by' && src === nodeId) return '#22c55e';
+      }
+    }
+    // Red: no spec coverage
+    return '#ef4444';
   }
 
   const EDGE_COLORS = {
@@ -835,10 +849,40 @@
     return s;
   });
 
+  // Map filter-panel categories to node_type sets
+  const CATEGORY_NODE_TYPES = {
+    boundaries: new Set(['module', 'crate', 'package', 'namespace']),
+    interfaces: new Set(['endpoint', 'function', 'method', 'trait', 'interface']),
+    data: new Set(['type', 'struct', 'enum', 'field', 'table', 'model']),
+    specs: new Set(['spec', 'spec_file']),
+  };
+
+  function matchesActiveFilters(node) {
+    if (!filters) return true;
+    // Category check
+    if (filters.categories && filters.categories.length > 0) {
+      const nt = (node.node_type ?? '').toLowerCase();
+      let matched = false;
+      for (const cat of filters.categories) {
+        if (CATEGORY_NODE_TYPES[cat]?.has(nt)) { matched = true; break; }
+      }
+      // If the node type doesn't fit any known category, show it if all categories are active
+      if (!matched && filters.categories.length < 4) return false;
+    }
+    // Visibility check
+    if (filters.visibility === 'public' && node.visibility === 'private') return false;
+    if (filters.visibility === 'private' && node.visibility === 'public') return false;
+    // Churn check
+    if (filters.min_churn && (node.churn ?? 0) < filters.min_churn) return false;
+    return true;
+  }
+
   function filterOpacity(ln) {
-    if (filter === 'all') return 1.0;
     if (ln.kind === 'tree-group') return 1.0;
     if (!ln.node) return 0.1;
+    // Apply active filters from filter panel
+    if (filters && !matchesActiveFilters(ln.node)) return 0.1;
+    if (filter === 'all') return 1.0;
     switch (filter) {
       case 'endpoints': return ln.node.node_type === 'endpoint' ? 1.0 : 0.1;
       case 'types': return (ln.node.node_type === 'type' || ln.node.node_type === 'interface' || ln.node.node_type === 'field') ? 1.0 : 0.1;
@@ -1857,11 +1901,15 @@
     const qColor = queryNodeColor(ln);
     let fillColor = 'rgba(20,28,48,0.9)';
     if (lens === 'structural' && !qColor) {
-      const conf = n?.spec_confidence;
-      if (conf === 'high') fillColor = 'rgba(34,197,94,0.15)';        // green tint
-      else if (conf === 'medium') fillColor = 'rgba(234,179,8,0.12)'; // amber tint
-      else if (conf === 'low') fillColor = 'rgba(249,115,22,0.12)';   // orange tint
-      else fillColor = 'rgba(239,68,68,0.08)';                        // subtle red tint
+      if (n?.spec_path) {
+        fillColor = 'rgba(34,197,94,0.15)';                             // green tint (has spec_path)
+      } else {
+        const conf = n?.spec_confidence;
+        if (conf === 'high') fillColor = 'rgba(34,197,94,0.15)';        // green tint
+        else if (conf === 'medium') fillColor = 'rgba(234,179,8,0.12)'; // amber tint
+        else if (conf === 'low') fillColor = 'rgba(249,115,22,0.12)';   // orange tint
+        else fillColor = 'rgba(239,68,68,0.08)';                        // red tint (no spec)
+      }
     }
     ctx.fillStyle = fillColor;
     ctx.fill();

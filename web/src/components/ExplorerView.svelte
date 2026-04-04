@@ -146,6 +146,9 @@
 
   let specEditorDirty = $derived(specEditorContent !== specEditorOriginal);
 
+  // Workspace-scope: track when a repo has been selected to show graph canvas
+  let showingRepoGraph = $state(false);
+
   // Filter panel state
   let filterVisible = $state(false);
   let insightsCollapsed = $state(true);
@@ -199,8 +202,16 @@
   function selectRepo(repo) {
     // In workspace-scope mode, selecting a repo loads its graph in this view
     selectedRepoId = repo.id;
+    showingRepoGraph = true;
     clearConceptSearch();
     loadGraph(repo.id);
+  }
+
+  function backToRepoList() {
+    showingRepoGraph = false;
+    selectedRepoId = '';
+    graph = null;
+    graphError = null;
   }
 
   async function loadRepos() {
@@ -365,7 +376,7 @@
   <!-- Tenant scope: workspace cards grid (S4.4a) -->
   <WorkspaceCards {onSelectWorkspace} />
 
-{:else if scopeType === 'workspace'}
+{:else if scopeType === 'workspace' && !showingRepoGraph}
   <!-- Workspace scope: repo list for graph exploration — S4.4b -->
   <div class="ws-repo-list" aria-busy={wsReposLoading}>
     <div class="ws-repo-header">
@@ -408,19 +419,27 @@
   </div>
 
 {:else}
-  <!-- Repo scope: architecture canvas + chat (S4.4b/c) -->
+  <!-- Repo/workspace-repo scope: architecture canvas + chat (S4.4b/c) -->
   <div class="explorer-view">
     <!-- Header -->
     <div class="explorer-header">
       <div class="header-left">
-        <h1 class="page-title">{scopeType === 'repo' ? $t('explorer_view.architecture_title') : $t('explorer_view.system_title')}</h1>
-        {#if scopeType !== 'repo'}
+        {#if scopeType === 'workspace' && showingRepoGraph}
+          <button class="back-to-repos-btn" onclick={backToRepoList} type="button" aria-label="Back to repositories">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+              <path d="M19 12H5M12 19l-7-7 7-7"/>
+            </svg>
+            Repos
+          </button>
+        {/if}
+        <h1 class="page-title">{scopeType === 'repo' || showingRepoGraph ? $t('explorer_view.architecture_title') : $t('explorer_view.system_title')}</h1>
+        {#if scopeType !== 'repo' && !showingRepoGraph}
           <p class="subtitle">{$t('explorer_view.system_subtitle')}</p>
         {/if}
       </div>
       <div class="header-right">
         <!-- Repo selector — hidden in repo scope (auto-selected from parent) -->
-        {#if scopeType !== 'repo'}
+        {#if scopeType !== 'repo' && !showingRepoGraph}
           {#if reposLoading}
             <div class="repo-selector-skeleton">
               <Skeleton lines={1} />
@@ -458,6 +477,28 @@
             </span>
           </div>
         {/if}
+
+        <!-- Lens toggle (Structural / Evaluative / Observable) -->
+        <div class="lens-toggle" role="group" aria-label="Explorer lens">
+          <button
+            class="lens-btn"
+            class:active={explorerLens === 'structural'}
+            onclick={() => { explorerLens = 'structural'; }}
+            type="button"
+          >Structural</button>
+          <button
+            class="lens-btn"
+            class:active={explorerLens === 'evaluative'}
+            onclick={() => { explorerLens = 'evaluative'; }}
+            type="button"
+          >Evaluative</button>
+          <button
+            class="lens-btn"
+            disabled
+            title="Requires production telemetry"
+            type="button"
+          >Observable</button>
+        </div>
       </div>
     </div>
 
@@ -574,11 +615,137 @@
                 activeQuery={activeViewQuery}
                 filter={explorerFilter}
                 lens={explorerLens}
+                filters={activeFilters}
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => { detailNode = n; }}
                 onInteractiveQuery={(q) => { activeViewQuery = q; }}
                 {ghostOverlays}
               />
+              <!-- Architecture Insights — collapsible panel inside canvas area -->
+              {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
+                <div class="arch-insights-overlay">
+                  <div class="arch-insights-toggle">
+                    <button
+                      class="arch-insights-btn"
+                      onclick={() => insightsCollapsed = !insightsCollapsed}
+                      aria-expanded={!insightsCollapsed}
+                      aria-controls="arch-insights-panel"
+                    >
+                      <span class="arch-toggle-icon" class:open={!insightsCollapsed}>&#9654;</span>
+                      Architecture Insights
+                    </button>
+                  </div>
+                  <div class="arch-insights" id="arch-insights-panel" class:collapsed={insightsCollapsed}>
+                    <!-- Graph Types (structs/enums extracted from code) -->
+                    {#if graphTypes?.length > 0}
+                      <div class="arch-insight-section">
+                        <h3 class="arch-insight-title">Types ({graphTypes.length})</h3>
+                        <p class="arch-insight-desc">Structs, enums, and type definitions extracted from the codebase.</p>
+                        <div class="arch-type-grid">
+                          {#each graphTypes.slice(0, 20) as node}
+                            <div class="arch-type-card" title={node.qualified_name ?? node.name}>
+                              <span class="arch-type-kind">{node.node_type ?? 'type'}</span>
+                              <span class="arch-type-name">{node.name ?? node.qualified_name}</span>
+                              {#if node.doc_comment}
+                                <span class="arch-type-doc">{node.doc_comment.slice(0, 80)}{node.doc_comment.length > 80 ? '...' : ''}</span>
+                              {/if}
+                            </div>
+                          {/each}
+                          {#if graphTypes.length > 20}
+                            <span class="arch-more">+{graphTypes.length - 20} more</span>
+                          {/if}
+                        </div>
+                      </div>
+                    {/if}
+
+                    <!-- Graph Modules -->
+                    {#if graphModules?.length > 0}
+                      <div class="arch-insight-section">
+                        <h3 class="arch-insight-title">Modules ({graphModules.length})</h3>
+                        <p class="arch-insight-desc">Module hierarchy extracted from the codebase.</p>
+                        <ul class="arch-dep-list">
+                          {#each graphModules.slice(0, 15) as mod}
+                            <li class="arch-dep-item">
+                              <span class="mono">{mod.qualified_name ?? mod.name}</span>
+                              {#if mod.doc_comment}
+                                <span class="arch-mod-doc">{mod.doc_comment.slice(0, 60)}</span>
+                              {/if}
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}
+
+                    {#if repoDeps && (repoDeps.dependencies.length > 0 || repoDeps.dependents.length > 0)}
+                      <div class="arch-insight-section">
+                        <h3 class="arch-insight-title">Cross-Repo Dependencies</h3>
+                        {#if repoDeps.dependencies.length > 0}
+                          <div class="arch-dep-group">
+                            <span class="arch-dep-label">Depends on ({repoDeps.dependencies.length})</span>
+                            <ul class="arch-dep-list">
+                              {#each repoDeps.dependencies as dep}
+                                <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? entityName('repo', dep.repo_id ?? dep)}</li>
+                              {/each}
+                            </ul>
+                          </div>
+                        {/if}
+                        {#if repoDeps.dependents.length > 0}
+                          <div class="arch-dep-group">
+                            <span class="arch-dep-label">Depended on by ({repoDeps.dependents.length})</span>
+                            <ul class="arch-dep-list">
+                              {#each repoDeps.dependents as dep}
+                                <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? entityName('repo', dep.repo_id ?? dep)}</li>
+                              {/each}
+                            </ul>
+                          </div>
+                        {/if}
+                      </div>
+                    {/if}
+                    {#if repoRisks?.length > 0}
+                      <div class="arch-insight-section">
+                        <h3 class="arch-insight-title">Risk Hotspots ({repoRisks.length})</h3>
+                        <p class="arch-insight-desc">Nodes scored for complexity, coupling, or churn that may warrant attention.</p>
+                        <ul class="arch-risk-list">
+                          {#each repoRisks.slice(0, 10) as node}
+                            <li class="arch-risk-item">
+                              <span class="arch-risk-name">{node.qualified_name ?? node.name}</span>
+                              <span class="arch-risk-score" title="Risk score">{node.risk_score ?? node.score ?? '\u2014'}</span>
+                              {#if node.risk_reason ?? node.reason}
+                                <span class="arch-risk-reason">{node.risk_reason ?? node.reason}</span>
+                              {/if}
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}
+
+                    <!-- Architecture Timeline (deltas over time) -->
+                    {#if graphTimeline?.length > 0}
+                      <div class="arch-insight-section">
+                        <h3 class="arch-insight-title">Architecture Timeline ({graphTimeline.length} changes)</h3>
+                        <p class="arch-insight-desc">How the architecture has evolved over time.</p>
+                        <div class="arch-timeline">
+                          {#each graphTimeline.slice(0, 10) as delta}
+                            <div class="arch-timeline-entry">
+                              <span class="arch-timeline-time">{delta.timestamp ? new Date(typeof delta.timestamp === 'number' ? delta.timestamp * 1000 : delta.timestamp).toLocaleDateString() : '\u2014'}</span>
+                              <span class="arch-timeline-label">{delta.change_type ?? delta.event ?? 'change'}</span>
+                              {#if delta.added_count || delta.removed_count}
+                                <span class="arch-timeline-stats">
+                                  {#if delta.added_count}<span class="diff-ins">+{delta.added_count}</span>{/if}
+                                  {#if delta.removed_count}<span class="diff-del">-{delta.removed_count}</span>{/if}
+                                </span>
+                              {/if}
+                              {#if delta.commit_sha}
+                                <code class="mono" style="font-size: var(--text-xs); color: var(--color-text-muted)">{delta.commit_sha.slice(0, 7)}</code>
+                              {/if}
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
             </div>
             {#if detailNode}
               <div class="explorer-detail-area">
@@ -718,129 +885,7 @@
           </div>
         {/if}
 
-        <!-- Repo dependencies, risks, types, modules, timeline — shown as collapsible section both before and alongside graph -->
-        {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
-          <div class="arch-insights-toggle">
-            <button
-              class="arch-insights-btn"
-              onclick={() => insightsCollapsed = !insightsCollapsed}
-              aria-expanded={!insightsCollapsed}
-              aria-controls="arch-insights-panel"
-            >
-              <span class="arch-toggle-icon" class:open={!insightsCollapsed}>&#9654;</span>
-              Architecture Insights
-            </button>
-          </div>
-          <div class="arch-insights" id="arch-insights-panel" class:collapsed={insightsCollapsed}>
-            <!-- Graph Types (structs/enums extracted from code) -->
-            {#if graphTypes?.length > 0}
-              <div class="arch-insight-section">
-                <h3 class="arch-insight-title">Types ({graphTypes.length})</h3>
-                <p class="arch-insight-desc">Structs, enums, and type definitions extracted from the codebase.</p>
-                <div class="arch-type-grid">
-                  {#each graphTypes.slice(0, 20) as node}
-                    <div class="arch-type-card" title={node.qualified_name ?? node.name}>
-                      <span class="arch-type-kind">{node.node_type ?? 'type'}</span>
-                      <span class="arch-type-name">{node.name ?? node.qualified_name}</span>
-                      {#if node.doc_comment}
-                        <span class="arch-type-doc">{node.doc_comment.slice(0, 80)}{node.doc_comment.length > 80 ? '...' : ''}</span>
-                      {/if}
-                    </div>
-                  {/each}
-                  {#if graphTypes.length > 20}
-                    <span class="arch-more">+{graphTypes.length - 20} more</span>
-                  {/if}
-                </div>
-              </div>
-            {/if}
-
-            <!-- Graph Modules -->
-            {#if graphModules?.length > 0}
-              <div class="arch-insight-section">
-                <h3 class="arch-insight-title">Modules ({graphModules.length})</h3>
-                <p class="arch-insight-desc">Module hierarchy extracted from the codebase.</p>
-                <ul class="arch-dep-list">
-                  {#each graphModules.slice(0, 15) as mod}
-                    <li class="arch-dep-item">
-                      <span class="mono">{mod.qualified_name ?? mod.name}</span>
-                      {#if mod.doc_comment}
-                        <span class="arch-mod-doc">{mod.doc_comment.slice(0, 60)}</span>
-                      {/if}
-                    </li>
-                  {/each}
-                </ul>
-              </div>
-            {/if}
-
-            {#if repoDeps && (repoDeps.dependencies.length > 0 || repoDeps.dependents.length > 0)}
-              <div class="arch-insight-section">
-                <h3 class="arch-insight-title">Cross-Repo Dependencies</h3>
-                {#if repoDeps.dependencies.length > 0}
-                  <div class="arch-dep-group">
-                    <span class="arch-dep-label">Depends on ({repoDeps.dependencies.length})</span>
-                    <ul class="arch-dep-list">
-                      {#each repoDeps.dependencies as dep}
-                        <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? entityName('repo', dep.repo_id ?? dep)}</li>
-                      {/each}
-                    </ul>
-                  </div>
-                {/if}
-                {#if repoDeps.dependents.length > 0}
-                  <div class="arch-dep-group">
-                    <span class="arch-dep-label">Depended on by ({repoDeps.dependents.length})</span>
-                    <ul class="arch-dep-list">
-                      {#each repoDeps.dependents as dep}
-                        <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? entityName('repo', dep.repo_id ?? dep)}</li>
-                      {/each}
-                    </ul>
-                  </div>
-                {/if}
-              </div>
-            {/if}
-            {#if repoRisks?.length > 0}
-              <div class="arch-insight-section">
-                <h3 class="arch-insight-title">Risk Hotspots ({repoRisks.length})</h3>
-                <p class="arch-insight-desc">Nodes scored for complexity, coupling, or churn that may warrant attention.</p>
-                <ul class="arch-risk-list">
-                  {#each repoRisks.slice(0, 10) as node}
-                    <li class="arch-risk-item">
-                      <span class="arch-risk-name">{node.qualified_name ?? node.name}</span>
-                      <span class="arch-risk-score" title="Risk score">{node.risk_score ?? node.score ?? '—'}</span>
-                      {#if node.risk_reason ?? node.reason}
-                        <span class="arch-risk-reason">{node.risk_reason ?? node.reason}</span>
-                      {/if}
-                    </li>
-                  {/each}
-                </ul>
-              </div>
-            {/if}
-
-            <!-- Architecture Timeline (deltas over time) -->
-            {#if graphTimeline?.length > 0}
-              <div class="arch-insight-section">
-                <h3 class="arch-insight-title">Architecture Timeline ({graphTimeline.length} changes)</h3>
-                <p class="arch-insight-desc">How the architecture has evolved over time.</p>
-                <div class="arch-timeline">
-                  {#each graphTimeline.slice(0, 10) as delta}
-                    <div class="arch-timeline-entry">
-                      <span class="arch-timeline-time">{delta.timestamp ? new Date(typeof delta.timestamp === 'number' ? delta.timestamp * 1000 : delta.timestamp).toLocaleDateString() : '—'}</span>
-                      <span class="arch-timeline-label">{delta.change_type ?? delta.event ?? 'change'}</span>
-                      {#if delta.added_count || delta.removed_count}
-                        <span class="arch-timeline-stats">
-                          {#if delta.added_count}<span class="diff-ins">+{delta.added_count}</span>{/if}
-                          {#if delta.removed_count}<span class="diff-del">-{delta.removed_count}</span>{/if}
-                        </span>
-                      {/if}
-                      {#if delta.commit_sha}
-                        <code class="mono" style="font-size: var(--text-xs); color: var(--color-text-muted)">{delta.commit_sha.slice(0, 7)}</code>
-                      {/if}
-                    </div>
-                  {/each}
-                </div>
-              </div>
-            {/if}
-          </div>
-        {/if}
+        <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
       </div>
     </div>
   </div>
@@ -1048,6 +1093,81 @@
 
   .stat-sep {
     color: var(--color-text-muted);
+  }
+
+  /* ── Lens toggle (segmented control) ──────────────────────────────── */
+  .lens-toggle {
+    display: flex;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .lens-btn {
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-surface);
+    border: none;
+    border-right: 1px solid var(--color-border-strong);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .lens-btn:last-child {
+    border-right: none;
+  }
+
+  .lens-btn:hover:not(:disabled) {
+    background: var(--color-surface-elevated);
+    color: var(--color-text);
+  }
+
+  .lens-btn.active {
+    background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+    color: var(--color-primary);
+    font-weight: 600;
+  }
+
+  .lens-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    color: var(--color-text-muted);
+  }
+
+  .lens-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  /* ── Back to repos button (workspace scope) ───────────────────────── */
+  .back-to-repos-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: none;
+    color: var(--color-link);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .back-to-repos-btn:hover {
+    background: color-mix(in srgb, var(--color-link) 10%, transparent);
+    color: var(--color-link-hover);
+  }
+
+  .back-to-repos-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   .explorer-body {
@@ -1349,10 +1469,24 @@
   }
 
   /* ── Architecture insights (deps + risks) ────────────────────────── */
+  .arch-insights-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  .arch-insights-overlay > * {
+    pointer-events: auto;
+  }
+
   .arch-insights-toggle {
     border-top: 1px solid var(--color-border);
-    padding: var(--space-2) var(--space-6);
+    padding: var(--space-2) var(--space-4);
     flex-shrink: 0;
+    background: var(--color-surface);
   }
 
   .arch-insights-btn {
@@ -1387,10 +1521,12 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-    padding: var(--space-4) var(--space-6);
+    padding: var(--space-4);
     flex-shrink: 0;
-    overflow: hidden;
-    max-height: 600px;
+    overflow-y: auto;
+    max-height: 300px;
+    background: var(--color-surface);
+    border-top: 1px solid var(--color-border);
     transition: max-height 0.2s ease, padding 0.2s ease, opacity 0.2s ease;
   }
 
