@@ -10,6 +10,12 @@
 //! Auth: Bearer token in initial HTTP upgrade (via AuthenticatedAgent extractor
 //! or ?token= query parameter). The WebSocket itself does NOT handle auth messages.
 //!
+//! **Preferred auth method**: Use the `Authorization: Bearer <token>` header on
+//! the initial HTTP upgrade request. The `?token=` query parameter is supported
+//! for backwards compatibility and browser environments that cannot set headers
+//! on WebSocket upgrades, but header-based auth should be preferred in all other
+//! cases to avoid token leakage in server logs and browser history.
+//!
 //! ## Architecture Note: LLM Port vs Claude Agent SDK
 //!
 //! The spec recommends Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`), but
@@ -413,7 +419,7 @@ async fn handle_explorer_session(
                                 continue;
                             }
                         };
-                        let msg = ExplorerServerMessage::ViewQuery { query };
+                        let msg = ExplorerServerMessage::ViewQuery { query, explanation: None };
                         let _ = sender
                             .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
                             .await;
@@ -541,7 +547,7 @@ async fn handle_explorer_session(
                 match state.saved_views.list_by_repo(&rid).await {
                     Ok(views) => {
                         // Filter to views in the user's tenant.
-                        let summaries: Vec<SavedViewSummary> = views
+                        let mut summaries: Vec<SavedViewSummary> = views
                             .into_iter()
                             .filter(|v| v.tenant_id.as_str() == auth.tenant_id)
                             .map(|v| SavedViewSummary {
@@ -551,6 +557,41 @@ async fn handle_explorer_session(
                                 created_at: v.created_at,
                             })
                             .collect();
+
+                        // Seed system default views on first access when none exist.
+                        if summaries.is_empty() {
+                            let now = crate::api::now_secs();
+                            let defaults = system_default_views();
+                            for (name, description, query_json) in &defaults {
+                                let view = SavedView {
+                                    id: crate::api::new_id(),
+                                    repo_id: rid.clone(),
+                                    workspace_id: repo_workspace_id.clone(),
+                                    tenant_id: Id::new(&auth.tenant_id),
+                                    name: name.to_string(),
+                                    description: Some(description.to_string()),
+                                    query_json: query_json.to_string(),
+                                    created_by: "system".to_string(),
+                                    created_at: now,
+                                    updated_at: now,
+                                    is_system: true,
+                                };
+                                match state.saved_views.create(view).await {
+                                    Ok(v) => {
+                                        summaries.push(SavedViewSummary {
+                                            id: v.id.to_string(),
+                                            name: v.name,
+                                            description: v.description,
+                                            created_at: v.created_at,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        warn!(error = ?e, "Failed to seed default view: {name}");
+                                    }
+                                }
+                            }
+                        }
+
                         let msg = ExplorerServerMessage::Views { views: summaries };
                         let _ = sender
                             .send(Message::Text(serde_json::to_string(&msg).unwrap().into()))
@@ -588,14 +629,23 @@ async fn send_status(
 
 /// Stream text to the client in word-boundary chunks for natural display.
 /// Returns false if the client disconnected.
+///
+/// **Limitation**: This is "fake" streaming — the full LLM response is received
+/// first via `complete_with_tools()`, then chunked here for progressive display.
+/// The `LlmPort::stream_complete()` method supports true token-level streaming but
+/// does not support tool definitions, so it cannot be used for the agent loop.
+/// When/if `LlmPort` gains a `stream_complete_with_tools()` method, this function
+/// should be refactored to consume a real token stream instead.
 async fn stream_text(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     text: &str,
     done: bool,
 ) -> bool {
-    // Stream in word-boundary chunks for more natural progressive display.
-    // Aim for ~40-60 char chunks, breaking at word boundaries.
-    const TARGET_CHUNK: usize = 50;
+    // Chunk the already-complete response at word boundaries for progressive display.
+    // Small chunks (~30 chars) to reduce perceived latency since we already have the
+    // full text. No artificial delay between chunks — just send as fast as the
+    // WebSocket will accept them.
+    const TARGET_CHUNK: usize = 30;
 
     if text.len() <= TARGET_CHUNK || done {
         let msg = ExplorerServerMessage::Text {
@@ -838,8 +888,10 @@ async fn run_explorer_agent_sdk(
                             }
                             "view_query" => {
                                 if let Some(query) = msg.get("query") {
+                                    let explanation = msg.get("explanation").and_then(|v| v.as_str()).map(|s| s.to_string());
                                     let view_msg = ExplorerServerMessage::ViewQuery {
                                         query: query.clone(),
+                                        explanation,
                                     };
                                     if sender
                                         .send(Message::Text(
@@ -1127,9 +1179,12 @@ async fn run_explorer_agent(
     let selected_node_id = canvas_state.selected_node.as_ref().map(|n| n.id.as_str());
 
     // Multi-turn agent loop with self-check.
-    // Separate budgets: tool_turns (max 6) for tool use, refinements (max 3) for view query fixes.
+    // Budget: MAX_AGENT_TURNS (3) refinement turns for view query fixes, plus
+    // 3 tool-use turns for graph exploration = 6 total iterations max.
+    // This prevents runaway loops while giving the agent enough room to explore
+    // the graph and refine its view query.
     let mut refinement_count = 0;
-    let max_total_turns = MAX_AGENT_TURNS * 2 + 3; // 9 total iterations max
+    let max_total_turns = MAX_AGENT_TURNS + 3; // 3 refinement + 3 tool = 6 max
     for turn in 0..max_total_turns {
         let response = llm_port
             .complete_with_tools(&system_prompt, conversation_history, &tools, Some(4096))
@@ -1169,24 +1224,47 @@ async fn run_explorer_agent(
 
                 if let Some(ref dr) = dry_run_result {
                     if !dr.warnings.is_empty() && refinement_count < MAX_AGENT_TURNS {
-                        // Self-check failed: inject dry-run results back to agent for refinement
+                        // Self-check failed: inject dry-run results back as a synthetic
+                        // tool_use → tool_result pair so the LLM can use its native
+                        // tool-use architecture for refinement (rather than a plain
+                        // user text message which breaks the tool-use flow).
                         refinement_count += 1;
                         send_status(sender, "refining").await;
 
+                        // Synthetic tool_use ID for the dry-run self-check
+                        let synthetic_tool_id =
+                            format!("selfcheck_{}", refinement_count);
+
+                        // Assistant message: text + synthetic tool_use block
                         conversation_history.push(ConversationMessage {
                             role: "assistant".to_string(),
-                            content: ConversationContent::Text(response.text.clone()),
+                            content: ConversationContent::Blocks(vec![
+                                ContentBlock::Text {
+                                    text: response.text.clone(),
+                                },
+                                ContentBlock::ToolUse {
+                                    id: synthetic_tool_id.clone(),
+                                    name: "graph_query_dryrun".to_string(),
+                                    input: json!({ "query": query_json }),
+                                },
+                            ]),
                         });
 
+                        // Tool result with the dry-run feedback
                         let feedback = format!(
-                            "The view query had issues during dry-run. Please refine it.\n\nDry-run result:\n- matched_nodes: {}\n- warnings: {:?}\n- matched names (sample): {:?}\n\nPlease fix the warnings and generate an improved <view_query>.",
+                            "Dry-run FAILED. Please refine the <view_query>.\n\n- matched_nodes: {}\n- warnings: {:?}\n- matched names (sample): {:?}",
                             dr.matched_nodes,
                             dr.warnings,
                             &dr.matched_node_names[..dr.matched_node_names.len().min(10)]
                         );
                         conversation_history.push(ConversationMessage {
                             role: "user".to_string(),
-                            content: ConversationContent::Text(feedback),
+                            content: ConversationContent::Blocks(vec![
+                                ContentBlock::ToolResult {
+                                    tool_use_id: synthetic_tool_id,
+                                    content: feedback,
+                                },
+                            ]),
                         });
                         continue;
                     }
@@ -1209,9 +1287,16 @@ async fn run_explorer_agent(
                     }
                 }
 
-                // Send the view query to the frontend
+                // Send the view query to the frontend, with the LLM's preceding
+                // text as explanation so the UI can show what the visualization reveals.
+                let explanation_text = if clean_text.is_empty() {
+                    None
+                } else {
+                    Some(clean_text.clone())
+                };
                 let view_msg = ExplorerServerMessage::ViewQuery {
                     query: query_json.clone(),
+                    explanation: explanation_text,
                 };
                 if sender
                     .send(Message::Text(
@@ -1651,6 +1736,54 @@ fn parse_view_query_from_text(text: &str) -> (String, Option<serde_json::Value>)
     (text_parts.join("\n\n"), view_query)
 }
 
+/// Returns the 4 system default views seeded on first ListViews access:
+/// (name, description, query_json).
+fn system_default_views() -> Vec<(&'static str, &'static str, serde_json::Value)> {
+    vec![
+        (
+            "Architecture Overview",
+            "Top-level module structure with containment and dependency edges",
+            json!({
+                "scope": { "type": "filter", "node_types": ["package", "module"] },
+                "edges": { "filter": ["contains", "depends_on"] },
+                "emphasis": { "dim_unmatched": 0.15 },
+                "zoom": "fit",
+                "annotation": { "title": "Architecture Overview", "description": "Top-level modules and their dependencies" }
+            }),
+        ),
+        (
+            "Test Coverage Gaps",
+            "Functions and methods not reachable from any test node",
+            json!({
+                "scope": { "type": "test_gaps" },
+                "emphasis": { "highlight": { "matched": { "color": "#ef4444", "label": "Untested" } }, "dim_unmatched": 0.1 },
+                "zoom": "fit",
+                "annotation": { "title": "Test Coverage Gaps", "description": "{{count}} functions with no test coverage" }
+            }),
+        ),
+        (
+            "Hot Paths",
+            "Functions with the highest incoming call counts (potential bottlenecks)",
+            json!({
+                "scope": { "type": "filter", "node_types": ["function"], "computed": "$where(incoming_calls, '>=', 5)" },
+                "emphasis": { "heat": { "metric": "incoming_calls", "palette": "blue-red" } },
+                "zoom": "fit",
+                "annotation": { "title": "Hot Paths", "description": "{{count}} functions with 5+ callers" }
+            }),
+        ),
+        (
+            "Blast Radius",
+            "Click any node to see everything it affects (outgoing calls and dependents)",
+            json!({
+                "scope": { "type": "focus", "node": "$clicked", "edges": ["calls", "depends_on"], "direction": "outgoing", "depth": 3 },
+                "emphasis": { "tiered_colors": ["#ef4444", "#f97316", "#eab308", "#94a3b8"], "dim_unmatched": 0.1 },
+                "zoom": "fit",
+                "annotation": { "title": "Blast Radius: $name", "description": "Downstream impact up to 3 hops" }
+            }),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1767,6 +1900,7 @@ This shows all callers of TaskPort."#;
         // Verify view query format
         let msg = ExplorerServerMessage::ViewQuery {
             query: json!({"scope": {"type": "all"}}),
+            explanation: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"view_query""#));
@@ -1918,5 +2052,37 @@ Done."#;
                 emph
             );
         }
+    }
+
+    #[test]
+    fn test_system_default_views_are_valid() {
+        let defaults = system_default_views();
+        assert_eq!(defaults.len(), 4, "Should have 4 system default views");
+
+        let expected_names = [
+            "Architecture Overview",
+            "Test Coverage Gaps",
+            "Hot Paths",
+            "Blast Radius",
+        ];
+        for (i, (name, description, query_json)) in defaults.iter().enumerate() {
+            assert_eq!(*name, expected_names[i]);
+            assert!(!description.is_empty(), "View '{}' should have a description", name);
+            // Verify the query JSON is a valid ViewQuery
+            let parsed = serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone());
+            assert!(
+                parsed.is_ok(),
+                "Default view '{}' has invalid query JSON: {:?}",
+                name,
+                parsed.err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_max_total_turns_is_six() {
+        // 3 refinement turns + 3 tool turns = 6 total max
+        let max_total = MAX_AGENT_TURNS + 3;
+        assert_eq!(max_total, 6, "Max total turns should be 6 (3 refinement + 3 tool)");
     }
 }

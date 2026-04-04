@@ -329,6 +329,31 @@ impl ViewQuery {
             }
         }
 
+        // Validate computed expression syntax in Filter scope
+        if let Scope::Filter { computed: Some(ref expr), .. } = &self.scope {
+            let normalized = expr.trim();
+            if !normalized.is_empty() {
+                let known_prefixes = [
+                    "$clicked", "$selected", "$test_unreachable", "$test_reachable",
+                    "$where(", "$intersect(", "$union(", "$diff(",
+                    "$callers(", "$callees(", "$implementors(", "$fields(",
+                    "$descendants(", "$ancestors(", "$governed_by(",
+                    "$test_fragility(", "$reachable(",
+                ];
+                if !known_prefixes.iter().any(|p| normalized.starts_with(p)) {
+                    errors.push(format!("Unknown computed expression: '{}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $intersect, $union, $diff", normalized));
+                }
+                // Check balanced parens
+                if normalized.contains('(') {
+                    let open = normalized.chars().filter(|c| *c == '(').count();
+                    let close = normalized.chars().filter(|c| *c == ')').count();
+                    if open != close {
+                        errors.push(format!("Unbalanced parentheses in computed expression: {} open, {} close", open, close));
+                    }
+                }
+            }
+        }
+
         errors
     }
 }
@@ -400,7 +425,7 @@ pub enum ExplorerServerMessage {
     /// Streamed text response from LLM.
     Text { content: String, done: bool },
     /// View query to apply to canvas.
-    ViewQuery { query: serde_json::Value },
+    ViewQuery { query: serde_json::Value, explanation: Option<String> },
     /// List of saved views.
     Views { views: Vec<SavedViewSummary> },
     /// Status update.
