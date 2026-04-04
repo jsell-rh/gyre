@@ -59,7 +59,8 @@ const MAX_SESSIONS_PER_USER: usize = 3;
 const MAX_AGENT_TURNS: usize = 3;
 
 /// Max messages per session before requiring reconnect (prevents unbounded history).
-const MAX_SESSION_MESSAGES: usize = 50;
+/// Set high enough for deep conversational exploration (100 back-and-forth turns).
+const MAX_SESSION_MESSAGES: usize = 200;
 
 /// Max conversation history entries before summarization window.
 const MAX_CONVERSATION_HISTORY: usize = 20;
@@ -474,8 +475,13 @@ async fn handle_explorer_session(
                 let vid = Id::new(&view_id);
                 match state.saved_views.get(&vid).await {
                     Ok(Some(v)) => {
-                        // Verify the view belongs to this repo.
-                        if v.repo_id.as_str() != repo_id {
+                        // Verify the view belongs to this repo or is a workspace-scoped view.
+                        // Workspace-scoped views use "__workspace__" as repo_id and are
+                        // accessible from any repo within that workspace.
+                        let is_repo_view = v.repo_id.as_str() == repo_id;
+                        let is_workspace_view = v.repo_id.as_str() == "__workspace__"
+                            && v.workspace_id == repo_workspace_id;
+                        if !is_repo_view && !is_workspace_view {
                             let err = ExplorerServerMessage::Error {
                                 message: "View does not belong to this repository".to_string(),
                             };
@@ -1101,8 +1107,31 @@ async fn run_explorer_agent(
             .to_string_lossy()
             .to_string()
     });
-    let use_sdk = std::env::var("GYRE_EXPLORER_SDK").unwrap_or_default() == "1"
-        || (std::path::Path::new(&sdk_script_path).exists() && state.llm.is_none());
+    // Validate SDK path: must be an absolute path within a known safe directory
+    // (the executable's directory tree or /usr/). This prevents arbitrary code
+    // execution via a compromised GYRE_EXPLORER_SDK_PATH env var.
+    let sdk_path = std::path::Path::new(&sdk_script_path);
+    let sdk_path_valid = if let Ok(canonical) = sdk_path.canonicalize() {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let in_exe_dir = exe_dir
+            .as_ref()
+            .map(|d| canonical.starts_with(d))
+            .unwrap_or(false);
+        let in_usr = canonical.starts_with("/usr/");
+        let in_nix = canonical.starts_with("/nix/");
+        in_exe_dir || in_usr || in_nix
+    } else {
+        // Path doesn't exist yet, check non-canonicalized
+        sdk_path.is_absolute()
+            && (sdk_script_path.contains("/scripts/")
+                || sdk_script_path.starts_with("/usr/")
+                || sdk_script_path.starts_with("/nix/"))
+    };
+    let use_sdk = sdk_path_valid
+        && (std::env::var("GYRE_EXPLORER_SDK").unwrap_or_default() == "1"
+            || (sdk_path.exists() && state.llm.is_none()));
     if use_sdk {
         return run_explorer_agent_sdk(
             state,
@@ -1329,7 +1358,24 @@ async fn run_explorer_agent(
                 };
 
                 if let Some(ref dr) = dry_run_result {
-                    if !dr.warnings.is_empty() && refinement_count < MAX_AGENT_TURNS {
+                    // Filter out the "may be cluttered" warning for all-scope queries —
+                    // it's expected that all-scope matches many nodes and forcing refinement
+                    // would waste 3 LLM turns trying to "fix" a valid query.
+                    let actionable_warnings: Vec<&String> = dr
+                        .warnings
+                        .iter()
+                        .filter(|w| {
+                            let is_all_scope = matches!(
+                                serde_json::from_value::<gyre_common::view_query::ViewQuery>(
+                                    query_json.clone()
+                                ),
+                                Ok(q) if matches!(q.scope, gyre_common::view_query::Scope::All)
+                            );
+                            // Skip "may be cluttered" for all-scope
+                            !(is_all_scope && w.contains("may be cluttered"))
+                        })
+                        .collect();
+                    if !actionable_warnings.is_empty() && refinement_count < MAX_AGENT_TURNS {
                         // Self-check failed: inject dry-run results back as a synthetic
                         // tool_use → tool_result pair so the LLM can use its native
                         // tool-use architecture for refinement (rather than a plain
@@ -1573,9 +1619,14 @@ async fn execute_tool(
             let source_id = tool_call.input.get("source_id").and_then(|v| v.as_str());
             let target_id = tool_call.input.get("target_id").and_then(|v| v.as_str());
 
-            // Pre-build node name lookup for O(1) access instead of O(N) per edge
-            let node_names: std::collections::HashMap<&gyre_common::Id, &str> =
-                nodes.iter().map(|n| (&n.id, n.name.as_str())).collect();
+            // Pre-build node lookups for O(1) access instead of O(N) per edge
+            let node_info: std::collections::HashMap<
+                &gyre_common::Id,
+                (&str, Option<&str>, &str),
+            > = nodes
+                .iter()
+                .map(|n| (&n.id, (n.name.as_str(), n.spec_path.as_deref(), n.qualified_name.as_str())))
+                .collect();
 
             let filtered: Vec<serde_json::Value> = edges
                 .iter()
@@ -1600,16 +1651,35 @@ async fn execute_tool(
                 })
                 .take(100)
                 .map(|e| {
-                    let source_name = node_names.get(&e.source_id).copied().unwrap_or("?");
-                    let target_name = node_names.get(&e.target_id).copied().unwrap_or("?");
-                    json!({
+                    let (source_name, source_spec, _source_qn) = node_info
+                        .get(&e.source_id)
+                        .copied()
+                        .unwrap_or(("?", None, ""));
+                    let (target_name, target_spec, _target_qn) = node_info
+                        .get(&e.target_id)
+                        .copied()
+                        .unwrap_or(("?", None, ""));
+                    let mut edge_json = json!({
                         "id": e.id.to_string(),
                         "source_id": e.source_id.to_string(),
                         "source_name": source_name,
                         "target_id": e.target_id.to_string(),
                         "target_name": target_name,
                         "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
-                    })
+                    });
+                    // Include spec_path for source/target so LLM can annotate flow
+                    // traces with governing specs without extra graph_nodes calls.
+                    if let Some(sp) = source_spec {
+                        if !sp.is_empty() {
+                            edge_json["source_spec_path"] = json!(sp);
+                        }
+                    }
+                    if let Some(sp) = target_spec {
+                        if !sp.is_empty() {
+                            edge_json["target_spec_path"] = json!(sp);
+                        }
+                    }
+                    edge_json
                 })
                 .collect();
 
