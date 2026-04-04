@@ -2120,37 +2120,7 @@
     line-height: 1.4;
   }
 
-  /* ── Clickable status items in header ── */
-  .ws-header-status-items {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 2px;
-  }
-
-  .ws-header-status-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: var(--text-xs);
-    font-weight: 500;
-    font-family: var(--font-body);
-    cursor: pointer;
-    border: 1px solid transparent;
-    transition: all var(--transition-fast);
-    line-height: 1.3;
-  }
-
-  .ws-header-status-chip:hover { filter: brightness(1.15); transform: translateY(-1px); }
-  .ws-header-status-icon { font-size: 10px; }
-
-  .ws-header-status-chip-danger { background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 25%, transparent); }
-  .ws-header-status-chip-warning { background: color-mix(in srgb, var(--color-warning) 12%, transparent); color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 25%, transparent); }
-  .ws-header-status-chip-success { background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 25%, transparent); }
-  .ws-header-status-chip-info { background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent); color: var(--color-info, #1e90ff); border-color: color-mix(in srgb, var(--color-info, #1e90ff) 25%, transparent); }
-  .ws-header-status-chip-muted { background: var(--color-surface-elevated); color: var(--color-text-muted); border-color: var(--color-border); }
+  /* Status chips CSS removed — workspace home uses status sentence instead */
 
   /* ── Compact provenance flow in header ── */
   .ws-header-flow {
@@ -3309,112 +3279,7 @@
     padding: var(--space-1) 0;
   }
 
-  /* ── Workspace tab bar ────────────────────────────────────────────── */
-  .ws-tab-bar {
-    display: flex;
-    align-items: center;
-    gap: 0;
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
-    overflow-x: auto;
-    flex-shrink: 0;
-  }
-
-  .ws-tab {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    padding: 8px var(--space-3);
-    background: transparent;
-    border: none;
-    border-bottom: 2px solid transparent;
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    font-weight: 500;
-    color: var(--color-text-muted);
-    opacity: 0.75;
-    white-space: nowrap;
-    transition: color var(--transition-fast), border-color var(--transition-fast), opacity var(--transition-fast), background var(--transition-fast);
-  }
-
-  .ws-tab:hover {
-    color: var(--color-text);
-    opacity: 1;
-    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
-  }
-
-  .ws-tab-active {
-    color: var(--color-primary);
-    border-bottom-color: var(--color-primary);
-    font-weight: 600;
-    opacity: 1;
-    background: color-mix(in srgb, var(--color-primary) 6%, transparent);
-  }
-
-  .ws-tab-count {
-    font-size: 10px;
-    font-weight: 500;
-    color: var(--color-text-muted);
-    margin-left: -2px;
-  }
-
-  .ws-tab-badge {
-    font-size: 10px;
-    font-weight: 600;
-    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
-    color: var(--color-primary);
-    border-radius: 999px;
-    padding: 1px 6px;
-    white-space: nowrap;
-    line-height: 14px;
-    margin-left: 2px;
-  }
-
-  .ws-tab-badge-warn { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
-  .ws-tab-badge-danger { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
-  .ws-tab-badge-success { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
-
-  .ws-tab-bar-secondary {
-    border-radius: var(--radius) var(--radius) 0 0;
-  }
-
-  .ws-tab-bar-label {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 6px var(--space-3) 6px var(--space-2);
-    flex-shrink: 0;
-  }
-
-  .ws-tab-spacer {
-    flex: 1;
-  }
-
-  .entity-search-input {
-    padding: 3px 10px;
-    font-size: var(--text-xs);
-    font-family: var(--font-body);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    background: var(--color-surface);
-    color: var(--color-text);
-    width: 140px;
-    margin-left: var(--space-1);
-  }
-
-  .entity-search-input:focus {
-    outline: none;
-    border-color: var(--color-primary);
-    width: 200px;
-    transition: width var(--transition-fast);
-  }
-
-  .entity-search-input::placeholder {
-    color: var(--color-text-muted);
-  }
+  /* Tab bar CSS removed — workspace home no longer uses tabs */
 
   .ws-tab-toolbar {
     display: flex;
