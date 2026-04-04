@@ -1197,16 +1197,21 @@
         <span class="pipeline-hero-arrow">
           <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </span>
-        <button class="pipeline-hero-stage" class:pipeline-hero-warn={pipelineMrs.failed_gates > 0} class:pipeline-hero-done={pipelineMrs.merged > 0 && pipelineMrs.failed_gates === 0 && pipelineMrs.open === 0} class:pipeline-hero-selected={expandedStage === 'mrs'} onclick={() => toggleStage('mrs')}>
-          <span class="pipeline-hero-count">{wsMrs.length}</span>
+        <button class="pipeline-hero-stage" class:pipeline-hero-warn={pipelineMrs.failed_gates > 0} class:pipeline-hero-selected={expandedStage === 'mrs'} onclick={() => toggleStage('mrs')}>
+          <span class="pipeline-hero-count">{pipelineMrs.open + pipelineMrs.failed_gates}</span>
           <span class="pipeline-hero-label">MRs</span>
           {#if pipelineMrs.failed_gates > 0}
             <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineMrs.failed_gates} failed</span>
           {:else if pipelineMrs.open > 0}
             <span class="pipeline-hero-badge">{pipelineMrs.open} open</span>
-          {:else if pipelineMrs.merged > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineMrs.merged} merged</span>
           {/if}
+        </button>
+        <span class="pipeline-hero-arrow">
+          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <button class="pipeline-hero-stage pipeline-hero-done-stage" class:pipeline-hero-done={pipelineMrs.merged > 0} onclick={() => toggleStage('mrs')}>
+          <span class="pipeline-hero-count">{pipelineMrs.merged}</span>
+          <span class="pipeline-hero-label">Merged</span>
         </button>
       </div>
 
@@ -1686,6 +1691,14 @@
     background: var(--color-surface-elevated);
     border-color: var(--color-primary);
     box-shadow: 0 0 0 1px var(--color-primary);
+  }
+
+  .pipeline-hero-done-stage {
+    cursor: default;
+  }
+
+  .pipeline-hero-done-stage:hover {
+    transform: none;
   }
 
   /* ── Stage popover ─────────────────────────────────────────── */
