@@ -1682,13 +1682,30 @@ async fn run_explorer_agent(
                                     .or_insert(0) += 1;
                             }
                             let mut sorted_nodes = n;
+                            // Sort by importance: connectivity (primary) + architectural significance.
+                            // Boost foundational types (Trait/Interface/Spec/Package/Module)
+                            // since the spec says "default zoom shows boundaries and interfaces."
                             sorted_nodes.sort_by(|a, b| {
                                 let a_inc =
                                     incoming_count.get(&a.id.to_string()).copied().unwrap_or(0);
                                 let b_inc =
                                     incoming_count.get(&b.id.to_string()).copied().unwrap_or(0);
-                                b_inc
-                                    .cmp(&a_inc)
+                                let arch_boost = |n: &gyre_common::graph::GraphNode| -> usize {
+                                    match n.node_type {
+                                        gyre_common::NodeType::Trait
+                                        | gyre_common::NodeType::Interface
+                                        | gyre_common::NodeType::Package
+                                        | gyre_common::NodeType::Module
+                                        | gyre_common::NodeType::Spec => 1000,
+                                        gyre_common::NodeType::Endpoint
+                                        | gyre_common::NodeType::Type
+                                        | gyre_common::NodeType::Class
+                                        | gyre_common::NodeType::Enum => 100,
+                                        _ => 0,
+                                    }
+                                };
+                                (b_inc + arch_boost(b))
+                                    .cmp(&(a_inc + arch_boost(a)))
                                     .then_with(|| b.last_modified_at.cmp(&a.last_modified_at))
                             });
                             let kept_count = MAX_GRAPH_CACHE_ENTRIES / 2;
