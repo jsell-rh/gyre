@@ -381,6 +381,7 @@ async fn do_extract(
         let pass2_edges: Vec<GraphEdge> = new_edge_map.into_values().collect();
         let pass2_repo_root = tmp.path().to_path_buf();
         let pass2_repo_id = repo_id_parsed.clone();
+        let pass2_repo_id_log = repo_id_parsed.to_string();
         let pass2_sha = new_sha.to_string();
         let pass2_graph_store = Arc::clone(&graph_store);
 
@@ -390,7 +391,7 @@ async fn do_extract(
         tokio::spawn(async move {
             let _tmp = tmp; // prevent TempDir drop until this task completes
 
-            let lsp_edges = tokio::task::spawn_blocking(move || {
+            let lsp_edges = match tokio::task::spawn_blocking(move || {
                 extract_lsp_edges(
                     &pass2_repo_root,
                     &pass2_nodes,
@@ -400,7 +401,17 @@ async fn do_extract(
                 )
             })
             .await
-            .unwrap_or_default();
+            {
+                Ok(edges) => edges,
+                Err(e) => {
+                    tracing::warn!(
+                        repo_id = %pass2_repo_id_log,
+                        error = %e,
+                        "LSP call graph extraction (Pass 2) failed — graph will be missing cross-module call edges"
+                    );
+                    Vec::new()
+                }
+            };
 
             // Persist any new LSP-discovered edges.
             for edge in lsp_edges {
