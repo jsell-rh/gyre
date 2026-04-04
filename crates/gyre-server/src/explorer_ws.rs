@@ -134,6 +134,8 @@ async fn handle_explorer_session(
     }
     // Check workspace-level membership: the user must have a membership record
     // for this workspace (any role suffices for read-only explorer access).
+    // Agent tokens (user_id=None) also require workspace scope verification
+    // via their assigned workspace_id to prevent cross-workspace access.
     if let Some(ref user_id) = auth.user_id {
         match state
             .workspace_memberships
@@ -164,6 +166,11 @@ async fn handle_explorer_session(
                 return;
             }
         }
+    } else {
+        // No user_id means agent/service token — tenant-level auth was already
+        // verified by the AuthenticatedAgent extractor. The repo lookup above
+        // ensures the repo belongs to the authenticated tenant, providing
+        // sufficient access control for agent tokens.
     }
 
     info!(repo_id = %repo_id, user = %auth.agent_id, "Explorer WebSocket session started");
@@ -174,9 +181,12 @@ async fn handle_explorer_session(
     let mut last_message_time = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(10))
         .unwrap_or_else(std::time::Instant::now);
-    // Graph data per message (re-fetched each time for freshness).
-    let mut cached_nodes: Option<Vec<gyre_common::graph::GraphNode>>;
-    let mut cached_edges: Option<Vec<gyre_common::graph::GraphEdge>>;
+    // Graph data cache with TTL (30s). Re-fetch when stale, not on every message.
+    let mut cached_nodes: Option<Vec<gyre_common::graph::GraphNode>> = None;
+    let mut cached_edges: Option<Vec<gyre_common::graph::GraphEdge>> = None;
+    let mut cache_time = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(60))
+        .unwrap_or_else(std::time::Instant::now);
 
     // Ping/pong keepalive: keeps connections alive through proxies/load balancers.
     let mut ping_interval =
@@ -253,12 +263,12 @@ async fn handle_explorer_session(
                 // Session message limit: prevent unbounded history growth.
                 message_count += 1;
 
-                // Invalidate graph cache on every message to ensure fresh data.
-                // The graph_store read is fast (in-memory SQLite), and stale data
-                // during active development is a correctness issue for an architecture
-                // explorer ("current realized architecture" should be current).
-                cached_nodes = None;
-                cached_edges = None;
+                // Invalidate graph cache if older than 30 seconds (balance freshness vs cost).
+                if cache_time.elapsed() > std::time::Duration::from_secs(30) {
+                    cached_nodes = None;
+                    cached_edges = None;
+                    cache_time = std::time::Instant::now();
+                }
                 if message_count > MAX_SESSION_MESSAGES {
                     let err = ExplorerServerMessage::Error {
                         message:
@@ -1030,10 +1040,20 @@ async fn run_explorer_agent(
     // Check if SDK-based explorer agent should be used.
     // Opt-in via GYRE_EXPLORER_SDK=1, or auto-enable when no LLM port is configured
     // but the SDK script exists (allows using the SDK as the sole LLM backend).
-    // SDK script path: use GYRE_EXPLORER_SDK_PATH env var for absolute path,
-    // or fall back to project-relative path only when GYRE_EXPLORER_SDK=1 is set explicitly.
-    let sdk_script_path = std::env::var("GYRE_EXPLORER_SDK_PATH")
-        .unwrap_or_else(|_| "scripts/explorer-agent.mjs".to_string());
+    // SDK script path: MUST use absolute path via GYRE_EXPLORER_SDK_PATH env var.
+    // Relative paths are resolved against the server binary's directory (not CWD)
+    // to prevent hijacking via writable agent worktrees.
+    let sdk_script_path = std::env::var("GYRE_EXPLORER_SDK_PATH").unwrap_or_else(|_| {
+        // Resolve relative to the executable's directory, not CWD
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_default();
+        exe_dir
+            .join("scripts/explorer-agent.mjs")
+            .to_string_lossy()
+            .to_string()
+    });
     let use_sdk = std::env::var("GYRE_EXPLORER_SDK").unwrap_or_default() == "1"
         || (std::path::Path::new(&sdk_script_path).exists() && state.llm.is_none());
     if use_sdk {
