@@ -352,6 +352,7 @@
     }
     ws = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
+    // Safety: $effect cleanup handles this, but onDestroy may fire first in edge cases
     document.removeEventListener('keydown', onKeyDown);
   });
 </script>
