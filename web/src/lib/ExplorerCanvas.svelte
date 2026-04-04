@@ -577,6 +577,21 @@
     scheduleRedraw();
   }
 
+  // Keep canvasState enriched with active filter, lens, and visible tree groups
+  // so the LLM receives full context about what the user is looking at.
+  $effect(() => {
+    const visibleGroups = rootLayoutNodes
+      .filter(ln => ln.kind === 'tree-group' && ln.treeNode?.label)
+      .map(ln => ln.treeNode.label);
+    canvasState = {
+      ...canvasState,
+      active_filter: filter,
+      active_lens: lens,
+      visible_tree_groups: visibleGroups,
+      zoom_level: cam.zoom,
+    };
+  });
+
   // ── Evaluative lens: OTLP trace particle animation ──────────────────────
   let evalPlaying = $state(false);
   let evalSpeed = $state(1.0);
@@ -762,6 +777,17 @@
 
   // Non-contains edges for rendering
   let renderEdges = $derived.by(() => {
+    // If an active view query specifies edge filters, use those exclusively
+    // (this allows queries to show contains/field_of edges when requested).
+    const queryEdgeFilter = activeQuery?.edges?.filter;
+    if (queryEdgeFilter?.length) {
+      return edges.filter(e => {
+        const et = edgeType(e);
+        return queryEdgeFilter.includes(et);
+      });
+    }
+    // Default: hide structural hierarchy edges (contains, field_of) as they
+    // are expressed via the treemap layout, not as rendered edge arrows.
     return edges.filter(e => {
       const et = edgeType(e);
       return et !== 'contains' && et !== 'field_of';
@@ -2493,7 +2519,9 @@
         }
         // 'high' or unrecognized → 1.0
       }
-      const pulse = basePulse * confAlpha;
+      // Confirmed ghosts (from full preview) get solid borders, no pulsing.
+      // Unconfirmed (predictions) get pulsing dotted borders.
+      const pulse = ghost.confirmed ? 0 : basePulse * confAlpha;
 
       if (ghost.action === 'add') {
         drawGhostNewNode(ctx, ghost, pulse);
@@ -2576,10 +2604,16 @@
     const confAlpha = ghost.confidence === 'low' ? 0.25 : ghost.confidence === 'medium' ? 0.45 : 0.55;
     ctx.globalAlpha = confAlpha + 0.25 * pulse;
 
-    // Pulsing green dotted border
-    ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = '#22c55e';
-    ctx.lineWidth = 2;
+    // Confirmed: solid green border. Predicted: pulsing dotted green border.
+    if (ghost.confirmed) {
+      ctx.setLineDash([]);
+      ctx.strokeStyle = '#22c55e';
+      ctx.lineWidth = 2.5;
+    } else {
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = '#22c55e';
+      ctx.lineWidth = 2;
+    }
     roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
     ctx.stroke();
 
@@ -2653,10 +2687,10 @@
     roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
     ctx.fill();
 
-    // Yellow pulsing border
-    ctx.setLineDash([6, 4]);
+    // Yellow border: solid if confirmed, dotted if predicted
+    ctx.setLineDash(ghost.confirmed ? [] : [6, 4]);
     ctx.strokeStyle = '#eab308';
-    ctx.lineWidth = 2.5;
+    ctx.lineWidth = ghost.confirmed ? 3 : 2.5;
     roundRect(ctx, s.x - sw / 2 - 2, s.y - sh / 2 - 2, sw + 4, sh + 4, r + 1);
     ctx.stroke();
 
@@ -4371,9 +4405,9 @@
   {#if activeQuery?.annotation?.title}
     <div class="query-annotation" role="status">
       <div class="annotation-content">
-        <span class="annotation-title">{activeQuery.annotation.title.replace('$name', canvasState?.selectedNode?.name ?? '').replace('{{count}}', queryMatchedIds?.size ?? '?')}</span>
+        <span class="annotation-title">{activeQuery.annotation.title.replace('$name', canvasState?.selectedNode?.name ?? '').replace('{{count}}', queryMatchedIds?.size ?? '?').replace('{{group_count}}', activeQuery?.groups?.length ?? '?')}</span>
         {#if activeQuery.annotation.description}
-          <span class="annotation-desc">{activeQuery.annotation.description.replace('{{count}}', queryMatchedIds?.size ?? '?')}</span>
+          <span class="annotation-desc">{activeQuery.annotation.description.replace('{{count}}', queryMatchedIds?.size ?? '?').replace('{{group_count}}', activeQuery?.groups?.length ?? '?')}</span>
         {/if}
       </div>
       {#if interactiveQueryTemplate}
@@ -4431,7 +4465,7 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-disabled" disabled type="button" title="Requires production telemetry integration">Observable <span class="tb-coming-soon">(requires telemetry)</span></button>
+      <button class="tb-btn tb-btn-observable" disabled type="button" title="Requires production telemetry integration">Observable</button>
     </div>
 
     {#if lens === 'evaluative'}
@@ -4547,25 +4581,23 @@
           {#if tooltipNode.spec_path}
             <span class="tooltip-spec">spec: {tooltipNode.spec_path}</span>
           {/if}
-          {#if lens === 'evaluative'}
-            <div class="tooltip-eval">
-              {#if tooltipNode.complexity != null}<span>complexity: {tooltipNode.complexity}</span>{/if}
-              {#if tooltipNode.churn_count_30d != null}<span>churn/30d: {tooltipNode.churn_count_30d}</span>{/if}
-              {#if tooltipNode.test_coverage != null}<span>test coverage: {Math.round(tooltipNode.test_coverage * 100)}%</span>{/if}
-              {#if tooltipNode.test_node}<span class="tooltip-test-badge">test function</span>{/if}
-              {#if nodeSpanStats.get(tooltipNode.id)}
-                {@const spanSt = nodeSpanStats.get(tooltipNode.id)}
-                <div class="tooltip-span-stats">
-                  <span>spans: {spanSt.spanCount}</span>
-                  <span>p50: {spanSt.p50 < 1000 ? `${Math.round(spanSt.p50)}\u00B5s` : `${(spanSt.p50 / 1000).toFixed(1)}ms`}</span>
-                  <span>p95: {spanSt.p95 < 1000 ? `${Math.round(spanSt.p95)}\u00B5s` : `${(spanSt.p95 / 1000).toFixed(1)}ms`}</span>
-                  {#if spanSt.errorRate > 0}
-                    <span class="tooltip-error-rate">error rate: {Math.round(spanSt.errorRate * 100)}%</span>
-                  {/if}
-                </div>
-              {/if}
-            </div>
-          {/if}
+          <div class="tooltip-eval">
+            {#if tooltipNode.complexity != null}<span>complexity: {tooltipNode.complexity}</span>{/if}
+            {#if tooltipNode.churn_count_30d != null}<span>churn/30d: {tooltipNode.churn_count_30d}</span>{/if}
+            {#if tooltipNode.test_coverage != null}<span>test coverage: {Math.round(tooltipNode.test_coverage * 100)}%</span>{/if}
+            {#if tooltipNode.test_node}<span class="tooltip-test-badge">test function</span>{/if}
+            {#if nodeSpanStats.get(tooltipNode.id)}
+              {@const spanSt = nodeSpanStats.get(tooltipNode.id)}
+              <div class="tooltip-span-stats">
+                <span>spans: {spanSt.spanCount}</span>
+                <span>p50: {spanSt.p50 < 1000 ? `${Math.round(spanSt.p50)}\u00B5s` : `${(spanSt.p50 / 1000).toFixed(1)}ms`}</span>
+                <span>p95: {spanSt.p95 < 1000 ? `${Math.round(spanSt.p95)}\u00B5s` : `${(spanSt.p95 / 1000).toFixed(1)}ms`}</span>
+                {#if spanSt.errorRate > 0}
+                  <span class="tooltip-error-rate">error rate: {Math.round(spanSt.errorRate * 100)}%</span>
+                {/if}
+              </div>
+            {/if}
+          </div>
         </div>
       {/if}
 
@@ -4902,7 +4934,8 @@
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .tb-btn-disabled { opacity: 0.35; cursor: not-allowed; }
-  .tb-coming-soon { font-size: 9px; opacity: 0.6; font-style: italic; }
+  .tb-btn-observable { opacity: 0.35; cursor: not-allowed; font-style: italic; }
+  .tb-btn-observable::after { content: ''; display: inline-block; width: 6px; height: 6px; background: #475569; border-radius: 50%; margin-left: 4px; vertical-align: middle; }
   .eval-metric-group { display: flex; gap: 2px; align-items: center; }
   .eval-label { font-size: 10px; color: #64748b; margin: 0 2px; white-space: nowrap; }
   .eval-playback { display: flex; gap: 4px; align-items: center; margin-left: 4px; }
