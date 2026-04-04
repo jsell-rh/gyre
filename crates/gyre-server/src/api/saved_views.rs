@@ -171,8 +171,24 @@ pub async fn create_view(
     Path(repo_id): Path<String>,
     auth: AuthenticatedAgent,
     Json(req): Json<CreateViewRequest>,
-) -> Result<Json<ViewResponse>, (axum::http::StatusCode, String)> {
+) -> Result<(axum::http::StatusCode, Json<ViewResponse>), (axum::http::StatusCode, String)> {
     let now = now_secs();
+
+    // Validate name and description length
+    if req.name.len() > 200 {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "View name must be 200 characters or fewer".to_string(),
+        ));
+    }
+    if let Some(ref desc) = req.description {
+        if desc.len() > 2000 {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                "View description must be 2000 characters or fewer".to_string(),
+            ));
+        }
+    }
 
     // Validate the view query against the ViewQuery schema before storing.
     let _parsed_query: gyre_common::view_query::ViewQuery =
@@ -217,7 +233,7 @@ pub async fn create_view(
     };
 
     match state.saved_views.create(view).await {
-        Ok(v) => Ok(Json(ViewResponse::from(v))),
+        Ok(v) => Ok((axum::http::StatusCode::CREATED, Json(ViewResponse::from(v)))),
         Err(e) => Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("Failed to create view: {e}"),
@@ -295,11 +311,12 @@ pub async fn update_view(
             "Access denied".to_string(),
         ));
     }
-    // Only the creator (or system views by admin) can update a view.
-    if !existing.is_system && existing.created_by != auth.agent_id {
+    // Only the creator or an Admin can update a view.
+    let is_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+    if !is_admin && existing.created_by != auth.agent_id {
         return Err((
             axum::http::StatusCode::FORBIDDEN,
-            "Only the view creator can update this view".to_string(),
+            "Only the view creator or an Admin can update this view".to_string(),
         ));
     }
 
@@ -377,11 +394,12 @@ pub async fn delete_view(
                     "System default views cannot be deleted".to_string(),
                 ));
             }
-            // Only the creator can delete their own views.
-            if v.created_by != auth.agent_id {
+            // Only the creator or an Admin can delete views.
+            let is_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+            if !is_admin && v.created_by != auth.agent_id {
                 return Err((
                     axum::http::StatusCode::FORBIDDEN,
-                    "Only the view creator can delete this view".to_string(),
+                    "Only the view creator or an Admin can delete this view".to_string(),
                 ));
             }
         }

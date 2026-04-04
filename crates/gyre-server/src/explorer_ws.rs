@@ -1466,16 +1466,31 @@ async fn run_explorer_agent(
 
             // If a view query was found, perform server-enforced self-check
             if let Some(query_json) = view_query {
-                // Dry-run the query server-side
+                // Dry-run the query server-side, with validation first
                 let dry_run_result = if let Ok(query) =
                     serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone())
                 {
-                    Some(gyre_domain::view_query_resolver::dry_run(
-                        &query,
-                        &nodes,
-                        &edges,
-                        selected_node_id,
-                    ))
+                    // Validate query before dry-run to prevent malformed queries
+                    let validation_errors = query.validate();
+                    if !validation_errors.is_empty() {
+                        let mut dr = gyre_domain::view_query_resolver::dry_run(
+                            &query,
+                            &nodes,
+                            &edges,
+                            selected_node_id,
+                        );
+                        for err in validation_errors {
+                            dr.warnings.push(format!("Validation: {}", err));
+                        }
+                        Some(dr)
+                    } else {
+                        Some(gyre_domain::view_query_resolver::dry_run(
+                            &query,
+                            &nodes,
+                            &edges,
+                            selected_node_id,
+                        ))
+                    }
                 } else {
                     None
                 };
