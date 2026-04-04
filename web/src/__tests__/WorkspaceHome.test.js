@@ -47,9 +47,8 @@ describe('WorkspaceHome', () => {
   it('shows key sections when workspace is provided', () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    // Streamlined layout: Repos, Entity/Activity tabs (PipelineOverview removed for cleaner UX)
+    // Streamlined layout: Repos section is the primary content area
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="browse-panel"]')).toBeTruthy();
   });
 
   it('each section has correct aria-labelledby', () => {

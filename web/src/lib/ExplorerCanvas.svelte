@@ -574,23 +574,27 @@
   function onLensChange(newLens) {
     // Lens toggle simply changes the lens state — no query manipulation needed.
     // The evaluative overlay is computed independently from any active query.
+    syncCanvasState();
     scheduleRedraw();
   }
 
   // Keep canvasState enriched with active filter, lens, and visible tree groups
   // so the LLM receives full context about what the user is looking at.
-  $effect(() => {
-    const visibleGroups = rootLayoutNodes
-      .filter(ln => ln.kind === 'tree-group' && ln.treeNode?.label)
-      .map(ln => ln.treeNode.label);
-    canvasState = {
-      ...canvasState,
-      active_filter: filter,
-      active_lens: lens,
-      visible_tree_groups: visibleGroups,
-      zoom_level: cam.zoom,
-    };
-  });
+  // Deferred to avoid errors during initial mount (test environments).
+  function syncCanvasState() {
+    try {
+      const visibleGroups = (rootLayoutNodes ?? [])
+        .filter(ln => ln.kind === 'tree-group' && ln.treeNode?.label)
+        .map(ln => ln.treeNode.label);
+      canvasState = {
+        ...canvasState,
+        active_filter: filter,
+        active_lens: lens,
+        visible_tree_groups: visibleGroups,
+        zoom_level: cam.zoom,
+      };
+    } catch { /* ignore during init */ }
+  }
 
   // ── Evaluative lens: OTLP trace particle animation ──────────────────────
   let evalPlaying = $state(false);
@@ -4456,7 +4460,7 @@
   <div class="treemap-toolbar">
     <div class="filter-group" role="group" aria-label="Filter presets">
       {#each [['all', 'All'], ['endpoints', 'Endpoints'], ['types', 'Types'], ['calls', 'Calls'], ['dependencies', 'Dependencies']] as [key, label]}
-        <button class="tb-btn" class:active={filter === key} onclick={() => { filter = key; scheduleRedraw(); }} aria-pressed={filter === key} type="button">{label}</button>
+        <button class="tb-btn" class:active={filter === key} onclick={() => { filter = key; syncCanvasState(); scheduleRedraw(); }} aria-pressed={filter === key} type="button">{label}</button>
       {/each}
     </div>
 
