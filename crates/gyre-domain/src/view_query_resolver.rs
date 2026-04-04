@@ -1724,9 +1724,16 @@ pub fn dry_run(
             callouts_unresolved.push(callout.node.clone());
         }
     }
+    if !callouts_unresolved.is_empty() {
+        warnings.push(format!(
+            "Unresolved callouts: {}. These nodes were not found in the graph.",
+            callouts_unresolved.join(", ")
+        ));
+    }
 
     // Resolve narrative
     let mut narrative_resolved = 0;
+    let mut narrative_unresolved = Vec::new();
     for step in &query.narrative {
         let lower = step.node.to_lowercase();
         let found = node_map.values().any(|n| {
@@ -1735,7 +1742,15 @@ pub fn dry_run(
         });
         if found {
             narrative_resolved += 1;
+        } else {
+            narrative_unresolved.push(step.node.clone());
         }
+    }
+    if !narrative_unresolved.is_empty() {
+        warnings.push(format!(
+            "Unresolved narrative steps: {}. These nodes were not found in the graph.",
+            narrative_unresolved.join(", ")
+        ));
     }
 
     // Apply edge filtering: restrict edges to connections between matched nodes
