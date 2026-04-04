@@ -3400,14 +3400,19 @@
     if (zoomDecayFrame) cancelAnimationFrame(zoomDecayFrame);
   });
 
-  const legendItems = [
-    ['Package', '#64748b'],
-    ['Module', '#3b82f6'],
-    ['Type', '#10b981'],
-    ['Interface', '#8b5cf6'],
-    ['Function', '#f59e0b'],
-    ['Endpoint', '#f43f5e'],
-  ];
+  let legendItems = $derived(lens === 'evaluative' ? [
+    ['Low flow', 'hsl(220,70%,45%)'],
+    ['Medium', 'hsl(30,70%,45%)'],
+    ['High flow', 'hsl(0,70%,45%)'],
+    ['OK span', '#60a5fa'],
+    ['Error span', '#ef4444'],
+  ] : [
+    ['Has spec', '#22c55e'],
+    ['Suggested', '#eab308'],
+    ['No spec', '#ef4444'],
+    ['Calls', '#60a5fa'],
+    ['Implements', '#34d399'],
+  ]);
 </script>
 
 <div class="treemap-container">

@@ -1228,6 +1228,12 @@ async fn execute_tool(
             let source_id = tool_call.input.get("source_id").and_then(|v| v.as_str());
             let target_id = tool_call.input.get("target_id").and_then(|v| v.as_str());
 
+            // Pre-build node name lookup for O(1) access instead of O(N) per edge
+            let node_names: std::collections::HashMap<&gyre_common::Id, &str> = nodes
+                .iter()
+                .map(|n| (&n.id, n.name.as_str()))
+                .collect();
+
             let filtered: Vec<serde_json::Value> = edges
                 .iter()
                 .filter(|e| e.deleted_at.is_none())
@@ -1251,17 +1257,8 @@ async fn execute_tool(
                 })
                 .take(100)
                 .map(|e| {
-                    // Include source/target names for context
-                    let source_name = nodes
-                        .iter()
-                        .find(|n| n.id == e.source_id)
-                        .map(|n| n.name.as_str())
-                        .unwrap_or("?");
-                    let target_name = nodes
-                        .iter()
-                        .find(|n| n.id == e.target_id)
-                        .map(|n| n.name.as_str())
-                        .unwrap_or("?");
+                    let source_name = node_names.get(&e.source_id).copied().unwrap_or("?");
+                    let target_name = node_names.get(&e.target_id).copied().unwrap_or("?");
                     json!({
                         "id": e.id.to_string(),
                         "source_id": e.source_id.to_string(),
