@@ -76,6 +76,7 @@ const mcpToolNames = [
   'mcp__gyre__graph_query_dryrun',
   'mcp__gyre__graph_nodes',
   'mcp__gyre__graph_edges',
+  'mcp__gyre__node_provenance',
   'mcp__gyre__search',
 ];
 
@@ -142,11 +143,18 @@ try {
     }
   }
 
-  // Parse <view_query> blocks from the accumulated text
-  const vqMatch = fullText.match(/<view_query>([\s\S]*?)<\/view_query>/);
-  if (vqMatch) {
+  // Parse <view_query> blocks from the accumulated text.
+  // Take the LAST block (matches server-side parse_view_query_from_text behavior)
+  // because the LLM may refine its query mid-response.
+  const vqRegex = /<view_query>([\s\S]*?)<\/view_query>/g;
+  let lastMatch = null;
+  let m;
+  while ((m = vqRegex.exec(fullText)) !== null) {
+    lastMatch = m;
+  }
+  if (lastMatch) {
     try {
-      const viewQuery = JSON.parse(vqMatch[1].trim());
+      const viewQuery = JSON.parse(lastMatch[1].trim());
       const cleanText = fullText.replace(/<view_query>[\s\S]*?<\/view_query>/g, '').trim();
       if (cleanText) {
         console.log(JSON.stringify({ type: 'text', content: cleanText, done: true }));

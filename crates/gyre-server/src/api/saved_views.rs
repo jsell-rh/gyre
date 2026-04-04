@@ -304,6 +304,24 @@ pub async fn update_view(
     }
 
     let query_json = if let Some(q) = req.query {
+        // Validate the updated view query against the ViewQuery schema.
+        let parsed: gyre_common::view_query::ViewQuery = serde_json::from_value(q.clone())
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    format!("Invalid view query: {e}"),
+                )
+            })?;
+        let validation_errors = parsed.validate();
+        if !validation_errors.is_empty() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!(
+                    "View query validation failed: {}",
+                    validation_errors.join("; ")
+                ),
+            ));
+        }
         serde_json::to_string(&q).map_err(|e| {
             (
                 axum::http::StatusCode::BAD_REQUEST,

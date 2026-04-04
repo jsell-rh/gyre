@@ -55,7 +55,8 @@ static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, usi
 /// Maximum concurrent explorer sessions per user.
 const MAX_SESSIONS_PER_USER: usize = 3;
 
-/// Max agent refinement turns (spec says 3).
+/// Max agent refinement turns (spec says 3). This is also the total LLM call
+/// budget per user message — tool-use and refinement share this cap.
 const MAX_AGENT_TURNS: usize = 3;
 
 /// Max messages per session before requiring reconnect (prevents unbounded history).
@@ -515,45 +516,68 @@ async fn handle_explorer_session(
                                 continue;
                             }
                         };
-                        // Check for stale references in the loaded view query
+                        // Check for stale references in the loaded view query.
+                        // Covers Focus, Concept, and Filter scopes.
                         let mut stale_warning = None;
                         if let Ok(vq) = serde_json::from_value::<gyre_common::view_query::ViewQuery>(
                             query.clone(),
                         ) {
-                            if let gyre_common::view_query::Scope::Focus { ref node, .. } = vq.scope
-                            {
-                                if node != "$clicked" && node != "$selected" {
-                                    // Refresh graph cache if needed
-                                    if cached_nodes.is_none() {
-                                        let rid = Id::new(&repo_id);
-                                        cached_nodes = Some(
-                                            state
-                                                .graph_store
-                                                .list_nodes(&rid, None)
-                                                .await
-                                                .unwrap_or_default(),
-                                        );
-                                        cached_edges = Some(
-                                            state
-                                                .graph_store
-                                                .list_edges(&rid, None)
-                                                .await
-                                                .unwrap_or_default(),
-                                        );
+                            // Collect node names to verify
+                            let mut nodes_to_check: Vec<String> = Vec::new();
+                            match &vq.scope {
+                                gyre_common::view_query::Scope::Focus { ref node, .. } => {
+                                    if node != "$clicked" && node != "$selected" {
+                                        nodes_to_check.push(node.clone());
                                     }
-                                    if let Some(ref graph_nodes) = cached_nodes {
-                                        let found = graph_nodes.iter().any(|n| {
-                                            n.deleted_at.is_none()
-                                                && (n.name == *node
-                                                    || n.qualified_name == *node
-                                                    || n.id.to_string() == *node)
-                                        });
-                                        if !found {
-                                            stale_warning = Some(format!(
-                                                "Warning: focus node '{}' not found in current graph — this saved view may be stale.",
-                                                node
-                                            ));
+                                }
+                                gyre_common::view_query::Scope::Concept {
+                                    ref seed_nodes, ..
+                                } => {
+                                    for sn in seed_nodes {
+                                        if sn != "$clicked" && sn != "$selected" {
+                                            nodes_to_check.push(sn.clone());
                                         }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            if !nodes_to_check.is_empty() {
+                                // Refresh graph cache if needed
+                                if cached_nodes.is_none() {
+                                    let rid = Id::new(&repo_id);
+                                    cached_nodes = Some(
+                                        state
+                                            .graph_store
+                                            .list_nodes(&rid, None)
+                                            .await
+                                            .unwrap_or_default(),
+                                    );
+                                    cached_edges = Some(
+                                        state
+                                            .graph_store
+                                            .list_edges(&rid, None)
+                                            .await
+                                            .unwrap_or_default(),
+                                    );
+                                }
+                                if let Some(ref graph_nodes) = cached_nodes {
+                                    let missing: Vec<&str> = nodes_to_check
+                                        .iter()
+                                        .filter(|node| {
+                                            !graph_nodes.iter().any(|n| {
+                                                n.deleted_at.is_none()
+                                                    && (n.name == **node
+                                                        || n.qualified_name == **node
+                                                        || n.id.to_string() == **node)
+                                            })
+                                        })
+                                        .map(|s| s.as_str())
+                                        .collect();
+                                    if !missing.is_empty() {
+                                        stale_warning = Some(format!(
+                                            "Warning: node(s) {} not found in current graph — this saved view may be stale.",
+                                            missing.join(", ")
+                                        ));
                                     }
                                 }
                             }
@@ -601,8 +625,12 @@ async fn handle_explorer_session(
                 let vid = Id::new(&view_id);
                 match state.saved_views.get(&vid).await {
                     Ok(Some(v)) => {
-                        // Verify the view belongs to this repo and tenant.
-                        if v.repo_id.as_str() != repo_id {
+                        // Verify the view belongs to this repo (or is workspace-scoped)
+                        // and tenant.
+                        let is_repo_view = v.repo_id.as_str() == repo_id;
+                        let is_workspace_view = v.repo_id.as_str() == "__workspace__"
+                            && v.workspace_id == repo_workspace_id;
+                        if !is_repo_view && !is_workspace_view {
                             let err = ExplorerServerMessage::Error {
                                 message: "View does not belong to this repository".to_string(),
                             };
@@ -878,10 +906,11 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "graph_nodes".to_string(),
-            description: "Query graph nodes by name pattern or node type. Returns up to 50 nodes with details (id, name, qualified_name, node_type, file_path, etc.).".to_string(),
+            description: "Query graph nodes by ID, name pattern, or node type. Returns up to 50 nodes with details (id, name, qualified_name, node_type, file_path, etc.).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "node_id": { "type": "string", "description": "Look up a specific node by its ID" },
                     "name_pattern": { "type": "string", "description": "Substring match on name or qualified_name (case-insensitive)" },
                     "node_type": { "type": "string", "description": "Filter by: package, module, type, interface, function, endpoint, component, table, constant, field, spec" }
                 }
@@ -1165,6 +1194,9 @@ async fn run_explorer_agent(
     // (the executable's directory tree or /usr/). This prevents arbitrary code
     // execution via a compromised GYRE_EXPLORER_SDK_PATH env var.
     let sdk_path = std::path::Path::new(&sdk_script_path);
+    // Validate SDK path: MUST exist and canonicalize to a known safe directory.
+    // Reject non-existent paths to prevent TOCTOU attacks (file could be
+    // replaced between validation and execution).
     let sdk_path_valid = if let Ok(canonical) = sdk_path.canonicalize() {
         let exe_dir = std::env::current_exe()
             .ok()
@@ -1177,11 +1209,8 @@ async fn run_explorer_agent(
         let in_nix = canonical.starts_with("/nix/");
         in_exe_dir || in_usr || in_nix
     } else {
-        // Path doesn't exist yet, check non-canonicalized
-        sdk_path.is_absolute()
-            && (sdk_script_path.contains("/scripts/")
-                || sdk_script_path.starts_with("/usr/")
-                || sdk_script_path.starts_with("/nix/"))
+        // Path doesn't exist — reject rather than allow unchecked execution
+        false
     };
     let use_sdk = sdk_path_valid
         && (std::env::var("GYRE_EXPLORER_SDK").unwrap_or_default() == "1"
@@ -1271,56 +1300,67 @@ async fn run_explorer_agent(
     }
     let tools = explorer_tool_definitions();
 
-    // Build user message with structured canvas context
-    let mut canvas_context_parts = Vec::new();
-    if let Some(ref sel) = canvas_state.selected_node {
-        let qname = sel.qualified_name.as_deref().unwrap_or(&sel.name);
-        canvas_context_parts.push(format!(
-            "Selected node: {qname} (type: {}, id: {})",
-            sel.node_type, sel.id
-        ));
-    }
-    if !canvas_state.visible_tree_groups.is_empty() {
-        canvas_context_parts.push(format!(
-            "Visible groups: {}",
-            canvas_state.visible_tree_groups.join(", ")
-        ));
-    }
-    if let Some(ref lens) = canvas_state.active_lens {
-        if !lens.is_empty() {
-            canvas_context_parts.push(format!("Active lens: {lens}"));
+    // Build user message with structured canvas context as JSON
+    // (structured format lets the LLM parse interaction sequences semantically)
+    let canvas_json = {
+        let mut ctx = serde_json::Map::new();
+        if let Some(ref sel) = canvas_state.selected_node {
+            ctx.insert(
+                "selected_node".to_string(),
+                json!({
+                    "name": sel.qualified_name.as_deref().unwrap_or(&sel.name),
+                    "type": sel.node_type,
+                    "id": sel.id,
+                }),
+            );
         }
-    }
-    if !canvas_state.recent_interactions.is_empty() {
-        let last_5: Vec<_> = canvas_state
-            .recent_interactions
-            .iter()
-            .rev()
-            .take(5)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let interaction_strs: Vec<String> = last_5
-            .iter()
-            .map(|i| {
-                let mut s = i.action.clone();
-                if let Some(ref node) = i.node {
-                    s.push_str(": ");
-                    s.push_str(node);
-                }
-                s
-            })
-            .collect();
-        canvas_context_parts.push(format!(
-            "Recent interactions: {}",
-            interaction_strs.join(", ")
-        ));
-    }
-    let canvas_summary = if canvas_context_parts.is_empty() {
+        if !canvas_state.visible_tree_groups.is_empty() {
+            ctx.insert(
+                "visible_groups".to_string(),
+                json!(canvas_state.visible_tree_groups),
+            );
+        }
+        if let Some(ref lens) = canvas_state.active_lens {
+            if !lens.is_empty() {
+                ctx.insert("active_lens".to_string(), json!(lens));
+            }
+        }
+        if !canvas_state.recent_interactions.is_empty() {
+            let last_10: Vec<_> = canvas_state
+                .recent_interactions
+                .iter()
+                .rev()
+                .take(10)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|i| {
+                    let mut m = serde_json::Map::new();
+                    m.insert("action".to_string(), json!(i.action));
+                    if let Some(ref node) = i.node {
+                        m.insert("node".to_string(), json!(node));
+                    }
+                    if let Some(ref detail) = i.detail {
+                        m.insert("detail".to_string(), json!(detail));
+                    }
+                    serde_json::Value::Object(m)
+                })
+                .collect();
+            ctx.insert("recent_interactions".to_string(), json!(last_10));
+        }
+        if let Some(ref aq) = canvas_state.active_query {
+            ctx.insert("active_query".to_string(), aq.clone());
+        }
+        ctx
+    };
+    let canvas_summary = if canvas_json.is_empty() {
         String::new()
     } else {
-        format!("[Canvas: {}]\n\n", canvas_context_parts.join(" | "))
+        format!(
+            "<canvas_state>\n{}\n</canvas_state>\n\n",
+            serde_json::to_string_pretty(&serde_json::Value::Object(canvas_json))
+                .unwrap_or_default()
+        )
     };
     let user_content = format!("{canvas_summary}{user_question}");
 
@@ -1332,21 +1372,51 @@ async fn run_explorer_agent(
     // of its role) doesn't create a role collision.
     if conversation_history.len() > MAX_CONVERSATION_HISTORY {
         let keep_recent = MAX_CONVERSATION_HISTORY - 3; // leave room for 2 summary + 1 possible skip
+
+        // Build a concise summary of dropped messages instead of silently discarding.
+        let dropped_count = conversation_history.len() - keep_recent;
+        let mut topics = Vec::new();
+        for msg in conversation_history.iter().take(dropped_count) {
+            let text = match &msg.content {
+                ConversationContent::Text(t) => t.clone(),
+                ConversationContent::Blocks(blocks) => blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            };
+            // Extract first 80 chars of each message as a topic hint
+            if msg.role == "user" && !text.is_empty() {
+                let snippet: String = text.chars().take(80).collect();
+                let snippet = snippet.replace('\n', " ");
+                topics.push(snippet);
+            }
+        }
+        let topic_summary = if topics.is_empty() {
+            "general exploration".to_string()
+        } else {
+            topics.join("; ")
+        };
+
         let mut recent: Vec<ConversationMessage> =
             conversation_history.split_off(conversation_history.len() - keep_recent);
         conversation_history.clear();
 
-        // Insert user→assistant pair so the next message (user or assistant) is valid.
+        // Insert user→assistant pair with meaningful summary.
         conversation_history.push(ConversationMessage {
             role: "user".to_string(),
-            content: ConversationContent::Text(
-                "[System: earlier conversation context was truncated for brevity.]".to_string(),
-            ),
+            content: ConversationContent::Text(format!(
+                "[System: {} earlier messages were summarized. Topics discussed: {}]",
+                dropped_count, topic_summary
+            )),
         });
         conversation_history.push(ConversationMessage {
             role: "assistant".to_string(),
             content: ConversationContent::Text(
-                "Understood, I'll continue based on the recent context.".to_string(),
+                "Understood. I have context from the earlier discussion and will continue building on it.".to_string(),
             ),
         });
 
@@ -1368,12 +1438,11 @@ async fn run_explorer_agent(
     let selected_node_id = canvas_state.selected_node.as_ref().map(|n| n.id.as_str());
 
     // Multi-turn agent loop with self-check.
-    // Budget: MAX_AGENT_TURNS (3) refinement turns for view query fixes, plus
-    // 3 tool-use turns for graph exploration = 6 total iterations max.
-    // This prevents runaway loops while giving the agent enough room to explore
-    // the graph and refine its view query.
+    // Budget: MAX_AGENT_TURNS (3) total LLM API calls per user message.
+    // Each call may involve tool use OR view query refinement — they share
+    // the same budget to cap per-query cost as specified in the spec.
     let mut refinement_count = 0;
-    let max_total_turns = MAX_AGENT_TURNS + 3; // 3 refinement + 3 tool = 6 max
+    let max_total_turns = MAX_AGENT_TURNS;
     for turn in 0..max_total_turns {
         let response = llm_port
             .complete_with_tools(&system_prompt, conversation_history, &tools, Some(4096))
@@ -1615,6 +1684,7 @@ async fn execute_tool(
             }
         }
         "graph_nodes" => {
+            let node_id_filter = tool_call.input.get("node_id").and_then(|v| v.as_str());
             let name_pattern = tool_call
                 .input
                 .get("name_pattern")
@@ -1630,6 +1700,10 @@ async fn execute_tool(
                 .iter()
                 .filter(|n| n.deleted_at.is_none())
                 .filter(|n| {
+                    // If node_id is specified, exact match only
+                    if let Some(nid) = node_id_filter {
+                        return n.id.to_string() == nid;
+                    }
                     if let Some(ref pat) = name_pattern {
                         n.name.to_lowercase().contains(pat)
                             || n.qualified_name.to_lowercase().contains(pat)
@@ -1855,10 +1929,12 @@ fn build_system_prompt() -> String {
     r##"You are the Gyre Explorer agent. You help humans understand codebases they didn't write by generating interactive visualizations of the knowledge graph.
 
 ## Context
-User messages may include a [Canvas: ...] prefix showing what's currently selected/visible.
-- "Selected node: X" means the user clicked on X — $selected resolves to it
-- "Visible groups: A, B" means those tree groups are expanded on screen
-- "Active lens: structural|evaluative|trace" shows the current analysis mode
+User messages may include a <canvas_state> JSON block showing what's currently selected/visible:
+- "selected_node": { name, type, id } — the user clicked on this node, $selected resolves to it
+- "visible_groups": [...] — tree groups currently expanded on screen
+- "active_lens": "structural"|"evaluative" — current analysis mode
+- "recent_interactions": [{ action, node?, detail? }, ...] — the user's recent click/zoom/query history (up to 10 entries, newest last)
+- "active_query": {...} — the currently applied view query
 
 ## $clicked vs $selected
 - $selected = the node currently highlighted in the UI (set when user message is sent)
@@ -1917,7 +1993,7 @@ Specs are first-class entities in the knowledge graph (Vision Principle 3). They
 - `highlight`: { matched: { color, label } } for matched nodes
 - `dim_unmatched`: opacity 0.0-1.0 for non-matched
 - `tiered_colors`: array of colors by BFS depth (e.g. ["#ef4444", "#f97316", "#eab308", "#94a3b8"])
-- `heat`: { metric, palette } — metric: incoming_calls, complexity, churn, test_fragility, test_coverage, risk_score
+- `heat`: { metric, palette } — metric: incoming_calls, outgoing_calls, complexity, churn, churn_count_30d, test_fragility, test_coverage, field_count, risk_score
 - `badges`: { template } — e.g. "{{count}} calls"
 
 ### Other Fields
@@ -1977,60 +2053,16 @@ fn parse_view_query_from_text(text: &str) -> (String, Option<serde_json::Value>)
 }
 
 /// Returns the system default views seeded on first ListViews access.
-/// These MUST match saved_views::system_default_views() semantics.
-/// (name, description, query_json).
+/// Delegates to saved_views::system_default_views() — single source of truth.
 fn system_default_views() -> Vec<(&'static str, &'static str, serde_json::Value)> {
-    vec![
-        (
-            "Architecture Overview",
-            "Full codebase structure",
-            json!({
-                "scope": { "type": "all" },
-                "zoom": "fit"
-            }),
-        ),
-        (
-            "Test Coverage Gaps",
-            "Functions not reachable from any test",
-            json!({
-                "scope": { "type": "test_gaps" },
-                "emphasis": { "highlight": { "matched": { "color": "#ef4444", "label": "Untested" } }, "dim_unmatched": 0.3 },
-                "zoom": "fit",
-                "annotation": { "title": "Test coverage gaps", "description": "{{count}} functions not reachable from any test" }
-            }),
-        ),
-        (
-            "Hot Paths",
-            "Most-called functions",
-            json!({
-                "scope": { "type": "all" },
-                "emphasis": { "heat": { "metric": "incoming_calls", "palette": "blue-red" } },
-                "zoom": "fit",
-                "annotation": { "title": "Hot paths" }
-            }),
-        ),
-        (
-            "Blast Radius (click)",
-            "Click any node to see what calls/uses it",
-            json!({
-                "scope": { "type": "focus", "node": "$clicked", "edges": ["calls", "implements", "field_of", "depends_on"], "direction": "incoming", "depth": 10 },
-                "emphasis": { "tiered_colors": ["#ef4444", "#f97316", "#eab308", "#94a3b8"], "dim_unmatched": 0.12 },
-                "edges": { "filter": ["calls", "implements", "field_of", "depends_on"] },
-                "zoom": "fit",
-                "annotation": { "title": "Blast radius: $name", "description": "{{count}} transitive callers/implementors" }
-            }),
-        ),
-        (
-            "Risk Map",
-            "Composite risk: high churn × low test coverage × high complexity",
-            json!({
-                "scope": { "type": "filter", "node_types": ["function", "type"], "computed": "$where(complexity, '>', 5)" },
-                "emphasis": { "heat": { "metric": "risk_score", "palette": "blue-red" } },
-                "zoom": "fit",
-                "annotation": { "title": "Risk Map", "description": "{{count}} nodes by composite risk (churn × complexity × (1 - test_coverage))" }
-            }),
-        ),
-    ]
+    crate::api::saved_views::system_default_views()
+        .into_iter()
+        .map(|(name, desc, json_str)| {
+            let query: serde_json::Value =
+                serde_json::from_str(json_str).unwrap_or(json!({"scope": {"type": "all"}}));
+            (name, desc, query)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2163,7 +2195,7 @@ This shows all callers of TaskPort."#;
             "System prompt should contain grounding instructions"
         );
         assert!(
-            prompt.contains("Canvas"),
+            prompt.contains("canvas_state"),
             "System prompt should explain canvas state format"
         );
         assert!(
@@ -2335,12 +2367,8 @@ Done."#;
     }
 
     #[test]
-    fn test_max_total_turns_is_six() {
-        // 3 refinement turns + 3 tool turns = 6 total max
-        let max_total = MAX_AGENT_TURNS + 3;
-        assert_eq!(
-            max_total, 6,
-            "Max total turns should be 6 (3 refinement + 3 tool)"
-        );
+    fn test_max_total_turns_matches_spec() {
+        // Spec caps at 3 total LLM calls per user message
+        assert_eq!(MAX_AGENT_TURNS, 3, "Max total turns should be 3 per spec");
     }
 }

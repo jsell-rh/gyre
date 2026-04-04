@@ -329,6 +329,27 @@ impl ViewQuery {
             }
         }
 
+        // Validate Zoom field
+        match &self.zoom {
+            Zoom::Named(name) => {
+                let valid_names = ["fit", "current"];
+                if !valid_names.contains(&name.as_str()) {
+                    errors.push(format!(
+                        "Unknown zoom value '{}' — must be \"fit\", \"current\", or {{\"level\": N}}",
+                        name
+                    ));
+                }
+            }
+            Zoom::Level { level } => {
+                if *level < 0.01 || *level > 100.0 {
+                    errors.push(format!(
+                        "Zoom level {} is out of range — must be between 0.01 and 100.0",
+                        level
+                    ));
+                }
+            }
+        }
+
         // Validate computed expression syntax in Filter scope
         if let Scope::Filter {
             computed: Some(ref expr),
