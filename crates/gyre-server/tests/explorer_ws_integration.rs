@@ -18,9 +18,7 @@ struct WsCtx {
 
 impl WsCtx {
     async fn new() -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let base_url = format!("http://127.0.0.1:{port}");
 
@@ -302,13 +300,13 @@ async fn explorer_ws_message_too_long() {
     .unwrap();
 
     let msg = WsCtx::read_msg(&mut stream).await;
-    assert!(msg.is_some(), "Should receive an error for too-long message");
+    assert!(
+        msg.is_some(),
+        "Should receive an error for too-long message"
+    );
     let msg = msg.unwrap();
     assert_eq!(msg["type"], "error");
-    assert!(msg["message"]
-        .as_str()
-        .unwrap()
-        .contains("too long"));
+    assert!(msg["message"].as_str().unwrap().contains("too long"));
 }
 
 #[tokio::test]
@@ -350,7 +348,10 @@ async fn explorer_ws_rate_limiting() {
             break;
         }
     }
-    assert!(got_rate_limit, "Second rapid message should be rate limited");
+    assert!(
+        got_rate_limit,
+        "Second rapid message should be rate limited"
+    );
 }
 
 #[tokio::test]

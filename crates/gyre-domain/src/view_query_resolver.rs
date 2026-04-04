@@ -3855,7 +3855,18 @@ mod tests {
     fn test_parse_node_type_invalid() {
         assert_eq!(parse_node_type("clase"), None); // typo
         assert_eq!(parse_node_type(""), None);
-        assert_eq!(parse_node_type("struct"), None); // not a valid node type name
+        assert_eq!(parse_node_type("widget"), None); // not a valid node type name
+    }
+
+    #[test]
+    fn test_parse_node_type_new_variants() {
+        assert_eq!(parse_node_type("trait"), Some(NodeType::Trait));
+        assert_eq!(parse_node_type("method"), Some(NodeType::Method));
+        assert_eq!(parse_node_type("class"), Some(NodeType::Class));
+        assert_eq!(parse_node_type("enum"), Some(NodeType::Enum));
+        assert_eq!(parse_node_type("enum_variant"), Some(NodeType::EnumVariant));
+        assert_eq!(parse_node_type("variant"), Some(NodeType::EnumVariant));
+        assert_eq!(parse_node_type("struct"), Some(NodeType::Type)); // alias
     }
 
     // ── normalize_computed_expression tests ─────────────────────────────

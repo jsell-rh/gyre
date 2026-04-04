@@ -137,9 +137,7 @@ pub fn extract_call_graph(
         result
             .errors
             .push("rust-analyzer not found on PATH — skipping LSP call graph extraction".into());
-        result
-            .missing_toolchains
-            .push("rust-analyzer".into());
+        result.missing_toolchains.push("rust-analyzer".into());
         return result;
     }
 
@@ -518,7 +516,14 @@ fn compute_char_position(repo_root: &Path, file_path: &str, node: &GraphNode) ->
     // Try language-specific keyword patterns to find the function name.
     // Each pattern matches "keyword <name>" and returns position at name start.
     // Covers Rust (fn), Python (def/async def), Go (func), JS/TS (function/async function).
-    let keywords = ["fn ", "def ", "func ", "function ", "async def ", "async function "];
+    let keywords = [
+        "fn ",
+        "def ",
+        "func ",
+        "function ",
+        "async def ",
+        "async function ",
+    ];
     for kw in &keywords {
         let needle = format!("{}{}", kw, node.name);
         if let Some(pos) = line.find(&needle) {
@@ -1265,7 +1270,7 @@ pub fn extract_call_graph_auto(
             new_edges_found: 0,
             total_definitions: 0,
             incomplete: false,
-        missing_toolchains: vec![],
+            missing_toolchains: vec![],
         },
     }
 }

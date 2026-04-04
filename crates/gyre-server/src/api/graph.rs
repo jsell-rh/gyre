@@ -1308,7 +1308,7 @@ fn _new_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         visibility: gyre_common::graph::Visibility::Public,
         doc_comment: None,
         spec_path: None,
-            spec_paths: vec![],
+        spec_paths: vec![],
         spec_confidence: SpecConfidence::None,
         last_modified_sha: "abc123".to_string(),
         last_modified_by: None,
