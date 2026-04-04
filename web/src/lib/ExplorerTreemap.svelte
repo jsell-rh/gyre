@@ -3820,8 +3820,8 @@
               {#if tooltipNode.churn_count_30d != null}<span>churn/30d: {tooltipNode.churn_count_30d}</span>{/if}
               {#if tooltipNode.test_coverage != null}<span>test coverage: {Math.round(tooltipNode.test_coverage * 100)}%</span>{/if}
               {#if tooltipNode.test_node}<span class="tooltip-test-badge">test function</span>{/if}
-              {@const spanSt = nodeSpanStats.get(tooltipNode.id)}
-              {#if spanSt}
+              {#if nodeSpanStats.get(tooltipNode.id)}
+                {@const spanSt = nodeSpanStats.get(tooltipNode.id)}
                 <div class="tooltip-span-stats">
                   <span>spans: {spanSt.spanCount}</span>
                   <span>p50: {spanSt.p50 < 1000 ? `${Math.round(spanSt.p50)}\u00B5s` : `${(spanSt.p50 / 1000).toFixed(1)}ms`}</span>
