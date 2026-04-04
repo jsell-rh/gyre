@@ -502,21 +502,21 @@ fn compute_char_position(repo_root: &Path, file_path: &str, node: &GraphNode) ->
         return 0;
     };
 
-    // Primary: find "fn <name>" anywhere in the line.  This correctly handles
-    // all modifier combinations (pub, pub(crate), async, const, unsafe,
-    // extern "C", etc.) because `find` matches the substring regardless of
-    // what precedes it.
-    let needle = format!("fn {}", node.name);
-    if let Some(pos) = line.find(&needle) {
-        // Verify we matched the exact name, not a prefix (e.g. "fn foo" vs "fn foo_bar").
-        let after = pos + needle.len();
-        let next_char = line.as_bytes().get(after).copied();
-        let is_exact = match next_char {
-            None => true,                                       // end of line
-            Some(c) => !c.is_ascii_alphanumeric() && c != b'_', // delimiter follows
-        };
-        if is_exact {
-            return (pos + 3) as u32; // "fn " = 3 chars, position at name start
+    // Try language-specific keyword patterns to find the function name.
+    // Each pattern matches "keyword <name>" and returns position at name start.
+    let keywords = ["fn ", "def ", "func ", "function "];
+    for kw in &keywords {
+        let needle = format!("{}{}", kw, node.name);
+        if let Some(pos) = line.find(&needle) {
+            let after = pos + needle.len();
+            let next_char = line.as_bytes().get(after).copied();
+            let is_exact = match next_char {
+                None => true,
+                Some(c) => !c.is_ascii_alphanumeric() && c != b'_',
+            };
+            if is_exact {
+                return (pos + kw.len()) as u32;
+            }
         }
     }
 
@@ -787,7 +787,7 @@ fn extract_call_graph_via_lsp(
     lsp_command: &str,
     lsp_args: &[&str],
     language_id: &str,
-    file_extension: &str,
+    file_extensions: &[&str],
 ) -> LspCallGraphResult {
     let mut result = LspCallGraphResult {
         edges: Vec::new(),
@@ -798,13 +798,15 @@ fn extract_call_graph_via_lsp(
         incomplete: false,
     };
 
+    let matches_ext = |path: &str| file_extensions.iter().any(|ext| path.ends_with(ext));
+
     // Build lookup maps
     let function_nodes: Vec<&GraphNode> = nodes
         .iter()
         .filter(|n| {
             n.deleted_at.is_none()
                 && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
-                && n.file_path.ends_with(file_extension)
+                && matches_ext(&n.file_path)
         })
         .collect();
 
@@ -815,7 +817,7 @@ fn extract_call_graph_via_lsp(
     // Build file → sorted vec of (line_start, line_end, node_id)
     let mut file_functions: HashMap<String, Vec<(u32, u32, String)>> = HashMap::new();
     for n in nodes.iter().filter(|n| n.deleted_at.is_none()) {
-        if !n.file_path.ends_with(file_extension) {
+        if !matches_ext(&n.file_path) {
             continue;
         }
         file_functions
@@ -969,13 +971,22 @@ fn extract_call_graph_via_lsp(
                 Ok(c) => c,
                 Err(_) => continue,
             };
+            // Infer languageId from file extension for correct LSP handling
+            // (e.g., TypeScript LSP needs "typescriptreact" for .tsx, not "typescript")
+            let inferred_lang_id = match func_node.file_path.rsplit('.').next() {
+                Some("ts") => "typescript",
+                Some("tsx") => "typescriptreact",
+                Some("js") => "javascript",
+                Some("jsx") => "javascriptreact",
+                _ => language_id,
+            };
             let did_open = serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "textDocument/didOpen",
                 "params": {
                     "textDocument": {
                         "uri": file_uri,
-                        "languageId": language_id,
+                        "languageId": inferred_lang_id,
                         "version": 1,
                         "text": file_content
                     }
@@ -984,9 +995,10 @@ fn extract_call_graph_via_lsp(
             let _ = send_lsp_message(stdin, &did_open);
         }
 
-        // For non-Rust languages, use column 0 (name is usually at start of definition)
-        let char_pos = func_node.line_start.saturating_sub(1);
-        let _ = char_pos; // suppress unused warning
+        // Compute character position for the function name in the definition line.
+        // This correctly handles language-specific keywords (def, func, export function, etc.)
+        // by finding the function name substring in the source line.
+        let char_pos = compute_char_position(repo_root, &func_node.file_path, func_node);
         let refs_msg = serde_json::json!({
             "jsonrpc": "2.0",
             "id": idx + 1,
@@ -995,7 +1007,7 @@ fn extract_call_graph_via_lsp(
                 "textDocument": { "uri": file_uri },
                 "position": {
                     "line": func_node.line_start.saturating_sub(1),
-                    "character": 0
+                    "character": char_pos
                 },
                 "context": { "includeDeclaration": false }
             }
@@ -1131,7 +1143,7 @@ pub fn extract_call_graph_python(
         "pyright-langserver",
         &["--stdio"],
         "python",
-        ".py",
+        &[".py"],
     )
 }
 
@@ -1163,7 +1175,7 @@ pub fn extract_call_graph_go(
         "gopls",
         &["serve"],
         "go",
-        ".go",
+        &[".go"],
     )
 }
 
@@ -1188,9 +1200,10 @@ pub fn extract_call_graph_typescript(
         };
     }
 
-    // typescript-language-server handles both .ts and .js files.
-    // We extract for .ts first, then .js separately and merge.
-    let mut ts_result = extract_call_graph_via_lsp(
+    // typescript-language-server handles .ts, .tsx, .js, and .jsx files.
+    // Use a single language server instance for all TypeScript/JavaScript files
+    // (previously spawned two — doubling extraction time and missing .tsx/.jsx).
+    extract_call_graph_via_lsp(
         repo_root,
         nodes,
         existing_edges,
@@ -1198,43 +1211,9 @@ pub fn extract_call_graph_typescript(
         commit_sha,
         "typescript-language-server",
         &["--stdio"],
-        "typescript",
-        ".ts",
-    );
-
-    // Also handle .js/.jsx/.tsx files
-    let js_nodes: Vec<&GraphNode> = nodes
-        .iter()
-        .filter(|n| {
-            n.deleted_at.is_none()
-                && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
-                && (n.file_path.ends_with(".js")
-                    || n.file_path.ends_with(".jsx")
-                    || n.file_path.ends_with(".tsx"))
-        })
-        .collect();
-
-    if !js_nodes.is_empty() {
-        let js_result = extract_call_graph_via_lsp(
-            repo_root,
-            nodes,
-            existing_edges,
-            repo_id,
-            commit_sha,
-            "typescript-language-server",
-            &["--stdio"],
-            "javascript",
-            ".js",
-        );
-        ts_result.edges.extend(js_result.edges);
-        ts_result.errors.extend(js_result.errors);
-        ts_result.definitions_queried += js_result.definitions_queried;
-        ts_result.new_edges_found += js_result.new_edges_found;
-        ts_result.total_definitions += js_result.total_definitions;
-        ts_result.incomplete = ts_result.incomplete || js_result.incomplete;
-    }
-
-    ts_result
+        "typescriptreact",
+        &[".ts", ".tsx", ".js", ".jsx"],
+    )
 }
 
 /// Extract call graph for any supported language, auto-detecting the language.
