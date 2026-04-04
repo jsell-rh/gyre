@@ -1137,7 +1137,8 @@ async fn run_explorer_agent_sdk(
         .unwrap_or_else(|_| "scripts/explorer-agent.mjs".to_string());
     // Clear environment and only pass needed variables to prevent
     // leaking DATABASE_URL, API keys, etc. to the subprocess.
-    let mut child = tokio::process::Command::new("node")
+    let mut child_cmd = tokio::process::Command::new("node");
+    child_cmd
         .arg(&sdk_script)
         .env_clear()
         .env("GYRE_API_URL", &server_url)
@@ -1159,8 +1160,8 @@ async fn run_explorer_agent_sdk(
         }))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+        .stderr(std::process::Stdio::piped());
+    let mut child = child_cmd.spawn()?;
 
     // Write input to stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -1714,6 +1715,7 @@ async fn run_explorer_agent(
                         ))
                     }
                 } else {
+                    warn!("Failed to deserialize view query for self-check — sending unvalidated");
                     None
                 };
 
