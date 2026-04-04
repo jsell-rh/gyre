@@ -61,6 +61,7 @@
   let assertionsLoading = $state(false);
   // View query dry-run result (contains node_metrics for heat map)
   let viewQueryResult = $state(null);
+  let dryRunVersion = 0; // Guards against stale async results
 
   // Fetch dry-run result when a view query with heat emphasis is active
   $effect(() => {
@@ -70,11 +71,17 @@
       viewQueryResult = null;
       return;
     }
-    // Fire and forget — result updates viewQueryResult asynchronously
+    // Capture version to detect if a newer request has been issued
+    const thisVersion = ++dryRunVersion;
     const selectedId = explorerCanvasState?.selectedNode?.id ?? null;
     api.graphQueryDryrun(repoId, q, selectedId)
-      .then(result => { viewQueryResult = result; })
-      .catch(() => { viewQueryResult = null; });
+      .then(result => {
+        // Only apply if this is still the most recent request
+        if (thisVersion === dryRunVersion) viewQueryResult = result;
+      })
+      .catch(() => {
+        if (thisVersion === dryRunVersion) viewQueryResult = null;
+      });
   });
 
   // Evaluative lens: trace data from most recent MR
@@ -246,6 +253,7 @@
   // Debounced auto-prediction: run predictions 2s after user stops typing
   // per spec §3.2-3.3: "the canvas updates live as you edit"
   let predictDebounceTimer = null;
+  let predictVersion = 0; // Guards against stale closure race conditions
   $effect(() => {
     // Watch for spec content changes
     const content = specEditorContent;
@@ -260,8 +268,13 @@
     // Only auto-predict when editing is dirty and we have the necessary data
     if (!dirty || !path || !repo || !specEditorOpen) return;
 
+    // Capture current version to detect stale closures
+    const thisVersion = ++predictVersion;
+
     // Debounce: 2 seconds after the user stops typing
     predictDebounceTimer = setTimeout(() => {
+      // Guard: if the spec editor has changed since this timer was set, skip
+      if (thisVersion !== predictVersion) return;
       // Don't auto-predict if a manual prediction is already running
       if (!predictLoading) {
         runPrediction();
@@ -348,6 +361,16 @@
     }
     try {
       const parsed = JSON.parse(text);
+      // Basic schema validation: must have a scope with a type field
+      if (!parsed.scope || !parsed.scope.type) {
+        queryEditorError = 'Query must have a "scope" object with a "type" field (all, focus, filter, test_gaps, diff, concept)';
+        return;
+      }
+      const validTypes = ['all', 'focus', 'filter', 'test_gaps', 'diff', 'concept'];
+      if (!validTypes.includes(parsed.scope.type)) {
+        queryEditorError = `Unknown scope type "${parsed.scope.type}". Valid: ${validTypes.join(', ')}`;
+        return;
+      }
       activeViewQuery = parsed;
     } catch (e) {
       queryEditorError = `Invalid JSON: ${e.message}`;
