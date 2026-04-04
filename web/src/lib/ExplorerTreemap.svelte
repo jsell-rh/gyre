@@ -1814,16 +1814,23 @@
     const r = Math.min(6, sw * 0.08);
     roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
 
-    // Fill
-    ctx.fillStyle = 'rgba(20,28,48,0.9)';
+    // Fill — spec coverage tint in structural lens (green=governed, amber=suggested, orange=low, red=none)
+    const qColor = queryNodeColor(ln);
+    let fillColor = 'rgba(20,28,48,0.9)';
+    if (lens === 'structural' && !qColor) {
+      const conf = n?.spec_confidence;
+      if (conf === 'high') fillColor = 'rgba(34,197,94,0.15)';        // green tint
+      else if (conf === 'medium') fillColor = 'rgba(234,179,8,0.12)'; // amber tint
+      else if (conf === 'low') fillColor = 'rgba(249,115,22,0.12)';   // orange tint
+      else fillColor = 'rgba(239,68,68,0.08)';                        // subtle red tint
+    }
+    ctx.fillStyle = fillColor;
     ctx.fill();
 
     // Border — colored by spec confidence, width scaled by churn
     let borderColor = ln.id === selectedNodeId ? '#ef4444' : specBorderColor(n);
     const churnWidth = 1 + Math.min((n?.churn_count_30d ?? 0) / 3, 4);
     let borderWidth = ln.id === selectedNodeId ? 2 : churnWidth;
-
-    const qColor = queryNodeColor(ln);
     if (qColor && ln.id !== selectedNodeId) {
       borderColor = qColor;
       // Fill tint
