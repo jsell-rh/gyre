@@ -291,13 +291,12 @@ fn find_node_by_name_with_match_type<'a>(
 
 /// Edge types traversed for test reachability analysis.
 /// Tests can reach code via direct calls, trait dispatch (Implements),
-/// HTTP endpoint tests (RoutesTo), and module-level integration (Contains).
-const TEST_REACHABILITY_EDGES: &[EdgeType] = &[
-    EdgeType::Calls,
-    EdgeType::Implements,
-    EdgeType::RoutesTo,
-    EdgeType::Contains,
-];
+/// and HTTP endpoint tests (RoutesTo).
+/// NOTE: Contains is intentionally excluded — including it would make all
+/// sibling functions in a module "reachable" just because one test exists
+/// in the same module, inflating test coverage metrics.
+const TEST_REACHABILITY_EDGES: &[EdgeType] =
+    &[EdgeType::Calls, EdgeType::Implements, EdgeType::RoutesTo];
 
 /// Compute the set of nodes reachable from test functions.
 /// Pre-computes a single BFS from all test nodes for O(T + N + M) total.

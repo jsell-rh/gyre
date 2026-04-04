@@ -54,10 +54,11 @@
     // Amber: suggested link (medium or low confidence)
     if (conf === 'medium') return '#eab308';
     if (conf === 'low') return '#eab308';
-    // Check GovernedBy edges for this node
+    // Check GovernedBy edges for this node (skip deleted edges)
     const nodeId = node.id;
     if (nodeId) {
       for (const e of edges) {
+        if (e.deleted_at) continue; // stale GovernedBy edge from deleted spec
         const src = e.source_id ?? e.from_node_id ?? e.from;
         const et = (e.edge_type ?? e.type ?? '').toLowerCase();
         if (et === 'governed_by' && src === nodeId) return '#22c55e';
@@ -222,6 +223,7 @@
       if ((n.node_type === 'type' || n.node_type === 'interface') && !n.spec_path && n.last_modified_by) {
         let hasGovEdge = false;
         for (const e of edges) {
+          if (e.deleted_at) continue;
           const src = e.source_id ?? e.from_node_id ?? e.from;
           const et = (e.edge_type ?? e.type ?? '').toLowerCase();
           if (et === 'governed_by' && src === n.id) { hasGovEdge = true; break; }
@@ -1327,9 +1329,11 @@
   function computeGovernedBy(specPath) {
     const result = new Set();
     for (const n of nodes) {
+      if (n.deleted_at) continue;
       if (n.spec_path === specPath) result.add(n.id);
     }
     for (const e of edges) {
+      if (e.deleted_at) continue;
       const et = (e.edge_type ?? e.type ?? '').toLowerCase();
       if (et === 'governed_by') {
         const tgt = e.target_id ?? e.to_node_id ?? e.to;
@@ -2695,6 +2699,7 @@
       const nodeId = n?.id;
       if (nodeId) {
         for (const e of edges) {
+          if (e.deleted_at) continue;
           const src = e.source_id ?? e.from_node_id ?? e.from;
           const et = (e.edge_type ?? e.type ?? '').toLowerCase();
           if (et === 'governed_by' && src === nodeId) { hasGovEdge = true; break; }

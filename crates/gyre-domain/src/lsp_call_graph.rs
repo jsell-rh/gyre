@@ -116,7 +116,7 @@ pub fn extract_call_graph(
     nodes: &[GraphNode],
     existing_edges: &[GraphEdge],
     repo_id: &Id,
-    _commit_sha: &str,
+    commit_sha: &str,
 ) -> LspCallGraphResult {
     let mut result = LspCallGraphResult {
         edges: Vec::new(),
@@ -403,13 +403,21 @@ pub fn extract_call_graph(
                                     && !existing_pairs.contains(&(caller.clone(), target.clone()))
                                 {
                                     existing_pairs.insert((caller.clone(), target.clone()));
+                                    let meta = if commit_sha.is_empty() {
+                                        r#"{"source":"lsp"}"#.to_string()
+                                    } else {
+                                        format!(
+                                            r#"{{"source":"lsp","commit_sha":"{}"}}"#,
+                                            commit_sha
+                                        )
+                                    };
                                     result.edges.push(GraphEdge {
                                         id: Id::new(Uuid::new_v4().to_string()),
                                         repo_id: repo_id.clone(),
                                         source_id: Id::new(caller),
                                         target_id: func_node.id.clone(),
                                         edge_type: EdgeType::Calls,
-                                        metadata: Some(r#"{"source":"lsp"}"#.to_string()),
+                                        metadata: Some(meta),
                                         first_seen_at: now,
                                         last_seen_at: now,
                                         deleted_at: None,
@@ -511,10 +519,11 @@ fn compute_char_position(repo_root: &Path, file_path: &str, node: &GraphNode) ->
         }
     }
 
-    // Fallback: use the LAST occurrence of the name in the line.  Using rfind
-    // avoids matching an earlier occurrence that might be part of a type
-    // annotation or attribute rather than the actual definition name.
-    if let Some(pos) = line.rfind(&node.name) {
+    // Fallback: use the FIRST occurrence of the name in the line. For function
+    // definitions, the name appears before parameters and return types, so the
+    // first match is most likely the definition (e.g. in `fn convert(x: Foo) -> Foo`,
+    // the first "convert" is the definition, not a type reference).
+    if let Some(pos) = line.find(&node.name) {
         return pos as u32;
     }
     0
