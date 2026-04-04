@@ -197,6 +197,49 @@ pub struct ViewQuery {
     pub narrative: Vec<NarrativeStep>,
 }
 
+// ── Validation ──────────────────────────────────────────────────────────────
+
+const MAX_DEPTH: u32 = 100;
+
+impl ViewQuery {
+    /// Validate a ViewQuery and return a list of errors (empty = valid).
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        // Bound depth fields to prevent DoS
+        match &self.scope {
+            Scope::Focus { depth, .. } => {
+                if *depth > MAX_DEPTH {
+                    errors.push(format!(
+                        "Focus depth {} exceeds maximum of {MAX_DEPTH}",
+                        depth
+                    ));
+                }
+            }
+            Scope::Concept { expand_depth, .. } => {
+                if *expand_depth > MAX_DEPTH {
+                    errors.push(format!(
+                        "Concept expand_depth {} exceeds maximum of {MAX_DEPTH}",
+                        expand_depth
+                    ));
+                }
+            }
+            _ => {}
+        }
+
+        // Validate dim_unmatched range (0.0-1.0)
+        if let Some(dim) = self.emphasis.dim_unmatched {
+            if !(0.0..=1.0).contains(&dim) {
+                errors.push(format!(
+                    "dim_unmatched {dim} is out of range — must be between 0.0 and 1.0"
+                ));
+            }
+        }
+
+        errors
+    }
+}
+
 // ── Canvas State (sent by frontend with each user message) ───────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

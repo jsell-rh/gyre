@@ -252,16 +252,39 @@ fn bfs_traverse_with_depths(
 fn find_node_by_name<'a>(nodes: &'a [GraphNode], name: &str) -> Option<&'a GraphNode> {
     let lower = name.to_lowercase();
     // Exact match first.
-    nodes
+    let exact = nodes
+        .iter()
+        .find(|n| n.qualified_name.to_lowercase() == lower || n.name.to_lowercase() == lower);
+    if exact.is_some() {
+        return exact;
+    }
+    // Partial match fallback.
+    nodes.iter().find(|n| {
+        n.qualified_name.to_lowercase().contains(&lower) || n.name.to_lowercase().contains(&lower)
+    })
+}
+
+/// Find a node by name, returning whether the match was partial (not exact).
+fn find_node_by_name_with_match_type<'a>(
+    nodes: &'a [GraphNode],
+    name: &str,
+) -> Option<(&'a GraphNode, bool)> {
+    let lower = name.to_lowercase();
+    // Exact match first.
+    if let Some(exact) = nodes
         .iter()
         .find(|n| n.qualified_name.to_lowercase() == lower || n.name.to_lowercase() == lower)
-        .or_else(|| {
-            // Partial match.
-            nodes.iter().find(|n| {
-                n.qualified_name.to_lowercase().contains(&lower)
-                    || n.name.to_lowercase().contains(&lower)
-            })
+    {
+        return Some((exact, false));
+    }
+    // Partial match fallback.
+    nodes
+        .iter()
+        .find(|n| {
+            n.qualified_name.to_lowercase().contains(&lower)
+                || n.name.to_lowercase().contains(&lower)
         })
+        .map(|n| (n, true))
 }
 
 /// Edge types traversed for test reachability analysis.
@@ -410,9 +433,21 @@ pub fn resolve_scope_with_depths(
     edges: &[GraphEdge],
     selected_node_id: Option<&str>,
 ) -> ScopeResult {
+    let (outgoing, incoming) = build_adjacency(edges);
+    resolve_scope_with_adjacency(scope, nodes, edges, selected_node_id, &outgoing, &incoming)
+}
+
+/// Resolve a scope using pre-built adjacency maps (avoids rebuilding them).
+fn resolve_scope_with_adjacency(
+    scope: &Scope,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    selected_node_id: Option<&str>,
+    outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
+    incoming: &HashMap<String, Vec<(String, EdgeType)>>,
+) -> ScopeResult {
     let active_nodes: Vec<&GraphNode> = nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
     let all_ids: HashSet<String> = active_nodes.iter().map(|n| n.id.to_string()).collect();
-    let (outgoing, incoming) = build_adjacency(edges);
 
     let no_depths = || HashMap::new();
 
@@ -460,8 +495,8 @@ pub fn resolve_scope_with_depths(
                         &edge_types,
                         direction,
                         *depth,
-                        &outgoing,
-                        &incoming,
+                        outgoing,
+                        incoming,
                     );
                     let ids = depth_map.keys().cloned().collect();
                     (ids, depth_map)
@@ -480,8 +515,8 @@ pub fn resolve_scope_with_depths(
                     expr,
                     &active_nodes,
                     edges,
-                    &outgoing,
-                    &incoming,
+                    outgoing,
+                    incoming,
                     selected_node_id,
                 );
                 (result, no_depths())
@@ -513,7 +548,7 @@ pub fn resolve_scope_with_depths(
                     .iter()
                     .map(|n| (*n).clone())
                     .collect::<Vec<_>>(),
-                &outgoing,
+                outgoing,
             );
             // Include Functions, Endpoints, and Types — not just Functions.
             // Endpoints and Types without test coverage are high-risk gaps.
@@ -585,8 +620,8 @@ pub fn resolve_scope_with_depths(
                         &edge_types,
                         direction,
                         *expand_depth,
-                        &outgoing,
-                        &incoming,
+                        outgoing,
+                        incoming,
                     );
                     for (id, d) in &depth_map {
                         let entry = all_depths.entry(id.clone()).or_insert(*d);
@@ -1190,6 +1225,10 @@ pub fn dry_run(
 ) -> DryRunResult {
     let mut warnings = Vec::new();
 
+    // Validate ViewQuery fields (depth bounds, dim_unmatched range)
+    let validation_errors = query.validate();
+    warnings.extend(validation_errors);
+
     // Validate computed expressions before resolving (catch syntax errors)
     if let Scope::Filter {
         computed: Some(ref expr),
@@ -1201,8 +1240,18 @@ pub fn dry_run(
         }
     }
 
+    // Build adjacency once — reused for scope resolution and heat metrics.
+    let (adjacency_outgoing, adjacency_incoming) = build_adjacency(edges);
+
     // Resolve scope with depth info
-    let scope_result = resolve_scope_with_depths(&query.scope, nodes, edges, selected_node_id);
+    let scope_result = resolve_scope_with_adjacency(
+        &query.scope,
+        nodes,
+        edges,
+        selected_node_id,
+        &adjacency_outgoing,
+        &adjacency_incoming,
+    );
     let result_set = scope_result.matched;
     let node_depths = scope_result.depths;
 
@@ -1252,6 +1301,32 @@ pub fn dry_run(
         _ => None,
     };
 
+    // Warn on partial (non-exact) node name matches in scope
+    {
+        let all_nodes: Vec<GraphNode> = nodes
+            .iter()
+            .filter(|n| n.deleted_at.is_none())
+            .cloned()
+            .collect();
+        let scope_names: Vec<&str> = match &query.scope {
+            Scope::Focus { node, .. } if node != "$clicked" && node != "$selected" => {
+                vec![node.as_str()]
+            }
+            Scope::Concept { seed_nodes, .. } => seed_nodes.iter().map(|s| s.as_str()).collect(),
+            _ => vec![],
+        };
+        for name in scope_names {
+            if let Some((found, is_partial)) = find_node_by_name_with_match_type(&all_nodes, name) {
+                if is_partial {
+                    warnings.push(format!(
+                        "Partial match: '{}' resolved to '{}' (not an exact match — use the qualified_name for precision)",
+                        name, found.qualified_name
+                    ));
+                }
+            }
+        }
+    }
+
     let matched_node_names: Vec<String> = result_set
         .iter()
         .filter_map(|id| node_map.get(id).map(|n| n.qualified_name.clone()))
@@ -1262,13 +1337,21 @@ pub fn dry_run(
     let group_count = count_distinct_parent_modules(&result_set, nodes, edges);
 
     // Resolve annotation templates with proper $name handling
-    if let Some(ref title) = query.annotation.title {
-        if title.contains("$name") && focused_node_name.is_none() {
-            warnings.push(
-                "Annotation uses $name but scope has no focused node — $name won't be resolved"
-                    .to_string(),
-            );
-        }
+    let has_unresolvable_name = focused_node_name.is_none()
+        && (query
+            .annotation
+            .title
+            .as_ref()
+            .map_or(false, |t| t.contains("$name"))
+            || query
+                .annotation
+                .description
+                .as_ref()
+                .map_or(false, |d| d.contains("$name")));
+    if has_unresolvable_name {
+        warnings.push(
+            "Annotation uses $name but scope has no focused node (TestGaps, All, Filter, Diff scopes don't have one) — $name will be empty".to_string(),
+        );
     }
 
     // Resolve annotation template variables server-side
@@ -1378,9 +1461,8 @@ pub fn dry_run(
         })
         .collect();
 
-    // Compute per-node metric values for heat emphasis
+    // Compute per-node metric values for heat emphasis (reuses pre-built adjacency)
     let node_metrics = if let Some(ref heat) = query.emphasis.heat {
-        let (outgoing, incoming) = build_adjacency(edges);
         result_set
             .iter()
             .filter_map(|id| {
@@ -1391,10 +1473,10 @@ pub fn dry_run(
                     "churn" | "churn_count_30d" => {
                         node_map.get(id).map(|n| n.churn_count_30d as f64)
                     }
-                    "incoming_calls" => Some(count_incoming_calls(id, &incoming) as f64),
-                    "outgoing_calls" => Some(count_outgoing_calls(id, &outgoing) as f64),
+                    "incoming_calls" => Some(count_incoming_calls(id, &adjacency_incoming) as f64),
+                    "outgoing_calls" => Some(count_outgoing_calls(id, &adjacency_outgoing) as f64),
                     "test_coverage" => node_map.get(id).and_then(|n| n.test_coverage),
-                    "field_count" => Some(count_fields(id, &incoming) as f64),
+                    "field_count" => Some(count_fields(id, &adjacency_incoming) as f64),
                     _ => None,
                 };
                 val.map(|v| (id.clone(), v))
