@@ -54,7 +54,13 @@
 
   // ── Auth ─────────────────────────────────────────────────────────────────
   function getAuthToken() {
-    return localStorage.getItem(AUTH_TOKEN_KEY) || 'gyre-dev-token';
+    const token = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!token) {
+      // No auth token found — return null to trigger "please log in" UX
+      // instead of silently using a hardcoded dev token in production.
+      return null;
+    }
+    return token;
   }
 
   // ── WebSocket connection ─────────────────────────────────────────────────
@@ -72,6 +78,15 @@
     status = 'connecting';
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const token = getAuthToken();
+    if (!token) {
+      status = 'error';
+      messages = capMessages([...messages, {
+        id: nextMsgId++, role: 'assistant',
+        content: 'Not authenticated. Please log in to use the explorer.',
+        timestamp: Date.now(),
+      }]);
+      return;
+    }
     // Browser WebSocket API does not support custom headers, so auth token
     // must be passed via query parameter. The server strips the token from
     // access logs to prevent leakage. Future: implement ticket-based auth
