@@ -622,109 +622,24 @@
     failed_gates: wsMrs.filter(m => m._gates?.failed > 0).length,
   });
 
-  // ── Workspace-level entity tab ──────────────────────────────────────
-  // 3 tabs: repos (default), pipeline (combined work), activity
-  let wsTab = $state('repos');
-  // Track whether user has manually selected a tab (don't auto-switch after that)
-  let userSelectedTab = $state(false);
-  // Browse section is always expanded — no toggle needed
-  let browseExpanded = $state(true);
+  // ── Activity pagination ──────────────────────────────────────
+  let activityLimit = $state(8);
 
-  // Auto-select the most relevant tab, but only before user interacts.
-  // Repos is default; switch to pipeline when there's active work needing attention.
-  $effect(() => {
-    if (userSelectedTab) return;
-    if (specsLoading || tasksLoading) return;
-    if (pipelineSpecs.pending > 0 || pipelineMrs.failed_gates > 0 || pipelineAgents.active > 0) {
-      wsTab = 'pipeline';
-    } else {
-      wsTab = 'repos';
-    }
-  });
+  // ── Pipeline hero stage click → show inline detail popover ──────────
+  let expandedStage = $state(null); // null | 'specs' | 'tasks' | 'agents' | 'mrs'
 
-  // ── Pipeline section collapse state ──────────────────────────────
-  let pipelineExpandedSections = $state({ specs: true, tasks: true, mrs: true, agents: true });
+  function toggleStage(stageId) {
+    expandedStage = expandedStage === stageId ? null : stageId;
+  }
 
-  // Auto-collapse empty sections once data loads (only once, don't override user clicks)
-  let pipelineAutoCollapseApplied = $state(false);
-  $effect(() => {
-    if (pipelineAutoCollapseApplied) return;
-    if (specsLoading || tasksLoading || mrsLoading || agentsLoading) return;
-    pipelineAutoCollapseApplied = true;
-    pipelineExpandedSections = {
-      specs: specs.length > 0,
-      tasks: wsTasks.length > 0,
-      mrs: wsMrs.length > 0,
-      agents: wsAgents.length > 0,
+  /** Get the top items needing attention for a pipeline stage */
+  let stageItems = $derived.by(() => {
+    return {
+      specs: specs.filter(s => (s.approval_status ?? s.status) === 'pending').slice(0, 5),
+      tasks: wsTasks.filter(t => t.status === 'in_progress' || t.status === 'blocked').slice(0, 5),
+      agents: wsAgents.filter(a => a.status === 'active' || a.status === 'failed').slice(0, 5),
+      mrs: wsMrs.filter(m => m.status === 'open' || m._gates?.failed > 0).slice(0, 5),
     };
-  });
-
-  // ── Entity table search ──────────────────────────────────────────────
-  let entitySearch = $state('');
-
-  // Clear search when switching tabs
-  $effect(() => {
-    void wsTab;
-    entitySearch = '';
-  });
-
-  let filteredSpecs = $derived.by(() => {
-    if (!entitySearch) return specs;
-    const q = entitySearch.toLowerCase();
-    return specs.filter(s => {
-      const name = s.path?.toLowerCase() ?? '';
-      const status = (s.approval_status ?? s.status ?? '').toLowerCase();
-      return name.includes(q) || status.includes(q);
-    });
-  });
-
-  let filteredTasks = $derived.by(() => {
-    if (!entitySearch) return wsTasks;
-    const q = entitySearch.toLowerCase();
-    return wsTasks.filter(t => {
-      const title = (t.title ?? '').toLowerCase();
-      const status = (t.status ?? '').toLowerCase();
-      return title.includes(q) || status.includes(q);
-    });
-  });
-
-  let filteredMrs = $derived.by(() => {
-    if (!entitySearch) return wsMrs;
-    const q = entitySearch.toLowerCase();
-    return wsMrs.filter(m => {
-      const title = (m.title ?? '').toLowerCase();
-      const branch = (m.source_branch ?? '').toLowerCase();
-      const status = (m.status ?? '').toLowerCase();
-      return title.includes(q) || branch.includes(q) || status.includes(q);
-    });
-  });
-
-  let filteredAgents = $derived.by(() => {
-    if (!entitySearch) return wsAgents;
-    const q = entitySearch.toLowerCase();
-    return wsAgents.filter(a => {
-      const name = (a.name ?? '').toLowerCase();
-      const status = (a.status ?? '').toLowerCase();
-      const branch = (a.branch ?? '').toLowerCase();
-      return name.includes(q) || status.includes(q) || branch.includes(q);
-    });
-  });
-
-  // ── Activity filter + pagination ──────────────────────────────────────
-  let activityFilter = $state('');
-  let activityLimit = $state(10);
-
-  let filteredActivity = $derived.by(() => {
-    if (!activityFilter) return activityEvents;
-    return activityEvents.filter(e => {
-      const t = e.event_type ?? e.type ?? '';
-      if (activityFilter === 'spec') return t.includes('spec');
-      if (activityFilter === 'task') return t.includes('task');
-      if (activityFilter === 'agent') return t.includes('agent');
-      if (activityFilter === 'mr') return t.includes('mr') || t.includes('merg') || t.includes('creat');
-      if (activityFilter === 'gate') return t.includes('gate');
-      return true;
-    });
   });
 
   // ── Repo card data ────────────────────────────────────────────────────
@@ -1147,20 +1062,9 @@
             </div>
           </div>
 
-          <!-- Status: one-line summary + clickable chips for attention items -->
+          <!-- Status: one-line summary -->
           {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-            {#if statusItems.length > 0}
-              <div class="ws-header-status-items">
-                {#each statusItems as item}
-                  <button class="ws-header-status-chip ws-header-status-chip-{item.variant}" onclick={() => { wsTab = item.tab; userSelectedTab = true; }}>
-                    <span class="ws-header-status-icon">{item.icon}</span>
-                    {item.text}
-                  </button>
-                {/each}
-              </div>
-            {:else}
-              <p class="ws-header-status">{statusSentence}</p>
-            {/if}
+            <p class="ws-header-status">{statusSentence}</p>
           {:else if workspace.description}
             <p class="ws-header-desc">{workspace.description}</p>
           {/if}
@@ -1257,34 +1161,133 @@
         </section>
       {/if}
 
-      <!-- ── Main workspace content: 3-tab layout ── -->
-      <div class="dashboard-flow" data-testid="browse-panel">
-        <nav class="ws-tab-bar" aria-label="Workspace navigation" data-testid="section-repos">
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'repos'} onclick={() => { wsTab = 'repos'; userSelectedTab = true; }}>
-            Repos
-          </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'pipeline'} onclick={() => { wsTab = 'pipeline'; userSelectedTab = true; }}>
-            Pipeline
-            {#if pipelineSpecs.pending + pipelineMrs.failed_gates + pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending + pipelineMrs.failed_gates + pipelineTasks.blocked} need attention</span>
-            {:else if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active} active</span>{/if}
-          </button>
-          <button class="ws-tab" class:ws-tab-active={wsTab === 'activity'} onclick={() => { wsTab = 'activity'; userSelectedTab = true; }}>
-            Activity
-          </button>
-          <span class="ws-tab-spacer"></span>
-          {#if wsTab === 'pipeline'}
-            <input
-              class="entity-search-input"
-              type="text"
-              placeholder="Filter pipeline..."
-              bind:value={entitySearch}
-              aria-label="Filter entities"
-            />
+      <!-- ── Pipeline hero — always visible ──────────────────────── -->
+      <div class="pipeline-hero" data-testid="pipeline-hero">
+        <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineSpecs.pending > 0} class:pipeline-hero-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} class:pipeline-hero-selected={expandedStage === 'specs'} onclick={() => toggleStage('specs')}>
+          <span class="pipeline-hero-count">{specs.length}</span>
+          <span class="pipeline-hero-label">Specs</span>
+          {#if pipelineSpecs.pending > 0}
+            <span class="pipeline-hero-badge pipeline-hero-badge-warn">{pipelineSpecs.pending} pending</span>
+          {:else if pipelineSpecs.approved > 0}
+            <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineSpecs.approved} approved</span>
           {/if}
-        </nav>
+        </button>
+        <span class="pipeline-hero-arrow">
+          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineTasks.in_progress > 0} class:pipeline-hero-warn={pipelineTasks.blocked > 0} class:pipeline-hero-selected={expandedStage === 'tasks'} onclick={() => toggleStage('tasks')}>
+          <span class="pipeline-hero-count">{wsTasks.length}</span>
+          <span class="pipeline-hero-label">Tasks</span>
+          {#if pipelineTasks.in_progress > 0}
+            <span class="pipeline-hero-badge">{pipelineTasks.in_progress} active</span>
+          {:else if pipelineTasks.blocked > 0}
+            <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineTasks.blocked} blocked</span>
+          {/if}
+        </button>
+        <span class="pipeline-hero-arrow">
+          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineAgents.active > 0} class:pipeline-hero-selected={expandedStage === 'agents'} onclick={() => toggleStage('agents')}>
+          <span class="pipeline-hero-count">{wsAgents.length}</span>
+          <span class="pipeline-hero-label">Agents</span>
+          {#if pipelineAgents.active > 0}
+            <span class="pipeline-hero-badge pipeline-hero-badge-ok"><span class="pipeline-hero-pulse"></span>{pipelineAgents.active} running</span>
+          {/if}
+        </button>
+        <span class="pipeline-hero-arrow">
+          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <button class="pipeline-hero-stage" class:pipeline-hero-warn={pipelineMrs.failed_gates > 0} class:pipeline-hero-done={pipelineMrs.merged > 0 && pipelineMrs.failed_gates === 0 && pipelineMrs.open === 0} class:pipeline-hero-selected={expandedStage === 'mrs'} onclick={() => toggleStage('mrs')}>
+          <span class="pipeline-hero-count">{wsMrs.length}</span>
+          <span class="pipeline-hero-label">MRs</span>
+          {#if pipelineMrs.failed_gates > 0}
+            <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineMrs.failed_gates} failed</span>
+          {:else if pipelineMrs.open > 0}
+            <span class="pipeline-hero-badge">{pipelineMrs.open} open</span>
+          {:else if pipelineMrs.merged > 0}
+            <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineMrs.merged} merged</span>
+          {/if}
+        </button>
+      </div>
 
-            <!-- ── Repos tab ──────────────────────────────────────────── -->
-            {#if wsTab === 'repos'}
+      <!-- ── Pipeline stage popover — shows top items when a stage is clicked ── -->
+      {#if expandedStage}
+        <div class="stage-popover" data-testid="stage-popover">
+          {#if expandedStage === 'specs' && stageItems.specs.length > 0}
+            <div class="stage-popover-header">
+              <span class="stage-popover-title">Specs needing approval</span>
+              <button class="stage-popover-close" onclick={() => { expandedStage = null; }}>✕</button>
+            </div>
+            {#each stageItems.specs as spec}
+              {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
+              <div class="stage-popover-item">
+                <button class="stage-popover-link" onclick={() => navigateToSpec(spec)}>{specName}</button>
+                {#if spec.repo_id && repoMap[spec.repo_id]}<span class="stage-popover-repo">{repoMap[spec.repo_id].name}</span>{/if}
+                <div class="stage-popover-actions">
+                  <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'}>Approve</button>
+                  <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'}>Reject</button>
+                </div>
+              </div>
+            {/each}
+          {:else if expandedStage === 'tasks' && stageItems.tasks.length > 0}
+            <div class="stage-popover-header">
+              <span class="stage-popover-title">Active & blocked tasks</span>
+              <button class="stage-popover-close" onclick={() => { expandedStage = null; }}>✕</button>
+            </div>
+            {#each stageItems.tasks as task}
+              <button class="stage-popover-item stage-popover-link" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })}>
+                <span class="status-pill status-pill-{task.status}">{task.status}</span>
+                <span>{task.title ?? 'Untitled'}</span>
+                {#if task.repo_id && repoMap[task.repo_id]}<span class="stage-popover-repo">{repoMap[task.repo_id].name}</span>{/if}
+              </button>
+            {/each}
+          {:else if expandedStage === 'agents' && stageItems.agents.length > 0}
+            <div class="stage-popover-header">
+              <span class="stage-popover-title">Active agents</span>
+              <button class="stage-popover-close" onclick={() => { expandedStage = null; }}>✕</button>
+            </div>
+            {#each stageItems.agents as agent}
+              {@const agentName = agent.name ?? formatId('agent', agent.id)}
+              {@const specName = agent.spec_path?.split('/').pop()?.replace(/\.md$/, '')}
+              <button class="stage-popover-item stage-popover-link" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
+                <span class="status-pill status-pill-{agent.status}">{#if agent.status === 'active'}<span class="status-pulse-tiny"></span>{/if}{agent.status}</span>
+                <span>{agentName}</span>
+                {#if specName}<span class="stage-popover-context">implementing {specName}</span>{/if}
+                {#if agent.repo_id && repoMap[agent.repo_id]}<span class="stage-popover-repo">{repoMap[agent.repo_id].name}</span>{/if}
+              </button>
+            {/each}
+          {:else if expandedStage === 'mrs' && stageItems.mrs.length > 0}
+            <div class="stage-popover-header">
+              <span class="stage-popover-title">Open merge requests</span>
+              <button class="stage-popover-close" onclick={() => { expandedStage = null; }}>✕</button>
+            </div>
+            {#each stageItems.mrs as mr}
+              {@const gates = mr._gates}
+              <div class="stage-popover-item">
+                <button class="stage-popover-link" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })}>{mr.title ?? 'Untitled MR'}</button>
+                {#if gates?.failed > 0}<span class="gate-chip gate-chip-failed">✗{gates.failed}</span>{/if}
+                {#if gates?.passed > 0}<span class="gate-chip gate-chip-passed">✓{gates.passed}</span>{/if}
+                {#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}<span class="stage-popover-repo">{repoMap[mr.repository_id ?? mr.repo_id].name}</span>{/if}
+                <div class="stage-popover-actions">
+                  {#if mr.status === 'open' && mr.queue_position == null}
+                    <button class="inline-action-btn inline-action-approve" onclick={(e) => { e.stopPropagation(); quickEnqueueMr(mr, e); }}>Enqueue</button>
+                  {/if}
+                  <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, _openTab: 'diff' }); }}>Diff</button>
+                </div>
+              </div>
+            {/each}
+          {:else}
+            <div class="stage-popover-header">
+              <span class="stage-popover-title">No items needing attention</span>
+              <button class="stage-popover-close" onclick={() => { expandedStage = null; }}>✕</button>
+            </div>
+            <p class="stage-popover-empty">All clear for this stage.</p>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- ── Repos ──────────────────────────────────────────── -->
+      <section class="repos-section" data-testid="section-repos">
               <div class="feed-body">
                 {#if reposLoading}
                   <div class="skeleton-row"></div>
@@ -1374,618 +1377,79 @@
                   </form>
                 {/if}
               </div>
+      </section>
 
-            <!-- ── Pipeline tab (combined specs → tasks → MRs → agents) ── -->
-            {:else if wsTab === 'pipeline'}
-              <div class="pipeline-flow">
-
-              <!-- Pipeline hero — interactive visual flow showing where work stands -->
-              <div class="pipeline-hero">
-                <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineSpecs.pending > 0} class:pipeline-hero-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { pipelineExpandedSections = { specs: true, tasks: false, mrs: false, agents: false }; }}>
-                  <span class="pipeline-hero-count">{specs.length}</span>
-                  <span class="pipeline-hero-label">Specs</span>
-                  {#if pipelineSpecs.pending > 0}
-                    <span class="pipeline-hero-badge pipeline-hero-badge-warn">{pipelineSpecs.pending} need approval</span>
-                  {:else if pipelineSpecs.approved > 0}
-                    <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineSpecs.approved} approved</span>
-                  {/if}
-                </button>
-                <span class="pipeline-hero-arrow">
-                  <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </span>
-                <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineTasks.in_progress > 0} class:pipeline-hero-warn={pipelineTasks.blocked > 0} onclick={() => { pipelineExpandedSections = { specs: false, tasks: true, mrs: false, agents: false }; }}>
-                  <span class="pipeline-hero-count">{wsTasks.length}</span>
-                  <span class="pipeline-hero-label">Tasks</span>
-                  {#if pipelineTasks.in_progress > 0}
-                    <span class="pipeline-hero-badge">{pipelineTasks.in_progress} in progress</span>
-                  {:else if pipelineTasks.blocked > 0}
-                    <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineTasks.blocked} blocked</span>
-                  {/if}
-                </button>
-                <span class="pipeline-hero-arrow">
-                  <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </span>
-                <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineAgents.active > 0} onclick={() => { pipelineExpandedSections = { specs: false, tasks: false, mrs: false, agents: true }; }}>
-                  <span class="pipeline-hero-count">{wsAgents.length}</span>
-                  <span class="pipeline-hero-label">Agents</span>
-                  {#if pipelineAgents.active > 0}
-                    <span class="pipeline-hero-badge pipeline-hero-badge-ok"><span class="pipeline-hero-pulse"></span>{pipelineAgents.active} running</span>
-                  {/if}
-                </button>
-                <span class="pipeline-hero-arrow">
-                  <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                </span>
-                <button class="pipeline-hero-stage" class:pipeline-hero-warn={pipelineMrs.failed_gates > 0} class:pipeline-hero-done={pipelineMrs.merged > 0 && pipelineMrs.failed_gates === 0 && pipelineMrs.open === 0} onclick={() => { pipelineExpandedSections = { specs: false, tasks: false, mrs: true, agents: false }; }}>
-                  <span class="pipeline-hero-count">{wsMrs.length}</span>
-                  <span class="pipeline-hero-label">MRs</span>
-                  {#if pipelineMrs.failed_gates > 0}
-                    <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineMrs.failed_gates} gate failures</span>
-                  {:else if pipelineMrs.open > 0}
-                    <span class="pipeline-hero-badge">{pipelineMrs.open} ready to merge</span>
-                  {:else if pipelineMrs.merged > 0}
-                    <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineMrs.merged} merged</span>
-                  {/if}
-                </button>
-              </div>
-
-              <!-- ── Needs Attention — surfaces the specific items requiring action ── -->
-              {#if !specsLoading && !mrsLoading && !agentsLoading}
-                {@const attentionItems = [
-                  ...specs.filter(s => (s.approval_status ?? s.status) === 'pending').map(s => ({
-                    type: 'spec', entity: s, variant: 'warning',
-                    icon: '!', label: 'Spec needs approval',
-                    title: s.title ?? s.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled',
-                    why: 'Agents cannot begin until this spec is approved',
-                    action: 'Approve',
-                  })),
-                  ...wsMrs.filter(m => m._gates?.failed > 0).map(m => ({
-                    type: 'mr', entity: m, variant: 'danger',
-                    icon: '✗', label: 'Gate failure',
-                    title: m.title ?? 'Untitled MR',
-                    why: `${m._gates.failed} quality gate${m._gates.failed !== 1 ? 's' : ''} failed — merge blocked`,
-                    action: 'View gates',
-                  })),
-                  ...wsAgents.filter(a => a.status === 'failed').map(a => ({
-                    type: 'agent', entity: a, variant: 'danger',
-                    icon: '✗', label: 'Agent failed',
-                    title: a.name ?? formatId('agent', a.id),
-                    why: 'Check logs for root cause',
-                    action: 'View logs',
-                  })),
-                ]}
-                {#if attentionItems.length > 0}
-                  <div class="pipeline-attention">
-                    <div class="pipeline-attention-header">
-                      <span class="pipeline-attention-icon">!</span>
-                      <span class="pipeline-attention-title">{attentionItems.length} item{attentionItems.length !== 1 ? 's' : ''} need{attentionItems.length === 1 ? 's' : ''} your attention</span>
-                    </div>
-                    {#each attentionItems.slice(0, 5) as item}
-                      <button class="pipeline-attention-item pipeline-attention-{item.variant}" onclick={() => {
-                        if (item.type === 'spec') navigateToSpec(item.entity);
-                        else if (item.type === 'mr') nav('mr', item.entity.id, { repo_id: item.entity.repository_id ?? item.entity.repo_id, title: item.entity.title, _openTab: item.action === 'View gates' ? 'gates' : undefined });
-                        else if (item.type === 'agent') nav('agent', item.entity.id, { repo_id: item.entity.repo_id, name: item.entity.name, _openTab: 'history' });
-                      }}>
-                        <span class="attention-icon attention-icon-{item.variant}">{item.icon}</span>
-                        <div class="attention-content">
-                          <span class="attention-label">{item.label}</span>
-                          <span class="attention-title">{item.title}</span>
-                          {#if item.entity.repo_id && repoMap[item.entity.repo_id]}
-                            <span class="attention-repo">{repoMap[item.entity.repo_id].name}</span>
-                          {/if}
-                        </div>
-                        <span class="attention-why">{item.why}</span>
-                        <span class="attention-action">{item.action}</span>
-                      </button>
-                    {/each}
-                    {#if attentionItems.length > 5}
-                      <span class="pipeline-attention-more">+{attentionItems.length - 5} more</span>
+      <!-- ── Recent Activity ──────────────────────────────────────── -->
+      <section class="activity-section" data-testid="section-activity">
+        <h2 class="section-heading">Recent Activity</h2>
+        {#if activityLoading}
+          <div class="skeleton-row"></div>
+        {:else if activityEvents.length === 0}
+          <p class="empty-text">No recent activity.</p>
+        {:else}
+          <div class="activity-timeline">
+            {#each activityEvents.slice(0, activityLimit) as event, i}
+              {@const variant = activityVariant(event)}
+              {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+              {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+              <button
+                class="activity-item activity-item-clickable"
+                onclick={() => {
+                  if (primaryType && primaryId) {
+                    const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                    nav(primaryType, primaryId, data);
+                  }
+                }}
+              >
+                <div class="activity-dot activity-dot-{variant}"></div>
+                {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                <div class="activity-content">
+                  <div class="activity-main-row">
+                    <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
+                    <span class="activity-label">{activityLabel(event)}</span>
+                    {#if event.entity_name ?? event.title}
+                      <span class="activity-detail">{event.entity_name ?? event.title}</span>
+                    {/if}
+                    {#if event.repo_id && repoMap[event.repo_id]}
+                      <span class="activity-repo">{repoMap[event.repo_id].name}</span>
+                    {/if}
+                    {#if event.timestamp ?? event.created_at}
+                      <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                     {/if}
                   </div>
-                {/if}
-              {/if}
-
-              <!-- ── Specs section ──────────────────────────────────────── -->
-              <div class="pipeline-section" class:pipeline-section-collapsed={!pipelineExpandedSections.specs}>
-                <button class="pipeline-section-header" onclick={() => { pipelineExpandedSections = { ...pipelineExpandedSections, specs: !pipelineExpandedSections.specs }; }}>
-                  <Icon name="spec" size={14} />
-                  <span class="pipeline-section-title">Specs</span>
-                  {#if pipelineSpecs.pending > 0}<span class="ws-tab-badge ws-tab-badge-warn">{pipelineSpecs.pending} pending</span>
-                  {:else}<span class="pipeline-section-count">{specs.length}</span>{/if}
-                  <span class="pipeline-section-chevron">{pipelineExpandedSections.specs ? '▾' : '▸'}</span>
-                </button>
-              {#if pipelineExpandedSections.specs}
-              <div class="feed-body">
-                {#if specsLoading}
-                  <div class="skeleton-row"></div>
-                {:else if specs.length === 0}
-                  <div class="empty-state-guided">
-                    <p class="empty-text">No specs yet</p>
-                    <p class="empty-guide">Create <code>specs/manifest.yaml</code> + spec files in your repo and push. After you <strong>approve</strong> a spec, Gyre automatically creates tasks and spawns agents to implement it.</p>
-                  </div>
-                {:else if filteredSpecs.length === 0}
-                  <p class="empty-text">No specs matching "{entitySearch}"</p>
-                {:else}
-                  <div class="entity-list">
-                    {#each filteredSpecs as spec}
-                      {@const status = spec.approval_status ?? spec.status ?? 'pending'}
-                      {@const specFileName = spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}
-                      {@const specName = spec.title && spec.title !== specFileName ? spec.title : specFileName}
-                      {@const specDir = spec.path?.includes('/') ? spec.path.split('/').slice(0, -1).join('/') : ''}
-                      {@const specTasks = wsTasks.filter(t => t.spec_path === spec.path)}
-                      {@const doneTasks = specTasks.filter(t => t.status === 'done').length}
-                      {@const inProgressTasks = specTasks.filter(t => t.status === 'in_progress').length}
-                      {@const totalTasks = specTasks.length}
-                      {@const specAgents = wsAgents.filter(a => a.spec_path === spec.path)}
-                      {@const specMrs = wsMrs.filter(m => m.spec_ref?.startsWith(spec.path))}
-                      {@const activeAgent = specAgents.find(a => a.status === 'active')}
-                      {@const latestMr = specMrs.sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))[0]}
-                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => navigateToSpec(spec)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigateToSpec(spec); }}}>
-                        <div class="entity-list-main">
-                          <Icon name="spec" size={14} />
-                          <div class="entity-list-info">
-                            <div class="entity-list-title-row">
-                              <span class="entity-list-name">{specName}</span>
-                              {#if specDir}<span class="entity-list-path">{specDir}/</span>{/if}
-                              {#if spec.repo_id && repoMap[spec.repo_id]}
-                                <span class="entity-list-repo">{repoMap[spec.repo_id].name}</span>
-                              {/if}
-                            </div>
-                            <div class="entity-list-meta">
-                              <span class="status-pill status-pill-{status}" title={specStatusTooltip(status)}>
-                                {SPEC_STATUS_ICONS[status] ?? ''} {status}
-                              </span>
-                              {#if status === 'pending'}
-                                {@const pendingSince = spec.created_at ? Math.round((Date.now() / 1000) - (typeof spec.created_at === 'number' && spec.created_at < 1e12 ? spec.created_at : new Date(spec.created_at).getTime() / 1000)) : 0}
-                                <span class="entity-list-context entity-list-context-action" class:entity-list-context-danger={pendingSince > 86400}>
-                                  needs review{#if pendingSince > 3600} · waiting {pendingSince > 86400 ? Math.round(pendingSince / 86400) + 'd' : Math.round(pendingSince / 3600) + 'h'}{/if}
-                                </span>
-                              {:else if status === 'approved' && activeAgent}
-                                <span class="entity-list-context entity-list-context-success">agent working</span>
-                              {:else if status === 'approved' && doneTasks === totalTasks && totalTasks > 0}
-                                <span class="entity-list-context entity-list-context-success">fully implemented</span>
-                              {:else if status === 'approved' && totalTasks === 0}
-                                <span class="entity-list-context">awaiting tasks</span>
-                              {:else if status === 'rejected'}
-                                <span class="entity-list-context entity-list-context-danger">blocked</span>
-                              {/if}
-                              {#if totalTasks > 0}
-                                <span class="entity-list-progress" title="{doneTasks}/{totalTasks} tasks done">
-                                  <span class="progress-mini-bar"><span class="progress-mini-fill" class:progress-complete={doneTasks === totalTasks} style="width: {Math.round((doneTasks / totalTasks) * 100)}%"></span></span>
-                                  {doneTasks}/{totalTasks}
-                                </span>
-                              {/if}
-                              {#if spec.updated_at ?? spec.created_at}
-                                <span class="entity-list-time" title={absTime(spec.updated_at ?? spec.created_at)}>{relTime(spec.updated_at ?? spec.created_at)}</span>
-                              {/if}
-                            </div>
-                            {#if activeAgent || latestMr}
-                              <div class="entity-list-meta entity-list-meta-secondary">
-                                {#if activeAgent}
-                                  <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', activeAgent.id, { repo_id: activeAgent.repo_id, name: activeAgent.name }); }}>
-                                    <span class="status-pulse-tiny"></span> {activeAgent.name ?? formatId('agent', activeAgent.id)}
-                                  </button>
-                                {/if}
-                                {#if latestMr}
-                                  <button class="entity-list-chip entity-list-chip-{latestMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', latestMr.id, { repo_id: latestMr.repository_id ?? latestMr.repo_id, title: latestMr.title }); }}>
-                                    <Icon name="git-merge" size={10} /> {latestMr.status}
-                                  </button>
-                                {/if}
-                              </div>
-                            {/if}
-                          </div>
-                        </div>
-                        <div class="entity-list-actions">
-                          {#if status === 'pending' && specActionStates[spec.path] !== 'approved'}
-                            <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'}>Approve</button>
-                            <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'}>Reject</button>
-                          {:else if specActionStates[spec.path] === 'approved'}
-                            <span class="inline-action-done">Approved</span>
-                          {:else if specActionStates[spec.path] === 'rejected'}
-                            <span class="inline-action-done inline-action-rejected">Rejected</span>
-                          {/if}
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-              {/if}
-              </div><!-- /pipeline-section specs -->
-
-            <!-- ── Tasks section ──────────────────────────────────────── -->
-              <div class="pipeline-section" class:pipeline-section-collapsed={!pipelineExpandedSections.tasks}>
-                <button class="pipeline-section-header" onclick={() => { pipelineExpandedSections = { ...pipelineExpandedSections, tasks: !pipelineExpandedSections.tasks }; }}>
-                  <Icon name="task" size={14} />
-                  <span class="pipeline-section-title">Tasks</span>
-                  {#if pipelineTasks.blocked > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineTasks.blocked} blocked</span>
-                  {:else if pipelineTasks.in_progress > 0}<span class="ws-tab-badge">{pipelineTasks.in_progress} active</span>
-                  {:else}<span class="pipeline-section-count">{wsTasks.length}</span>{/if}
-                  <span class="pipeline-section-chevron">{pipelineExpandedSections.tasks ? '▾' : '▸'}</span>
-                </button>
-              {#if pipelineExpandedSections.tasks}
-              <div class="feed-body">
-                {#if tasksLoading}
-                  <div class="skeleton-row"></div>
-                {:else if wsTasks.length === 0}
-                  <div class="empty-state-guided">
-                    <p class="empty-text">No tasks yet</p>
-                    <p class="empty-guide">Tasks are created automatically when specs are approved. Each task is assigned to an agent that implements it in an isolated branch, iterating through the Ralph loop until quality gates pass.</p>
-                  </div>
-                {:else if filteredTasks.length === 0}
-                  <p class="empty-text">No tasks matching "{entitySearch}"</p>
-                {:else}
-                  <div class="entity-list">
-                    {#each filteredTasks.sort((a, b) => {
-                      const order = { blocked: 0, in_progress: 1, review: 2, backlog: 3, done: 4, cancelled: 5 };
-                      return (order[a.status] ?? 3) - (order[b.status] ?? 3);
-                    }) as task}
-                      {@const taskStatus = task.status ?? 'backlog'}
-                      {@const taskAgent = wsAgents.find(a => (a.task_id ?? a.current_task_id) === task.id)}
-                      {@const taskMr = wsMrs.find(m => m.task_id === task.id || (task.spec_path && m.spec_ref?.includes(task.spec_path)))}
-                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); nav('task', task.id, { repo_id: task.repo_id, title: task.title }); }}}>
-                        <div class="entity-list-main">
-                          <Icon name="task" size={14} />
-                          <div class="entity-list-info">
-                            <div class="entity-list-title-row">
-                              <span class="entity-list-name">{task.title ?? 'Untitled'}</span>
-                              {#if task.repo_id && repoMap[task.repo_id]}
-                                <span class="entity-list-repo">{repoMap[task.repo_id].name}</span>
-                              {/if}
-                            </div>
-                            <div class="entity-list-meta">
-                              <span class="status-pill status-pill-{taskStatus}" title={taskStatusTooltip(task)}>{taskStatus}</span>
-                              {#if task.priority}
-                                <span class="priority-pill priority-{task.priority}">{task.priority}</span>
-                              {/if}
-                              {#if taskStatus === 'in_progress' && taskAgent}
-                                <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', taskAgent.id, { repo_id: task.repo_id, name: taskAgent.name }); }}>
-                                  <span class="status-pulse-tiny"></span> {taskAgent.name ?? formatId('agent', taskAgent.id)}
-                                </button>
-                              {:else if taskStatus === 'blocked'}
-                                <span class="entity-list-context entity-list-context-danger">waiting for dependency</span>
-                              {/if}
-                              {#if task.spec_path}
-                                <button class="entity-list-chip" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }}>
-                                  <Icon name="spec" size={10} /> {task.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                                </button>
-                              {/if}
-                              {#if taskMr}
-                                <button class="entity-list-chip entity-list-chip-{taskMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', taskMr.id, { repo_id: taskMr.repository_id ?? taskMr.repo_id, title: taskMr.title }); }}>
-                                  <Icon name="git-merge" size={10} /> {taskMr.title ?? entityName('mr', taskMr.id)}
-                                </button>
-                              {/if}
-                              {#if task.updated_at ?? task.created_at}
-                                <span class="entity-list-time" title={absTime(task.updated_at ?? task.created_at)}>{relTime(task.updated_at ?? task.created_at)}</span>
-                              {/if}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-              {/if}
-              </div><!-- /pipeline-section tasks -->
-
-            <!-- ── MRs section ────────────────────────────────────────── -->
-              <div class="pipeline-section" class:pipeline-section-collapsed={!pipelineExpandedSections.mrs}>
-                <button class="pipeline-section-header" onclick={() => { pipelineExpandedSections = { ...pipelineExpandedSections, mrs: !pipelineExpandedSections.mrs }; }}>
-                  <Icon name="git-merge" size={14} />
-                  <span class="pipeline-section-title">Merge Requests</span>
-                  {#if pipelineMrs.failed_gates > 0}<span class="ws-tab-badge ws-tab-badge-danger">{pipelineMrs.failed_gates} failed</span>
-                  {:else if pipelineMrs.open > 0}<span class="ws-tab-badge">{pipelineMrs.open} open</span>
-                  {:else}<span class="pipeline-section-count">{wsMrs.length}</span>{/if}
-                  <span class="pipeline-section-chevron">{pipelineExpandedSections.mrs ? '▾' : '▸'}</span>
-                </button>
-              {#if pipelineExpandedSections.mrs}
-              <div class="feed-body">
-                {#if !mergeQueueLoading && mergeQueueItems.length > 0}
-                  <div class="ws-merge-queue-inline">
-                    <div class="mq-inline-header">
-                      <span class="mq-inline-label">Merge queue</span>
-                      <span class="mq-inline-count">{mergeQueueItems.length} queued</span>
+                  {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
+                    <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
+                  {/if}
+                  {#if (event.agent_id && primaryType !== 'agent') || (event.mr_id && primaryType !== 'mr') || (event.spec_path && primaryType !== 'spec')}
+                    <div class="activity-refs">
+                      {#if event.agent_id && primaryType !== 'agent'}
+                        <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }}>
+                          <Icon name="agent" size={10} /> {entityName('agent', event.agent_id)}
+                        </button>
+                      {/if}
+                      {#if event.mr_id && primaryType !== 'mr'}
+                        <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }}>
+                          <Icon name="git-merge" size={10} /> {entityName('mr', event.mr_id)}
+                        </button>
+                      {/if}
+                      {#if event.spec_path && primaryType !== 'spec'}
+                        <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }}>
+                          <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                        </button>
+                      {/if}
                     </div>
-                    {#each mergeQueueItems.slice(0, 5) as item, i}
-                      {@const mrId = item.merge_request_id ?? item.mr_id}
-                      <button class="mq-inline-item" onclick={() => nav('mr', mrId, item._mr)}>
-                        <span class="mq-inline-pos">#{i + 1}</span>
-                        <span class="mq-inline-title">{item._title}</span>
-                        {#if item._mr?._gates?.total > 0}
-                          <span class="mq-inline-gates">
-                            {#if item._mr._gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{item._mr._gates.failed}</span>{/if}
-                            {#if item._mr._gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{item._mr._gates.passed}</span>{/if}
-                          </span>
-                        {/if}
-                      </button>
-                    {/each}
-                    {#if mergeQueueItems.length > 5}
-                      <span class="mq-inline-more">+{mergeQueueItems.length - 5} more in queue</span>
-                    {/if}
-                  </div>
-                {/if}
-                {#if mrsLoading}
-                  <div class="skeleton-row"></div>
-                {:else if wsMrs.length === 0}
-                  <div class="empty-state-guided">
-                    <p class="empty-text">No merge requests yet</p>
-                    <p class="empty-guide">When an agent finishes implementing a task, it creates an MR. The merge queue runs quality gates (tests, lint, traces), and on success produces a cryptographically signed attestation linking spec → code.</p>
-                  </div>
-                {:else if filteredMrs.length === 0}
-                  <p class="empty-text">No MRs matching "{entitySearch}"</p>
-                {:else}
-                  <div class="entity-list">
-                    {#each filteredMrs.sort((a, b) => {
-                      const order = { open: 0, queued: 1, merged: 2, closed: 3 };
-                      return (order[a.status] ?? 2) - (order[b.status] ?? 2);
-                    }) as mr}
-                      {@const mrStatus = mr.status ?? 'open'}
-                      {@const gates = mr._gates}
-                      {@const ds = mr.diff_stats}
-                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title }); }}}>
-                        <div class="entity-list-main">
-                          <Icon name="git-merge" size={14} />
-                          <div class="entity-list-info">
-                            <div class="entity-list-title-row">
-                              <span class="entity-list-name">{mr.title ?? 'Untitled MR'}</span>
-                              {#if mr.source_branch}
-                                <span class="entity-branch-tag">{mr.source_branch}</span>
-                              {/if}
-                              {#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}
-                                <span class="entity-list-repo">{repoMap[mr.repository_id ?? mr.repo_id].name}</span>
-                              {/if}
-                            </div>
-                            <div class="entity-list-meta">
-                              <span class="status-pill status-pill-{mrStatus}" title={mrStatusTooltip(mr)}>{mrStatus}</span>
-                              {#if mrStatus === 'open' && gates?.failed > 0}
-                                {@const failedNames = (gates.details ?? []).filter(g => g.status === 'failed').map(g => g.name).slice(0, 3)}
-                                <span class="entity-list-context entity-list-context-danger">
-                                  {#if failedNames.length > 0}
-                                    {failedNames.join(', ')} failed — merge blocked
-                                  {:else}
-                                    {gates.failed} gate{gates.failed !== 1 ? 's' : ''} failed — merge blocked
-                                  {/if}
-                                </span>
-                              {:else if mrStatus === 'merged'}
-                                <span class="entity-list-context entity-list-context-success">
-                                  {#if gates?.passed > 0}{gates.passed} gates passed · {/if}merged{#if mr.merge_commit_sha}
-                                  <code class="sha-inline mono sha-copyable" title="Click to copy {mr.merge_commit_sha}" onclick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); toastSuccess('SHA copied'); }} role="button" tabindex="0">{mr.merge_commit_sha.slice(0, 7)}</code>{/if}
-                                </span>
-                              {:else if mrStatus === 'open' && gates?.passed === gates?.total && gates?.total > 0}
-                                <span class="entity-list-context entity-list-context-success">all {gates.total} gates passed — ready to merge</span>
-                              {:else if mrStatus === 'open'}
-                                <span class="entity-list-context">ready for review</span>
-                              {/if}
-                              {#if gates && gates.total > 0}
-                                {@const gateTooltip = (gates.details ?? []).map(g => `${g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} ${g.name}${g.required === false ? ' (advisory)' : ''}`).join('\n') || `${gates.passed}/${gates.total} passed`}
-                                <button class="entity-list-chip entity-list-chip-gates" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }} title={gateTooltip + '\nClick for full gate details'}>
-                                  {#if gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{gates.failed}</span>{/if}
-                                  {#if gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{gates.passed}</span>{/if}
-                                  {#if gates.total - gates.passed - gates.failed > 0}<span class="gate-chip gate-chip-pending">○{gates.total - gates.passed - gates.failed}</span>{/if}
-                                </button>
-                              {/if}
-                              {#if mr.spec_ref}
-                                {@const mrSpecPath = mr.spec_ref.split('@')[0]}
-                                <button class="entity-list-chip" onclick={(e) => { e.stopPropagation(); nav('spec', mrSpecPath, { path: mrSpecPath, repo_id: mr.repository_id ?? mr.repo_id }); }} title="Spec: {mr.spec_ref}">
-                                  <Icon name="spec" size={10} /> {mrSpecPath.split('/').pop()?.replace(/\.md$/, '')}
-                                </button>
-                              {/if}
-                              {#if mr.author_agent_id}
-                                <button class="entity-list-chip entity-list-chip-active" onclick={(e) => { e.stopPropagation(); nav('agent', mr.author_agent_id, { repo_id: mr.repository_id ?? mr.repo_id }); }}>
-                                  <Icon name="agent" size={10} /> {entityName('agent', mr.author_agent_id)}
-                                </button>
-                              {/if}
-                              {#if ds}
-                                <span class="diff-stats-mini">
-                                  <span class="diff-ins-mini">+{ds.insertions ?? 0}</span>
-                                  <span class="diff-del-mini">-{ds.deletions ?? 0}</span>
-                                </span>
-                              {/if}
-                              {#if mr.merged_at ?? mr.updated_at ?? mr.created_at}
-                                <span class="entity-list-time" title={absTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}>{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</span>
-                              {/if}
-                            </div>
-                          </div>
-                        </div>
-                        <div class="entity-list-actions">
-                          {#if mrStatus === 'open' && mr.queue_position == null && mrEnqueueStates[mr.id] !== 'queued'}
-                            <button class="inline-action-btn inline-action-approve" onclick={(e) => { e.stopPropagation(); quickEnqueueMr(mr, e); }}>Enqueue</button>
-                          {:else if mrEnqueueStates[mr.id] === 'queued'}
-                            <span class="inline-action-done">Queued</span>
-                          {/if}
-                          {#if gates?.failed > 0}
-                            <button class="inline-action-btn inline-action-danger" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'gates' }); }}>Gates</button>
-                          {/if}
-                          {#if ds}
-                            <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title, _openTab: 'diff' }); }}>Diff</button>
-                          {/if}
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-              {/if}
-              </div><!-- /pipeline-section mrs -->
-
-            <!-- ── Agents section ─────────────────────────────────────── -->
-              <div class="pipeline-section" class:pipeline-section-collapsed={!pipelineExpandedSections.agents}>
-                <button class="pipeline-section-header" onclick={() => { pipelineExpandedSections = { ...pipelineExpandedSections, agents: !pipelineExpandedSections.agents }; }}>
-                  <Icon name="agent" size={14} />
-                  <span class="pipeline-section-title">Agents</span>
-                  {#if pipelineAgents.active > 0}<span class="ws-tab-badge ws-tab-badge-success">{pipelineAgents.active} active</span>
-                  {:else}<span class="pipeline-section-count">{wsAgents.length}</span>{/if}
-                  <span class="pipeline-section-chevron">{pipelineExpandedSections.agents ? '▾' : '▸'}</span>
-                </button>
-              {#if pipelineExpandedSections.agents}
-              <div class="feed-body">
-                {#if agentsLoading}
-                  <div class="skeleton-row"></div>
-                {:else if wsAgents.length === 0}
-                  <div class="empty-state-guided">
-                    <p class="empty-text">No agents yet</p>
-                    <p class="empty-guide">Agents are spawned to implement tasks. Each runs in an isolated branch with its own worktree, iterating through code → test → fix cycles until quality gates pass, then creates an MR.</p>
-                  </div>
-                {:else if filteredAgents.length === 0}
-                  <p class="empty-text">No agents matching "{entitySearch}"</p>
-                {:else}
-                  <div class="entity-list">
-                    {#each filteredAgents.sort((a, b) => {
-                      const order = { active: 0, spawning: 1, idle: 2, completed: 3, failed: 4, dead: 5 };
-                      return (order[a.status] ?? 3) - (order[b.status] ?? 3);
-                    }) as agent}
-                      {@const agStatus = agent.status ?? 'idle'}
-                      {@const agentMr = wsMrs.find(m => m.author_agent_id === agent.id)}
-                      {@const startTime = agent.spawned_at ?? agent.created_at}
-                      {@const endTime = agent.completed_at ?? (agStatus === 'active' ? null : agent.last_heartbeat)}
-                      {@const durationSecs = startTime ? Math.round(((endTime ? new Date(endTime) : new Date()) - new Date(startTime)) / 1000) : null}
-                      {@const totalTokens = (agent.input_tokens ?? 0) + (agent.output_tokens ?? 0) + (agent.tokens_used ?? 0)}
-                      <div class="entity-list-item" role="button" tabindex="0" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name }); }}}>
-                        <div class="entity-list-main">
-                          <Icon name="agent" size={14} />
-                          <div class="entity-list-info">
-                            <div class="entity-list-title-row">
-                              <span class="entity-list-name">{agent.name ?? formatId('agent', agent.id)}</span>
-                              {#if agent.branch}
-                                <span class="entity-branch-tag">{agent.branch}</span>
-                              {/if}
-                              {#if agent.repo_id && repoMap[agent.repo_id]}
-                                <span class="entity-list-repo">{repoMap[agent.repo_id].name}</span>
-                              {/if}
-                            </div>
-                            <div class="entity-list-meta">
-                              <span class="status-pill status-pill-{agStatus}" title={agentStatusTooltip(agent)}>
-                                {#if agStatus === 'active'}<span class="status-pulse"></span>{/if}
-                                {agStatus}
-                              </span>
-                              {#if agStatus === 'active'}
-                                <span class="entity-list-context entity-list-context-success">{agent.spec_path ? `implementing ${agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}` : 'implementing code'}</span>
-                              {:else if agStatus === 'failed'}
-                                <span class="entity-list-context entity-list-context-danger">failed — click for logs</span>
-                              {:else if agStatus === 'idle' || agStatus === 'completed'}
-                                <span class="entity-list-context">work complete</span>
-                              {/if}
-                              {#if agent.task_id ?? agent.current_task_id}
-                                <button class="entity-list-chip" onclick={(e) => { e.stopPropagation(); nav('task', agent.task_id ?? agent.current_task_id, { repo_id: agent.repo_id }); }}>
-                                  <Icon name="task" size={10} /> {entityName('task', agent.task_id ?? agent.current_task_id)}
-                                </button>
-                              {/if}
-                              {#if agentMr}
-                                <button class="entity-list-chip entity-list-chip-{agentMr.status}" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title }); }}>
-                                  <Icon name="git-merge" size={10} /> {agentMr.title ?? entityName('mr', agentMr.id)}
-                                </button>
-                              {/if}
-                              {#if totalTokens > 0}
-                                <span class="entity-list-tokens" title="{totalTokens.toLocaleString()} tokens used">{totalTokens > 1000000 ? (totalTokens / 1000000).toFixed(1) + 'M' : totalTokens > 1000 ? (totalTokens / 1000).toFixed(0) + 'k' : totalTokens} tokens</span>
-                              {/if}
-                              {#if durationSecs != null}
-                                <span class="entity-list-time" class:duration-running={agStatus === 'active'}>{formatDuration(durationSecs)}</span>
-                              {/if}
-                            </div>
-                          </div>
-                        </div>
-                        <div class="entity-list-actions">
-                          <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name, _openTab: 'history' }); }}>Logs</button>
-                          {#if agentMr}
-                            <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', agentMr.id, { repo_id: agentMr.repository_id ?? agentMr.repo_id, title: agentMr.title, _openTab: 'diff' }); }}>Diff</button>
-                          {/if}
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-              {/if}
-              </div><!-- /pipeline-section agents -->
-
-              </div><!-- /pipeline-flow -->
-
-            <!-- ── Activity tab ──────────────────────────────────────────── -->
-            {:else if wsTab === 'activity'}
-              <div class="feed-body">
-                <div class="activity-toolbar">
-                  <select class="filter-select" bind:value={activityFilter} aria-label="Filter activity">
-                    <option value="">All events</option>
-                    <option value="spec">Specs</option>
-                    <option value="task">Tasks</option>
-                    <option value="agent">Agents</option>
-                    <option value="mr">MRs</option>
-                    <option value="gate">Gates</option>
-                  </select>
+                  {/if}
                 </div>
-                {#if activityLoading}
-                  <div class="skeleton-row"></div>
-                  <div class="skeleton-row"></div>
-                {:else if filteredActivity.length === 0}
-                  <p class="empty-text">No recent activity.</p>
-                {:else}
-                  <div class="activity-timeline">
-                    {#each filteredActivity.slice(0, activityLimit) as event, i}
-                      {@const variant = activityVariant(event)}
-                      {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                      {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                      <button
-                        class="activity-item activity-item-clickable"
-                        onclick={() => {
-                          if (primaryType && primaryId) {
-                            const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                            nav(primaryType, primaryId, data);
-                          }
-                        }}
-                      >
-                        <div class="activity-dot activity-dot-{variant}"></div>
-                        {#if i < Math.min(filteredActivity.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                        <div class="activity-content">
-                          <div class="activity-main-row">
-                            <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
-                            <span class="activity-label">{activityLabel(event)}</span>
-                            {#if event.entity_name ?? event.title}
-                              <span class="activity-detail">{event.entity_name ?? event.title}</span>
-                            {/if}
-                            {#if event.repo_id && repoMap[event.repo_id]}
-                              <span class="activity-repo">{repoMap[event.repo_id].name}</span>
-                            {/if}
-                            {#if event.timestamp ?? event.created_at}
-                              <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                            {/if}
-                          </div>
-                          {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                            <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
-                          {/if}
-                          <!-- Secondary entity links for cross-referencing -->
-                          {#if (event.agent_id && primaryType !== 'agent') || (event.mr_id && primaryType !== 'mr') || (event.spec_path && primaryType !== 'spec')}
-                            <div class="activity-refs">
-                              {#if event.agent_id && primaryType !== 'agent'}
-                                <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }}>
-                                  <Icon name="agent" size={10} /> {entityName('agent', event.agent_id)}
-                                </button>
-                              {/if}
-                              {#if event.mr_id && primaryType !== 'mr'}
-                                <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }}>
-                                  <Icon name="git-merge" size={10} /> {entityName('mr', event.mr_id)}
-                                </button>
-                              {/if}
-                              {#if event.spec_path && primaryType !== 'spec'}
-                                <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }}>
-                                  <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                                </button>
-                              {/if}
-                            </div>
-                          {/if}
-                        </div>
-                      </button>
-                    {/each}
-                  </div>
-                  {#if filteredActivity.length > activityLimit}
-                    <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
-                      Show more ({filteredActivity.length - activityLimit} remaining)
-                    </button>
-                  {/if}
-                {/if}
-              </div>
-            {/if}
-
-      </div><!-- .dashboard-flow -->
+              </button>
+            {/each}
+          </div>
+          {#if activityEvents.length > activityLimit}
+            <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
+              Show more ({activityEvents.length - activityLimit} remaining)
+            </button>
+          {/if}
+        {/if}
+      </section>
 
       </div><!-- .ws-main-col -->
 
@@ -2181,6 +1645,131 @@
   @keyframes pipeline-pulse {
     0%, 100% { opacity: 1; transform: scale(1); }
     50% { opacity: 0.4; transform: scale(0.7); }
+  }
+
+  .pipeline-hero-selected {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 1px var(--color-primary);
+  }
+
+  /* ── Stage popover ─────────────────────────────────────────── */
+  .stage-popover {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+  }
+
+  .stage-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+  }
+
+  .stage-popover-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .stage-popover-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+  }
+
+  .stage-popover-close:hover {
+    background: var(--color-border);
+    color: var(--color-text);
+  }
+
+  .stage-popover-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    font-size: var(--text-sm);
+    width: 100%;
+    text-align: left;
+  }
+
+  .stage-popover-item:last-child { border-bottom: none; }
+
+  .stage-popover-link {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--color-link);
+    font-family: inherit;
+    font-size: inherit;
+    padding: 0;
+    text-decoration: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    text-align: left;
+  }
+
+  .stage-popover-link:hover { text-decoration: underline; }
+
+  .stage-popover-repo {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .stage-popover-context {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    font-style: italic;
+  }
+
+  .stage-popover-actions {
+    display: flex;
+    gap: var(--space-1);
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+
+  .stage-popover-empty {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    padding: var(--space-3);
+    text-align: center;
+    font-style: italic;
+  }
+
+  /* ── Section headings ──────────────────────────────────────── */
+  .section-heading {
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0 0 var(--space-2) 0;
+    padding: 0 var(--space-1);
+  }
+
+  .repos-section {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .activity-section {
+    display: flex;
+    flex-direction: column;
   }
 
   /* ── Pipeline attention section ──────────────────────────────────── */
