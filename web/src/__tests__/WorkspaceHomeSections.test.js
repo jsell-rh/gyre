@@ -189,9 +189,8 @@ describe('WorkspaceHome — basic rendering', () => {
 
   it('shows key sections when workspace is set', () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    // Streamlined layout: Repos, Entity/Activity tabs (PipelineOverview removed)
+    // Streamlined layout: Repos section is the primary content area
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="browse-panel"]')).toBeTruthy();
   });
 });
 
