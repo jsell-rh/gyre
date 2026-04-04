@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from '@testing-library/svelte';
-import ExplorerTreemap from '../lib/ExplorerTreemap.svelte';
+import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 
 // Mock canvas context
 let mockCtx;
@@ -72,13 +72,13 @@ const EDGES = [
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
-describe('ExplorerTreemap', () => {
+describe('ExplorerCanvas', () => {
   it('renders without throwing', () => {
-    expect(() => render(ExplorerTreemap)).not.toThrow();
+    expect(() => render(ExplorerCanvas)).not.toThrow();
   });
 
   it('renders a canvas element', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const canvas = container.querySelector('canvas');
@@ -86,7 +86,7 @@ describe('ExplorerTreemap', () => {
   });
 
   it('shows node count in stats', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const stats = container.querySelector('.treemap-stats');
@@ -94,7 +94,7 @@ describe('ExplorerTreemap', () => {
   });
 
   it('renders toolbar with filter presets', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const buttons = container.querySelectorAll('.tb-btn');
@@ -109,7 +109,7 @@ describe('ExplorerTreemap', () => {
   });
 
   it('renders lens toggle with structural active', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const lensButtons = container.querySelectorAll('.lens-group .tb-btn, .tb-btn');
@@ -118,7 +118,7 @@ describe('ExplorerTreemap', () => {
   });
 
   it('renders minimap', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const minimap = container.querySelector('.treemap-minimap');
@@ -126,7 +126,7 @@ describe('ExplorerTreemap', () => {
   });
 
   it('renders legend with node type colors', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const legendItems = container.querySelectorAll('.legend-item');
@@ -134,7 +134,7 @@ describe('ExplorerTreemap', () => {
   });
 
   it('renders zoom indicator', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const zoomInd = container.querySelector('.zoom-ind');
@@ -143,7 +143,7 @@ describe('ExplorerTreemap', () => {
   });
 
   it('shows empty state when no nodes', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: [], edges: [] },
     });
     // EmptyState component should render
@@ -156,7 +156,7 @@ describe('ExplorerTreemap', () => {
       scope: { type: 'all' },
       annotation: { title: 'Test View', description: 'A test query' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     const annotation = container.querySelector('.annotation-title');
@@ -164,14 +164,14 @@ describe('ExplorerTreemap', () => {
   });
 
   it('calls canvas getContext on render', () => {
-    render(ExplorerTreemap, {
+    render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     expect(HTMLCanvasElement.prototype.getContext).toHaveBeenCalled();
   });
 
   it('no breadcrumb at root level', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const breadcrumb = container.querySelector('.treemap-breadcrumb');
@@ -180,7 +180,7 @@ describe('ExplorerTreemap', () => {
 
   it('updates canvasState zoom property', () => {
     let capturedState = {};
-    const { component } = render(ExplorerTreemap, {
+    const { component } = render(ExplorerCanvas, {
       props: {
         nodes: NODES,
         edges: EDGES,
@@ -193,11 +193,11 @@ describe('ExplorerTreemap', () => {
   });
 });
 
-describe('ExplorerTreemap — hierarchy', () => {
+describe('ExplorerCanvas — hierarchy', () => {
   it('at root level shows only top-level packages (no Contains parent)', () => {
     // Root nodes are pkg1, pkg2, and test1 (test1 has no parent)
     // The treemap should show these as top-level cells
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     // Canvas rendering happened
@@ -205,7 +205,7 @@ describe('ExplorerTreemap — hierarchy', () => {
   });
 
   it('canvas draws with clearRect and fillRect', () => {
-    render(ExplorerTreemap, {
+    render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     // Background fill
@@ -215,14 +215,14 @@ describe('ExplorerTreemap — hierarchy', () => {
   });
 });
 
-describe('ExplorerTreemap — view queries', () => {
+describe('ExplorerCanvas — view queries', () => {
   it('renders focus scope query', () => {
     const query = {
       scope: { type: 'focus', node: 'create_user', edges: ['calls'], direction: 'incoming', depth: 3 },
       emphasis: { dim_unmatched: 0.12, tiered_colors: ['#ef4444', '#f97316'] },
       annotation: { title: 'Blast radius: create_user' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     const title = container.querySelector('.annotation-title');
@@ -235,7 +235,7 @@ describe('ExplorerTreemap — view queries', () => {
       emphasis: { highlight: { matched: { color: '#ef4444', label: 'Untested' } }, dim_unmatched: 0.3 },
       annotation: { title: 'Test coverage gaps' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Test coverage gaps');
@@ -246,7 +246,7 @@ describe('ExplorerTreemap — view queries', () => {
       scope: { type: 'filter', node_types: ['endpoint'] },
       annotation: { title: 'Endpoints only' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Endpoints only');
@@ -258,7 +258,7 @@ describe('ExplorerTreemap — view queries', () => {
       emphasis: { highlight: { matched: { color: '#60a5fa' } }, dim_unmatched: 0.15 },
       annotation: { title: 'User concept' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('User concept');
@@ -270,7 +270,7 @@ describe('ExplorerTreemap — view queries', () => {
       emphasis: { heat: { metric: 'incoming_calls', palette: 'blue-red' } },
       annotation: { title: 'Hot paths' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Hot paths');
@@ -282,15 +282,15 @@ describe('ExplorerTreemap — view queries', () => {
       emphasis: { highlight: { matched: { color: '#22c55e' } } },
       annotation: { title: 'Recent changes' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Recent changes');
   });
 });
 
-describe('ExplorerTreemap — view query opacity resolution', () => {
-  // Unit test the queryNodeOpacity logic from ExplorerTreemap.svelte
+describe('ExplorerCanvas — view query opacity resolution', () => {
+  // Unit test the queryNodeOpacity logic from ExplorerCanvas.svelte
   function resolveQueryMatch(nodes, edges, scope) {
     const nodeById = new Map();
     for (const n of nodes) nodeById.set(n.id, n);
@@ -540,14 +540,14 @@ describe('ExplorerTreemap — view query opacity resolution', () => {
   });
 });
 
-describe('ExplorerTreemap — interactive $clicked query mode', () => {
+describe('ExplorerCanvas — interactive $clicked query mode', () => {
   it('renders $clicked query annotation with placeholder', () => {
     const query = {
       scope: { type: 'focus', node: '$clicked', edges: ['calls'], direction: 'incoming', depth: 10 },
       emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'], dim_unmatched: 0.12 },
       annotation: { title: 'Blast radius: $name', description: '{{count}} transitive callers' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     const title = container.querySelector('.annotation-title');
@@ -562,7 +562,7 @@ describe('ExplorerTreemap — interactive $clicked query mode', () => {
       emphasis: { dim_unmatched: 0.15 },
       annotation: { title: 'Impact: $name' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('canvas')).toBeTruthy();
@@ -577,16 +577,16 @@ describe('ExplorerTreemap — interactive $clicked query mode', () => {
         dim_unmatched: 0.12,
       },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('canvas')).toBeTruthy();
   });
 });
 
-describe('ExplorerTreemap — breadcrumb navigation', () => {
+describe('ExplorerCanvas — breadcrumb navigation', () => {
   it('no breadcrumb visible at root level', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     expect(container.querySelector('.treemap-breadcrumb')).toBeFalsy();
@@ -657,16 +657,16 @@ describe('ExplorerTreemap — breadcrumb navigation', () => {
   });
 });
 
-describe('ExplorerTreemap — context menu', () => {
+describe('ExplorerCanvas — context menu', () => {
   it('does not show context menu by default', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     expect(container.querySelector('.ctx-menu')).toBeFalsy();
   });
 
   it('context menu backdrop closes on click', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     expect(container.querySelector('.ctx-menu')).toBeFalsy();
@@ -730,9 +730,9 @@ describe('ExplorerTreemap — context menu', () => {
   });
 });
 
-describe('ExplorerTreemap — lens switching', () => {
+describe('ExplorerCanvas — lens switching', () => {
   it('structural lens is active by default', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const btns = Array.from(container.querySelectorAll('.tb-btn'));
@@ -741,7 +741,7 @@ describe('ExplorerTreemap — lens switching', () => {
   });
 
   it('evaluative lens renders metric selector', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
     });
     expect(container.querySelector('.eval-metric-group')).toBeTruthy();
@@ -750,7 +750,7 @@ describe('ExplorerTreemap — lens switching', () => {
   });
 
   it('evaluative lens shows no-trace message without trace data', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
     });
     expect(container.querySelector('.eval-no-trace')).toBeTruthy();
@@ -763,14 +763,14 @@ describe('ExplorerTreemap — lens switching', () => {
       ],
       root_spans: ['s1'],
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative', traceData },
     });
     expect(container.querySelector('.eval-playback')).toBeTruthy();
   });
 
   it('structural lens shows spec coverage legend', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'structural' },
     });
     const legendLabels = [...container.querySelectorAll('.legend-label')].map(el => el.textContent);
@@ -779,7 +779,7 @@ describe('ExplorerTreemap — lens switching', () => {
   });
 
   it('evaluative lens shows evaluative legend', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
     });
     const legendLabels = [...container.querySelectorAll('.legend-label')].map(el => el.textContent);
@@ -788,7 +788,7 @@ describe('ExplorerTreemap — lens switching', () => {
   });
 });
 
-describe('ExplorerTreemap — heat map coloring', () => {
+describe('ExplorerCanvas — heat map coloring', () => {
   // Unit test the evaluativeNodeColor logic
   function evaluativeNodeColor(metric, node, incomingCallCounts, maxValues) {
     let value = 0;
@@ -875,16 +875,16 @@ describe('ExplorerTreemap — heat map coloring', () => {
   });
 });
 
-describe('ExplorerTreemap — timeline scrubber', () => {
+describe('ExplorerCanvas — timeline scrubber', () => {
   it('does not show timeline by default', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     expect(container.querySelector('.timeline-scrubber')).toBeFalsy();
   });
 
   it('has a Timeline toggle button in toolbar', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const btns = Array.from(container.querySelectorAll('.tb-btn'));
@@ -893,9 +893,9 @@ describe('ExplorerTreemap — timeline scrubber', () => {
   });
 });
 
-describe('ExplorerTreemap — canvas search', () => {
+describe('ExplorerCanvas — canvas search', () => {
   it('does not show search by default', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     expect(container.querySelector('.canvas-search')).toBeFalsy();
@@ -928,9 +928,9 @@ describe('ExplorerTreemap — canvas search', () => {
   });
 });
 
-describe('ExplorerTreemap — evaluative lens', () => {
+describe('ExplorerCanvas — evaluative lens', () => {
   it('renders evaluative metric buttons when lens is evaluative', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
     });
     const evalBtns = container.querySelectorAll('.eval-metric-group .tb-btn-sm');
@@ -943,7 +943,7 @@ describe('ExplorerTreemap — evaluative lens', () => {
       emphasis: { badges: { metric: 'incoming_calls', template: '{{count}} calls' } },
       annotation: { title: 'Call count badges' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Call count badges');
@@ -955,7 +955,7 @@ describe('ExplorerTreemap — evaluative lens', () => {
       emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'], dim_unmatched: 0.12 },
       annotation: { title: 'Blast radius: $name', description: '{{count}} transitive callers' },
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     const title = container.querySelector('.annotation-title');
@@ -964,7 +964,7 @@ describe('ExplorerTreemap — evaluative lens', () => {
   });
 
   it('shows evaluative lens metric selector', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
     });
     expect(container.querySelector('.eval-metric-group')).toBeTruthy();
@@ -977,21 +977,21 @@ describe('ExplorerTreemap — evaluative lens', () => {
       ],
       root_spans: ['s1'],
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative', traceData },
     });
     expect(container.querySelector('.eval-playback')).toBeTruthy();
   });
 
   it('shows no-trace message when evaluative lens lacks trace data', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
     });
     expect(container.querySelector('.eval-no-trace')).toBeTruthy();
   });
 
   it('renders spec coverage legend in structural lens', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'structural' },
     });
     const legendLabels = [...container.querySelectorAll('.legend-label')].map(el => el.textContent);
@@ -1000,7 +1000,7 @@ describe('ExplorerTreemap — evaluative lens', () => {
   });
 
   it('renders evaluative legend in evaluative lens', () => {
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
     });
     const legendLabels = [...container.querySelectorAll('.legend-label')].map(el => el.textContent);
@@ -1011,7 +1011,7 @@ describe('ExplorerTreemap — evaluative lens', () => {
   it('renders context menu actions including spec-required items', () => {
     // The context menu includes View spec, View provenance, View history, Open in code
     // We verify the menu item strings exist in the component source
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     // Menu is not visible until right-click, but DOM structure should be present
@@ -1025,7 +1025,7 @@ describe('ExplorerTreemap — evaluative lens', () => {
       scope: { type: 'all' },
       callouts: [{ node: 'create_user', text: 'Important function' }],
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     // Just verify it renders without error — the callout resolution is tested by
@@ -1041,14 +1041,14 @@ describe('ExplorerTreemap — evaluative lens', () => {
         { node: 'get_user', text: 'Step 2: Get user' },
       ],
     };
-    const { container } = render(ExplorerTreemap, {
+    const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('canvas')).toBeTruthy();
   });
 });
 
-describe('ExplorerTreemap — anomaly detection (evaluative)', () => {
+describe('ExplorerCanvas — anomaly detection (evaluative)', () => {
   it('detects high complexity + low test coverage anomaly', () => {
     const nodesWithMetrics = [
       { id: 'fn1', node_type: 'function', name: 'complex_fn', complexity: 20, test_coverage: 0.1, test_node: false },
@@ -1108,7 +1108,7 @@ describe('ExplorerTreemap — anomaly detection (evaluative)', () => {
   });
 });
 
-describe('ExplorerTreemap — callout and narrative resolution', () => {
+describe('ExplorerCanvas — callout and narrative resolution', () => {
   it('resolves callout node names to node IDs', () => {
     const callouts = [
       { node: 'create_user', text: 'Entry point' },
@@ -1154,7 +1154,7 @@ describe('ExplorerTreemap — callout and narrative resolution', () => {
   });
 });
 
-describe('ExplorerTreemap — spec border coloring', () => {
+describe('ExplorerCanvas — spec border coloring', () => {
   it('returns green for node with spec_path', () => {
     const node = { id: 'fn1', spec_path: 'specs/api.md' };
     expect(node.spec_path).toBeTruthy();

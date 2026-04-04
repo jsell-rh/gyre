@@ -2,7 +2,7 @@
  * BidirectionalNav.test.js — TASK-360
  *
  * Tests for ArchPreviewCanvas ghost overlay rendering.
- * (ExplorerCanvas tests removed -- component superseded by ExplorerTreemap.)
+ * (ExplorerCanvas tests removed -- component superseded by ExplorerCanvas.)
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render } from '@testing-library/svelte';

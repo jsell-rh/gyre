@@ -3,7 +3,7 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
-  import ExplorerTreemap from '../lib/ExplorerTreemap.svelte';
+  import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -850,7 +850,7 @@
           </div>
         {/if}
 
-        <!-- Lens toggle is in the ExplorerTreemap toolbar to avoid duplication -->
+        <!-- Lens toggle is in the ExplorerCanvas toolbar to avoid duplication -->
       </div>
     </div>
 
@@ -975,7 +975,7 @@
         {:else if graph}
           <div class="explorer-split">
             <div class="explorer-canvas-area">
-              <ExplorerTreemap
+              <ExplorerCanvas
                 repoId={selectedRepoId}
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
