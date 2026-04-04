@@ -50,6 +50,7 @@
   let inputEl = $state(null);
   let streamingText = $state('');
   let savedViewsDropdownOpen = $state(false);
+  let activeViewId = $state(null);
 
   // ── Auth ─────────────────────────────────────────────────────────────────
   function getAuthToken() {
@@ -89,7 +90,8 @@
       let msg;
       try {
         msg = JSON.parse(event.data);
-      } catch {
+      } catch (e) {
+        console.warn('[ExplorerChat] Malformed WebSocket JSON:', e.message);
         return;
       }
       handleMessage(msg);
@@ -122,19 +124,21 @@
       reconnectTimer = null;
       reconnectCount++;
       connect();
-    }, RECONNECT_DELAY);
+    }, delay);
   }
 
   function handleMessage(msg) {
     switch (msg.type) {
       case 'text': {
         if (!msg.done) {
-          // Streaming chunk: accumulate text
-          streamingText += msg.content ?? '';
+          // Streaming chunk: accumulate text (coerce to string for safety)
+          const chunk = typeof msg.content === 'string' ? msg.content : String(msg.content ?? '');
+          streamingText += chunk;
           status = 'thinking';
         } else {
           // Final text message (done=true)
-          const fullText = streamingText + (msg.content ?? '');
+          const doneChunk = typeof msg.content === 'string' ? msg.content : String(msg.content ?? '');
+          const fullText = streamingText + doneChunk;
           if (fullText.trim()) {
             messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: fullText, timestamp: Date.now() }]);
           }
@@ -193,6 +197,7 @@
         break;
       }
       default:
+        console.warn('[ExplorerChat] Unknown message type:', msg.type);
         break;
     }
   }
@@ -220,6 +225,7 @@
   function loadView(view) {
     savedViewsDropdownOpen = false;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    activeViewId = view.id;
     ws.send(JSON.stringify({ type: 'load_view', view_id: view.id }));
   }
 
@@ -385,7 +391,7 @@
                   <button
                     class="saved-view-item"
                     role="option"
-                    aria-selected={false}
+                    aria-selected={activeViewId === view.id}
                     onclick={() => loadView(view)}
                     type="button"
                   >
@@ -754,7 +760,7 @@
   .click-away {
     position: fixed;
     inset: 0;
-    z-index: 50;
+    z-index: 99;
   }
 
   /* ── Messages ────────────────────────────────────────────────────── */
