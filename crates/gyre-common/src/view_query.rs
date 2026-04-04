@@ -323,7 +323,7 @@ impl ViewQuery {
             if !heat.metric.is_empty() && !Self::KNOWN_HEAT_METRICS.contains(&heat.metric.as_str())
             {
                 errors.push(format!(
-                    "Unknown heat metric '{}' — known metrics: complexity, churn, incoming_calls, outgoing_calls, test_coverage, field_count, test_fragility",
+                    "Unknown heat metric '{}' — known metrics: complexity, churn, churn_count_30d, incoming_calls, outgoing_calls, test_coverage, field_count, test_fragility, risk_score",
                     heat.metric
                 ));
             }
@@ -337,79 +337,154 @@ impl ViewQuery {
         {
             let normalized = expr.trim();
             if !normalized.is_empty() {
-                let known_prefixes = [
-                    "$clicked",
-                    "$selected",
-                    "$test_unreachable",
-                    "$test_reachable",
-                    "$where(",
-                    "$intersect(",
-                    "$union(",
-                    "$diff(",
-                    "$callers(",
-                    "$callees(",
-                    "$implementors(",
-                    "$fields(",
-                    "$descendants(",
-                    "$ancestors(",
-                    "$governed_by(",
-                    "$test_fragility(",
-                    "$reachable(",
-                ];
-                if !known_prefixes.iter().any(|p| normalized.starts_with(p)) {
-                    errors.push(format!("Unknown computed expression: '{}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $intersect, $union, $diff", normalized));
-                }
-                // Check balanced parens
-                if normalized.contains('(') {
-                    let open = normalized.chars().filter(|c| *c == '(').count();
-                    let close = normalized.chars().filter(|c| *c == ')').count();
-                    if open != close {
-                        errors.push(format!(
-                            "Unbalanced parentheses in computed expression: {} open, {} close",
-                            open, close
-                        ));
-                    }
-                }
-                // Validate $where arguments: $where(metric, op, value)
-                if normalized.starts_with("$where(") && normalized.ends_with(')') {
-                    let inner = &normalized[7..normalized.len() - 1];
-                    let parts: Vec<&str> = inner
-                        .splitn(3, ',')
-                        .map(|s| s.trim().trim_matches('\'').trim_matches('"'))
-                        .collect();
-                    if parts.len() != 3 {
-                        errors.push(format!(
-                            "$where requires 3 arguments (metric, operator, value), got {}",
-                            parts.len()
-                        ));
-                    } else {
-                        let known_where_metrics = [
-                            "complexity",
-                            "churn",
-                            "churn_count_30d",
-                            "incoming_calls",
-                            "outgoing_calls",
-                            "test_coverage",
-                            "field_count",
-                            "test_fragility",
-                            "risk_score",
-                        ];
-                        if !known_where_metrics.contains(&parts[0]) {
-                            errors.push(format!("Unknown $where metric '{}'", parts[0]));
-                        }
-                        let known_ops = [">", ">=", "<", "<=", "==", "="];
-                        if !known_ops.contains(&parts[1]) {
-                            errors.push(format!("Unknown $where operator '{}'", parts[1]));
-                        }
-                        if parts[2].parse::<f64>().is_err() {
-                            errors.push(format!("$where value '{}' is not a number", parts[2]));
-                        }
-                    }
-                }
+                Self::validate_computed_expression(normalized, &mut errors);
             }
         }
 
         errors
+    }
+
+    /// Known computed expression prefixes.
+    const KNOWN_COMPUTED_PREFIXES: &'static [&'static str] = &[
+        "$clicked",
+        "$selected",
+        "$test_unreachable",
+        "$test_reachable",
+        "$where(",
+        "$intersect(",
+        "$union(",
+        "$diff(",
+        "$callers(",
+        "$callees(",
+        "$implementors(",
+        "$fields(",
+        "$descendants(",
+        "$ancestors(",
+        "$governed_by(",
+        "$test_fragility(",
+        "$reachable(",
+    ];
+
+    /// Recursively validate a computed expression, including inner expressions
+    /// within $intersect, $union, $diff.
+    fn validate_computed_expression(expr: &str, errors: &mut Vec<String>) {
+        let expr = expr.trim();
+        if expr.is_empty() {
+            return;
+        }
+
+        if !Self::KNOWN_COMPUTED_PREFIXES
+            .iter()
+            .any(|p| expr.starts_with(p))
+        {
+            errors.push(format!("Unknown computed expression: '{}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $intersect, $union, $diff", expr));
+            return;
+        }
+
+        // Check balanced parens
+        if expr.contains('(') {
+            let open = expr.chars().filter(|c| *c == '(').count();
+            let close = expr.chars().filter(|c| *c == ')').count();
+            if open != close {
+                errors.push(format!(
+                    "Unbalanced parentheses in computed expression: {} open, {} close",
+                    open, close
+                ));
+                return;
+            }
+        }
+
+        // Recursively validate inner expressions in set operations
+        for set_op in &["$intersect(", "$union(", "$diff("] {
+            if expr.starts_with(set_op) {
+                // Extract inner content between outermost parens
+                if let Some(inner) = Self::extract_inner_parens(expr, set_op.len() - 1) {
+                    // Split on top-level commas (not inside nested parens)
+                    let parts = Self::split_top_level_commas(inner);
+                    for part in &parts {
+                        let trimmed = part.trim();
+                        if !trimmed.is_empty() {
+                            Self::validate_computed_expression(trimmed, errors);
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
+        // Validate $where arguments: $where(metric, op, value)
+        if expr.starts_with("$where(") && expr.ends_with(')') {
+            let inner = &expr[7..expr.len() - 1];
+            let parts: Vec<&str> = inner
+                .splitn(3, ',')
+                .map(|s| s.trim().trim_matches('\'').trim_matches('"'))
+                .collect();
+            if parts.len() != 3 {
+                errors.push(format!(
+                    "$where requires 3 arguments (metric, operator, value), got {}",
+                    parts.len()
+                ));
+            } else {
+                if !Self::KNOWN_HEAT_METRICS.contains(&parts[0]) {
+                    errors.push(format!("Unknown $where metric '{}'", parts[0]));
+                }
+                let known_ops = [">", ">=", "<", "<=", "==", "="];
+                if !known_ops.contains(&parts[1]) {
+                    errors.push(format!("Unknown $where operator '{}'", parts[1]));
+                }
+                if parts[2].parse::<f64>().is_err() {
+                    errors.push(format!("$where value '{}' is not a number", parts[2]));
+                }
+            }
+        }
+    }
+
+    /// Extract the content between the outermost parentheses starting at `paren_pos`.
+    fn extract_inner_parens(s: &str, paren_pos: usize) -> Option<&str> {
+        let bytes = s.as_bytes();
+        if paren_pos >= bytes.len() || bytes[paren_pos] != b'(' {
+            return None;
+        }
+        // The content starts after the opening paren and ends before the matching close
+        let start = paren_pos + 1;
+        let mut depth = 1;
+        let mut end = start;
+        for &b in &bytes[start..] {
+            if b == b'(' {
+                depth += 1;
+            } else if b == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[start..end]);
+                }
+            }
+            end += 1;
+        }
+        None
+    }
+
+    /// Split a string on commas that are not inside parentheses.
+    fn split_top_level_commas(s: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut depth = 0;
+        let mut start = 0;
+        for (i, ch) in s.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                ',' if depth == 0 => {
+                    parts.push(&s[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(&s[start..]);
+        parts
     }
 }
 

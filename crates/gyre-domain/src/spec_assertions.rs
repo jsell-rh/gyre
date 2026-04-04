@@ -146,7 +146,7 @@ fn parse_single_assertion(text: &str, line: usize) -> Option<ParsedAssertion> {
 
 /// Parse a subject like `module("gyre-domain")` and return the subject + remaining text.
 fn parse_subject(text: &str) -> Option<(Subject, &str)> {
-    // Try each subject type
+    // Try each subject type — must match exact keyword followed by `(`, not a longer word.
     for (prefix, constructor) in &[
         ("module", Subject::Module as fn(String) -> Subject),
         ("type", Subject::Type as fn(String) -> Subject),
@@ -154,6 +154,12 @@ fn parse_subject(text: &str) -> Option<(Subject, &str)> {
         ("function", Subject::Function as fn(String) -> Subject),
     ] {
         if let Some(rest) = text.strip_prefix(prefix) {
+            // Ensure the prefix is a complete word: next char must be '(' or whitespace
+            // (not an alphanumeric continuation like "typeForTask").
+            let first_non_ws = rest.trim_start();
+            if !first_non_ws.starts_with('(') {
+                continue;
+            }
             let rest = rest.trim();
             if let Some((arg, remainder)) = parse_quoted_arg(rest) {
                 return Some((constructor(arg), remainder));

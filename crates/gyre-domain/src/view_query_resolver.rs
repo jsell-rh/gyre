@@ -449,6 +449,8 @@ fn count_fields(node_id: &str, incoming: &HashMap<String, Vec<(String, EdgeType)
 pub struct ScopeResult {
     pub matched: HashSet<String>,
     pub depths: HashMap<String, u32>,
+    /// Warnings generated during scope resolution.
+    pub warnings: Vec<String>,
 }
 
 /// Resolve a view query scope against the graph, returning the set of matched node IDs.
@@ -485,6 +487,7 @@ fn resolve_scope_with_adjacency(
     let all_ids: HashSet<String> = active_nodes.iter().map(|n| n.id.to_string()).collect();
 
     let no_depths = || HashMap::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     let (matched, depths) = match scope {
         Scope::All => (all_ids, no_depths()),
@@ -625,8 +628,17 @@ fn resolve_scope_with_adjacency(
                     .map(|n| n.id.to_string())
                     .collect()
             } else {
-                // SHA-based diff: nodes whose created_sha or last_modified_sha
-                // matches to_commit but NOT from_commit (prefix matching for short SHAs).
+                // SHA-based diff: select nodes modified at or after to_commit but not
+                // at from_commit. This is a best-effort heuristic — we only have the
+                // last_modified_sha on each node, not the full git log, so nodes
+                // changed by intermediate commits between from and to will be missed.
+                // Prefer temporal diff (epoch prefix) for accurate ranges.
+                warnings.push(
+                    "SHA-based diff is approximate: only nodes whose last_modified_sha \
+                     matches the target commit are shown. Intermediate commits are not \
+                     visible. Use temporal diff (~epoch) for full range accuracy."
+                        .to_string(),
+                );
                 let sha_matches = |sha: &str, target: &str| -> bool {
                     if target.is_empty() {
                         return false;
@@ -696,7 +708,11 @@ fn resolve_scope_with_adjacency(
         }
     };
 
-    ScopeResult { matched, depths }
+    ScopeResult {
+        matched,
+        depths,
+        warnings,
+    }
 }
 
 /// Normalize whitespace in computed expressions.
@@ -910,11 +926,9 @@ fn resolve_computed_expression(
     // $callers(node_or_ref, depth?)
     if trimmed.starts_with("$callers(") && trimmed.ends_with(')') {
         let inner = &trimmed[9..trimmed.len() - 1];
-        let parts: Vec<&str> = inner.splitn(2, ',').map(|s| s.trim()).collect();
-        let node_ref = parts[0].trim_matches('\'').trim_matches('"');
-        let depth: u32 = parts.get(1).and_then(|d| d.parse().ok()).unwrap_or(10);
+        let (node_ref, depth) = split_node_and_depth(inner);
 
-        let resolved_name = resolve_node_ref(node_ref, selected_node_id);
+        let resolved_name = resolve_node_ref(&node_ref, selected_node_id);
         if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
             return bfs_traverse(
                 &found.id.to_string(),
@@ -931,11 +945,9 @@ fn resolve_computed_expression(
     // $callees(node_or_ref, depth?)
     if trimmed.starts_with("$callees(") && trimmed.ends_with(')') {
         let inner = &trimmed[9..trimmed.len() - 1];
-        let parts: Vec<&str> = inner.splitn(2, ',').map(|s| s.trim()).collect();
-        let node_ref = parts[0].trim_matches('\'').trim_matches('"');
-        let depth: u32 = parts.get(1).and_then(|d| d.parse().ok()).unwrap_or(10);
+        let (node_ref, depth) = split_node_and_depth(inner);
 
-        let resolved_name = resolve_node_ref(node_ref, selected_node_id);
+        let resolved_name = resolve_node_ref(&node_ref, selected_node_id);
         if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
             return bfs_traverse(
                 &found.id.to_string(),
@@ -996,7 +1008,7 @@ fn resolve_computed_expression(
         return HashSet::new();
     }
 
-    // $descendants(node)
+    // $descendants(node) — cap depth at 20 to prevent DoS from unbounded traversal
     if trimmed.starts_with("$descendants(") && trimmed.ends_with(')') {
         let node_name = trimmed[13..trimmed.len() - 1]
             .trim()
@@ -1008,7 +1020,7 @@ fn resolve_computed_expression(
                 &found.id.to_string(),
                 &[EdgeType::Contains],
                 "outgoing",
-                100,
+                20,
                 outgoing,
                 incoming,
             );
@@ -1016,7 +1028,7 @@ fn resolve_computed_expression(
         return HashSet::new();
     }
 
-    // $ancestors(node)
+    // $ancestors(node) — cap depth at 20 to prevent DoS from unbounded traversal
     if trimmed.starts_with("$ancestors(") && trimmed.ends_with(')') {
         let node_name = trimmed[11..trimmed.len() - 1]
             .trim()
@@ -1028,7 +1040,7 @@ fn resolve_computed_expression(
                 &found.id.to_string(),
                 &[EdgeType::Contains],
                 "incoming",
-                100,
+                20,
                 outgoing,
                 incoming,
             );
@@ -1192,6 +1204,39 @@ pub fn validate_computed_expression(expr: &str) -> Option<String> {
 }
 
 /// Resolve $clicked/$selected references to the actual node ID.
+/// Split a `$callers`/`$callees` inner string into (node_ref, depth).
+/// Handles generics like `HashMap<String, Vec<Task>>` by finding the last
+/// top-level comma (not inside `<>`).
+fn split_node_and_depth(inner: &str) -> (String, u32) {
+    let inner = inner.trim();
+    // Find the last comma that's NOT inside angle brackets
+    let mut depth_bracket = 0i32;
+    let mut last_top_comma = None;
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '<' => depth_bracket += 1,
+            '>' => {
+                if depth_bracket > 0 {
+                    depth_bracket -= 1;
+                }
+            }
+            ',' if depth_bracket == 0 => last_top_comma = Some(i),
+            _ => {}
+        }
+    }
+    if let Some(comma_pos) = last_top_comma {
+        let node_part = inner[..comma_pos].trim();
+        let depth_part = inner[comma_pos + 1..].trim();
+        if let Ok(d) = depth_part.parse::<u32>() {
+            let node_ref = node_part.trim_matches('\'').trim_matches('"');
+            return (node_ref.to_string(), d);
+        }
+    }
+    // No depth separator found — entire thing is the node ref
+    let node_ref = inner.trim_matches('\'').trim_matches('"');
+    (node_ref.to_string(), 10)
+}
+
 fn resolve_node_ref(reference: &str, selected_node_id: Option<&str>) -> String {
     match reference {
         "$clicked" | "$selected" => selected_node_id.unwrap_or("").to_string(),
@@ -1337,6 +1382,7 @@ pub fn dry_run(
     );
     let result_set = scope_result.matched;
     let node_depths = scope_result.depths;
+    warnings.extend(scope_result.warnings);
 
     if result_set.is_empty() {
         let is_interactive = matches!(&query.scope, Scope::Focus { node, .. } if node == "$clicked" || node == "$selected");
