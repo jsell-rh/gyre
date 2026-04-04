@@ -166,7 +166,7 @@
       evaluativeMetric = 'span_duration';
     }
   });
-  let observableBannerVisible = $state(false); // show "coming soon" banner for observable lens
+  let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
 
   // ── Ghost overlay state (spec editing preview) ──────────────────────
   // ghostOverlays: [{ id, name, type, action: 'add'|'change'|'remove', edges?: [] }]
@@ -4657,13 +4657,13 @@
     </div>
   {/if}
 
-  <!-- Observable lens "coming soon" banner -->
+  <!-- Observable lens notice banner -->
   {#if observableBannerVisible}
     <div class="observable-banner" role="status" aria-live="polite">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0">
         <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
       </svg>
-      <span>Coming soon: Requires production telemetry integration</span>
+      <span>Requires production telemetry integration</span>
       <button class="observable-banner-close" onclick={() => { observableBannerVisible = false; }} type="button" title="Dismiss">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
@@ -4758,7 +4758,7 @@
   .eval-particle-count { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; white-space: nowrap; }
   .eval-no-trace { font-size: 11px; color: #64748b; font-style: italic; margin-left: 4px; }
 
-  /* Observable lens "coming soon" banner */
+  /* Observable lens notice banner */
   .observable-banner {
     position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 45;
     display: flex; align-items: center; gap: 8px;
