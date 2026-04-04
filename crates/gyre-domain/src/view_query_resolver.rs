@@ -674,12 +674,18 @@ fn resolve_scope_with_adjacency(
                         .to_string(),
                 );
                 let sha_matches = |sha: &str, target: &str| -> bool {
-                    if target.is_empty() {
-                        return false;
+                    if target.is_empty() || target.len() < 4 {
+                        return false; // Require at least 4 chars to prevent overly broad matches
                     }
                     let sha_lower = sha.to_lowercase();
-                    // Always use prefix matching — short SHAs are prefixes of full SHAs
-                    sha_lower.starts_with(target) || target.starts_with(&sha_lower)
+                    // Prefix matching: short SHAs are prefixes of full SHAs.
+                    // Only match target as prefix of SHA (not bidirectional) unless
+                    // the SHA itself is shorter (e.g., abbreviated in node data).
+                    if sha_lower.len() >= target.len() {
+                        sha_lower.starts_with(target)
+                    } else {
+                        target.starts_with(&sha_lower)
+                    }
                 };
 
                 active_nodes
@@ -789,6 +795,9 @@ fn normalize_computed_expression(expr: &str) -> String {
 /// $callers(...), $callees(...), $implementors(...), $fields(...),
 /// $descendants(...), $ancestors(...), $governed_by(...), $test_fragility(...),
 /// $reachable(...)
+/// Maximum recursion depth for resolver (mirrors validation MAX_COMPUTED_DEPTH).
+const RESOLVER_MAX_DEPTH: u32 = 20;
+
 fn resolve_computed_expression(
     expr: &str,
     active_nodes: &[&GraphNode],
@@ -797,6 +806,22 @@ fn resolve_computed_expression(
     incoming: &HashMap<String, Vec<(String, EdgeType)>>,
     selected_node_id: Option<&str>,
 ) -> HashSet<String> {
+    resolve_computed_expression_inner(expr, active_nodes, edges, outgoing, incoming, selected_node_id, 0)
+}
+
+fn resolve_computed_expression_inner(
+    expr: &str,
+    active_nodes: &[&GraphNode],
+    edges: &[GraphEdge],
+    outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
+    incoming: &HashMap<String, Vec<(String, EdgeType)>>,
+    selected_node_id: Option<&str>,
+    depth: u32,
+) -> HashSet<String> {
+    if depth > RESOLVER_MAX_DEPTH {
+        return HashSet::new(); // Prevent stack overflow on deeply nested expressions
+    }
+
     // Normalize whitespace before parentheses: "$callers (Foo)" -> "$callers(Foo)"
     let normalized = normalize_computed_expression(expr);
     let trimmed = normalized.trim();
@@ -900,21 +925,11 @@ fn resolve_computed_expression(
         if let Some(comma_pos) = find_balanced_comma(inner) {
             let a_expr = inner[..comma_pos].trim();
             let b_expr = inner[comma_pos + 1..].trim();
-            let set_a = resolve_computed_expression(
-                a_expr,
-                active_nodes,
-                edges,
-                outgoing,
-                incoming,
-                selected_node_id,
+            let set_a = resolve_computed_expression_inner(
+                a_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
             );
-            let set_b = resolve_computed_expression(
-                b_expr,
-                active_nodes,
-                edges,
-                outgoing,
-                incoming,
-                selected_node_id,
+            let set_b = resolve_computed_expression_inner(
+                b_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
             );
             return set_a.intersection(&set_b).cloned().collect();
         }
@@ -926,21 +941,11 @@ fn resolve_computed_expression(
         if let Some(comma_pos) = find_balanced_comma(inner) {
             let a_expr = inner[..comma_pos].trim();
             let b_expr = inner[comma_pos + 1..].trim();
-            let set_a = resolve_computed_expression(
-                a_expr,
-                active_nodes,
-                edges,
-                outgoing,
-                incoming,
-                selected_node_id,
+            let set_a = resolve_computed_expression_inner(
+                a_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
             );
-            let set_b = resolve_computed_expression(
-                b_expr,
-                active_nodes,
-                edges,
-                outgoing,
-                incoming,
-                selected_node_id,
+            let set_b = resolve_computed_expression_inner(
+                b_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
             );
             return set_a.union(&set_b).cloned().collect();
         }
@@ -952,21 +957,11 @@ fn resolve_computed_expression(
         if let Some(comma_pos) = find_balanced_comma(inner) {
             let a_expr = inner[..comma_pos].trim();
             let b_expr = inner[comma_pos + 1..].trim();
-            let set_a = resolve_computed_expression(
-                a_expr,
-                active_nodes,
-                edges,
-                outgoing,
-                incoming,
-                selected_node_id,
+            let set_a = resolve_computed_expression_inner(
+                a_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
             );
-            let set_b = resolve_computed_expression(
-                b_expr,
-                active_nodes,
-                edges,
-                outgoing,
-                incoming,
-                selected_node_id,
+            let set_b = resolve_computed_expression_inner(
+                b_expr, active_nodes, edges, outgoing, incoming, selected_node_id, depth + 1,
             );
             return set_a.difference(&set_b).cloned().collect();
         }
@@ -1215,8 +1210,10 @@ fn resolve_computed_expression(
         return HashSet::new();
     }
 
-    // Fallback: unrecognized expression — returns empty set.
+    // Fallback: unrecognized expression — return empty set.
     // validate_computed_expression() should be called before resolution to catch these.
+    #[cfg(debug_assertions)]
+    eprintln!("[view_query_resolver] Unrecognized computed expression: '{}'", trimmed);
     HashSet::new()
 }
 

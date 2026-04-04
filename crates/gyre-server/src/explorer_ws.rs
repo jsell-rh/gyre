@@ -73,9 +73,13 @@ static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, usi
 /// Maximum concurrent explorer sessions per user.
 const MAX_SESSIONS_PER_USER: usize = 3;
 
-/// Max agent refinement turns (spec says 3). This is also the total LLM call
-/// budget per user message — tool-use and refinement share this cap.
-const MAX_AGENT_TURNS: usize = 3;
+/// Max total LLM calls per user message (tool-use turns + refinement turns).
+/// Spec says max 3 refinements for self-check. We allow 5 total turns
+/// so tool-use calls don't consume the self-check budget.
+const MAX_AGENT_TURNS: usize = 5;
+
+/// Max refinement-only turns (view query self-check loop).
+const MAX_REFINEMENT_TURNS: usize = 3;
 
 /// Max messages per session before requiring reconnect (prevents unbounded history).
 /// Set high enough for deep conversational exploration (100 back-and-forth turns).
@@ -466,22 +470,8 @@ async fn handle_explorer_session(
                     }
                 }
 
-                // Use workspace_id from the repo we already validated.
-                let workspace_id = match state.repos.find_by_id(&rid).await {
-                    Ok(Some(r)) => r.workspace_id.to_string(),
-                    _ => {
-                        let err = ExplorerServerMessage::Error {
-                            message: "Failed to resolve repository workspace. Please try again."
-                                .to_string(),
-                        };
-                        let _ = sender
-                            .send(Message::Text(
-                                serialize_msg(&err).unwrap_or_default().into(),
-                            ))
-                            .await;
-                        continue;
-                    }
-                };
+                // Use workspace_id cached from session start to avoid TOCTOU.
+                let workspace_id = repo_workspace_id.to_string();
                 let now = crate::api::now_secs();
                 let view = SavedView {
                     id: crate::api::new_id(),
@@ -509,6 +499,7 @@ async fn handle_explorer_session(
                                         name: v.name,
                                         description: v.description,
                                         created_at: v.created_at,
+                                        is_system: v.is_system,
                                     })
                                     .collect();
                                 let msg = ExplorerServerMessage::Views { views: summaries };
@@ -526,6 +517,7 @@ async fn handle_explorer_session(
                                         name: _v.name,
                                         description: _v.description,
                                         created_at: _v.created_at,
+                                        is_system: _v.is_system,
                                     }],
                                 };
                                 let _ = sender
@@ -777,6 +769,7 @@ async fn handle_explorer_session(
                                             name: v.name,
                                             description: v.description,
                                             created_at: v.created_at,
+                                            is_system: v.is_system,
                                         })
                                         .collect();
                                     let msg = ExplorerServerMessage::Views { views: summaries };
@@ -836,11 +829,15 @@ async fn handle_explorer_session(
                                 name: v.name,
                                 description: v.description,
                                 created_at: v.created_at,
+                                is_system: v.is_system,
                             })
                             .collect();
 
-                        // Seed system default views on first access when none exist.
-                        if summaries.is_empty() {
+                        // Seed system default views on first access when no system views exist.
+                        // Check for system views specifically (not all views) to prevent
+                        // re-seeding when a user deletes all personal views.
+                        let has_system_views = summaries.iter().any(|s| s.is_system);
+                        if !has_system_views {
                             let now = crate::api::now_secs();
                             let defaults = system_default_views();
                             for (name, description, query_json) in &defaults {
@@ -864,6 +861,7 @@ async fn handle_explorer_session(
                                             name: v.name,
                                             description: v.description,
                                             created_at: v.created_at,
+                                            is_system: v.is_system,
                                         });
                                     }
                                     Err(e) => {
@@ -1033,7 +1031,7 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "node_id": { "type": "string", "description": "Find all edges connected to this node" },
-                    "edge_type": { "type": "string", "description": "Filter by: contains, implements, depends_on, calls, field_of, returns, routes_to, governed_by" },
+                    "edge_type": { "type": "string", "description": "Filter by: contains, implements, depends_on, calls, field_of, returns, routes_to, governed_by, renders, persists_to, produced_by" },
                     "source_id": { "type": "string", "description": "Filter by source node" },
                     "target_id": { "type": "string", "description": "Filter by target node" }
                 }
@@ -1408,13 +1406,32 @@ async fn run_explorer_agent(
                         // Enforce cache size limit to prevent memory exhaustion
                         if n.len() + e.len() > MAX_GRAPH_CACHE_ENTRIES {
                             warn!(
-                                "Graph too large for session cache ({} nodes + {} edges > {}), truncating",
+                                "Graph too large for session cache ({} nodes + {} edges > {}), truncating — keeping most recently modified nodes",
                                 n.len(), e.len(), MAX_GRAPH_CACHE_ENTRIES
                             );
-                            *cached_nodes =
-                                Some(n.into_iter().take(MAX_GRAPH_CACHE_ENTRIES / 2).collect());
-                            *cached_edges =
-                                Some(e.into_iter().take(MAX_GRAPH_CACHE_ENTRIES / 2).collect());
+                            // Sort by last_modified_at descending so we keep recent nodes
+                            let mut sorted_nodes = n;
+                            sorted_nodes.sort_by(|a, b| b.last_modified_at.cmp(&a.last_modified_at));
+                            let kept_node_ids: std::collections::HashSet<String> = sorted_nodes
+                                .iter()
+                                .take(MAX_GRAPH_CACHE_ENTRIES / 2)
+                                .map(|n| n.id.to_string())
+                                .collect();
+                            // Keep edges that connect to retained nodes
+                            let kept_edges: Vec<_> = e
+                                .into_iter()
+                                .filter(|e| {
+                                    kept_node_ids.contains(&e.source_id.to_string())
+                                        || kept_node_ids.contains(&e.target_id.to_string())
+                                })
+                                .collect();
+                            *cached_nodes = Some(
+                                sorted_nodes
+                                    .into_iter()
+                                    .take(MAX_GRAPH_CACHE_ENTRIES / 2)
+                                    .collect(),
+                            );
+                            *cached_edges = Some(kept_edges);
                         } else {
                             *cached_nodes = Some(n);
                             *cached_edges = Some(e);
@@ -1715,8 +1732,15 @@ async fn run_explorer_agent(
                         ))
                     }
                 } else {
-                    warn!("Failed to deserialize view query for self-check — sending unvalidated");
-                    None
+                    warn!("Failed to deserialize view query for self-check — rejecting invalid query");
+                    // Don't send unvalidated queries to the frontend.
+                    // Stream a warning instead and skip the view query.
+                    stream_text(
+                        sender,
+                        "\n\n*Warning: Generated view query had invalid structure and was not applied.*",
+                        true,
+                    ).await;
+                    break;
                 };
 
                 if let Some(ref dr) = dry_run_result {
@@ -1755,7 +1779,7 @@ async fn run_explorer_agent(
                             true
                         })
                         .collect();
-                    if !actionable_warnings.is_empty() && refinement_count < MAX_AGENT_TURNS {
+                    if !actionable_warnings.is_empty() && refinement_count < MAX_REFINEMENT_TURNS {
                         // Self-check failed: inject dry-run results back as a synthetic
                         // tool_use → tool_result pair so the LLM can use its native
                         // tool-use architecture for refinement (rather than a plain
@@ -2145,7 +2169,7 @@ async fn execute_tool(
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(30)
-                .min(200) as usize; // Cap at 200 to prevent unbounded iteration
+                .min(50) as usize; // Cap at 50 to limit conversation history bloat
 
             let results: Vec<serde_json::Value> = nodes
                 .iter()
@@ -2230,7 +2254,7 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 - `concept`: Cross-cutting concept. Fields: seed_nodes (array), expand_edges (array), expand_depth (number), expand_direction ("outgoing"/"incoming"/"both")
 
 ### Edge Types
-calls, contains, implements, depends_on, field_of, returns, routes_to, governed_by
+calls, contains, implements, depends_on, field_of, returns, routes_to, governed_by, renders, persists_to, produced_by
 
 ### Node Types
 package, module, type, interface, function, endpoint, component, table, constant, field, spec
@@ -2390,8 +2414,9 @@ This shows all callers of TaskPort."#;
     }
 
     #[test]
-    fn test_max_agent_turns_is_three() {
-        assert_eq!(MAX_AGENT_TURNS, 3, "Spec requires max 3 refinement turns");
+    fn test_max_agent_turns() {
+        assert_eq!(MAX_AGENT_TURNS, 5, "Total LLM budget: 5 turns (tool-use + refinement)");
+        assert_eq!(MAX_REFINEMENT_TURNS, 3, "Spec requires max 3 refinement turns");
     }
 
     #[test]
@@ -2628,7 +2653,9 @@ Done."#;
 
     #[test]
     fn test_max_total_turns_matches_spec() {
-        // Spec caps at 3 total LLM calls per user message
-        assert_eq!(MAX_AGENT_TURNS, 3, "Max total turns should be 3 per spec");
+        // 5 total LLM calls per user message (tool-use + self-check refinements)
+        assert_eq!(MAX_AGENT_TURNS, 5, "Max total turns should be 5");
+        // Spec caps refinement-only turns at 3
+        assert_eq!(MAX_REFINEMENT_TURNS, 3, "Max refinement turns should be 3 per spec");
     }
 }

@@ -47,7 +47,7 @@ pub enum Scope {
         expand_edges: Vec<String>,
         #[serde(default = "default_concept_depth")]
         expand_depth: u32,
-        /// Expansion direction: "outgoing", "incoming", or "both" (default: "outgoing").
+        /// Expansion direction: "outgoing", "incoming", or "both" (default: "both").
         #[serde(default = "default_concept_direction")]
         expand_direction: String,
     },
@@ -63,7 +63,7 @@ fn default_concept_depth() -> u32 {
     2
 }
 fn default_concept_direction() -> String {
-    "outgoing".to_string()
+    "both".to_string()
 }
 
 // ── Emphasis ─────────────────────────────────────────────────────────────────
@@ -373,9 +373,9 @@ impl ViewQuery {
                 }
             }
             Zoom::Level { level } => {
-                if *level < 0.01 || *level > 100.0 {
+                if *level < 0.05 || *level > 20.0 {
                     errors.push(format!(
-                        "Zoom level {} is out of range — must be between 0.01 and 100.0",
+                        "Zoom level {} is out of range — must be between 0.05 and 20.0",
                         level
                     ));
                 }
@@ -682,4 +682,7 @@ pub struct SavedViewSummary {
     pub name: String,
     pub description: Option<String>,
     pub created_at: u64,
+    /// Whether this is a system-provided (non-deletable) view.
+    #[serde(default)]
+    pub is_system: bool,
 }
