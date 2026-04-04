@@ -3034,7 +3034,7 @@ Done."#;
     #[test]
     fn test_system_default_views_are_valid() {
         let defaults = system_default_views();
-        assert_eq!(defaults.len(), 5, "Should have 5 system default views");
+        assert_eq!(defaults.len(), 6, "Should have 6 system default views");
 
         let expected_names = [
             "Architecture Overview",
@@ -3042,6 +3042,7 @@ Done."#;
             "Hot Paths",
             "Blast Radius (click)",
             "Spec Coverage",
+            "Ungoverned Risk",
         ];
         for (i, (name, description, query_json)) in defaults.iter().enumerate() {
             assert_eq!(*name, expected_names[i]);

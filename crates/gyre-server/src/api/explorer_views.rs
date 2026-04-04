@@ -629,14 +629,15 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         let arr = body.as_array().unwrap();
-        // 5 system default views should be seeded.
-        assert_eq!(arr.len(), 5);
+        // 6 system default views should be seeded.
+        assert_eq!(arr.len(), 6);
         let names: Vec<&str> = arr.iter().map(|v| v["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"Architecture Overview"));
         assert!(names.contains(&"Test Coverage Gaps"));
         assert!(names.contains(&"Hot Paths"));
         assert!(names.contains(&"Blast Radius (click)"));
         assert!(names.contains(&"Spec Coverage"));
+        assert!(names.contains(&"Ungoverned Risk"));
     }
 
     #[tokio::test]

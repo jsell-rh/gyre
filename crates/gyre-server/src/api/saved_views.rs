@@ -163,6 +163,11 @@ pub fn system_default_views() -> Vec<(&'static str, &'static str, &'static str)>
             "Nodes with and without spec governance",
             r##"{"scope":{"type":"all"},"emphasis":{"heat":{"metric":"risk_score","palette":"green-yellow-red"}},"annotation":{"title":"Spec coverage","description":"Green = governed by spec, Red = unspecified + risky"}}"##,
         ),
+        (
+            "Ungoverned Risk",
+            "Complex nodes without spec governance — highest value targets for spec authoring",
+            r##"{"scope":{"type":"filter","computed":"$intersect($where(complexity, '>', 10), $diff($where(node_type, '=', 'function'), $test_reachable))"},"emphasis":{"highlight":{"matched":{"color":"#ef4444","label":"Needs spec"}},"dim_unmatched":0.08},"zoom":"fit","annotation":{"title":"Ungoverned risk","description":"{{count}} complex, untested nodes without spec — start here"}}"##,
+        ),
     ]
 }
 
@@ -437,8 +442,8 @@ mod tests {
         let defaults = system_default_views();
         assert_eq!(
             defaults.len(),
-            5,
-            "Should have exactly 5 system default views"
+            6,
+            "Should have exactly 6 system default views"
         );
     }
 
