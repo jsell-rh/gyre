@@ -88,6 +88,12 @@ pub struct GraphNode {
     /// Whether this node is a test function/class (for structural test coverage analysis).
     #[serde(default)]
     pub test_node: bool,
+    /// When a spec was approved for this node (epoch seconds), if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_approved_at: Option<u64>,
+    /// When a milestone was completed for this node (epoch seconds), if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone_completed_at: Option<u64>,
 }
 
 /// A directed edge between two graph nodes.

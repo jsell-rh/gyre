@@ -132,6 +132,8 @@ fn make_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         last_seen_at: now,
         deleted_at: None,
         test_node: false,
+        spec_approved_at: None,
+        milestone_completed_at: None,
     }
 }
 

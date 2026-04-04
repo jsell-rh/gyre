@@ -686,6 +686,8 @@ mod tests {
             last_seen_at: 1000,
             deleted_at: None,
             test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
         }
     }
 

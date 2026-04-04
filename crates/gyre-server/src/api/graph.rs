@@ -71,6 +71,12 @@ pub struct GraphNodeResponse {
     pub deleted_at: Option<u64>,
     /// Whether this node is a test function/class (for structural test coverage analysis).
     pub test_node: bool,
+    /// When a spec was approved for this node (epoch seconds), if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_approved_at: Option<u64>,
+    /// When a milestone was completed for this node (epoch seconds), if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub milestone_completed_at: Option<u64>,
 }
 
 impl From<GraphNode> for GraphNodeResponse {
@@ -100,6 +106,8 @@ impl From<GraphNode> for GraphNodeResponse {
             last_seen_at: n.last_seen_at,
             deleted_at: n.deleted_at,
             test_node: n.test_node,
+            spec_approved_at: n.spec_approved_at,
+            milestone_completed_at: n.milestone_completed_at,
         }
     }
 }
@@ -1298,6 +1306,8 @@ fn _new_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         last_seen_at: now,
         deleted_at: None,
         test_node: false,
+        spec_approved_at: None,
+        milestone_completed_at: None,
     }
 }
 
