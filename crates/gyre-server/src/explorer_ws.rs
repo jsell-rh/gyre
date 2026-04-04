@@ -653,6 +653,9 @@ async fn run_explorer_agent_sdk(
     const SDK_TIMEOUT_SECS: u64 = 60;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(SDK_TIMEOUT_SECS);
 
+    // Accumulate assistant response text for conversation history
+    let mut accumulated_text = String::new();
+
     if let Some(stdout) = child.stdout.take() {
         use tokio::io::{AsyncBufReadExt, BufReader};
         let reader = BufReader::new(stdout);
@@ -682,6 +685,7 @@ async fn run_explorer_agent_sdk(
                                     msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
                                 let done =
                                     msg.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
+                                accumulated_text.push_str(content);
                                 if !stream_text(sender, content, done).await {
                                     break; // Client disconnected
                                 }
@@ -759,13 +763,16 @@ async fn run_explorer_agent_sdk(
         role: "user".to_string(),
         content: ConversationContent::Text(user_question.to_string()),
     });
-    // We don't have the full assistant text from the SDK subprocess, but we
-    // add a placeholder so the history alternates correctly.
+    // Use the actual accumulated assistant text (not a placeholder)
+    // so multi-turn conversations have real context.
+    let assistant_text = if accumulated_text.is_empty() {
+        "[No response from SDK subprocess]".to_string()
+    } else {
+        accumulated_text
+    };
     conversation_history.push(ConversationMessage {
         role: "assistant".to_string(),
-        content: ConversationContent::Text(
-            "[Assistant responded via SDK subprocess]".to_string(),
-        ),
+        content: ConversationContent::Text(assistant_text),
     });
 
     Ok(())
@@ -837,7 +844,40 @@ async fn run_explorer_agent(
     let nodes = cached_nodes.as_ref().unwrap();
     let edges = cached_edges.as_ref().unwrap();
 
-    let system_prompt = build_system_prompt();
+    // Build system prompt with repo context so LLM doesn't need an extra graph_summary call
+    let mut system_prompt = build_system_prompt();
+    {
+        let mut type_counts = std::collections::HashMap::new();
+        let mut edge_counts = std::collections::HashMap::new();
+        for n in nodes.iter() {
+            *type_counts
+                .entry(format!("{:?}", n.node_type))
+                .or_insert(0u32) += 1;
+        }
+        for e in edges.iter() {
+            *edge_counts
+                .entry(format!("{:?}", e.edge_type))
+                .or_insert(0u32) += 1;
+        }
+        let mut type_summary: Vec<_> = type_counts.iter().collect();
+        type_summary.sort_by(|a, b| b.1.cmp(a.1));
+        let type_str: Vec<_> = type_summary
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k, v))
+            .collect();
+        let edge_str: Vec<_> = edge_counts
+            .iter()
+            .map(|(k, v)| format!("{}: {}", k, v))
+            .collect();
+        system_prompt.push_str(&format!(
+            "\n\n## Current Repository Context\nRepo ID: {}\nGraph: {} nodes, {} edges\nNode types: {}\nEdge types: {}",
+            repo_id,
+            nodes.len(),
+            edges.len(),
+            type_str.join(", "),
+            edge_str.join(", "),
+        ));
+    }
     let tools = explorer_tool_definitions();
 
     // Build user message with structured canvas context

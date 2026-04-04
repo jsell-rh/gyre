@@ -1236,13 +1236,15 @@
     }
 
     if (scope.type === 'test_gaps') {
+      // Match backend TEST_REACHABILITY_EDGES: calls, implements, routes_to, contains
+      const TEST_REACHABILITY_EDGES = new Set(['calls', 'implements', 'routes_to', 'contains']);
       const testN = nodes.filter(n => n.test_node);
       const reachable = new Set(testN.map(n => n.id));
       const q = [...reachable];
       while (q.length > 0) {
         const id = q.shift();
         for (const nb of (adjacency.get(id) ?? [])) {
-          if (reachable.has(nb.targetId) || nb.edgeType !== 'calls' || nb.reverse) continue;
+          if (reachable.has(nb.targetId) || !TEST_REACHABILITY_EDGES.has(nb.edgeType) || nb.reverse) continue;
           reachable.add(nb.targetId);
           q.push(nb.targetId);
         }
@@ -1283,6 +1285,7 @@
       const seeds = scope.seed_nodes ?? [];
       const expandEdges = new Set((scope.expand_edges ?? ['calls']).map(e => e.toLowerCase()));
       const maxDepth = scope.expand_depth ?? 2;
+      const dir = scope.expand_direction ?? 'both';
       const dm = new Map();
 
       for (const seedName of seeds) {
@@ -1298,6 +1301,8 @@
           for (const nb of (adjacency.get(id) ?? [])) {
             if (dm.has(nb.targetId)) continue;
             if (!expandEdges.has(nb.edgeType)) continue;
+            if (dir === 'outgoing' && nb.reverse) continue;
+            if (dir === 'incoming' && !nb.reverse) continue;
             dm.set(nb.targetId, depth + 1);
             q.push({ id: nb.targetId, depth: depth + 1 });
           }
@@ -1329,7 +1334,8 @@
     if (!activeQuery?.callouts?.length) return new Map();
     const m = new Map();
     for (const c of activeQuery.callouts) {
-      const n = nodes.find(n => n.name === c.node_name || n.qualified_name === c.node_name);
+      const cName = c.node ?? c.node_name;
+      const n = nodes.find(n => n.name === cName || n.qualified_name === cName);
       if (n) m.set(n.id, c.label ?? c.text ?? '');
     }
     return m;
@@ -1807,7 +1813,8 @@
     if (activeQuery?.narrative?.length) {
       for (let i = 0; i < activeQuery.narrative.length; i++) {
         const step = activeQuery.narrative[i];
-        const n = nodes.find(n => n.name === step.node_name || n.qualified_name === step.node_name);
+        const stepNode = step.node ?? step.node_name;
+        const n = nodes.find(n => n.name === stepNode || n.qualified_name === stepNode);
         if (!n) continue;
         const ln = layoutNodeMap.get(n.id);
         if (!ln) continue;
@@ -2214,18 +2221,28 @@
     const r = Math.min(6, sw * 0.08);
     roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
 
-    // Fill — spec coverage tint in structural lens (green=governed, amber=suggested, orange=low, red=none)
+    // Fill — spec coverage as PRIMARY color in structural lens (green=governed, amber=suggested, red=no spec)
     const qColor = queryNodeColor(ln);
     let fillColor = 'rgba(20,28,48,0.9)';
     if (lens === 'structural' && !qColor) {
-      if (n?.spec_path) {
-        fillColor = 'rgba(34,197,94,0.15)';                             // green tint (has spec_path)
+      // Check GovernedBy edges for this node
+      let hasGovEdge = false;
+      const nodeId = n?.id;
+      if (nodeId) {
+        for (const e of edges) {
+          const src = e.source_id ?? e.from_node_id ?? e.from;
+          const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+          if (et === 'governed_by' && src === nodeId) { hasGovEdge = true; break; }
+        }
+      }
+      if (n?.spec_path || hasGovEdge) {
+        fillColor = 'rgba(34,197,94,0.30)';                             // green (has spec)
       } else {
         const conf = n?.spec_confidence;
-        if (conf === 'high') fillColor = 'rgba(34,197,94,0.15)';        // green tint
-        else if (conf === 'medium') fillColor = 'rgba(234,179,8,0.12)'; // amber tint
-        else if (conf === 'low') fillColor = 'rgba(249,115,22,0.12)';   // orange tint
-        else fillColor = 'rgba(239,68,68,0.08)';                        // red tint (no spec)
+        if (conf === 'high') fillColor = 'rgba(34,197,94,0.30)';        // green
+        else if (conf === 'medium') fillColor = 'rgba(234,179,8,0.25)'; // amber
+        else if (conf === 'low') fillColor = 'rgba(249,115,22,0.20)';   // orange
+        else fillColor = 'rgba(239,68,68,0.18)';                        // red (no spec)
       }
     }
     ctx.fillStyle = fillColor;

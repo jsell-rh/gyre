@@ -30,7 +30,8 @@
   const MAX_CLIENT_MESSAGES = 200;
 
   // ── State ────────────────────────────────────────────────────────────────
-  let messages = $state([]); // [{ role: 'user'|'assistant', content: string, viewQuery?: object, timestamp: number }]
+  let messages = $state([]); // [{ id: number, role: 'user'|'assistant', content: string, viewQuery?: object, timestamp: number }]
+  let nextMsgId = 0;
 
   /** Cap the messages array to MAX_CLIENT_MESSAGES, keeping the newest entries. */
   function capMessages(msgs) {
@@ -128,7 +129,7 @@
           // Final text message (done=true)
           const fullText = streamingText + (msg.content ?? '');
           if (fullText.trim()) {
-            messages = capMessages([...messages, { role: 'assistant', content: fullText, timestamp: Date.now() }]);
+            messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: fullText, timestamp: Date.now() }]);
           }
           streamingText = '';
           status = 'ready';
@@ -140,11 +141,12 @@
         const query = msg.query ?? msg.view_query ?? msg;
         // Finalize any in-flight streaming text before clearing
         if (streamingText.trim()) {
-          messages = capMessages([...messages, { role: 'assistant', content: streamingText, timestamp: Date.now() }]);
+          messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: streamingText, timestamp: Date.now() }]);
         }
         streamingText = '';
         // Add as assistant message with view query
         messages = capMessages([...messages, {
+          id: nextMsgId++,
           role: 'assistant',
           content: msg.explanation ?? $t('explorer_chat.view_applied'),
           viewQuery: query,
@@ -170,7 +172,7 @@
       }
       case 'error': {
         const errorMsg = msg.message ?? $t('explorer_chat.error_occurred');
-        messages = capMessages([...messages, { role: 'assistant', content: errorMsg, timestamp: Date.now(), isError: true }]);
+        messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: errorMsg, timestamp: Date.now(), isError: true }]);
         streamingText = '';
         // Session limit reached — mark as disconnected so user knows to reconnect
         if (errorMsg.includes('Session message limit')) {
@@ -194,7 +196,7 @@
     const text = inputText.trim();
     inputText = '';
 
-    messages = capMessages([...messages, { role: 'user', content: text, timestamp: Date.now() }]);
+    messages = capMessages([...messages, { id: nextMsgId++, role: 'user', content: text, timestamp: Date.now() }]);
     scrollToBottom();
 
     ws.send(JSON.stringify({
@@ -411,7 +413,7 @@
         </div>
       </div>
     {:else}
-      {#each messages as msg, i (msg.timestamp + '-' + i)}
+      {#each messages as msg, i (msg.id ?? msg.timestamp + '-' + i)}
         <div class="chat-message {msg.role}" class:error={msg.isError}>
           <div class="message-meta">
             <span class="message-role">{msg.role === 'user' ? $t('explorer_chat.you') : $t('explorer_chat.assistant')}</span>
