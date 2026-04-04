@@ -335,6 +335,7 @@
                 <button
                   class="saved-view-item"
                   role="option"
+                  aria-selected={false}
                   onclick={() => loadView(view)}
                   type="button"
                 >
