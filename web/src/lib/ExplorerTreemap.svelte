@@ -256,13 +256,7 @@
       }
       // Pattern 4: Type/interface created by agent but has no governing spec
       if ((n.node_type === 'type' || n.node_type === 'interface') && !n.spec_path && n.last_modified_by) {
-        let hasGovEdge = false;
-        for (const e of edges) {
-          if (e.deleted_at) continue;
-          const src = edgeSrc(e);
-          const et = edgeType(e);
-          if (et === 'governed_by' && src === n.id) { hasGovEdge = true; break; }
-        }
+        const hasGovEdge = governedByIndex.has(n.id);
         if (!hasGovEdge) {
           results.push({
             nodeId: n.id,
@@ -409,12 +403,19 @@
   let searchResults = $derived.by(() => {
     if (!searchQuery.trim()) return [];
     const q = searchQuery.toLowerCase();
-    return nodes.filter(n =>
-      n.name?.toLowerCase().includes(q) ||
-      n.qualified_name?.toLowerCase().includes(q) ||
-      n.node_type?.toLowerCase().includes(q) ||
-      n.spec_path?.toLowerCase().includes(q)
-    ).slice(0, 20);
+    const results = [];
+    for (const n of nodes) {
+      if (results.length >= 20) break; // Early exit once we have enough matches
+      if (
+        n.name?.toLowerCase().includes(q) ||
+        n.qualified_name?.toLowerCase().includes(q) ||
+        n.node_type?.toLowerCase().includes(q) ||
+        n.spec_path?.toLowerCase().includes(q)
+      ) {
+        results.push(n);
+      }
+    }
+    return results;
   });
   let searchHighlightIds = $derived(new Set(searchResults.map(n => n.id)));
   let searchInputEl = $state(null);
