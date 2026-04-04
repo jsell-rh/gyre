@@ -309,7 +309,13 @@ impl ExtractionContext {
 
     fn extract_ts_file(&mut self, path: &Path) -> Result<(), String> {
         let content = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
+        // Skip binary files
+        if content.contains('\0') {
+            return Ok(());
+        }
         let source = content.as_bytes();
+        // Extract spec governance comments (// spec: <path>)
+        let spec_refs = crate::tree_sitter_utils::extract_spec_comments(&content);
 
         let rel_path = path
             .strip_prefix(&self.repo_root)
@@ -450,6 +456,29 @@ impl ExtractionContext {
 
             // Calls edge: module → endpoint
             let edge = self.make_edge(EdgeType::Calls, module_id.clone(), endpoint_id);
+            self.edges.push(edge);
+        }
+
+        // GovernedBy edges from spec comments
+        for spec_path in &spec_refs {
+            let spec_id = self.name_to_id.get(spec_path).cloned().unwrap_or_else(|| {
+                let mut spec_node = self.make_node(
+                    NodeType::Module,
+                    spec_path,
+                    spec_path,
+                    spec_path,
+                    0,
+                    0,
+                    Visibility::Public,
+                );
+                spec_node.spec_path = Some(spec_path.clone());
+                spec_node.spec_confidence = SpecConfidence::High;
+                let id = spec_node.id.clone();
+                self.nodes.push(spec_node);
+                self.name_to_id.insert(spec_path.clone(), id.clone());
+                id
+            });
+            let edge = self.make_edge(EdgeType::GovernedBy, module_id.clone(), spec_id);
             self.edges.push(edge);
         }
 

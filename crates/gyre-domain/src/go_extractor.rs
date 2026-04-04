@@ -178,12 +178,20 @@ impl GoExtractionContext {
     fn extract_go_file(&mut self, path: &Path) -> Result<(), String> {
         let content = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
 
+        // Check for UTF-8 validity (skip binary files)
+        if content.contains('\0') {
+            return Ok(());
+        }
+
         let rel_path = path
             .strip_prefix(&self.repo_root)
             .ok()
             .and_then(|p| p.to_str())
             .unwrap_or("")
             .to_string();
+
+        // Extract spec governance comments (// spec: <path>)
+        let spec_refs = crate::tree_sitter_utils::extract_spec_comments(&content);
 
         let tree = parse_source(content.as_bytes(), tree_sitter_go::LANGUAGE.into())?;
         let root = tree.root_node();
@@ -238,6 +246,31 @@ impl GoExtractionContext {
 
         // --- Extract http.HandleFunc / mux.HandleFunc and gin/echo/chi routes ---
         self.extract_http_routes(&root, source, &rel_path, &pkg_qname, &pkg_id);
+
+        // --- GovernedBy edges from spec comments ---
+        for spec_path in &spec_refs {
+            // Create or look up spec node
+            let spec_id = self.name_to_id.get(spec_path).cloned().unwrap_or_else(|| {
+                let mut spec_node = self.make_node(
+                    NodeType::Module,
+                    spec_path,
+                    spec_path,
+                    spec_path,
+                    0,
+                    0,
+                    Visibility::Public,
+                );
+                spec_node.spec_path = Some(spec_path.clone());
+                spec_node.spec_confidence = SpecConfidence::High;
+                let id = spec_node.id.clone();
+                self.nodes.push(spec_node);
+                self.name_to_id.insert(spec_path.clone(), id.clone());
+                id
+            });
+            // GovernedBy: package → spec
+            let edge = self.make_edge(EdgeType::GovernedBy, pkg_id.clone(), spec_id);
+            self.edges.push(edge);
+        }
 
         Ok(())
     }
