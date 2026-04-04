@@ -36,3 +36,4 @@ crates/gyre-server/repos/
 # Runtime snapshots (created by POST /api/v1/admin/snapshot)
 snapshots/
 crates/gyre-server/snapshots/
+scripts/node_modules/
