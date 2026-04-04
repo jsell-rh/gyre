@@ -1033,4 +1033,182 @@ Some explanation.
         assert_eq!(results.len(), 1);
         assert!(results[0].passed);
     }
+
+    // ── New predicate tests ────────────────────────────────────────────
+
+    #[test]
+    fn parse_test_coverage() {
+        let content = r#"<!-- gyre:assert function("handler") test_coverage >= 0.8 -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+        assert_eq!(
+            assertions[0].predicate,
+            Predicate::TestCoverage(Comparison::Gte, 0.8)
+        );
+    }
+
+    #[test]
+    fn parse_complexity() {
+        let content = r#"<!-- gyre:assert function("process") complexity <= 20 -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+        assert_eq!(
+            assertions[0].predicate,
+            Predicate::Complexity(Comparison::Lte, 20.0)
+        );
+    }
+
+    #[test]
+    fn parse_churn() {
+        let content = r#"<!-- gyre:assert type("Config") churn <= 5 -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+        assert_eq!(
+            assertions[0].predicate,
+            Predicate::Churn(Comparison::Lte, 5.0)
+        );
+    }
+
+    #[test]
+    fn parse_field_count() {
+        let content = r#"<!-- gyre:assert type("BigStruct") field_count <= 15 -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+        assert_eq!(
+            assertions[0].predicate,
+            Predicate::FieldCount(Comparison::Lte, 15)
+        );
+    }
+
+    #[test]
+    fn eval_test_coverage_passes() {
+        let mut node = make_node("n1", "handler", NodeType::Function);
+        node.test_coverage = Some(0.9);
+        let nodes = vec![node];
+        let edges = vec![];
+
+        let content = r#"<!-- gyre:assert function("handler") test_coverage >= 0.8 -->"#;
+        let assertions = parse_assertions(content);
+        let results = evaluate_assertions(&assertions, &nodes, &edges);
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].passed,
+            "Expected pass: {}",
+            results[0].explanation
+        );
+    }
+
+    #[test]
+    fn eval_test_coverage_fails() {
+        let mut node = make_node("n1", "handler", NodeType::Function);
+        node.test_coverage = Some(0.3);
+        let nodes = vec![node];
+        let edges = vec![];
+
+        let content = r#"<!-- gyre:assert function("handler") test_coverage >= 0.8 -->"#;
+        let assertions = parse_assertions(content);
+        let results = evaluate_assertions(&assertions, &nodes, &edges);
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+    }
+
+    #[test]
+    fn eval_complexity_passes() {
+        let mut node = make_node("n1", "simple_fn", NodeType::Function);
+        node.complexity = Some(5);
+        let nodes = vec![node];
+        let edges = vec![];
+
+        let content = r#"<!-- gyre:assert function("simple_fn") complexity <= 20 -->"#;
+        let assertions = parse_assertions(content);
+        let results = evaluate_assertions(&assertions, &nodes, &edges);
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].passed,
+            "Expected pass: {}",
+            results[0].explanation
+        );
+    }
+
+    #[test]
+    fn eval_complexity_fails() {
+        let mut node = make_node("n1", "complex_fn", NodeType::Function);
+        node.complexity = Some(30);
+        let nodes = vec![node];
+        let edges = vec![];
+
+        let content = r#"<!-- gyre:assert function("complex_fn") complexity <= 20 -->"#;
+        let assertions = parse_assertions(content);
+        let results = evaluate_assertions(&assertions, &nodes, &edges);
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+    }
+
+    #[test]
+    fn eval_churn_passes() {
+        let mut node = make_node("n1", "Config", NodeType::Type);
+        node.churn_count_30d = 3;
+        let nodes = vec![node];
+        let edges = vec![];
+
+        let content = r#"<!-- gyre:assert type("Config") churn <= 5 -->"#;
+        let assertions = parse_assertions(content);
+        let results = evaluate_assertions(&assertions, &nodes, &edges);
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].passed,
+            "Expected pass: {}",
+            results[0].explanation
+        );
+    }
+
+    #[test]
+    fn eval_field_count_passes() {
+        let nodes = vec![
+            make_node("n1", "SmallStruct", NodeType::Type),
+            make_node("f1", "field_a", NodeType::Field),
+            make_node("f2", "field_b", NodeType::Field),
+        ];
+        let edges = vec![
+            make_edge("f1", "n1", EdgeType::FieldOf),
+            make_edge("f2", "n1", EdgeType::FieldOf),
+        ];
+
+        let content = r#"<!-- gyre:assert type("SmallStruct") field_count <= 15 -->"#;
+        let assertions = parse_assertions(content);
+        let results = evaluate_assertions(&assertions, &nodes, &edges);
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].passed,
+            "Expected pass: {}",
+            results[0].explanation
+        );
+        assert!(results[0].explanation.contains("2"));
+    }
+
+    #[test]
+    fn eval_field_count_fails() {
+        let mut nodes = vec![make_node("n1", "BigStruct", NodeType::Type)];
+        let mut edges = vec![];
+        // Add 5 fields, assert field_count <= 3
+        for i in 0..5 {
+            let fid = format!("f{i}");
+            let fname = format!("field_{i}");
+            nodes.push(make_node(&fid, &fname, NodeType::Field));
+            edges.push(make_edge(&fid, "n1", EdgeType::FieldOf));
+        }
+
+        let content = r#"<!-- gyre:assert type("BigStruct") field_count <= 3 -->"#;
+        let assertions = parse_assertions(content);
+        let results = evaluate_assertions(&assertions, &nodes, &edges);
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+    }
 }

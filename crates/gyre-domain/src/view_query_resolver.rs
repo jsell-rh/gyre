@@ -3408,4 +3408,53 @@ mod tests {
             "Only n3 should be unreachable"
         );
     }
+
+    #[test]
+    fn test_computed_where_risk_score() {
+        // risk_score = churn × complexity × (1 - test_coverage)
+        let mut n1 = make_node("n1", "risky_fn", NodeType::Function);
+        n1.churn_count_30d = 10;
+        n1.complexity = Some(20);
+        n1.test_coverage = Some(0.0);
+        // risk_score = 10 * 20 * 1.0 = 200
+
+        let mut n2 = make_node("n2", "safe_fn", NodeType::Function);
+        n2.churn_count_30d = 1;
+        n2.complexity = Some(2);
+        n2.test_coverage = Some(0.9);
+        // risk_score = 1 * 2 * 0.1 = 0.2
+
+        let nodes = vec![n1, n2];
+        let edges: Vec<GraphEdge> = vec![];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$where(risk_score, '>', 10)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(
+            result.contains("n1"),
+            "risky_fn should match risk_score > 10"
+        );
+        assert!(
+            !result.contains("n2"),
+            "safe_fn should not match risk_score > 10"
+        );
+    }
+
+    #[test]
+    fn test_find_node_by_name_deterministic() {
+        let n1 = make_node("n1", "AuthService", NodeType::Type);
+        let n2 = make_node("n2", "OAuthProvider", NodeType::Type);
+        let n3 = make_node("n3", "AuthMiddleware", NodeType::Type);
+        let nodes = vec![&n1, &n2, &n3];
+        // Partial match for "Auth" should return the shortest name match
+        let result = find_node_by_name(&nodes, "Auth");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name, "AuthService");
+    }
 }
