@@ -89,6 +89,11 @@ pub struct LspCallGraphResult {
     pub total_definitions: usize,
     /// Whether extraction was cut short by the overall deadline.
     pub incomplete: bool,
+    /// Language toolchains that were expected but not found on PATH.
+    /// When non-empty, the knowledge graph is missing Calls edges for
+    /// these languages — test coverage and blast radius queries will
+    /// be incomplete. The frontend should surface this to the user.
+    pub missing_toolchains: Vec<String>,
 }
 
 /// Check if rust-analyzer is available on the PATH.
@@ -125,12 +130,16 @@ pub fn extract_call_graph(
         new_edges_found: 0,
         total_definitions: 0,
         incomplete: false,
+        missing_toolchains: vec![],
     };
 
     if !rust_analyzer_available() {
         result
             .errors
             .push("rust-analyzer not found on PATH — skipping LSP call graph extraction".into());
+        result
+            .missing_toolchains
+            .push("rust-analyzer".into());
         return result;
     }
 
@@ -508,7 +517,8 @@ fn compute_char_position(repo_root: &Path, file_path: &str, node: &GraphNode) ->
 
     // Try language-specific keyword patterns to find the function name.
     // Each pattern matches "keyword <name>" and returns position at name start.
-    let keywords = ["fn ", "def ", "func ", "function "];
+    // Covers Rust (fn), Python (def/async def), Go (func), JS/TS (function/async function).
+    let keywords = ["fn ", "def ", "func ", "function ", "async def ", "async function "];
     for kw in &keywords {
         let needle = format!("{}{}", kw, node.name);
         if let Some(pos) = line.find(&needle) {
@@ -800,6 +810,7 @@ fn extract_call_graph_via_lsp(
         new_edges_found: 0,
         total_definitions: 0,
         incomplete: false,
+        missing_toolchains: vec![],
     };
 
     let matches_ext = |path: &str| file_extensions.iter().any(|ext| path.ends_with(ext));
@@ -1138,6 +1149,7 @@ pub fn extract_call_graph_python(
             new_edges_found: 0,
             total_definitions: 0,
             incomplete: false,
+            missing_toolchains: vec!["pyright".into()],
         };
     }
 
@@ -1170,6 +1182,7 @@ pub fn extract_call_graph_go(
             new_edges_found: 0,
             total_definitions: 0,
             incomplete: false,
+            missing_toolchains: vec!["gopls".into()],
         };
     }
 
@@ -1204,6 +1217,7 @@ pub fn extract_call_graph_typescript(
             new_edges_found: 0,
             total_definitions: 0,
             incomplete: false,
+            missing_toolchains: vec!["typescript-language-server".into()],
         };
     }
 
@@ -1251,6 +1265,7 @@ pub fn extract_call_graph_auto(
             new_edges_found: 0,
             total_definitions: 0,
             incomplete: false,
+        missing_toolchains: vec![],
         },
     }
 }
