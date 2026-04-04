@@ -3235,7 +3235,7 @@
       for (const ln of nodes) {
         const l = ln.x - ln.w / 2, r = ln.x + ln.w / 2;
         const t = ln.y - ln.h / 2, b = ln.y + ln.h / 2;
-        if (world.x < l || world.x > r || world.y < t || world.y > b) continue;
+        if (world.x < l || world.x > r + 1 || world.y < t || world.y > b + 1) continue;
 
         // This node contains the point
         const op = nodeOpacity(ln);
@@ -3596,9 +3596,9 @@
     contextMenu = null;
     if (action === 'trace') {
       // Trace from here: show causal flow using Calls + RoutesTo edges.
-      // Depth capped at 5 to keep the visualization readable for branching call graphs.
+      // Depth 15 to capture full reachable subgraph while staying responsive.
       onInteractiveQuery({
-        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 5 },
+        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 15 },
         emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#94a3b8'], dim_unmatched: 0.12 },
         edges: { filter: ['calls', 'routes_to'] },
         zoom: 'fit',
@@ -3757,6 +3757,54 @@
         targetCam = { x: 0, y: 0, zoom: cam.zoom };
         scheduleRedraw();
       }
+      return;
+    }
+
+    // Keyboard pan (arrow keys) — move 100 world units per press
+    const PAN_STEP = 100 / cam.zoom;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); targetCam.x -= PAN_STEP; scheduleRedraw(); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); targetCam.x += PAN_STEP; scheduleRedraw(); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); targetCam.y -= PAN_STEP; scheduleRedraw(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); targetCam.y += PAN_STEP; scheduleRedraw(); return; }
+
+    // Keyboard zoom (+/- or =/-)
+    if (e.key === '=' || e.key === '+') {
+      e.preventDefault();
+      targetCam.zoom = Math.min(MAX_ZOOM, targetCam.zoom * 1.2);
+      scheduleRedraw();
+      return;
+    }
+    if (e.key === '-') {
+      e.preventDefault();
+      targetCam.zoom = Math.max(MIN_ZOOM, targetCam.zoom / 1.2);
+      scheduleRedraw();
+      return;
+    }
+
+    // Tab: cycle through selectable nodes
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      const selectableNodes = layoutNodes.filter(ln => ln.isLeafGraphNode && nodeOpacity(ln) > 0.1);
+      if (selectableNodes.length === 0) return;
+      const currentIdx = selectedNodeId ? selectableNodes.findIndex(ln => ln.id === selectedNodeId) : -1;
+      const nextIdx = e.shiftKey
+        ? (currentIdx <= 0 ? selectableNodes.length - 1 : currentIdx - 1)
+        : (currentIdx + 1) % selectableNodes.length;
+      const next = selectableNodes[nextIdx];
+      selectedNodeId = next.id;
+      onNodeDetail(next.node);
+      targetCam.x = next.x;
+      targetCam.y = next.y;
+      canvasState = { ...canvasState, selectedNode: next.node };
+      scheduleRedraw();
+      return;
+    }
+
+    // Enter: open detail panel for selected node
+    if (e.key === 'Enter' && selectedNodeId) {
+      const ln = layoutNodeMap.get(selectedNodeId);
+      if (ln?.node) onNodeDetail(ln.node);
+      return;
     }
   }
 
@@ -3892,7 +3940,15 @@
 
   // View query zoom directive: auto-zoom to fit highlighted nodes after query is applied
   $effect(() => {
-    if (!activeQuery?.zoom || activeQuery.zoom !== 'fit') return;
+    if (!activeQuery?.zoom) return;
+    // Handle { level: N } zoom
+    if (typeof activeQuery.zoom === 'object' && activeQuery.zoom.level != null) {
+      targetCam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, activeQuery.zoom.level));
+      scheduleRedraw();
+      return;
+    }
+    if (activeQuery.zoom === 'current') return;
+    if (activeQuery.zoom !== 'fit') return;
     if (!queryMatchedIds || queryMatchedIds.size === 0) return;
     // Find bounding box of all matched nodes in layout
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
