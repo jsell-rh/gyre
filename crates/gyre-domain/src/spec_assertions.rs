@@ -381,7 +381,11 @@ fn find_subject_nodes<'a>(subject: &Subject, nodes: &'a [GraphNode]) -> Vec<&'a 
         Subject::Type(name) => nodes
             .iter()
             .filter(|n| {
-                (n.node_type == NodeType::Type || n.node_type == NodeType::Interface)
+                (n.node_type == NodeType::Type
+                    || n.node_type == NodeType::Trait
+                    || n.node_type == NodeType::Interface
+                    || n.node_type == NodeType::Class
+                    || n.node_type == NodeType::Enum)
                     && (n.name == *name || n.qualified_name == *name)
             })
             .collect(),
@@ -841,6 +845,7 @@ Some explanation.
             visibility: Visibility::Public,
             doc_comment: None,
             spec_path: None,
+            spec_paths: vec![],
             spec_confidence: SpecConfidence::None,
             last_modified_sha: "abc".to_string(),
             last_modified_by: None,

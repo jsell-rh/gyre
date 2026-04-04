@@ -147,6 +147,7 @@ impl ExtractionContext {
             visibility,
             doc_comment,
             spec_path,
+            spec_paths: vec![],
             spec_confidence,
             last_modified_sha: self.commit_sha.clone(),
             last_modified_by: None,
@@ -1085,7 +1086,7 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                 let doc = extract_doc_comment(&e.attrs);
                 let is_subcommand = has_derive_attr(&e.attrs, "Subcommand");
 
-                let node = self.make_node(NodeType::Type, &name, 0, vis, doc);
+                let node = self.make_node(NodeType::Enum, &name, 0, vis, doc);
                 let node_id = node.id.clone();
                 let enum_qname = self.qualified(&name);
                 self.ctx
@@ -1129,7 +1130,7 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                 let name = t.ident.to_string();
                 let vis = syn_vis_to_visibility(&t.vis);
                 let doc = extract_doc_comment(&t.attrs);
-                let node = self.make_node(NodeType::Interface, &name, 0, vis, doc);
+                let node = self.make_node(NodeType::Trait, &name, 0, vis, doc);
                 let node_id = node.id.clone();
                 self.ctx
                     .name_to_id
@@ -1582,14 +1583,14 @@ pub fn create_user(name: &str) -> User {
             result
                 .nodes
                 .iter()
-                .any(|n| n.node_type == NodeType::Type && n.name == "Status"),
+                .any(|n| n.node_type == NodeType::Enum && n.name == "Status"),
             "should extract Status enum"
         );
         assert!(
             result
                 .nodes
                 .iter()
-                .any(|n| n.node_type == NodeType::Interface && n.name == "Repository"),
+                .any(|n| n.node_type == NodeType::Trait && n.name == "Repository"),
             "should extract Repository trait"
         );
         assert!(

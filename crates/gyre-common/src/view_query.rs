@@ -235,6 +235,10 @@ impl ViewQuery {
         "field_count",
         "test_fragility",
         "risk_score",
+        // Evaluative lens metrics (from OTLP trace spans)
+        "span_duration",
+        "span_count",
+        "error_rate",
     ];
 
     /// Validate a ViewQuery and return a list of errors (empty = valid).

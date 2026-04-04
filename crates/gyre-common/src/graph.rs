@@ -10,8 +10,18 @@ pub enum NodeType {
     Package,
     Module,
     Type,
+    /// A trait or interface definition (distinct from Type for trait-level granularity).
+    Trait,
     Interface,
     Function,
+    /// A method on a type or trait (carries parent context).
+    Method,
+    /// A class definition (Python, TypeScript, Go struct with methods).
+    Class,
+    /// An enum definition.
+    Enum,
+    /// An enum variant.
+    EnumVariant,
     Endpoint,
     Component,
     Table,
@@ -71,6 +81,10 @@ pub struct GraphNode {
     pub visibility: Visibility,
     pub doc_comment: Option<String>,
     pub spec_path: Option<String>,
+    /// Additional spec paths when a node is governed by multiple specs (N:M mapping).
+    /// The primary spec is in `spec_path`; extras here. GovernedBy edges are canonical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spec_paths: Vec<String>,
     pub spec_confidence: SpecConfidence,
     pub last_modified_sha: String,
     pub last_modified_by: Option<Id>,

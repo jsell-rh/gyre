@@ -138,7 +138,11 @@ pub fn extract_call_graph(
     let function_nodes: Vec<&GraphNode> = nodes
         .iter()
         .filter(|n| {
-            n.deleted_at.is_none() && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
+            n.deleted_at.is_none()
+                && matches!(
+                    n.node_type,
+                    NodeType::Function | NodeType::Method | NodeType::Endpoint
+                )
         })
         .collect();
 
@@ -805,7 +809,10 @@ fn extract_call_graph_via_lsp(
         .iter()
         .filter(|n| {
             n.deleted_at.is_none()
-                && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
+                && matches!(
+                    n.node_type,
+                    NodeType::Function | NodeType::Method | NodeType::Endpoint
+                )
                 && matches_ext(&n.file_path)
         })
         .collect();
@@ -1272,6 +1279,7 @@ mod tests {
             visibility: Visibility::Public,
             doc_comment: None,
             spec_path: None,
+            spec_paths: vec![],
             spec_confidence: SpecConfidence::None,
             last_modified_sha: "abc123".to_string(),
             last_modified_by: None,

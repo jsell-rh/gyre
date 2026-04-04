@@ -120,6 +120,7 @@ impl ExtractionContext {
             visibility,
             doc_comment: None,
             spec_path: None,
+            spec_paths: vec![],
             spec_confidence: SpecConfidence::None,
             last_modified_sha: self.commit_sha.clone(),
             last_modified_by: None,

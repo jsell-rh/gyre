@@ -111,9 +111,14 @@ fn parse_node_type(s: &str) -> Option<NodeType> {
     match s.to_lowercase().as_str() {
         "package" => Some(NodeType::Package),
         "module" => Some(NodeType::Module),
-        "type" => Some(NodeType::Type),
+        "type" | "struct" => Some(NodeType::Type),
+        "trait" => Some(NodeType::Trait),
         "interface" => Some(NodeType::Interface),
         "function" => Some(NodeType::Function),
+        "method" => Some(NodeType::Method),
+        "class" => Some(NodeType::Class),
+        "enum" => Some(NodeType::Enum),
+        "enum_variant" | "enumvariant" | "variant" => Some(NodeType::EnumVariant),
         "endpoint" => Some(NodeType::Endpoint),
         "component" => Some(NodeType::Component),
         "table" => Some(NodeType::Table),
@@ -129,8 +134,13 @@ fn node_type_str(nt: &NodeType) -> &'static str {
         NodeType::Package => "package",
         NodeType::Module => "module",
         NodeType::Type => "type",
+        NodeType::Trait => "trait",
         NodeType::Interface => "interface",
         NodeType::Function => "function",
+        NodeType::Method => "method",
+        NodeType::Class => "class",
+        NodeType::Enum => "enum",
+        NodeType::EnumVariant => "enum_variant",
         NodeType::Endpoint => "endpoint",
         NodeType::Component => "component",
         NodeType::Table => "table",
@@ -626,7 +636,12 @@ fn resolve_scope_with_adjacency(
                 .filter(|n| {
                     matches!(
                         n.node_type,
-                        NodeType::Function | NodeType::Endpoint | NodeType::Type
+                        NodeType::Function
+                            | NodeType::Method
+                            | NodeType::Endpoint
+                            | NodeType::Type
+                            | NodeType::Trait
+                            | NodeType::Class
                     )
                 })
                 .map(|n| n.id.to_string())
@@ -885,7 +900,12 @@ fn resolve_computed_expression_inner(
             .filter(|n| {
                 matches!(
                     n.node_type,
-                    NodeType::Function | NodeType::Endpoint | NodeType::Type
+                    NodeType::Function
+                        | NodeType::Method
+                        | NodeType::Endpoint
+                        | NodeType::Type
+                        | NodeType::Trait
+                        | NodeType::Class
                 )
             })
             .map(|n| n.id.to_string())
@@ -1961,6 +1981,7 @@ mod tests {
             visibility: Visibility::Public,
             doc_comment: None,
             spec_path: None,
+            spec_paths: vec![],
             spec_confidence: SpecConfidence::None,
             last_modified_sha: "abc123".to_string(),
             last_modified_by: None,
