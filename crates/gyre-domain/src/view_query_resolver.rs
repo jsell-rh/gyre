@@ -844,7 +844,7 @@ fn normalize_computed_expression(expr: &str) -> String {
 /// $descendants(...), $ancestors(...), $governed_by(...), $test_fragility(...),
 /// $reachable(...)
 /// Maximum recursion depth for resolver (mirrors validation MAX_COMPUTED_DEPTH).
-const RESOLVER_MAX_DEPTH: u32 = 20;
+const RESOLVER_MAX_DEPTH: u32 = 5;
 
 fn resolve_computed_expression(
     expr: &str,
@@ -964,6 +964,8 @@ fn resolve_computed_expression_inner(
                                 None => None, // Exclude unanalyzed nodes from risk calculations
                             }
                         }
+                        // Trace-based metrics require OTLP runtime data; return 0.0 placeholder
+                        "span_duration" | "span_count" | "error_rate" => Some(0.0),
                         _ => None,
                     };
                     match (node_val, op) {
@@ -1398,7 +1400,7 @@ fn split_node_and_depth(inner: &str) -> (String, u32) {
         }
     }
     // No depth separator found — entire thing is the node ref.
-    // Default depth matches RESOLVER_MAX_DEPTH so $callers(X) explores the full graph.
+    // Default depth matches RESOLVER_MAX_DEPTH (5) for reasonable traversal scope.
     let node_ref = inner.trim_matches('\'').trim_matches('"');
     (node_ref.to_string(), RESOLVER_MAX_DEPTH)
 }
@@ -1803,6 +1805,16 @@ pub fn dry_run(
 
     // Compute per-node metric values for heat emphasis (reuses pre-built adjacency)
     let node_metrics = if let Some(ref heat) = query.emphasis.heat {
+        // Warn about trace-based metrics that require OTLP runtime data
+        match heat.metric.as_str() {
+            "span_duration" | "span_count" | "error_rate" => {
+                warnings.push(format!(
+                    "Heat metric '{}' requires trace data; dry-run returns placeholder values",
+                    heat.metric
+                ));
+            }
+            _ => {}
+        }
         // Pre-compute test fragility for all nodes at once if needed
         let fragility_map = if heat.metric == "test_fragility" {
             let active_nodes: Vec<&GraphNode> =
@@ -1839,6 +1851,8 @@ pub fn dry_run(
                             })
                         })
                     }
+                    // Trace-based metrics require OTLP runtime data; return 0.0 placeholder
+                    "span_duration" | "span_count" | "error_rate" => Some(0.0),
                     _ => {
                         if !heat.metric.is_empty() {
                             // Log unrecognized metric once via warning (already validated)

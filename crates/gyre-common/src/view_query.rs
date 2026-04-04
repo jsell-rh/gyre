@@ -396,15 +396,37 @@ impl ViewQuery {
             }
         }
 
+        // Validate highlight.matched.color
+        if let Some(ref highlight) = self.emphasis.highlight {
+            if let Some(ref matched) = highlight.matched {
+                if let Some(ref c) = matched.color {
+                    if !Self::is_valid_color(c) {
+                        errors.push(format!(
+                            "Invalid color '{}' in highlight.matched — expected hex, named CSS color, or hsl/rgb function",
+                            c
+                        ));
+                    }
+                }
+            }
+        }
+
         // Validate Zoom field
         match &self.zoom {
             Zoom::Named(name) => {
-                let valid_names = ["fit", "current"];
-                if !valid_names.contains(&name.as_str()) {
+                // Detect when serde(untagged) parsed a number string as Named
+                if name.parse::<f64>().is_ok() {
                     errors.push(format!(
-                        "Unknown zoom value '{}' — must be \"fit\", \"current\", or {{\"level\": N}}",
-                        name
+                        "Zoom value '{}' looks like a number — use {{\"level\": {}}} instead of a plain string",
+                        name, name
                     ));
+                } else {
+                    let valid_names = ["fit", "current"];
+                    if !valid_names.contains(&name.as_str()) {
+                        errors.push(format!(
+                            "Unknown zoom value '{}' — must be \"fit\", \"current\", or {{\"level\": N}}",
+                            name
+                        ));
+                    }
                 }
             }
             Zoom::Level { level } => {
