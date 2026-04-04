@@ -295,20 +295,34 @@
       }
     }
     // Compute structural delta: what changed between the selected time range and now
-    const delta = { added: 0, removed: 0, modified: 0, byType: new Map() };
+    const delta = { added: 0, removed: 0, modified: 0, addedByType: new Map(), removedByType: new Map() };
+    // Legacy byType kept for backward compat
+    delta.byType = delta.addedByType;
     for (const n of nodes) {
-      if (n.deleted_at) continue;
       const t = n.first_seen_at || 0;
       const nt = n.node_type ?? 'unknown';
-      if (t > toT) {
+      // Nodes that appeared after the selected range end
+      if (!n.deleted_at && t > toT) {
         delta.added++;
-        delta.byType.set(nt, (delta.byType.get(nt) ?? 0) + 1);
+        delta.addedByType.set(nt, (delta.addedByType.get(nt) ?? 0) + 1);
       }
-      if (t < fromT && n.last_modified_at && n.last_modified_at > fromT) {
+      // Nodes that were visible in the range but later deleted
+      if (n.deleted_at && t >= fromT && t <= toT) {
+        delta.removed++;
+        delta.removedByType.set(nt, (delta.removedByType.get(nt) ?? 0) + 1);
+      }
+      // Nodes that existed before the range but were deleted during/after it
+      if (n.deleted_at && t < fromT && n.deleted_at >= fromT) {
+        delta.removed++;
+        delta.removedByType.set(nt, (delta.removedByType.get(nt) ?? 0) + 1);
+      }
+      // Nodes modified within the range
+      if (!n.deleted_at && t < fromT && n.last_modified_at && n.last_modified_at > fromT) {
         delta.modified++;
       }
     }
-    return { visibleIds, ghostIds, minT, maxT, fromT, toT, totalWithTime, markers: dedupedMarkers.slice(0, 10), delta };
+    const isFullRange = timelineRange[0] === 0 && timelineRange[1] === 100;
+    return { visibleIds, ghostIds, minT, maxT, fromT, toT, totalWithTime, markers: dedupedMarkers.slice(0, 10), delta, isFullRange };
   });
 
   // Canvas-scoped search state
@@ -3902,22 +3916,41 @@
             ({timelineNodes.ghostIds.size} ghosted)
           {/if}
         </span>
-        {#if timelineNodes.delta && (timelineNodes.delta.added > 0 || timelineNodes.delta.modified > 0)}
-          <span class="timeline-delta">
-            Since then:
-            {#if timelineNodes.delta.added > 0}
-              <span class="diff-ins">+{timelineNodes.delta.added}</span>
-            {/if}
-            {#if timelineNodes.delta.modified > 0}
-              <span class="diff-mod">{timelineNodes.delta.modified} modified</span>
-            {/if}
-            {#if timelineNodes.delta.byType.size > 0}
-              ({[...timelineNodes.delta.byType.entries()].map(([t, c]) => `${c} ${t}s`).join(', ')})
-            {/if}
-          </span>
-        {/if}
       {/if}
     </div>
+    {#if timelineNodes && !timelineNodes.isFullRange && (timelineNodes.delta.added > 0 || timelineNodes.delta.removed > 0 || timelineNodes.delta.modified > 0)}
+      <div class="timeline-delta-panel" role="status" aria-label="Timeline delta summary">
+        <div class="timeline-delta-header">Delta vs. full range</div>
+        <div class="timeline-delta-rows">
+          {#if timelineNodes.delta.added > 0}
+            <div class="timeline-delta-row">
+              <span class="timeline-delta-badge delta-added">+{timelineNodes.delta.added}</span>
+              <span class="timeline-delta-detail">
+                {#each [...timelineNodes.delta.addedByType.entries()].sort((a,b) => b[1] - a[1]) as [typ, cnt]}
+                  <span class="timeline-delta-type">{cnt} {typ}{cnt > 1 ? 's' : ''}</span>
+                {/each}
+              </span>
+            </div>
+          {/if}
+          {#if timelineNodes.delta.removed > 0}
+            <div class="timeline-delta-row">
+              <span class="timeline-delta-badge delta-removed">-{timelineNodes.delta.removed}</span>
+              <span class="timeline-delta-detail">
+                {#each [...timelineNodes.delta.removedByType.entries()].sort((a,b) => b[1] - a[1]) as [typ, cnt]}
+                  <span class="timeline-delta-type">{cnt} {typ}{cnt > 1 ? 's' : ''}</span>
+                {/each}
+              </span>
+            </div>
+          {/if}
+          {#if timelineNodes.delta.modified > 0}
+            <div class="timeline-delta-row">
+              <span class="timeline-delta-badge delta-modified">~{timelineNodes.delta.modified}</span>
+              <span class="timeline-delta-detail">modified</span>
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/if}
   {/if}
 
   <!-- Breadcrumb -->
@@ -4278,6 +4311,36 @@
   .timeline-count {
     font-size: 10px; color: #64748b; font-family: 'SF Mono', Menlo, monospace;
     white-space: nowrap; min-width: 160px; text-align: right;
+  }
+
+  /* Timeline delta floating panel */
+  .timeline-delta-panel {
+    position: absolute; bottom: 52px; right: 12px;
+    background: rgba(15,15,26,0.96); border: 1px solid #334155;
+    border-radius: 6px; padding: 8px 10px; z-index: 30;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    font-family: 'SF Mono', Menlo, monospace; font-size: 11px;
+    min-width: 160px; max-width: 280px;
+  }
+  .timeline-delta-header {
+    color: #94a3b8; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.05em; margin-bottom: 6px;
+  }
+  .timeline-delta-rows { display: flex; flex-direction: column; gap: 4px; }
+  .timeline-delta-row { display: flex; align-items: baseline; gap: 6px; }
+  .timeline-delta-badge {
+    font-weight: 700; font-size: 12px; min-width: 32px;
+  }
+  .delta-added { color: #4ade80; }
+  .delta-removed { color: #f87171; }
+  .delta-modified { color: #fbbf24; }
+  .timeline-delta-detail {
+    color: #94a3b8; font-size: 10px;
+    display: flex; flex-wrap: wrap; gap: 4px;
+  }
+  .timeline-delta-type {
+    background: rgba(148,163,184,0.1); border-radius: 3px;
+    padding: 1px 4px;
   }
 
   /* Anomaly panel */
