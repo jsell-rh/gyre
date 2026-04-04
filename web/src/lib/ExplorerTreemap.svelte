@@ -103,6 +103,12 @@
   let breadcrumb = $state([]);
   let animFrame = null;
 
+  // Recent interaction trail for conversational context (sent with messages)
+  let recentInteractions = $state([]);
+  function trackInteraction(action) {
+    recentInteractions = [...recentInteractions.slice(-9), action];
+  }
+
   let tooltipNode = $state(null);
   let tooltipPos = $state({ x: 0, y: 0 });
 
@@ -2958,6 +2964,7 @@
     const hit = hitTest(e.clientX, e.clientY);
     if (hit) {
       selectedNodeId = hit.id;
+      trackInteraction(`click:${hit.node.name ?? hit.node.id}(${hit.node.node_type})`);
       canvasState = {
         ...canvasState,
         selectedNode: {
@@ -2968,6 +2975,7 @@
         },
         zoom: cam.zoom,
         breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })),
+        recent_interactions: recentInteractions,
       };
       onNodeDetail(hit.node);
 

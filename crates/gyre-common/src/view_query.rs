@@ -260,6 +260,9 @@ pub struct CanvasState {
     pub active_filter: Option<String>,
     pub active_lens: Option<String>,
     pub active_query: Option<serde_json::Value>,
+    /// Recent user interactions (clicks, zooms, query presets) for conversational context.
+    #[serde(default)]
+    pub recent_interactions: Vec<String>,
 }
 
 // ── WebSocket Protocol Messages ──────────────────────────────────────────────

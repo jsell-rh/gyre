@@ -900,6 +900,25 @@ async fn run_explorer_agent(
             canvas_context_parts.push(format!("Active lens: {lens}"));
         }
     }
+    if !canvas_state.recent_interactions.is_empty() {
+        let last_5: Vec<_> = canvas_state
+            .recent_interactions
+            .iter()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        canvas_context_parts.push(format!(
+            "Recent interactions: {}",
+            last_5
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     let canvas_summary = if canvas_context_parts.is_empty() {
         String::new()
     } else {
