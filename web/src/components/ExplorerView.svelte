@@ -232,29 +232,28 @@
       predictEstimatedCost = result?.estimated_agent_cost ?? result?.cost ?? null;
       predictConfidence = result?.confidence ?? null;
 
-      // Build ghost overlays with per-node confidence and reason
+      // Build ghost overlays with per-node confidence and reason.
+      // Validate each item has at minimum a name and action.
       const overlays = [];
-      for (const item of (result?.added ?? [])) {
-        overlays.push({ id: item.id ?? `ghost-add-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'new node', type: item.node_type ?? item.type ?? 'unknown', action: 'add', confidence: item.confidence, reason: item.reason });
-      }
-      for (const item of (result?.changed ?? [])) {
-        overlays.push({ id: item.id ?? `ghost-change-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'changed node', type: item.node_type ?? item.type ?? 'unknown', action: 'change', confidence: item.confidence, reason: item.reason });
-      }
-      for (const item of (result?.removed ?? [])) {
-        overlays.push({ id: item.id ?? `ghost-remove-${overlays.length}`, name: item.name ?? item.qualified_name ?? 'removed node', type: item.node_type ?? item.type ?? 'unknown', action: 'remove', confidence: item.confidence, reason: item.reason });
-      }
-
-      // Also check for predictions array (alternative response format)
-      for (const item of (result?.predictions ?? [])) {
+      function addOverlay(item, defaultAction) {
+        const name = item?.name ?? item?.qualified_name;
+        if (!name || typeof name !== 'string') return; // Skip malformed items
+        const action = item?.action ?? defaultAction;
+        if (!['add', 'change', 'remove'].includes(action)) return; // Skip unknown actions
         overlays.push({
-          id: item.node_id ?? item.id ?? `ghost-pred-${overlays.length}`,
-          name: item.name ?? 'predicted',
+          id: item.id ?? `ghost-${action}-${overlays.length}`,
+          name,
           type: item.node_type ?? item.type ?? 'unknown',
-          action: item.action ?? 'change',
+          action,
           confidence: item.confidence,
           reason: item.reason,
         });
       }
+      for (const item of (result?.added ?? [])) addOverlay(item, 'add');
+      for (const item of (result?.changed ?? [])) addOverlay(item, 'change');
+      for (const item of (result?.removed ?? [])) addOverlay(item, 'remove');
+      // Also check for predictions array (alternative response format)
+      for (const item of (result?.predictions ?? [])) addOverlay(item, 'change');
       ghostOverlays = overlays;
     } catch (e) {
       predictError = e.message ?? 'Prediction failed';
@@ -267,8 +266,9 @@
   let publishLoading = $state(false);
   let publishError = $state('');
 
-  // Debounced auto-prediction: run predictions 2s after user stops typing
-  // per spec §3.2-3.3: "the canvas updates live as you edit"
+  // Debounced auto-prediction and spec assertion re-check:
+  // Run predictions 2s after user stops typing per spec §3.2-3.3.
+  // Also re-check gyre:assert assertions continuously (§9).
   let predictDebounceTimer = null;
   let predictVersion = 0; // Guards against stale closure race conditions
   $effect(() => {
@@ -282,8 +282,8 @@
     // Clear previous timer
     if (predictDebounceTimer) clearTimeout(predictDebounceTimer);
 
-    // Only auto-predict when editing is dirty and we have the necessary data
-    if (!dirty || !path || !repo || !specEditorOpen) return;
+    // Only auto-predict/assert when editing and we have the necessary data
+    if (!path || !repo || !specEditorOpen) return;
 
     // Capture current version to detect stale closures
     const thisVersion = ++predictVersion;
@@ -292,8 +292,24 @@
     predictDebounceTimer = setTimeout(() => {
       // Guard: if the spec editor has changed since this timer was set, skip
       if (thisVersion !== predictVersion) return;
+
+      // Re-check assertions on every edit if content has gyre:assert directives (§9)
+      if (content.includes('gyre:assert') && !assertionsLoading) {
+        assertionsLoading = true;
+        api.checkSpecAssertions(repo, path, content)
+          .then(result => {
+            if (thisVersion === predictVersion) {
+              specAssertionResults = result?.assertions ?? [];
+            }
+          })
+          .catch(() => {
+            if (thisVersion === predictVersion) specAssertionResults = [];
+          })
+          .finally(() => { assertionsLoading = false; });
+      }
+
       // Don't auto-predict if a manual prediction is already running
-      if (!predictLoading) {
+      if (dirty && !predictLoading) {
         runPrediction();
       }
     }, 2000);
@@ -326,9 +342,11 @@
       try {
         await api.approveSpec(specEditorPath, '');
         showToast('Spec published and submitted for approval. Agents will implement after approval.', { type: 'success' });
-      } catch {
-        // Approval endpoint may not exist for all spec types — still show success for the save
-        showToast('Spec saved. Submit for approval when ready.', { type: 'success' });
+      } catch (approvalErr) {
+        // Approval endpoint may not exist — show a clear warning so the user
+        // knows the save succeeded but approval didn't go through.
+        const reason = approvalErr?.message ?? 'Approval endpoint unavailable';
+        showToast(`Spec saved, but approval submission failed: ${reason}. You may need to submit for approval separately.`, { type: 'warning' });
       }
 
       closeSpecEditor();
@@ -924,6 +942,15 @@
                   detailNode = n;
                   if (n?._action === 'view_spec' && n.spec_path) {
                     openSpecEditor(n.spec_path);
+                  } else if (n?._action === 'create_spec') {
+                    // Open spec editor with a template for the uncovered node
+                    const suggestedPath = n.suggested_spec_path || `specs/system/${(n.name ?? 'new').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
+                    specEditorOpen = true;
+                    specEditorPath = suggestedPath;
+                    const template = `# ${n.name ?? 'New Spec'}\n\nStatus: Draft\n\n## Purpose\n\nGoverns the \`${n.qualified_name ?? n.name}\` ${n.node_type ?? 'component'}.\n\n## Requirements\n\n- TODO: Define requirements\n`;
+                    specEditorContent = template;
+                    specEditorOriginal = '';
+                    specEditorError = '';
                   } else if (n?._action === 'view_code' && n.file_path) {
                     // Open in code: show file in detail panel.
                     // The NodeDetailPanel displays Location (file_path:line).
