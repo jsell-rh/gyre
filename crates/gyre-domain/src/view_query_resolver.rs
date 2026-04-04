@@ -1362,9 +1362,10 @@ fn split_node_and_depth(inner: &str) -> (String, u32) {
             return (node_ref.to_string(), d);
         }
     }
-    // No depth separator found — entire thing is the node ref
+    // No depth separator found — entire thing is the node ref.
+    // Default depth matches RESOLVER_MAX_DEPTH so $callers(X) explores the full graph.
     let node_ref = inner.trim_matches('\'').trim_matches('"');
-    (node_ref.to_string(), 10)
+    (node_ref.to_string(), RESOLVER_MAX_DEPTH)
 }
 
 fn resolve_node_ref(reference: &str, selected_node_id: Option<&str>) -> String {
