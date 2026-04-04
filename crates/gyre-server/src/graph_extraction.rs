@@ -21,6 +21,7 @@ use gyre_domain::{
 use gyre_ports::{GraphPort, NotificationRepository, WorkspaceMembershipRepository};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tracing::{info, warn};
@@ -73,7 +74,7 @@ pub async fn extract_and_store_graph(
     repo_path: &str,
     repo_id: &str,
     new_sha: &str,
-    graph_store: &dyn GraphPort,
+    graph_store: Arc<dyn GraphPort>,
     git_bin: &str,
     agent_ctx: Option<AgentPushContext>,
     divergence_ports: Option<DivergencePorts<'_>>,
@@ -97,7 +98,7 @@ async fn do_extract(
     repo_path: &str,
     repo_id: &str,
     new_sha: &str,
-    graph_store: &dyn GraphPort,
+    graph_store: Arc<dyn GraphPort>,
     git_bin: &str,
     agent_ctx: Option<AgentPushContext>,
     divergence_ports: Option<DivergencePorts<'_>>,
@@ -354,30 +355,38 @@ async fn do_extract(
     // --- Step 7: Non-blocking Pass 2 (LSP) -----------------------------------
     // Per lsp-call-graph.md, the graph is usable after Pass 1 with partial call data.
     // Pass 2 runs in the background and merges additional edges when done.
+    // The temp directory is moved into the spawned task so it stays alive.
     {
         let pass2_nodes = final_nodes.clone();
         let pass2_edges: Vec<GraphEdge> = new_edge_map.into_values().collect();
         let pass2_repo_root = tmp.path().to_path_buf();
         let pass2_repo_id = repo_id_parsed.clone();
         let pass2_sha = new_sha.to_string();
+        let pass2_graph_store = Arc::clone(&graph_store);
 
-        // Spawn a blocking task for LSP extraction — it won't block the push response.
-        let lsp_edges = tokio::task::spawn_blocking(move || {
-            extract_lsp_edges(
-                &pass2_repo_root,
-                &pass2_nodes,
-                &pass2_edges,
-                &pass2_repo_id,
-                &pass2_sha,
-            )
-        })
-        .await
-        .unwrap_or_default();
+        // Fire-and-forget: spawn a background task so Pass 2 never blocks the
+        // push response.  The `_tmp` binding keeps the temp directory alive
+        // until the LSP analysis finishes.
+        tokio::spawn(async move {
+            let _tmp = tmp; // prevent TempDir drop until this task completes
 
-        // Persist any new LSP-discovered edges.
-        for edge in lsp_edges {
-            let _ = graph_store.create_edge(edge).await;
-        }
+            let lsp_edges = tokio::task::spawn_blocking(move || {
+                extract_lsp_edges(
+                    &pass2_repo_root,
+                    &pass2_nodes,
+                    &pass2_edges,
+                    &pass2_repo_id,
+                    &pass2_sha,
+                )
+            })
+            .await
+            .unwrap_or_default();
+
+            // Persist any new LSP-discovered edges.
+            for edge in lsp_edges {
+                let _ = pass2_graph_store.create_edge(edge).await;
+            }
+        });
     }
 
     // --- Step 8: post-extraction divergence check (HSI §8 priority 5) ---------
@@ -394,7 +403,7 @@ async fn do_extract(
                 &repo_id_parsed,
                 &scope,
                 &recorded_delta,
-                graph_store,
+                graph_store.as_ref(),
                 &ports,
             )
             .await

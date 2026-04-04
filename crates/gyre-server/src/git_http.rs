@@ -523,7 +523,7 @@ pub async fn git_receive_pack(
                 &repo_path_clone,
                 &repo_id_clone,
                 &update.new_sha,
-                state_clone.graph_store.as_ref(),
+                Arc::clone(&state_clone.graph_store),
                 &git_bin,
                 agent_push_ctx,
                 divergence_ports,

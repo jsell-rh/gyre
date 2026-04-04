@@ -73,7 +73,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                             &repo.path,
                             &repo_id_str,
                             &new_sha,
-                            state.graph_store.as_ref(),
+                            Arc::clone(&state.graph_store),
                             &git_bin,
                             None, // no agent context for mirror syncs
                             None, // no divergence check

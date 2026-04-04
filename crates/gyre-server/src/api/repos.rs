@@ -514,7 +514,7 @@ pub async fn sync_mirror(
                 &repo.path,
                 &repo_id_str,
                 &new_sha,
-                state.graph_store.as_ref(),
+                Arc::clone(&state.graph_store),
                 &git_bin,
                 None,
                 None,
