@@ -1065,16 +1065,13 @@
     if (statusItems.length === 0) {
       const s = provenanceSummary;
       if (specs.length === 0 && repos.length === 0) return 'Get started by creating a repo and pushing specs.';
-      if (specs.length === 0) return 'Push specs to your repo to start the autonomous pipeline.';
-      if (s.approved > 0 && s.totalTasks === 0) return 'Specs approved — waiting for task creation.';
+      if (specs.length === 0 && repos.length > 0) return `${repos.length} repo${repos.length !== 1 ? 's' : ''} ready. Push specs to start the autonomous pipeline.`;
+      if (s.approved > 0 && s.totalTasks === 0) return `${s.approved} spec${s.approved !== 1 ? 's' : ''} approved — tasks will be created automatically.`;
       if (s.mergedMrs > 0 && s.activeAgentCount === 0 && s.openMrs === 0 && s.pending === 0) {
-        const parts = [];
-        parts.push(`${s.approved} spec${s.approved !== 1 ? 's' : ''} implemented`);
-        if (s.totalTasks > 0) parts.push(`${s.totalTasks} task${s.totalTasks !== 1 ? 's' : ''} completed`);
-        parts.push(`${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with signed attestation`);
-        return `All clear. ${parts.join(', ')}.`;
+        return `All clear: ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with signed attestations across ${repos.length} repo${repos.length !== 1 ? 's' : ''}.`;
       }
-      return 'System idle — no active work.';
+      if (s.totalTasks > 0 && s.activeAgentCount === 0) return `${s.totalTasks} task${s.totalTasks !== 1 ? 's' : ''} tracked. No agents running.`;
+      return `${repos.length} repo${repos.length !== 1 ? 's' : ''}. No active work.`;
     }
     return statusItems.map(i => i.text).join('. ') + '.';
   });
