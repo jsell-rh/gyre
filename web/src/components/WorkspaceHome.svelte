@@ -1061,107 +1061,10 @@
               </button>
             </div>
           </div>
-
-          <!-- Status: one-line summary -->
-          {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-            <p class="ws-header-status">{statusSentence}</p>
-          {:else if workspace.description}
-            <p class="ws-header-desc">{workspace.description}</p>
-          {/if}
         </div>
       </header>
 
-      <!-- ── Main content ──────────────────────────────────────────── -->
-      <div class="ws-main-col">
-
-      <!-- ── Workspace briefing (AI-generated summary) ──────── -->
-      {#if !briefingLoading && briefingData?.summary}
-        <div class="ws-briefing-compact">
-          <p class="ws-briefing-summary">{briefingData.summary}</p>
-        </div>
-      {/if}
-
-      <!-- ── Action Needed (compact, dismissible) ──────────── -->
-      {#if !decisionsLoading && actionableNotifications.length > 0}
-        {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
-        <section class="ws-decisions-section" class:decisions-danger={hasDangerDecision} data-testid="section-decisions">
-          <div class="decisions-header">
-            <h2 class="decisions-title">
-              {actionableNotifications.length} item{actionableNotifications.length !== 1 ? 's need' : ' needs'} attention
-            </h2>
-            {#if actionableNotifications.length > 3}
-              <button class="section-btn" onclick={() => showAllDecisions = !showAllDecisions}>
-                {showAllDecisions ? 'Show less' : `Show all`}
-              </button>
-            {/if}
-          </div>
-          <div class="decisions-list">
-            {#each (showAllDecisions ? actionableNotifications : actionableNotifications.slice(0, 3)) as n (n.id)}
-              {@const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type}
-              {@const body = getBody(n)}
-              {@const aState = actionStates[n.id]}
-              {@const severity = nt === 'gate_failure' || nt === 'agent_failed' ? 'danger' : nt === 'spec_approval' || nt === 'mr_needs_review' ? 'action' : 'warn'}
-              <div class="decision-item decision-severity-{severity}" class:decision-resolved={aState?.success}>
-                <div class="decision-icon decision-icon-{severity}">
-                  {TYPE_ICONS[nt] ?? '?'}
-                </div>
-                <button class="decision-body" onclick={() => {
-                  if (body.mr_id) nav('mr', body.mr_id, { repo_id: n.repo_id, _openTab: nt === 'gate_failure' ? 'gates' : undefined });
-                  else if (body.agent_id) nav('agent', body.agent_id, { repo_id: n.repo_id, _openTab: nt === 'agent_failed' ? 'history' : undefined });
-                  else if (body.task_id) nav('task', body.task_id, { repo_id: n.repo_id });
-                  else if (body.spec_path) {
-                    const sp = normalizeSpecPath(body.spec_path);
-                    nav('spec', sp, { path: sp, repo_id: n.repo_id });
-                  }
-                }}>
-                  <span class="decision-type">{typeLabel(nt)}{#if n.repo_id && repoMap[n.repo_id]} · {repoMap[n.repo_id].name}{/if}</span>
-                  <span class="decision-title">{n.title ?? n.message ?? ''}</span>
-                  {#if nt === 'gate_failure' && body.gate_name}
-                    <span class="decision-detail">
-                      Gate "{body.gate_name}" failed{#if body.gate_type} ({body.gate_type.replace(/_/g, ' ')}){/if} — merge blocked
-                      {#if body.error}<code class="decision-error-preview">{body.error.split('\n')[0]?.slice(0, 100)}</code>{/if}
-                    </span>
-                  {:else if nt === 'gate_failure' && body.mr_id}
-                    <span class="decision-detail">Quality gate failed on {entityName('mr', body.mr_id)}</span>
-                  {:else if nt === 'agent_failed' && body.agent_name}
-                    <span class="decision-detail">Agent "{body.agent_name}" stopped — check logs for root cause</span>
-                  {:else if nt === 'agent_failed' && body.agent_id}
-                    <span class="decision-detail">{entityName('agent', body.agent_id)} encountered an error</span>
-                  {:else if nt === 'spec_approval' && body.spec_path}
-                    <span class="decision-detail">Agents cannot begin until "{body.spec_path.split('/').pop()?.replace(/\.md$/, '')}" is approved</span>
-                  {:else if nt === 'mr_needs_review' && body.mr_id}
-                    <span class="decision-detail">{entityName('mr', body.mr_id)} is ready for human review</span>
-                  {:else if nt === 'budget_warning'}
-                    <span class="decision-detail">Budget threshold exceeded — consider adjusting limits</span>
-                  {/if}
-                  {#if n.created_at}
-                    <span class="decision-time">{relTime(n.created_at)}</span>
-                  {/if}
-                </button>
-                <div class="decision-actions">
-                  {#if aState?.success}
-                    <span class="decision-done">{aState.message}</span>
-                  {:else if aState?.loading}
-                    <span class="decision-loading">...</span>
-                  {:else}
-                    {#if nt === 'spec_approval'}
-                      <button class="inline-action-btn inline-action-approve" onclick={() => handleApproveSpec(n)}>Approve</button>
-                      <button class="inline-action-btn inline-action-reject" onclick={() => handleRejectSpec(n)}>Reject</button>
-                    {:else if nt === 'gate_failure'}
-                      <button class="inline-action-btn inline-action-approve" onclick={() => handleRetry(n)}>Retry</button>
-                    {:else if nt === 'mr_needs_review'}
-                      <button class="inline-action-btn inline-action-approve" onclick={() => { const mrId = body.mr_id; if (mrId) nav('mr', mrId, { repo_id: n.repo_id }); }}>Review</button>
-                    {/if}
-                    <button class="inline-action-btn inline-action-reject" onclick={() => handleDismiss(n)} title="Dismiss">✕</button>
-                  {/if}
-                </div>
-              </div>
-            {/each}
-          </div>
-        </section>
-      {/if}
-
-      <!-- ── Pipeline hero — visible once data loads ──────────────── -->
+      <!-- ── Pipeline hero — always visible, shows the full lifecycle flow ── -->
       {#if !specsLoading || !tasksLoading || !mrsLoading || !agentsLoading || specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
       <div class="pipeline-hero" data-testid="pipeline-hero">
         <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineSpecs.pending > 0} class:pipeline-hero-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} class:pipeline-hero-selected={expandedStage === 'specs'} onclick={() => toggleStage('specs')}>
@@ -1293,207 +1196,305 @@
         </div>
       {/if}
 
-      <!-- ── Merge Queue (compact, if items queued) ──────── -->
-      {#if !mergeQueueLoading && mergeQueueItems.length > 0}
-        <section class="merge-queue-compact" data-testid="section-merge-queue">
-          <div class="mq-compact-header">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
-            <span class="mq-compact-title">Merge Queue</span>
-            <span class="mq-compact-count">{mergeQueueItems.length} queued</span>
-          </div>
-          <div class="mq-compact-items">
-            {#each mergeQueueItems.slice(0, 5) as item, i}
-              {@const mrId = item.merge_request_id ?? item.mr_id}
-              <button class="mq-compact-item" onclick={() => nav('mr', mrId, item._mr)}>
-                <span class="mq-compact-pos">#{i + 1}</span>
-                <span class="mq-compact-mr-title">{item._title}</span>
-                {#if item._mr?._gates?.total > 0}
-                  <span class="mq-compact-gates">
-                    {#if item._mr._gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{item._mr._gates.failed}</span>{/if}
-                    {#if item._mr._gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{item._mr._gates.passed}</span>{/if}
-                  </span>
-                {/if}
-                {#if item._branch}<span class="mq-compact-branch">{item._branch}</span>{/if}
-              </button>
-            {/each}
-            {#if mergeQueueItems.length > 5}
-              <span class="mq-compact-more">+{mergeQueueItems.length - 5} more</span>
-            {/if}
-          </div>
-        </section>
-      {/if}
+      <!-- ── Main content: two-column layout ──────────────────────── -->
+      <div class="ws-two-col">
 
-      <!-- ── Repos ──────────────────────────────────────────── -->
-      <section class="repos-section" data-testid="section-repos">
-        <div class="section-header-row">
-          <h2 class="section-heading">Repositories</h2>
-          {#if repos.length > 0}
-            <div class="section-header-actions">
-              <button class="section-btn section-btn-compact" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo-top">+ New</button>
-              <button class="section-btn section-btn-compact" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo-top">Import</button>
-            </div>
-          {/if}
-        </div>
-              <div class="feed-body">
-                {#if reposLoading}
-                  <div class="skeleton-row"></div>
-                {:else if reposError}
-                  <div class="error-row" role="alert">
-                    <p class="error-text">{reposError}</p>
-                    <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
-                  </div>
-                {:else if repos.length === 0}
-                  <div class="empty-state-guided" data-testid="repos-empty">
-                    <p class="empty-text">No repositories yet</p>
-                    <p class="empty-guide">Create a repo, push your code with specs, and Gyre handles the rest.</p>
-                    <div class="pipeline-guide">
-                      <div class="pipeline-step"><span class="pipeline-step-num">1</span><span class="pipeline-step-title">Create a repo</span><span class="pipeline-step-desc">Click "+ New" above</span></div>
-                      <span class="pipeline-arrow">→</span>
-                      <div class="pipeline-step"><span class="pipeline-step-num">2</span><span class="pipeline-step-title">Push specs</span><span class="pipeline-step-desc">specs/manifest.yaml + .md files</span></div>
-                      <span class="pipeline-arrow">→</span>
-                      <div class="pipeline-step"><span class="pipeline-step-num">3</span><span class="pipeline-step-title">Approve</span><span class="pipeline-step-desc">Review & approve specs</span></div>
-                      <span class="pipeline-arrow">→</span>
-                      <div class="pipeline-step"><span class="pipeline-step-num">4</span><span class="pipeline-step-title">Agents implement</span><span class="pipeline-step-desc">Autonomous code + MR</span></div>
-                      <span class="pipeline-arrow">→</span>
-                      <div class="pipeline-step"><span class="pipeline-step-num">5</span><span class="pipeline-step-title">Gates & merge</span><span class="pipeline-step-desc">Test, lint, attest, merge</span></div>
-                    </div>
-                    <div class="empty-actions">
-                      <button class="section-btn primary" onclick={() => { newRepoOpen = true; }}>Create your first repo</button>
-                    </div>
-                  </div>
-                {:else}
-                  <div class="repo-cards-grid" class:repo-cards-few={repos.length <= 2}>
-                    {#each repos.slice().sort((a, b) => {
-                      const aStats = repoStats(a);
-                      const bStats = repoStats(b);
-                      if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
-                      const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
-                      const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
-                      return bTime - aTime;
-                    }) as repo (repo.id)}
-                      <RepoCard
-                        {repo}
-                        health={repoHealth(repo)}
-                        stats={repoStats(repo)}
-                        activeAgentNames={repoActiveAgentNames(repo)}
-                        activeAgents={wsAgents.filter(a => a.repo_id === repo.id && a.status === 'active')}
-                        failedMrs={wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m._gates?.failed > 0)}
-                        specBreakdown={repoSpecBreakdown(repo)}
-                        latestMr={repoLatestMr(repo)}
-                        onclick={() => onSelectRepo?.(repo)}
-                        onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
-                      />
-                    {/each}
-                  </div>
-                {/if}
+        <!-- Left column: Actions + Activity feed -->
+        <div class="ws-col-primary">
 
-                {#if newRepoOpen}
-                  <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
-                    <div class="inline-form-header">
-                      <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
-                      <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
-                    </div>
-                    <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
-                    <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
-                    {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
-                    <div class="inline-form-actions">
-                      <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
-                      <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
-                    </div>
-                  </form>
-                {/if}
-
-                {#if importOpen}
-                  <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
-                    <div class="inline-form-header">
-                      <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
-                      <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
-                    </div>
-                    <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
-                    <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
-                    {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
-                    <div class="inline-form-actions">
-                      <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
-                      <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
-                    </div>
-                  </form>
+          <!-- Action Needed (compact, dismissible) -->
+          {#if !decisionsLoading && actionableNotifications.length > 0}
+            {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
+            <section class="ws-decisions-section" class:decisions-danger={hasDangerDecision} data-testid="section-decisions">
+              <div class="decisions-header">
+                <h2 class="decisions-title">
+                  {actionableNotifications.length} item{actionableNotifications.length !== 1 ? 's need' : ' needs'} attention
+                </h2>
+                {#if actionableNotifications.length > 3}
+                  <button class="section-btn" onclick={() => showAllDecisions = !showAllDecisions}>
+                    {showAllDecisions ? 'Show less' : `Show all`}
+                  </button>
                 {/if}
               </div>
-      </section>
-
-      <!-- ── Recent Activity ──────────────────────────────────────── -->
-      <section class="activity-section" data-testid="section-activity">
-        <h2 class="section-heading">Recent Activity</h2>
-        {#if activityLoading}
-          <div class="skeleton-row"></div>
-        {:else if activityEvents.length === 0}
-          <p class="empty-text">No recent activity.</p>
-        {:else}
-          <div class="activity-timeline">
-            {#each activityEvents.slice(0, activityLimit) as event, i}
-              {@const variant = activityVariant(event)}
-              {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-              {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-              <button
-                class="activity-item activity-item-clickable"
-                onclick={() => {
-                  if (primaryType && primaryId) {
-                    const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                    nav(primaryType, primaryId, data);
-                  }
-                }}
-              >
-                <div class="activity-dot activity-dot-{variant}"></div>
-                {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                <div class="activity-content">
-                  <div class="activity-main-row">
-                    <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
-                    <span class="activity-label">{activityLabel(event)}</span>
-                    {#if event.entity_name ?? event.title}
-                      <span class="activity-detail">{event.entity_name ?? event.title}</span>
-                    {/if}
-                    {#if event.repo_id && repoMap[event.repo_id]}
-                      <span class="activity-repo">{repoMap[event.repo_id].name}</span>
-                    {/if}
-                    {#if event.timestamp ?? event.created_at}
-                      <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                    {/if}
-                  </div>
-                  {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                    <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
-                  {/if}
-                  {#if (event.agent_id && primaryType !== 'agent') || (event.mr_id && primaryType !== 'mr') || (event.spec_path && primaryType !== 'spec')}
-                    <div class="activity-refs">
-                      {#if event.agent_id && primaryType !== 'agent'}
-                        <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }}>
-                          <Icon name="agent" size={10} /> {entityName('agent', event.agent_id)}
-                        </button>
+              <div class="decisions-list">
+                {#each (showAllDecisions ? actionableNotifications : actionableNotifications.slice(0, 3)) as n (n.id)}
+                  {@const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type}
+                  {@const body = getBody(n)}
+                  {@const aState = actionStates[n.id]}
+                  {@const severity = nt === 'gate_failure' || nt === 'agent_failed' ? 'danger' : nt === 'spec_approval' || nt === 'mr_needs_review' ? 'action' : 'warn'}
+                  <div class="decision-item decision-severity-{severity}" class:decision-resolved={aState?.success}>
+                    <div class="decision-icon decision-icon-{severity}">
+                      {TYPE_ICONS[nt] ?? '?'}
+                    </div>
+                    <button class="decision-body" onclick={() => {
+                      if (body.mr_id) nav('mr', body.mr_id, { repo_id: n.repo_id, _openTab: nt === 'gate_failure' ? 'gates' : undefined });
+                      else if (body.agent_id) nav('agent', body.agent_id, { repo_id: n.repo_id, _openTab: nt === 'agent_failed' ? 'history' : undefined });
+                      else if (body.task_id) nav('task', body.task_id, { repo_id: n.repo_id });
+                      else if (body.spec_path) {
+                        const sp = normalizeSpecPath(body.spec_path);
+                        nav('spec', sp, { path: sp, repo_id: n.repo_id });
+                      }
+                    }}>
+                      <span class="decision-type">{typeLabel(nt)}{#if n.repo_id && repoMap[n.repo_id]} · {repoMap[n.repo_id].name}{/if}</span>
+                      <span class="decision-title">{n.title ?? n.message ?? ''}</span>
+                      {#if nt === 'gate_failure' && body.gate_name}
+                        <span class="decision-detail">
+                          Gate "{body.gate_name}" failed{#if body.gate_type} ({body.gate_type.replace(/_/g, ' ')}){/if} — merge blocked
+                          {#if body.error}<code class="decision-error-preview">{body.error.split('\n')[0]?.slice(0, 100)}</code>{/if}
+                        </span>
+                      {:else if nt === 'gate_failure' && body.mr_id}
+                        <span class="decision-detail">Quality gate failed on {entityName('mr', body.mr_id)}</span>
+                      {:else if nt === 'agent_failed' && body.agent_name}
+                        <span class="decision-detail">Agent "{body.agent_name}" stopped — check logs for root cause</span>
+                      {:else if nt === 'agent_failed' && body.agent_id}
+                        <span class="decision-detail">{entityName('agent', body.agent_id)} encountered an error</span>
+                      {:else if nt === 'spec_approval' && body.spec_path}
+                        <span class="decision-detail">Agents cannot begin until "{body.spec_path.split('/').pop()?.replace(/\.md$/, '')}" is approved</span>
+                      {:else if nt === 'mr_needs_review' && body.mr_id}
+                        <span class="decision-detail">{entityName('mr', body.mr_id)} is ready for human review</span>
+                      {:else if nt === 'budget_warning'}
+                        <span class="decision-detail">Budget threshold exceeded — consider adjusting limits</span>
                       {/if}
-                      {#if event.mr_id && primaryType !== 'mr'}
-                        <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }}>
-                          <Icon name="git-merge" size={10} /> {entityName('mr', event.mr_id)}
-                        </button>
+                      {#if n.created_at}
+                        <span class="decision-time">{relTime(n.created_at)}</span>
                       {/if}
-                      {#if event.spec_path && primaryType !== 'spec'}
-                        <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }}>
-                          <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                        </button>
+                    </button>
+                    <div class="decision-actions">
+                      {#if aState?.success}
+                        <span class="decision-done">{aState.message}</span>
+                      {:else if aState?.loading}
+                        <span class="decision-loading">...</span>
+                      {:else}
+                        {#if nt === 'spec_approval'}
+                          <button class="inline-action-btn inline-action-approve" onclick={() => handleApproveSpec(n)}>Approve</button>
+                          <button class="inline-action-btn inline-action-reject" onclick={() => handleRejectSpec(n)}>Reject</button>
+                        {:else if nt === 'gate_failure'}
+                          <button class="inline-action-btn inline-action-approve" onclick={() => handleRetry(n)}>Retry</button>
+                        {:else if nt === 'mr_needs_review'}
+                          <button class="inline-action-btn inline-action-approve" onclick={() => { const mrId = body.mr_id; if (mrId) nav('mr', mrId, { repo_id: n.repo_id }); }}>Review</button>
+                        {/if}
+                        <button class="inline-action-btn inline-action-reject" onclick={() => handleDismiss(n)} title="Dismiss">✕</button>
                       {/if}
                     </div>
-                  {/if}
-                </div>
-              </button>
-            {/each}
-          </div>
-          {#if activityEvents.length > activityLimit}
-            <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
-              Show more ({activityEvents.length - activityLimit} remaining)
-            </button>
+                  </div>
+                {/each}
+              </div>
+            </section>
           {/if}
-        {/if}
-      </section>
 
-      </div><!-- .ws-main-col -->
+          <!-- Recent Activity -->
+          <section class="activity-section" data-testid="section-activity">
+            <h2 class="section-heading">Recent Activity</h2>
+            {#if activityLoading}
+              <div class="skeleton-row"></div>
+            {:else if activityEvents.length === 0}
+              <p class="empty-text">No recent activity.</p>
+            {:else}
+              <div class="activity-timeline">
+                {#each activityEvents.slice(0, activityLimit) as event, i}
+                  {@const variant = activityVariant(event)}
+                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                  <button
+                    class="activity-item activity-item-clickable"
+                    onclick={() => {
+                      if (primaryType && primaryId) {
+                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                        nav(primaryType, primaryId, data);
+                      }
+                    }}
+                  >
+                    <div class="activity-dot activity-dot-{variant}"></div>
+                    {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                    <div class="activity-content">
+                      <div class="activity-main-row">
+                        <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
+                        <span class="activity-label">{activityLabel(event)}</span>
+                        {#if event.entity_name ?? event.title}
+                          <span class="activity-detail">{event.entity_name ?? event.title}</span>
+                        {/if}
+                        {#if event.repo_id && repoMap[event.repo_id]}
+                          <span class="activity-repo">{repoMap[event.repo_id].name}</span>
+                        {/if}
+                        {#if event.timestamp ?? event.created_at}
+                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                        {/if}
+                      </div>
+                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
+                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
+                      {/if}
+                      {#if (event.agent_id && primaryType !== 'agent') || (event.mr_id && primaryType !== 'mr') || (event.spec_path && primaryType !== 'spec')}
+                        <div class="activity-refs">
+                          {#if event.agent_id && primaryType !== 'agent'}
+                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }}>
+                              <Icon name="agent" size={10} /> {entityName('agent', event.agent_id)}
+                            </button>
+                          {/if}
+                          {#if event.mr_id && primaryType !== 'mr'}
+                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }}>
+                              <Icon name="git-merge" size={10} /> {entityName('mr', event.mr_id)}
+                            </button>
+                          {/if}
+                          {#if event.spec_path && primaryType !== 'spec'}
+                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }}>
+                              <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                            </button>
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  </button>
+                {/each}
+              </div>
+              {#if activityEvents.length > activityLimit}
+                <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
+                  Show more ({activityEvents.length - activityLimit} remaining)
+                </button>
+              {/if}
+            {/if}
+          </section>
+        </div><!-- .ws-col-primary -->
+
+        <!-- Right column: Repos + Merge Queue -->
+        <div class="ws-col-secondary">
+          <!-- Repos -->
+          <section class="repos-section" data-testid="section-repos">
+            <div class="section-header-row">
+              <h2 class="section-heading">Repositories</h2>
+              {#if repos.length > 0}
+                <div class="section-header-actions">
+                  <button class="section-btn section-btn-compact" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo-top">+ New</button>
+                  <button class="section-btn section-btn-compact" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo-top">Import</button>
+                </div>
+              {/if}
+            </div>
+            <div class="feed-body">
+              {#if reposLoading}
+                <div class="skeleton-row"></div>
+              {:else if reposError}
+                <div class="error-row" role="alert">
+                  <p class="error-text">{reposError}</p>
+                  <button class="retry-btn" onclick={loadRepos}>{$t('common.retry')}</button>
+                </div>
+              {:else if repos.length === 0}
+                <div class="empty-state-guided" data-testid="repos-empty">
+                  <p class="empty-text">No repositories yet</p>
+                  <p class="empty-guide">Create a repo, push your code with specs, and Gyre handles the rest.</p>
+                  <div class="pipeline-guide">
+                    <div class="pipeline-step"><span class="pipeline-step-num">1</span><span class="pipeline-step-title">Create a repo</span><span class="pipeline-step-desc">Click "+ New" above</span></div>
+                    <span class="pipeline-arrow">→</span>
+                    <div class="pipeline-step"><span class="pipeline-step-num">2</span><span class="pipeline-step-title">Push specs</span><span class="pipeline-step-desc">specs/manifest.yaml + .md files</span></div>
+                    <span class="pipeline-arrow">→</span>
+                    <div class="pipeline-step"><span class="pipeline-step-num">3</span><span class="pipeline-step-title">Approve</span><span class="pipeline-step-desc">Review & approve specs</span></div>
+                    <span class="pipeline-arrow">→</span>
+                    <div class="pipeline-step"><span class="pipeline-step-num">4</span><span class="pipeline-step-title">Agents implement</span><span class="pipeline-step-desc">Autonomous code + MR</span></div>
+                    <span class="pipeline-arrow">→</span>
+                    <div class="pipeline-step"><span class="pipeline-step-num">5</span><span class="pipeline-step-title">Gates & merge</span><span class="pipeline-step-desc">Test, lint, attest, merge</span></div>
+                  </div>
+                  <div class="empty-actions">
+                    <button class="section-btn primary" onclick={() => { newRepoOpen = true; }}>Create your first repo</button>
+                  </div>
+                </div>
+              {:else}
+                <div class="repo-cards-list">
+                  {#each repos.slice().sort((a, b) => {
+                    const aStats = repoStats(a);
+                    const bStats = repoStats(b);
+                    if (bStats.agents !== aStats.agents) return bStats.agents - aStats.agents;
+                    const aTime = aStats.last_activity ? new Date(aStats.last_activity).getTime() : 0;
+                    const bTime = bStats.last_activity ? new Date(bStats.last_activity).getTime() : 0;
+                    return bTime - aTime;
+                  }) as repo (repo.id)}
+                    <RepoCard
+                      {repo}
+                      health={repoHealth(repo)}
+                      stats={repoStats(repo)}
+                      activeAgentNames={repoActiveAgentNames(repo)}
+                      activeAgents={wsAgents.filter(a => a.repo_id === repo.id && a.status === 'active')}
+                      failedMrs={wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m._gates?.failed > 0)}
+                      specBreakdown={repoSpecBreakdown(repo)}
+                      latestMr={repoLatestMr(repo)}
+                      onclick={() => onSelectRepo?.(repo)}
+                      onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
+                    />
+                  {/each}
+                </div>
+              {/if}
+
+              {#if newRepoOpen}
+                <form class="inline-form" data-testid="new-repo-form" onsubmit={(e) => { e.preventDefault(); handleCreateRepo(); }}>
+                  <div class="inline-form-header">
+                    <span class="inline-form-title">{$t('workspace_home.new_repo_title')}</span>
+                    <button type="button" class="inline-form-close" onclick={() => { newRepoOpen = false; newRepoError = null; }}>✕</button>
+                  </div>
+                  <input id="new-repo-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_name_placeholder')} bind:value={newRepoName} required disabled={newRepoLoading} data-testid="new-repo-name-input" />
+                  <input id="new-repo-desc" class="inline-form-input" type="text" placeholder={$t('workspace_home.new_repo_desc_placeholder')} bind:value={newRepoDescription} disabled={newRepoLoading} data-testid="new-repo-description-input" />
+                  {#if newRepoError}<p class="inline-form-error" role="alert">{newRepoError}</p>{/if}
+                  <div class="inline-form-actions">
+                    <button type="submit" class="section-btn primary" disabled={newRepoLoading || !newRepoName.trim()}>{newRepoLoading ? $t('workspace_home.new_repo_creating') : $t('workspace_home.new_repo_create')}</button>
+                    <button type="button" class="section-btn" onclick={() => { newRepoOpen = false; newRepoError = null; }}>{$t('common.cancel')}</button>
+                  </div>
+                </form>
+              {/if}
+
+              {#if importOpen}
+                <form class="inline-form" data-testid="import-repo-form" onsubmit={(e) => { e.preventDefault(); handleImportRepo(); }}>
+                  <div class="inline-form-header">
+                    <span class="inline-form-title">{$t('workspace_home.import_repo_title')}</span>
+                    <button type="button" class="inline-form-close" onclick={() => { importOpen = false; importError = null; }}>✕</button>
+                  </div>
+                  <input id="import-url" class="inline-form-input" type="url" placeholder={$t('workspace_home.import_url_placeholder')} bind:value={importUrl} required disabled={importLoading} data-testid="import-url-input" />
+                  <input id="import-name" class="inline-form-input" type="text" placeholder={$t('workspace_home.import_name_placeholder')} bind:value={importName} disabled={importLoading} data-testid="import-name-input" />
+                  {#if importError}<p class="inline-form-error" role="alert">{importError}</p>{/if}
+                  <div class="inline-form-actions">
+                    <button type="submit" class="section-btn primary" disabled={importLoading || !importUrl.trim()}>{importLoading ? $t('workspace_home.import_importing') : $t('workspace_home.import_submit')}</button>
+                    <button type="button" class="section-btn" onclick={() => { importOpen = false; importError = null; }}>{$t('common.cancel')}</button>
+                  </div>
+                </form>
+              {/if}
+            </div>
+          </section>
+
+          <!-- Merge Queue (compact, if items queued) -->
+          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
+            <section class="merge-queue-compact" data-testid="section-merge-queue">
+              <div class="mq-compact-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+                <span class="mq-compact-title">Merge Queue</span>
+                <span class="mq-compact-count">{mergeQueueItems.length} queued</span>
+              </div>
+              <div class="mq-compact-items">
+                {#each mergeQueueItems.slice(0, 5) as item, i}
+                  {@const mrId = item.merge_request_id ?? item.mr_id}
+                  <button class="mq-compact-item" onclick={() => nav('mr', mrId, item._mr)}>
+                    <span class="mq-compact-pos">#{i + 1}</span>
+                    <span class="mq-compact-mr-title">{item._title}</span>
+                    {#if item._mr?._gates?.total > 0}
+                      <span class="mq-compact-gates">
+                        {#if item._mr._gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{item._mr._gates.failed}</span>{/if}
+                        {#if item._mr._gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{item._mr._gates.passed}</span>{/if}
+                      </span>
+                    {/if}
+                    {#if item._branch}<span class="mq-compact-branch">{item._branch}</span>{/if}
+                  </button>
+                {/each}
+                {#if mergeQueueItems.length > 5}
+                  <span class="mq-compact-more">+{mergeQueueItems.length - 5} more</span>
+                {/if}
+              </div>
+            </section>
+          {/if}
+
+          <!-- Workspace briefing (AI-generated summary) -->
+          {#if !briefingLoading && briefingData?.summary}
+            <div class="ws-briefing-compact">
+              <h2 class="section-heading">Briefing</h2>
+              <p class="ws-briefing-summary">{briefingData.summary}</p>
+            </div>
+          {/if}
+        </div><!-- .ws-col-secondary -->
+
+      </div><!-- .ws-two-col -->
 
     </div><!-- .focused-dashboard -->
   {/if}
@@ -2073,6 +2074,40 @@
     gap: var(--space-3);
     min-width: 0;
     min-height: 0;
+  }
+
+  /* ── Two-column layout ──────────────────────────────────────── */
+  .ws-two-col {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    gap: var(--space-3);
+    align-items: start;
+  }
+
+  @media (max-width: 900px) {
+    .ws-two-col {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  .ws-col-primary {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .ws-col-secondary {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .repo-cards-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
 
   /* ── Workspace header ────────────────────────────────────────────── */
