@@ -181,6 +181,7 @@
     }
   });
   let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
+  let srAnnouncement = $state(''); // Screen reader announcements via ARIA live region
 
   // ── Ghost overlay state (spec editing preview) ──────────────────────
   // ghostOverlays: [{ id, name, type, action: 'add'|'change'|'remove', edges?: [] }]
@@ -2297,15 +2298,24 @@
       if (!isTreeGroup && op < 0.01) return;
 
       // Semantic zoom: deliberate information hierarchy per zoom level
-      // Overview (< 0.12): packages, modules only — boundaries and interfaces
-      // Mid-level (0.12-0.25): + types, interfaces, specs — the essential design
-      // Detail (0.25-0.5): + endpoints, tables — integration points
-      // Full detail (> 0.5): + functions, fields, constants — implementation
+      // The spec's core abstraction: "default zoom shows boundaries and interfaces"
+      // with "types, functions visible on drill-down."
+      //
+      // Overview (< 0.3): packages, modules only — boundaries
+      // Architecture (0.3-0.6): + types, traits, interfaces, enums, specs — essential design
+      // Integration (0.6-1.0): + endpoints, tables, classes, components — integration points
+      // Detail (1.0-2.0): + functions, methods — implementation
+      // Full (> 2.0): + fields, constants, enum variants — every detail
       if (!isTreeGroup && ln.node) {
         const nt = ln.node.node_type ?? '';
-        if (cam.zoom < 0.12 && !['package', 'module'].includes(nt)) return;
-        if (cam.zoom < 0.25 && ['function', 'field', 'constant'].includes(nt)) return;
-        if (cam.zoom < 0.5 && ['field', 'constant'].includes(nt)) return;
+        const isQueryMatched = activeQuery && matchedNodes?.has(ln.node.id);
+        // Always show query-matched nodes regardless of zoom
+        if (!isQueryMatched) {
+          if (cam.zoom < 0.3 && !['package', 'module'].includes(nt)) return;
+          if (cam.zoom < 0.6 && ['function', 'method', 'endpoint', 'field', 'constant', 'table', 'component', 'class', 'enum_variant'].includes(nt)) return;
+          if (cam.zoom < 1.0 && ['function', 'method', 'field', 'constant', 'enum_variant'].includes(nt)) return;
+          if (cam.zoom < 2.0 && ['field', 'constant', 'enum_variant'].includes(nt)) return;
+        }
       }
 
       // Draw this node if it has any opacity
@@ -3234,7 +3244,9 @@
       let edgeAlpha = alpha;
       let lineWidth = 1.2;
 
-      // Evaluative lens: modulate edge thickness by call frequency from traces
+      // Edge thickness by frequency:
+      // Evaluative: use OTLP trace span frequency
+      // Structural: use call edge count (how many callers reference a target)
       if (lens === 'evaluative' && traceEdgeFrequency.size > 0) {
         const freqKey = `${srcId}->${tgtId}`;
         const freq = traceEdgeFrequency.get(freqKey) ?? 0;
@@ -3242,6 +3254,10 @@
           lineWidth = 1.5 + (freq / traceMaxFreq) * 4;
           edgeAlpha = Math.max(alpha, 0.6);
         }
+      } else if (et === 'calls') {
+        // In structural lens, thicken high-traffic edges by incoming call count
+        const inCount = (adjacency.get(tgtId) ?? []).filter(nb => nb.edgeType === 'calls' && nb.reverse).length;
+        if (inCount > 1) lineWidth = 1.2 + Math.min(inCount / 5, 3);
       }
 
       // Connected highlight
@@ -4114,6 +4130,42 @@
     if (e.key === 'ArrowUp') { e.preventDefault(); targetCam.y -= PAN_STEP; scheduleRedraw(); return; }
     if (e.key === 'ArrowDown') { e.preventDefault(); targetCam.y += PAN_STEP; scheduleRedraw(); return; }
 
+    // Tab/Shift+Tab: cycle through visible nodes for keyboard accessibility
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const visibleNodes = layoutNodes
+        .filter(ln => ln.node && !ln.isTreeGroup && nodeOpacity(ln) > 0.3)
+        .sort((a, b) => a.x - b.x || a.y - b.y);
+      if (visibleNodes.length === 0) return;
+      const currentIdx = visibleNodes.findIndex(ln => ln.node?.id === selectedNodeId);
+      const nextIdx = e.shiftKey
+        ? (currentIdx <= 0 ? visibleNodes.length - 1 : currentIdx - 1)
+        : (currentIdx < 0 ? 0 : (currentIdx + 1) % visibleNodes.length);
+      const ln = visibleNodes[nextIdx];
+      if (ln?.node) {
+        selectedNodeId = ln.node.id;
+        // Announce to screen readers
+        srAnnouncement = `${ln.node.node_type}: ${ln.node.name}`;
+        // Center camera on selected node
+        targetCam.x = ln.x;
+        targetCam.y = ln.y;
+        onNodeDetail(ln.node);
+        scheduleRedraw();
+      }
+      return;
+    }
+
+    // Enter: drill into selected node
+    if (e.key === 'Enter' && selectedNodeId) {
+      const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === selectedNodeId);
+      if (ln?.node) {
+        const children = treeData.parentToChildren.get(ln.node.id) ?? [];
+        if (children.length > 0) drillInto(ln.node);
+        else onNodeDetail(ln.node);
+      }
+      return;
+    }
+
     // Keyboard zoom (+/- or =/-)
     if (e.key === '=' || e.key === '+') {
       e.preventDefault();
@@ -4435,11 +4487,29 @@
 <div class="treemap-container">
   <!-- Query annotation -->
   {#if activeQuery?.annotation?.title}
+    {@const matchCount = queryMatchedIds?.size ?? '?'}
+    {@const groupCount = (() => {
+      // Compute distinct parent modules of matched nodes (not just group definition count)
+      if (!queryMatchedIds || queryMatchedIds.size === 0) return '0';
+      const parents = new Set();
+      for (const id of queryMatchedIds) {
+        const n = nodes.find(nd => nd.id === id);
+        if (n?.qualified_name) {
+          const parts = n.qualified_name.split(/[:.]/);
+          if (parts.length > 1) parents.add(parts.slice(0, -1).join('.'));
+          else parents.add(n.qualified_name);
+        }
+      }
+      return String(parents.size);
+    })()}
+    {@const resolveVars = (t) => t?.replace(/\$name/g, canvasState?.selectedNode?.name ?? '')
+      .replace(/\{\{count\}\}/g, String(matchCount))
+      .replace(/\{\{group_count\}\}/g, groupCount) ?? ''}
     <div class="query-annotation" role="status">
       <div class="annotation-content">
-        <span class="annotation-title">{activeQuery.annotation.title.replace('$name', canvasState?.selectedNode?.name ?? '').replace('{{count}}', queryMatchedIds?.size ?? '?').replace('{{group_count}}', activeQuery?.groups?.length ?? '?')}</span>
+        <span class="annotation-title">{resolveVars(activeQuery.annotation.title)}</span>
         {#if activeQuery.annotation.description}
-          <span class="annotation-desc">{activeQuery.annotation.description.replace('{{count}}', queryMatchedIds?.size ?? '?').replace('{{group_count}}', activeQuery?.groups?.length ?? '?')}</span>
+          <span class="annotation-desc">{resolveVars(activeQuery.annotation.description)}</span>
         {/if}
       </div>
       {#if interactiveQueryTemplate}
@@ -4497,7 +4567,7 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" disabled type="button" title="Requires production telemetry integration">Observable</button>
+      <button class="tb-btn tb-btn-observable" disabled type="button" title="Observable lens — requires production OpenTelemetry collector integration (see system-explorer.md §Observable)" onclick={() => { observableBannerVisible = true; }}>Observable</button>
     </div>
 
     {#if lens === 'evaluative'}
@@ -4915,7 +4985,7 @@
   {/if}
 
   <!-- Anomaly panel (evaluative lens) -->
-  {#if lens === 'evaluative' && anomalies.length > 0 && anomalyPanelOpen}
+  {#if (lens === 'structural' || lens === 'evaluative') && anomalies.length > 0 && anomalyPanelOpen}
     <div class="anomaly-panel" role="complementary" aria-label="Detected anomalies">
       <div class="anomaly-header">
         <span class="anomaly-title">
@@ -4943,9 +5013,15 @@
       {/each}
     </div>
   {/if}
+
+  <!-- Screen reader live region for accessibility -->
+  <div class="sr-only" aria-live="polite" aria-atomic="true">
+    {srAnnouncement}
+  </div>
 </div>
 
 <style>
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   .treemap-container { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: #0f0f1a; position: relative; }
 
   .treemap-toolbar {
