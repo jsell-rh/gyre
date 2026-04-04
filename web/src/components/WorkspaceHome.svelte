@@ -1382,34 +1382,53 @@
             {:else if wsTab === 'pipeline'}
               <div class="pipeline-flow">
 
-              <!-- Pipeline progress bar — compact visual of where work stands -->
-              <div class="pipeline-progress-bar">
-                <div class="pipeline-progress-stage" class:pipeline-progress-active={pipelineSpecs.pending > 0} class:pipeline-progress-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0}>
-                  <span class="pipeline-progress-count">{specs.length}</span>
-                  <span class="pipeline-progress-label">Specs</span>
-                  {#if pipelineSpecs.pending > 0}<span class="pipeline-progress-sub">{pipelineSpecs.pending} pending</span>{/if}
-                </div>
-                <span class="pipeline-progress-arrow">→</span>
-                <div class="pipeline-progress-stage" class:pipeline-progress-active={pipelineTasks.in_progress > 0} class:pipeline-progress-warn={pipelineTasks.blocked > 0}>
-                  <span class="pipeline-progress-count">{wsTasks.length}</span>
-                  <span class="pipeline-progress-label">Tasks</span>
-                  {#if pipelineTasks.in_progress > 0}<span class="pipeline-progress-sub">{pipelineTasks.in_progress} active</span>
-                  {:else if pipelineTasks.blocked > 0}<span class="pipeline-progress-sub">{pipelineTasks.blocked} blocked</span>{/if}
-                </div>
-                <span class="pipeline-progress-arrow">→</span>
-                <div class="pipeline-progress-stage" class:pipeline-progress-active={pipelineAgents.active > 0}>
-                  <span class="pipeline-progress-count">{wsAgents.length}</span>
-                  <span class="pipeline-progress-label">Agents</span>
-                  {#if pipelineAgents.active > 0}<span class="pipeline-progress-sub">{pipelineAgents.active} running</span>{/if}
-                </div>
-                <span class="pipeline-progress-arrow">→</span>
-                <div class="pipeline-progress-stage" class:pipeline-progress-warn={pipelineMrs.failed_gates > 0} class:pipeline-progress-done={pipelineMrs.merged > 0 && pipelineMrs.failed_gates === 0 && pipelineMrs.open === 0}>
-                  <span class="pipeline-progress-count">{wsMrs.length}</span>
-                  <span class="pipeline-progress-label">MRs</span>
-                  {#if pipelineMrs.failed_gates > 0}<span class="pipeline-progress-sub">{pipelineMrs.failed_gates} failed</span>
-                  {:else if pipelineMrs.open > 0}<span class="pipeline-progress-sub">{pipelineMrs.open} open</span>
-                  {:else if pipelineMrs.merged > 0}<span class="pipeline-progress-sub">{pipelineMrs.merged} merged</span>{/if}
-                </div>
+              <!-- Pipeline hero — interactive visual flow showing where work stands -->
+              <div class="pipeline-hero">
+                <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineSpecs.pending > 0} class:pipeline-hero-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { pipelineExpandedSections = { specs: true, tasks: false, mrs: false, agents: false }; }}>
+                  <span class="pipeline-hero-count">{specs.length}</span>
+                  <span class="pipeline-hero-label">Specs</span>
+                  {#if pipelineSpecs.pending > 0}
+                    <span class="pipeline-hero-badge pipeline-hero-badge-warn">{pipelineSpecs.pending} need approval</span>
+                  {:else if pipelineSpecs.approved > 0}
+                    <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineSpecs.approved} approved</span>
+                  {/if}
+                </button>
+                <span class="pipeline-hero-arrow">
+                  <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </span>
+                <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineTasks.in_progress > 0} class:pipeline-hero-warn={pipelineTasks.blocked > 0} onclick={() => { pipelineExpandedSections = { specs: false, tasks: true, mrs: false, agents: false }; }}>
+                  <span class="pipeline-hero-count">{wsTasks.length}</span>
+                  <span class="pipeline-hero-label">Tasks</span>
+                  {#if pipelineTasks.in_progress > 0}
+                    <span class="pipeline-hero-badge">{pipelineTasks.in_progress} in progress</span>
+                  {:else if pipelineTasks.blocked > 0}
+                    <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineTasks.blocked} blocked</span>
+                  {/if}
+                </button>
+                <span class="pipeline-hero-arrow">
+                  <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </span>
+                <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineAgents.active > 0} onclick={() => { pipelineExpandedSections = { specs: false, tasks: false, mrs: false, agents: true }; }}>
+                  <span class="pipeline-hero-count">{wsAgents.length}</span>
+                  <span class="pipeline-hero-label">Agents</span>
+                  {#if pipelineAgents.active > 0}
+                    <span class="pipeline-hero-badge pipeline-hero-badge-ok"><span class="pipeline-hero-pulse"></span>{pipelineAgents.active} running</span>
+                  {/if}
+                </button>
+                <span class="pipeline-hero-arrow">
+                  <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </span>
+                <button class="pipeline-hero-stage" class:pipeline-hero-warn={pipelineMrs.failed_gates > 0} class:pipeline-hero-done={pipelineMrs.merged > 0 && pipelineMrs.failed_gates === 0 && pipelineMrs.open === 0} onclick={() => { pipelineExpandedSections = { specs: false, tasks: false, mrs: true, agents: false }; }}>
+                  <span class="pipeline-hero-count">{wsMrs.length}</span>
+                  <span class="pipeline-hero-label">MRs</span>
+                  {#if pipelineMrs.failed_gates > 0}
+                    <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineMrs.failed_gates} gate failures</span>
+                  {:else if pipelineMrs.open > 0}
+                    <span class="pipeline-hero-badge">{pipelineMrs.open} ready to merge</span>
+                  {:else if pipelineMrs.merged > 0}
+                    <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineMrs.merged} merged</span>
+                  {/if}
+                </button>
               </div>
 
               <!-- ── Specs section ──────────────────────────────────────── -->
@@ -2015,58 +2034,100 @@
     border-top: 1px solid var(--color-border);
   }
 
-  /* ── Pipeline progress bar ─────────────────────────────────────── */
-  .pipeline-progress-bar {
+  /* ── Pipeline hero — interactive flow visualization ─────────────── */
+  .pipeline-hero {
     display: flex;
-    align-items: center;
+    align-items: stretch;
     gap: 0;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-1);
     background: var(--color-surface);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg, var(--radius));
     overflow-x: auto;
   }
 
-  .pipeline-progress-stage {
+  .pipeline-hero-stage {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 1px;
-    padding: var(--space-1) var(--space-3);
+    justify-content: center;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
     flex: 1;
-    min-width: 60px;
+    min-width: 80px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: all var(--transition-fast);
+    position: relative;
   }
 
-  .pipeline-progress-count {
-    font-size: var(--text-base);
-    font-weight: 700;
+  .pipeline-hero-stage:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+    transform: translateY(-1px);
+  }
+
+  .pipeline-hero-count {
+    font-size: var(--text-lg, 18px);
+    font-weight: 800;
     font-family: var(--font-mono);
     color: var(--color-text-muted);
+    line-height: 1;
   }
 
-  .pipeline-progress-label {
+  .pipeline-hero-label {
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
   }
 
-  .pipeline-progress-sub {
+  .pipeline-hero-badge {
     font-size: 10px;
-    color: var(--color-text-muted);
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 3px;
   }
 
-  .pipeline-progress-active .pipeline-progress-count { color: var(--color-primary); }
-  .pipeline-progress-active .pipeline-progress-sub { color: var(--color-primary); }
-  .pipeline-progress-done .pipeline-progress-count { color: var(--color-success); }
-  .pipeline-progress-done .pipeline-progress-sub { color: var(--color-success); }
-  .pipeline-progress-warn .pipeline-progress-count { color: var(--color-danger); }
-  .pipeline-progress-warn .pipeline-progress-sub { color: var(--color-danger); }
+  .pipeline-hero-badge-warn { color: var(--color-warning); font-weight: 600; }
+  .pipeline-hero-badge-danger { color: var(--color-danger); font-weight: 600; }
+  .pipeline-hero-badge-ok { color: var(--color-success); font-weight: 600; }
 
-  .pipeline-progress-arrow {
+  .pipeline-hero-active .pipeline-hero-count { color: var(--color-primary); }
+  .pipeline-hero-active .pipeline-hero-label { color: var(--color-primary); }
+  .pipeline-hero-done .pipeline-hero-count { color: var(--color-success); }
+  .pipeline-hero-done .pipeline-hero-label { color: var(--color-success); }
+  .pipeline-hero-warn .pipeline-hero-count { color: var(--color-danger); }
+  .pipeline-hero-warn .pipeline-hero-label { color: var(--color-danger); }
+
+  .pipeline-hero-arrow {
+    display: flex;
+    align-items: center;
     color: var(--color-text-muted);
-    font-size: var(--text-sm);
-    opacity: 0.4;
+    opacity: 0.3;
     flex-shrink: 0;
+    padding: 0 2px;
+  }
+
+  .pipeline-hero-pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: pipeline-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes pipeline-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.7); }
   }
 
   /* ═══ Focused Dashboard ═══════════════════════════════════════════════ */
