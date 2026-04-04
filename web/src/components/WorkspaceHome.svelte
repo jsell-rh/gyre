@@ -1318,6 +1318,15 @@
 
       <!-- ── Repos ──────────────────────────────────────────── -->
       <section class="repos-section" data-testid="section-repos">
+        <div class="section-header-row">
+          <h2 class="section-heading">Repositories</h2>
+          {#if repos.length > 0}
+            <div class="section-header-actions">
+              <button class="section-btn section-btn-compact" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo-top">+ New</button>
+              <button class="section-btn section-btn-compact" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo-top">Import</button>
+            </div>
+          {/if}
+        </div>
               <div class="feed-body">
                 {#if reposLoading}
                   <div class="skeleton-row"></div>
@@ -1346,10 +1355,6 @@
                     </div>
                   </div>
                 {:else}
-                  <div class="repo-header-actions">
-                    <button class="section-btn section-btn-compact" onclick={() => { newRepoOpen = !newRepoOpen; importOpen = false; }} data-testid="btn-new-repo">+ New</button>
-                    <button class="section-btn section-btn-compact" onclick={() => { importOpen = !importOpen; newRepoOpen = false; }} data-testid="btn-import-repo">Import</button>
-                  </div>
                   <div class="repo-cards-grid" class:repo-cards-few={repos.length <= 2}>
                     {#each repos.slice().sort((a, b) => {
                       const aStats = repoStats(a);
@@ -1790,6 +1795,18 @@
     letter-spacing: 0.04em;
     margin: 0 0 var(--space-2) 0;
     padding: 0 var(--space-1);
+  }
+
+  .section-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .section-header-actions {
+    display: flex;
+    gap: var(--space-1);
   }
 
   .repos-section {
