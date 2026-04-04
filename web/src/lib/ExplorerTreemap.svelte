@@ -245,6 +245,29 @@
         });
       }
     }
+    // Pattern 6: Co-change detection — modules that always change together but have no shared spec
+    // Group nodes by last_modified_sha to find co-change clusters
+    const shaGroups = new Map(); // sha → [node]
+    for (const n of nodes) {
+      if (n.deleted_at || !n.last_modified_sha || n.node_type === 'tree-group') continue;
+      if (!shaGroups.has(n.last_modified_sha)) shaGroups.set(n.last_modified_sha, []);
+      shaGroups.get(n.last_modified_sha).push(n);
+    }
+    // Find groups of 3+ nodes from different modules that share a commit but no shared spec
+    for (const [, group] of shaGroups) {
+      if (group.length < 3) continue;
+      const modules = new Set(group.map(n => n.file_path?.split('/').slice(0, -1).join('/') ?? ''));
+      if (modules.size < 2) continue; // Same module, not interesting
+      const specs = new Set(group.filter(n => n.spec_path).map(n => n.spec_path));
+      if (specs.size > 0) continue; // Have shared spec governance
+      const names = group.slice(0, 3).map(n => n.name ?? '?').join(', ');
+      results.push({
+        nodeId: group[0].id,
+        nodeName: names,
+        message: `${group.length} modules always change together but have no shared spec`,
+        severity: 'medium',
+      });
+    }
     // Sort by severity (high first), then take top 8
     const order = { high: 0, medium: 1, low: 2 };
     results.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
