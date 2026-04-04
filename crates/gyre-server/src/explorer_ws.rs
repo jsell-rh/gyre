@@ -214,8 +214,9 @@ async fn handle_explorer_session(
                 // Session message limit: prevent unbounded history growth.
                 message_count += 1;
 
-                // Invalidate graph cache periodically to pick up changes.
-                if message_count % 10 == 0 {
+                // Invalidate graph cache frequently to pick up push/sync changes.
+                // Every 3 messages keeps data reasonably fresh without excessive DB load.
+                if message_count % 3 == 0 {
                     cached_nodes = None;
                     cached_edges = None;
                 }
@@ -752,10 +753,19 @@ async fn run_explorer_agent_sdk(
         }
     }
 
-    // Add to conversation history so subsequent messages have context
+    // Add both user and assistant messages to conversation history
+    // so subsequent SDK messages have full context.
     conversation_history.push(ConversationMessage {
         role: "user".to_string(),
         content: ConversationContent::Text(user_question.to_string()),
+    });
+    // We don't have the full assistant text from the SDK subprocess, but we
+    // add a placeholder so the history alternates correctly.
+    conversation_history.push(ConversationMessage {
+        role: "assistant".to_string(),
+        content: ConversationContent::Text(
+            "[Assistant responded via SDK subprocess]".to_string(),
+        ),
     });
 
     Ok(())

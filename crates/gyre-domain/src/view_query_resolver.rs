@@ -1304,11 +1304,18 @@ pub fn dry_run(
         }
     }
 
+    let total_matched = result_set.len();
     let matched_node_names: Vec<String> = result_set
         .iter()
         .filter_map(|id| node_map.get(id).map(|n| n.qualified_name.clone()))
         .take(50)
         .collect();
+    if total_matched > 50 {
+        warnings.push(format!(
+            "Showing 50 of {} matched node names. The query may be too broad — consider adding filters.",
+            total_matched
+        ));
+    }
 
     // Compute group_count as distinct parent modules (spec semantics)
     let group_count = count_distinct_parent_modules(&result_set, nodes, edges);

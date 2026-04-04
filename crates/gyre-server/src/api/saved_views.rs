@@ -270,6 +270,13 @@ pub async fn update_view(
             "Access denied".to_string(),
         ));
     }
+    // Only the creator (or system views by admin) can update a view.
+    if !existing.is_system && existing.created_by != auth.agent_id {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "Only the view creator can update this view".to_string(),
+        ));
+    }
 
     let query_json = if let Some(q) = req.query {
         serde_json::to_string(&q).map_err(|e| {
@@ -318,6 +325,20 @@ pub async fn delete_view(
                 return Err((
                     axum::http::StatusCode::FORBIDDEN,
                     "Access denied".to_string(),
+                ));
+            }
+            // System default views cannot be deleted.
+            if v.is_system {
+                return Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    "System default views cannot be deleted".to_string(),
+                ));
+            }
+            // Only the creator can delete their own views.
+            if v.created_by != auth.agent_id {
+                return Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    "Only the view creator can delete this view".to_string(),
                 ));
             }
         }
