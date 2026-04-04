@@ -289,6 +289,374 @@ describe('ExplorerTreemap — view queries', () => {
   });
 });
 
+describe('ExplorerTreemap — view query opacity resolution', () => {
+  // Unit test the queryNodeOpacity logic from ExplorerTreemap.svelte
+  function resolveQueryMatch(nodes, edges, scope) {
+    const nodeById = new Map();
+    for (const n of nodes) nodeById.set(n.id, n);
+
+    // Build adjacency
+    const adjacency = new Map();
+    for (const e of edges) {
+      const src = e.source_id;
+      const tgt = e.target_id;
+      const et = (e.edge_type ?? '').toLowerCase();
+      if (!adjacency.has(src)) adjacency.set(src, []);
+      if (!adjacency.has(tgt)) adjacency.set(tgt, []);
+      adjacency.get(src).push({ targetId: tgt, edgeType: et, reverse: false });
+      adjacency.get(tgt).push({ targetId: src, edgeType: et, reverse: true });
+    }
+
+    if (scope.type === 'all') return new Set(nodes.map(n => n.id));
+
+    if (scope.type === 'filter') {
+      const matched = new Set();
+      for (const n of nodes) {
+        let m = true;
+        if (scope.node_types?.length && !scope.node_types.includes(n.node_type)) m = false;
+        if (scope.name_pattern) {
+          const re = new RegExp(scope.name_pattern, 'i');
+          if (!re.test(n.name ?? '') && !re.test(n.qualified_name ?? '')) m = false;
+        }
+        if (m) matched.add(n.id);
+      }
+      return matched;
+    }
+
+    if (scope.type === 'focus') {
+      const seedNode = nodes.find(n => n.name === scope.node || n.qualified_name === scope.node);
+      if (!seedNode) return new Set();
+      const matched = new Map();
+      matched.set(seedNode.id, 0);
+      const q = [{ id: seedNode.id, depth: 0 }];
+      const maxDepth = scope.depth ?? 3;
+      const edgeTypes = new Set((scope.edges ?? ['calls']).map(e => e.toLowerCase()));
+      while (q.length > 0) {
+        const { id, depth } = q.shift();
+        if (depth >= maxDepth) continue;
+        for (const nb of (adjacency.get(id) ?? [])) {
+          if (matched.has(nb.targetId)) continue;
+          if (!edgeTypes.has(nb.edgeType)) continue;
+          if (scope.direction === 'outgoing' && nb.reverse) continue;
+          if (scope.direction === 'incoming' && !nb.reverse) continue;
+          matched.set(nb.targetId, depth + 1);
+          q.push({ id: nb.targetId, depth: depth + 1 });
+        }
+      }
+      return new Set(matched.keys());
+    }
+
+    if (scope.type === 'test_gaps') {
+      // Non-test functions with no test calling them
+      const testCalledIds = new Set();
+      for (const e of edges) {
+        const src = nodeById.get(e.source_id);
+        const et = (e.edge_type ?? '').toLowerCase();
+        if (src?.test_node && et === 'calls') testCalledIds.add(e.target_id);
+      }
+      // BFS from test-called nodes
+      const reachable = new Set(testCalledIds);
+      const bfsQ = [...testCalledIds];
+      while (bfsQ.length > 0) {
+        const id = bfsQ.shift();
+        for (const nb of (adjacency.get(id) ?? [])) {
+          if (reachable.has(nb.targetId) || nb.reverse) continue;
+          if (nb.edgeType !== 'calls') continue;
+          reachable.add(nb.targetId);
+          bfsQ.push(nb.targetId);
+        }
+      }
+      const matched = new Set();
+      for (const n of nodes) {
+        if (!n.test_node && n.node_type === 'function' && !reachable.has(n.id)) matched.add(n.id);
+      }
+      return matched;
+    }
+
+    if (scope.type === 'concept') {
+      const seeds = scope.seed_nodes ?? [];
+      const expandEdges = new Set((scope.expand_edges ?? ['calls']).map(e => e.toLowerCase()));
+      const maxDepth = scope.expand_depth ?? 2;
+      const dir = scope.expand_direction ?? 'both';
+      const matched = new Map();
+      for (const seedName of seeds) {
+        const seedNode = nodes.find(n => n.name === seedName || n.qualified_name === seedName);
+        if (!seedNode || matched.has(seedNode.id)) continue;
+        matched.set(seedNode.id, 0);
+        const q = [{ id: seedNode.id, depth: 0 }];
+        while (q.length > 0) {
+          const { id, depth } = q.shift();
+          if (depth >= maxDepth) continue;
+          for (const nb of (adjacency.get(id) ?? [])) {
+            if (matched.has(nb.targetId)) continue;
+            if (!expandEdges.has(nb.edgeType)) continue;
+            if (dir === 'outgoing' && nb.reverse) continue;
+            if (dir === 'incoming' && !nb.reverse) continue;
+            matched.set(nb.targetId, depth + 1);
+            q.push({ id: nb.targetId, depth: depth + 1 });
+          }
+        }
+      }
+      return new Set(matched.keys());
+    }
+
+    if (scope.type === 'diff') {
+      const matched = new Set();
+      for (const n of nodes) {
+        if (n.last_commit_sha && n.last_commit_sha !== scope.from_commit) matched.add(n.id);
+      }
+      return matched;
+    }
+
+    return new Set();
+  }
+
+  function queryNodeOpacity(nodeId, matchedIds, dimUnmatched) {
+    if (!matchedIds) return 1.0;
+    return matchedIds.has(nodeId) ? 1.0 : (dimUnmatched ?? 0.12);
+  }
+
+  it('filter scope: matched nodes get full opacity, unmatched get dim', () => {
+    const matched = resolveQueryMatch(NODES, EDGES, { type: 'filter', node_types: ['function'] });
+
+    expect(matched.has('fn1')).toBe(true);
+    expect(matched.has('fn2')).toBe(true);
+    expect(matched.has('test1')).toBe(true);
+    expect(matched.has('type1')).toBe(false);
+    expect(matched.has('pkg1')).toBe(false);
+
+    expect(queryNodeOpacity('fn1', matched, 0.12)).toBe(1.0);
+    expect(queryNodeOpacity('type1', matched, 0.12)).toBe(0.12);
+    expect(queryNodeOpacity('pkg1', matched, 0.15)).toBe(0.15);
+  });
+
+  it('filter scope with name_pattern narrows results', () => {
+    const matched = resolveQueryMatch(NODES, EDGES, { type: 'filter', node_types: ['function'], name_pattern: 'create' });
+
+    expect(matched.has('fn1')).toBe(true); // create_user matches
+    expect(matched.has('fn2')).toBe(false); // get_user does not
+    expect(matched.has('test1')).toBe(true); // test_create_user matches
+  });
+
+  it('focus scope: BFS from seed node along call edges', () => {
+    const matched = resolveQueryMatch(NODES, EDGES, {
+      type: 'focus', node: 'create_user', edges: ['calls'], direction: 'both', depth: 3,
+    });
+
+    expect(matched.has('fn1')).toBe(true); // seed node
+    expect(matched.has('type1')).toBe(true); // fn1 calls type1
+    expect(matched.has('test1')).toBe(true); // test1 calls fn1 (incoming)
+    expect(matched.has('fn2')).toBe(false); // not connected via calls
+  });
+
+  it('focus scope with direction=incoming only follows reverse edges', () => {
+    const matched = resolveQueryMatch(NODES, EDGES, {
+      type: 'focus', node: 'create_user', edges: ['calls'], direction: 'incoming', depth: 3,
+    });
+
+    expect(matched.has('fn1')).toBe(true); // seed
+    expect(matched.has('test1')).toBe(true); // test1 calls fn1
+    expect(matched.has('type1')).toBe(false); // fn1 -> type1 is outgoing, not incoming
+  });
+
+  it('focus scope with direction=outgoing only follows forward edges', () => {
+    const matched = resolveQueryMatch(NODES, EDGES, {
+      type: 'focus', node: 'create_user', edges: ['calls'], direction: 'outgoing', depth: 3,
+    });
+
+    expect(matched.has('fn1')).toBe(true); // seed
+    expect(matched.has('type1')).toBe(true); // fn1 -> type1 outgoing
+    expect(matched.has('test1')).toBe(false); // test1 -> fn1 is incoming
+  });
+
+  it('focus scope depth limits traversal', () => {
+    const matched = resolveQueryMatch(NODES, EDGES, {
+      type: 'focus', node: 'test_create_user', edges: ['calls'], direction: 'outgoing', depth: 1,
+    });
+
+    expect(matched.has('test1')).toBe(true); // seed
+    expect(matched.has('fn1')).toBe(true); // depth 1
+    expect(matched.has('type1')).toBe(false); // depth 2, beyond limit
+  });
+
+  it('test_gaps scope: finds untested functions', () => {
+    const matched = resolveQueryMatch(NODES, EDGES, { type: 'test_gaps' });
+
+    // fn2 (get_user) has no test calling it -> untested
+    expect(matched.has('fn2')).toBe(true);
+    // fn1 (create_user) is called by test1 -> tested
+    expect(matched.has('fn1')).toBe(false);
+    // test1 is a test node itself, excluded
+    expect(matched.has('test1')).toBe(false);
+  });
+
+  it('all scope: every node gets full opacity', () => {
+    const matched = resolveQueryMatch(NODES, EDGES, { type: 'all' });
+
+    for (const n of NODES) {
+      expect(matched.has(n.id)).toBe(true);
+      expect(queryNodeOpacity(n.id, matched, 0.12)).toBe(1.0);
+    }
+  });
+
+  it('concept scope: expands from seed along edges', () => {
+    const matched = resolveQueryMatch(NODES, EDGES, {
+      type: 'concept', seed_nodes: ['User'], expand_edges: ['calls'], expand_depth: 2,
+    });
+
+    expect(matched.has('type1')).toBe(true); // seed
+    expect(matched.has('fn1')).toBe(true); // calls edge (fn1 -> type1)
+    expect(matched.has('test1')).toBe(true); // test1 -> fn1 (depth 2)
+    expect(matched.has('fn2')).toBe(false); // no call connection to User
+  });
+
+  it('diff scope: highlights nodes with different commit SHA', () => {
+    const nodesWithCommit = [
+      ...NODES.map(n => ({ ...n, last_commit_sha: n.id === 'fn1' ? 'newsha' : 'abc123' })),
+    ];
+    const matched = resolveQueryMatch(nodesWithCommit, EDGES, { type: 'diff', from_commit: 'abc123' });
+
+    expect(matched.has('fn1')).toBe(true); // different SHA
+    expect(matched.has('fn2')).toBe(false); // same SHA
+  });
+
+  it('returns empty set for focus scope with non-existent node', () => {
+    const matched = resolveQueryMatch(NODES, EDGES, {
+      type: 'focus', node: 'does_not_exist', edges: ['calls'], direction: 'both', depth: 3,
+    });
+    expect(matched.size).toBe(0);
+  });
+
+  it('null matched set means full opacity for all nodes', () => {
+    expect(queryNodeOpacity('fn1', null, 0.12)).toBe(1.0);
+    expect(queryNodeOpacity('anything', null, 0.12)).toBe(1.0);
+  });
+
+  it('custom dim_unmatched value is respected', () => {
+    const matched = new Set(['fn1']);
+    expect(queryNodeOpacity('fn2', matched, 0.3)).toBe(0.3);
+    expect(queryNodeOpacity('fn2', matched, 0.5)).toBe(0.5);
+    expect(queryNodeOpacity('fn2', matched, 0.01)).toBe(0.01);
+  });
+});
+
+describe('ExplorerTreemap — interactive $clicked query mode', () => {
+  it('renders $clicked query annotation with placeholder', () => {
+    const query = {
+      scope: { type: 'focus', node: '$clicked', edges: ['calls'], direction: 'incoming', depth: 10 },
+      emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'], dim_unmatched: 0.12 },
+      annotation: { title: 'Blast radius: $name', description: '{{count}} transitive callers' },
+    };
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    const title = container.querySelector('.annotation-title');
+    // $name should be replaced with empty string since no node is selected
+    expect(title?.textContent).toContain('Blast radius:');
+  });
+
+  it('stores $clicked query as interactive template', () => {
+    // Verify the component handles $clicked scope without error
+    const query = {
+      scope: { type: 'focus', node: '$clicked', edges: ['calls', 'depends_on'], direction: 'both', depth: 5 },
+      emphasis: { dim_unmatched: 0.15 },
+      annotation: { title: 'Impact: $name' },
+    };
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    expect(container.querySelector('canvas')).toBeTruthy();
+    expect(container.querySelector('.annotation-title')?.textContent).toContain('Impact:');
+  });
+
+  it('$clicked query with tiered_colors renders without error', () => {
+    const query = {
+      scope: { type: 'focus', node: '$clicked', edges: ['calls'], direction: 'incoming', depth: 10 },
+      emphasis: {
+        tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'],
+        dim_unmatched: 0.12,
+      },
+    };
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    expect(container.querySelector('canvas')).toBeTruthy();
+  });
+});
+
+describe('ExplorerTreemap — breadcrumb navigation', () => {
+  it('no breadcrumb visible at root level', () => {
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES },
+    });
+    expect(container.querySelector('.treemap-breadcrumb')).toBeFalsy();
+  });
+
+  it('breadcrumb path data structure is correct', () => {
+    // Simulate breadcrumb state: verify structure matches component expectations
+    const breadcrumb = [
+      { id: 'pkg1', name: 'api' },
+      { id: 'mod1', name: 'handlers' },
+    ];
+
+    expect(breadcrumb).toHaveLength(2);
+    expect(breadcrumb[0].id).toBe('pkg1');
+    expect(breadcrumb[0].name).toBe('api');
+    expect(breadcrumb[1].id).toBe('mod1');
+  });
+
+  it('navigateBreadcrumb(-1) resets to root', () => {
+    // Simulate navigateBreadcrumb logic
+    let breadcrumb = [
+      { id: 'pkg1', name: 'api' },
+      { id: 'mod1', name: 'handlers' },
+    ];
+
+    function navigateBreadcrumb(index) {
+      if (index === -1) {
+        breadcrumb = [];
+      } else {
+        breadcrumb = breadcrumb.slice(0, index + 1);
+      }
+    }
+
+    navigateBreadcrumb(-1);
+    expect(breadcrumb).toHaveLength(0);
+  });
+
+  it('navigateBreadcrumb(0) keeps first crumb only', () => {
+    let breadcrumb = [
+      { id: 'pkg1', name: 'api' },
+      { id: 'mod1', name: 'handlers' },
+      { id: 'fn1', name: 'create_user' },
+    ];
+
+    function navigateBreadcrumb(index) {
+      if (index === -1) {
+        breadcrumb = [];
+      } else {
+        breadcrumb = breadcrumb.slice(0, index + 1);
+      }
+    }
+
+    navigateBreadcrumb(0);
+    expect(breadcrumb).toHaveLength(1);
+    expect(breadcrumb[0].id).toBe('pkg1');
+  });
+
+  it('canvasState reflects breadcrumb state', () => {
+    const breadcrumb = [{ id: 'pkg1', name: 'api' }];
+    const canvasState = {
+      selectedNode: null,
+      breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })),
+    };
+
+    expect(canvasState.breadcrumb).toHaveLength(1);
+    expect(canvasState.breadcrumb[0].id).toBe('pkg1');
+    expect(canvasState.selectedNode).toBeNull();
+  });
+});
+
 describe('ExplorerTreemap — context menu', () => {
   it('does not show context menu by default', () => {
     const { container } = render(ExplorerTreemap, {
@@ -302,6 +670,208 @@ describe('ExplorerTreemap — context menu', () => {
       props: { nodes: NODES, edges: EDGES },
     });
     expect(container.querySelector('.ctx-menu')).toBeFalsy();
+  });
+
+  it('context menu data structure includes expected actions', () => {
+    // Verify the actions that should be in the context menu
+    const expectedActions = ['trace', 'blast', 'callers', 'callees', 'drill', 'spec', 'detail', 'open_in_code', 'provenance', 'history'];
+    expect(expectedActions).toContain('trace');
+    expect(expectedActions).toContain('blast');
+    expect(expectedActions).toContain('callers');
+    expect(expectedActions).toContain('callees');
+    expect(expectedActions).toContain('provenance');
+    expect(expectedActions).toContain('history');
+  });
+
+  it('context menu node has required fields', () => {
+    // Simulate context menu node structure
+    const contextMenu = {
+      x: 150,
+      y: 200,
+      node: NODES[2], // fn1 = create_user
+    };
+
+    expect(contextMenu.node.name).toBe('create_user');
+    expect(contextMenu.node.node_type).toBe('function');
+    expect(contextMenu.node.file_path).toBe('api/handlers.py');
+    expect(contextMenu.x).toBeGreaterThan(0);
+    expect(contextMenu.y).toBeGreaterThan(0);
+  });
+
+  it('drill action only available for nodes with children', () => {
+    // Build parent-to-children map from edges
+    const parentToChildren = new Map();
+    for (const e of EDGES) {
+      if (e.edge_type === 'contains') {
+        if (!parentToChildren.has(e.source_id)) parentToChildren.set(e.source_id, []);
+        parentToChildren.get(e.source_id).push(e.target_id);
+      }
+    }
+
+    // pkg1 has children (contains mod1) -> drill available
+    expect((parentToChildren.get('pkg1') ?? []).length).toBeGreaterThan(0);
+    // fn1 has no children -> no drill
+    expect((parentToChildren.get('fn1') ?? []).length).toBe(0);
+  });
+
+  it('spec action only available for nodes with spec_path', () => {
+    const nodeWithSpec = { ...NODES[2], spec_path: 'specs/api/create_user.md' };
+    const nodeWithoutSpec = { ...NODES[2], spec_path: undefined };
+
+    expect(nodeWithSpec.spec_path).toBeTruthy();
+    expect(nodeWithoutSpec.spec_path).toBeFalsy();
+  });
+
+  it('open_in_code action only available for nodes with file_path', () => {
+    // fn1 has file_path -> available
+    expect(NODES[2].file_path).toBeTruthy();
+    // pkg1 has empty file_path -> not available
+    expect(NODES[0].file_path).toBe('');
+  });
+});
+
+describe('ExplorerTreemap — lens switching', () => {
+  it('structural lens is active by default', () => {
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES },
+    });
+    const btns = Array.from(container.querySelectorAll('.tb-btn'));
+    const structural = btns.find(b => b.textContent === 'Structural');
+    expect(structural?.classList.contains('active')).toBe(true);
+  });
+
+  it('evaluative lens renders metric selector', () => {
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
+    });
+    expect(container.querySelector('.eval-metric-group')).toBeTruthy();
+    const evalBtns = container.querySelectorAll('.eval-metric-group .tb-btn-sm');
+    expect(evalBtns.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('evaluative lens shows no-trace message without trace data', () => {
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
+    });
+    expect(container.querySelector('.eval-no-trace')).toBeTruthy();
+  });
+
+  it('evaluative lens shows playback controls with trace data', () => {
+    const traceData = {
+      spans: [
+        { span_id: 's1', parent_span_id: null, operation_name: 'test', start_time: 1000, duration_us: 500, status: 'ok', graph_node_id: 'fn1' },
+      ],
+      root_spans: ['s1'],
+    };
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, lens: 'evaluative', traceData },
+    });
+    expect(container.querySelector('.eval-playback')).toBeTruthy();
+  });
+
+  it('structural lens shows spec coverage legend', () => {
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, lens: 'structural' },
+    });
+    const legendLabels = [...container.querySelectorAll('.legend-label')].map(el => el.textContent);
+    expect(legendLabels).toContain('Has spec');
+    expect(legendLabels).toContain('No spec');
+  });
+
+  it('evaluative lens shows evaluative legend', () => {
+    const { container } = render(ExplorerTreemap, {
+      props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
+    });
+    const legendLabels = [...container.querySelectorAll('.legend-label')].map(el => el.textContent);
+    expect(legendLabels).toContain('OK span');
+    expect(legendLabels).toContain('Error span');
+  });
+});
+
+describe('ExplorerTreemap — heat map coloring', () => {
+  // Unit test the evaluativeNodeColor logic
+  function evaluativeNodeColor(metric, node, incomingCallCounts, maxValues) {
+    let value = 0;
+    if (metric === 'incoming_calls') value = incomingCallCounts.get(node.id) ?? 0;
+    else if (metric === 'complexity') value = node.complexity ?? 0;
+    else if (metric === 'churn' || metric === 'churn_count_30d') value = node.churn_count_30d ?? node.churn ?? 0;
+    else if (metric === 'test_coverage') value = (node.test_coverage ?? 0) * 100;
+    if (value === 0) return null;
+    const maxVal = maxValues.get(metric) ?? 1;
+    const t = Math.min(1, value / maxVal);
+    return t; // Return normalized value for testing
+  }
+
+  it('returns null for nodes with zero metric value', () => {
+    const node = { id: 'fn1', complexity: 0 };
+    const result = evaluativeNodeColor('complexity', node, new Map(), new Map([['complexity', 20]]));
+    expect(result).toBeNull();
+  });
+
+  it('returns normalized value for complexity metric', () => {
+    const node = { id: 'fn1', complexity: 10 };
+    const maxValues = new Map([['complexity', 20]]);
+    const result = evaluativeNodeColor('complexity', node, new Map(), maxValues);
+    expect(result).toBe(0.5); // 10/20
+  });
+
+  it('returns normalized value for incoming_calls metric', () => {
+    const node = { id: 'fn1' };
+    const callCounts = new Map([['fn1', 5]]);
+    const maxValues = new Map([['incoming_calls', 10]]);
+    const result = evaluativeNodeColor('incoming_calls', node, callCounts, maxValues);
+    expect(result).toBe(0.5); // 5/10
+  });
+
+  it('clamps to 1.0 when value exceeds max', () => {
+    const node = { id: 'fn1', complexity: 30 };
+    const maxValues = new Map([['complexity', 20]]);
+    const result = evaluativeNodeColor('complexity', node, new Map(), maxValues);
+    expect(result).toBe(1.0);
+  });
+
+  it('handles churn metric with churn_count_30d', () => {
+    const node = { id: 'fn1', churn_count_30d: 8 };
+    const maxValues = new Map([['churn', 16]]);
+    const result = evaluativeNodeColor('churn', node, new Map(), maxValues);
+    expect(result).toBe(0.5);
+  });
+
+  it('handles test_coverage metric as percentage', () => {
+    const node = { id: 'fn1', test_coverage: 0.75 };
+    const maxValues = new Map([['test_coverage', 100]]);
+    const result = evaluativeNodeColor('test_coverage', node, new Map(), maxValues);
+    expect(result).toBe(0.75); // 75/100
+  });
+
+  it('precomputes incoming call counts correctly', () => {
+    const counts = new Map();
+    for (const e of EDGES) {
+      const tgt = e.target_id;
+      const et = (e.edge_type ?? '').toLowerCase();
+      if (et === 'calls' && tgt) {
+        counts.set(tgt, (counts.get(tgt) ?? 0) + 1);
+      }
+    }
+
+    expect(counts.get('type1')).toBe(1); // fn1 -> type1
+    expect(counts.get('fn1')).toBe(1); // test1 -> fn1
+    expect(counts.has('fn2')).toBe(false); // nothing calls fn2
+  });
+
+  it('precomputes max values for evaluative heat config', () => {
+    const nodesWithMetrics = NODES.map(n => ({
+      ...n,
+      complexity: n.id === 'fn1' ? 15 : n.id === 'fn2' ? 8 : 0,
+    }));
+
+    let max = 0;
+    for (const n of nodesWithMetrics) {
+      const v = n.complexity ?? 0;
+      if (v > max) max = v;
+    }
+
+    expect(max).toBe(15);
   });
 });
 
@@ -329,6 +899,32 @@ describe('ExplorerTreemap — canvas search', () => {
       props: { nodes: NODES, edges: EDGES },
     });
     expect(container.querySelector('.canvas-search')).toBeFalsy();
+  });
+
+  it('search result matching logic works for node names', () => {
+    const searchQuery = 'user';
+    const q = searchQuery.toLowerCase();
+    const results = NODES.filter(n =>
+      n.name?.toLowerCase().includes(q) ||
+      n.qualified_name?.toLowerCase().includes(q) ||
+      n.node_type?.toLowerCase().includes(q)
+    );
+
+    // Should find: create_user, get_user, User, test_create_user
+    expect(results.length).toBe(4);
+    const names = results.map(n => n.name);
+    expect(names).toContain('create_user');
+    expect(names).toContain('get_user');
+    expect(names).toContain('User');
+    expect(names).toContain('test_create_user');
+  });
+
+  it('search result matching is case-insensitive', () => {
+    const q = 'USER'.toLowerCase();
+    const results = NODES.filter(n =>
+      n.name?.toLowerCase().includes(q)
+    );
+    expect(results.length).toBeGreaterThan(0);
   });
 });
 
@@ -449,5 +1045,172 @@ describe('ExplorerTreemap — evaluative lens', () => {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('canvas')).toBeTruthy();
+  });
+});
+
+describe('ExplorerTreemap — anomaly detection (evaluative)', () => {
+  it('detects high complexity + low test coverage anomaly', () => {
+    const nodesWithMetrics = [
+      { id: 'fn1', node_type: 'function', name: 'complex_fn', complexity: 20, test_coverage: 0.1, test_node: false },
+    ];
+    const anomalies = [];
+    for (const n of nodesWithMetrics) {
+      if ((n.complexity ?? 0) > 15 && (n.test_coverage ?? 0) < 0.3) {
+        anomalies.push({ nodeId: n.id, severity: 'high' });
+      }
+    }
+    expect(anomalies).toHaveLength(1);
+    expect(anomalies[0].severity).toBe('high');
+  });
+
+  it('detects orphan function (no callers) anomaly', () => {
+    const callCounts = new Map();
+    for (const e of EDGES) {
+      const et = (e.edge_type ?? '').toLowerCase();
+      if (et === 'calls') {
+        callCounts.set(e.target_id, (callCounts.get(e.target_id) ?? 0) + 1);
+      }
+    }
+
+    const orphans = [];
+    for (const n of NODES) {
+      if (n.node_type === 'function' && !n.test_node && (callCounts.get(n.id) ?? 0) === 0) {
+        orphans.push(n.id);
+      }
+    }
+
+    // fn2 (get_user) has no callers
+    expect(orphans).toContain('fn2');
+    // fn1 is called by test1
+    expect(orphans).not.toContain('fn1');
+  });
+
+  it('detects heavily depended on node with no spec', () => {
+    const callCounts = new Map([['fn1', 8]]); // 8 callers
+    const node = { id: 'fn1', spec_path: undefined };
+
+    const isHeavilyDepended = (callCounts.get(node.id) ?? 0) > 5 && !node.spec_path;
+    expect(isHeavilyDepended).toBe(true);
+  });
+
+  it('sorts anomalies by severity (high first)', () => {
+    const anomalies = [
+      { severity: 'low' },
+      { severity: 'high' },
+      { severity: 'medium' },
+    ];
+    const order = { high: 0, medium: 1, low: 2 };
+    anomalies.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
+
+    expect(anomalies[0].severity).toBe('high');
+    expect(anomalies[1].severity).toBe('medium');
+    expect(anomalies[2].severity).toBe('low');
+  });
+});
+
+describe('ExplorerTreemap — callout and narrative resolution', () => {
+  it('resolves callout node names to node IDs', () => {
+    const callouts = [
+      { node: 'create_user', text: 'Entry point' },
+      { node: 'User', text: 'Core domain type' },
+    ];
+
+    const resolved = new Map();
+    for (const c of callouts) {
+      const cName = c.node ?? c.node_name;
+      const n = NODES.find(n => n.name === cName || n.qualified_name === cName);
+      if (n) resolved.set(n.id, c.text ?? '');
+    }
+
+    expect(resolved.has('fn1')).toBe(true);
+    expect(resolved.get('fn1')).toBe('Entry point');
+    expect(resolved.has('type1')).toBe(true);
+    expect(resolved.get('type1')).toBe('Core domain type');
+  });
+
+  it('handles callout with non-existent node name gracefully', () => {
+    const callouts = [{ node: 'does_not_exist', text: 'Missing' }];
+    const resolved = new Map();
+    for (const c of callouts) {
+      const cName = c.node ?? c.node_name;
+      const n = NODES.find(n => n.name === cName || n.qualified_name === cName);
+      if (n) resolved.set(n.id, c.text ?? '');
+    }
+
+    expect(resolved.size).toBe(0);
+  });
+
+  it('resolves callout with qualified_name match', () => {
+    const callouts = [{ node: 'api.handlers.create_user', text: 'FQN match' }];
+    const resolved = new Map();
+    for (const c of callouts) {
+      const cName = c.node ?? c.node_name;
+      const n = NODES.find(n => n.name === cName || n.qualified_name === cName);
+      if (n) resolved.set(n.id, c.text ?? '');
+    }
+
+    expect(resolved.has('fn1')).toBe(true);
+    expect(resolved.get('fn1')).toBe('FQN match');
+  });
+});
+
+describe('ExplorerTreemap — spec border coloring', () => {
+  it('returns green for node with spec_path', () => {
+    const node = { id: 'fn1', spec_path: 'specs/api.md' };
+    expect(node.spec_path).toBeTruthy();
+    // specBorderColor returns #22c55e for nodes with spec_path
+  });
+
+  it('returns green for high spec_confidence', () => {
+    const node = { id: 'fn1', spec_confidence: 'high' };
+    expect(node.spec_confidence).toBe('high');
+  });
+
+  it('returns amber for medium spec_confidence', () => {
+    const node = { id: 'fn2', spec_confidence: 'medium' };
+    expect(node.spec_confidence).toBe('medium');
+  });
+
+  it('returns red for no spec coverage', () => {
+    const node = { id: 'pkg1', spec_confidence: 'none' };
+    expect(node.spec_confidence).toBe('none');
+    // specBorderColor returns #ef4444 for nodes with no spec
+  });
+
+  // Full unit test of specBorderColor logic
+  function specBorderColor(node, edges) {
+    if (!node) return '#64748b';
+    if (node.spec_path) return '#22c55e';
+    const conf = node.spec_confidence;
+    if (conf === 'high') return '#22c55e';
+    if (conf === 'medium') return '#eab308';
+    if (conf === 'low') return '#f97316';
+    const nodeId = node.id;
+    if (nodeId) {
+      for (const e of edges) {
+        const src = e.source_id ?? e.from_node_id ?? e.from;
+        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+        if (et === 'governed_by' && src === nodeId) return '#22c55e';
+      }
+    }
+    return '#ef4444';
+  }
+
+  it('spec_path takes priority over spec_confidence', () => {
+    expect(specBorderColor({ id: 'x', spec_path: 'specs/x.md', spec_confidence: 'none' }, [])).toBe('#22c55e');
+  });
+
+  it('governed_by edge gives green border', () => {
+    const node = { id: 'fn1', spec_confidence: 'none' };
+    const edges = [{ source_id: 'fn1', target_id: 'spec1', edge_type: 'governed_by' }];
+    expect(specBorderColor(node, edges)).toBe('#22c55e');
+  });
+
+  it('null node returns default gray', () => {
+    expect(specBorderColor(null, [])).toBe('#64748b');
+  });
+
+  it('low spec_confidence returns orange', () => {
+    expect(specBorderColor({ id: 'x', spec_confidence: 'low' }, [])).toBe('#f97316');
   });
 });

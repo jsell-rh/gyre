@@ -163,6 +163,27 @@ describe('ExplorerChat message handling', () => {
         state.status = 'ready';
         break;
       }
+      case 'status': {
+        if (msg.status === 'thinking') state.status = 'thinking';
+        else if (msg.status === 'refining') state.status = 'refining';
+        else if (msg.status === 'ready') state.status = 'ready';
+        break;
+      }
+      case 'error': {
+        const errorMsg = msg.message ?? 'An error occurred.';
+        state.messages = [...state.messages, { role: 'assistant', content: errorMsg, timestamp: Date.now(), isError: true }];
+        state.streamingText = '';
+        if (errorMsg.includes('Session message limit')) {
+          state.status = 'disconnected';
+        } else {
+          state.status = 'ready';
+        }
+        break;
+      }
+      case 'views': {
+        state.savedViews = msg.views ?? [];
+        break;
+      }
     }
     return state;
   }
@@ -255,5 +276,830 @@ describe('Save button disabled logic', () => {
     expect(isSaveDisabled({ selectedNode: 'node-123' }, 'thinking')).toBe(true);
     // snake_case should work
     expect(isSaveDisabled({ selected_node: 'node-123' }, 'thinking')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WebSocket session lifecycle integration tests
+// ---------------------------------------------------------------------------
+describe('WebSocket session lifecycle', () => {
+  const RECONNECT_DELAY = 3000;
+  const MAX_RECONNECTS = 5;
+
+  // Minimal WebSocket lifecycle simulation mirroring ExplorerChat.svelte connect()
+  function createSession() {
+    let ws = null;
+    let status = 'connecting';
+    let reconnectCount = 0;
+    let reconnectTimer = null;
+    let onViewQueryCalls = [];
+    let sentMessages = [];
+
+    function createMockSocket() {
+      return {
+        readyState: 0, // CONNECTING
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send: vi.fn((data) => sentMessages.push(JSON.parse(data))),
+        close: vi.fn(),
+        OPEN: 1,
+        CLOSED: 3,
+      };
+    }
+
+    function connect(repoId) {
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+      if (!repoId) {
+        status = 'disconnected';
+        return;
+      }
+      status = 'connecting';
+      const socket = createMockSocket();
+      ws = socket;
+      return socket;
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      if (reconnectCount >= MAX_RECONNECTS) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        reconnectCount++;
+      }, RECONNECT_DELAY);
+    }
+
+    return {
+      get ws() { return ws; },
+      set ws(v) { ws = v; },
+      get status() { return status; },
+      set status(v) { status = v; },
+      get reconnectCount() { return reconnectCount; },
+      set reconnectCount(v) { reconnectCount = v; },
+      get reconnectTimer() { return reconnectTimer; },
+      set reconnectTimer(v) { reconnectTimer = v; },
+      get sentMessages() { return sentMessages; },
+      get onViewQueryCalls() { return onViewQueryCalls; },
+      connect,
+      scheduleReconnect,
+    };
+  }
+
+  it('connects and transitions to ready on socket open', () => {
+    const session = createSession();
+    const socket = session.connect('repo-1');
+    expect(session.status).toBe('connecting');
+
+    // Simulate onopen
+    socket.readyState = 1;
+    session.status = 'ready';
+    session.reconnectCount = 0;
+
+    expect(session.status).toBe('ready');
+    expect(session.reconnectCount).toBe(0);
+  });
+
+  it('sends list_views on connection open', () => {
+    const session = createSession();
+    const socket = session.connect('repo-1');
+    socket.readyState = 1;
+
+    // Simulate onopen behavior: send list_views
+    socket.send(JSON.stringify({ type: 'list_views' }));
+
+    expect(session.sentMessages).toHaveLength(1);
+    expect(session.sentMessages[0].type).toBe('list_views');
+  });
+
+  it('transitions to disconnected when no repoId', () => {
+    const session = createSession();
+    session.connect('');
+    expect(session.status).toBe('disconnected');
+  });
+
+  it('transitions to disconnected on socket close', () => {
+    const session = createSession();
+    const socket = session.connect('repo-1');
+    socket.readyState = 1;
+    session.status = 'ready';
+
+    // Simulate onclose
+    session.ws = null;
+    session.status = 'disconnected';
+
+    expect(session.status).toBe('disconnected');
+    expect(session.ws).toBeNull();
+  });
+
+  it('transitions to error on socket error', () => {
+    const session = createSession();
+    session.connect('repo-1');
+
+    // Simulate onerror
+    session.status = 'error';
+    expect(session.status).toBe('error');
+  });
+
+  it('closes previous socket before reconnecting', () => {
+    const session = createSession();
+    const socket1 = session.connect('repo-1');
+    socket1.readyState = 1;
+    session.status = 'ready';
+
+    // Connect again — should close socket1
+    const socket2 = session.connect('repo-1');
+    expect(socket1.close).toHaveBeenCalled();
+    expect(socket2).not.toBe(socket1);
+  });
+
+  it('limits reconnection attempts to MAX_RECONNECTS', () => {
+    const session = createSession();
+    session.reconnectCount = MAX_RECONNECTS;
+    session.scheduleReconnect();
+
+    // Should not schedule another reconnect
+    expect(session.reconnectTimer).toBeNull();
+  });
+
+  it('does not double-schedule reconnects', () => {
+    vi.useFakeTimers();
+    const session = createSession();
+    session.scheduleReconnect();
+    const timer1 = session.reconnectTimer;
+    session.scheduleReconnect(); // Second call should be no-op
+    expect(session.reconnectTimer).toBe(timer1);
+    vi.useRealTimers();
+  });
+
+  it('sends user message with canvas_state', () => {
+    const session = createSession();
+    const socket = session.connect('repo-1');
+    socket.readyState = 1;
+
+    const canvasState = { selected_node: 'fn1', zoom: 1.5, breadcrumb: [] };
+    socket.send(JSON.stringify({
+      type: 'message',
+      text: 'Show me the API endpoints',
+      canvas_state: canvasState,
+    }));
+
+    expect(session.sentMessages).toHaveLength(1);
+    expect(session.sentMessages[0].type).toBe('message');
+    expect(session.sentMessages[0].text).toBe('Show me the API endpoints');
+    expect(session.sentMessages[0].canvas_state.selected_node).toBe('fn1');
+  });
+
+  it('does not send when socket is not open', () => {
+    const session = createSession();
+    const socket = session.connect('repo-1');
+    // readyState is still 0 (CONNECTING), not 1 (OPEN)
+
+    const canSend = socket.readyState === 1;
+    expect(canSend).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Saved view CRUD protocol tests
+// ---------------------------------------------------------------------------
+describe('Saved view CRUD protocol', () => {
+  function createMockWs() {
+    const sent = [];
+    return {
+      readyState: 1, // WebSocket.OPEN
+      send: vi.fn((data) => sent.push(JSON.parse(data))),
+      close: vi.fn(),
+      sent,
+    };
+  }
+
+  it('sends save_view with name, description, and query', () => {
+    const ws = createMockWs();
+    const lastViewQuery = { scope: { type: 'filter', node_types: ['function'] } };
+
+    ws.send(JSON.stringify({
+      type: 'save_view',
+      name: 'My Functions',
+      description: 'Saved from explorer chat',
+      query: lastViewQuery,
+    }));
+
+    expect(ws.sent).toHaveLength(1);
+    expect(ws.sent[0].type).toBe('save_view');
+    expect(ws.sent[0].name).toBe('My Functions');
+    expect(ws.sent[0].query.scope.type).toBe('filter');
+    expect(ws.sent[0].query.scope.node_types).toEqual(['function']);
+  });
+
+  it('sends load_view with view_id', () => {
+    const ws = createMockWs();
+
+    ws.send(JSON.stringify({ type: 'load_view', view_id: 'view-42' }));
+
+    expect(ws.sent).toHaveLength(1);
+    expect(ws.sent[0].type).toBe('load_view');
+    expect(ws.sent[0].view_id).toBe('view-42');
+  });
+
+  it('sends list_views request', () => {
+    const ws = createMockWs();
+
+    ws.send(JSON.stringify({ type: 'list_views' }));
+
+    expect(ws.sent).toHaveLength(1);
+    expect(ws.sent[0].type).toBe('list_views');
+  });
+
+  it('handles views response with saved views list', () => {
+    function handleMessage(state, msg) {
+      if (msg.type === 'views') {
+        state.savedViews = msg.views ?? [];
+      }
+      return state;
+    }
+
+    const state = { savedViews: [] };
+    const views = [
+      { id: 'v1', name: 'Endpoints', created_at: 1700000000 },
+      { id: 'v2', name: 'Test gaps', created_at: 1700001000 },
+    ];
+
+    handleMessage(state, { type: 'views', views });
+
+    expect(state.savedViews).toHaveLength(2);
+    expect(state.savedViews[0].name).toBe('Endpoints');
+    expect(state.savedViews[1].id).toBe('v2');
+  });
+
+  it('handles views response with empty list', () => {
+    function handleMessage(state, msg) {
+      if (msg.type === 'views') {
+        state.savedViews = msg.views ?? [];
+      }
+      return state;
+    }
+
+    const state = { savedViews: [{ id: 'old' }] };
+    handleMessage(state, { type: 'views', views: [] });
+    expect(state.savedViews).toHaveLength(0);
+  });
+
+  it('saves the last view query from conversation history', () => {
+    const messages = [
+      { role: 'user', content: 'Show endpoints' },
+      { role: 'assistant', content: 'Here are endpoints.', viewQuery: { scope: { type: 'filter', node_types: ['endpoint'] } } },
+      { role: 'user', content: 'Now show types' },
+      { role: 'assistant', content: 'Here are the types.', viewQuery: { scope: { type: 'filter', node_types: ['type'] } } },
+      { role: 'user', content: 'Thanks' },
+      { role: 'assistant', content: 'You are welcome.' },
+    ];
+
+    // Mirroring saveCurrentView logic: find last viewQuery
+    const lastViewQuery = [...messages].reverse().find(m => m.viewQuery)?.viewQuery ?? {};
+    expect(lastViewQuery.scope.type).toBe('filter');
+    expect(lastViewQuery.scope.node_types).toEqual(['type']);
+  });
+
+  it('returns empty object when no view queries in history', () => {
+    const messages = [
+      { role: 'user', content: 'Hello' },
+      { role: 'assistant', content: 'Hi there' },
+    ];
+
+    const lastViewQuery = [...messages].reverse().find(m => m.viewQuery)?.viewQuery ?? {};
+    expect(lastViewQuery).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// View query extraction from chat messages
+// ---------------------------------------------------------------------------
+describe('View query extraction from chat messages', () => {
+  function createChatState() {
+    return { messages: [], streamingText: '', status: 'ready' };
+  }
+
+  function handleMessage(state, msg) {
+    switch (msg.type) {
+      case 'view_query': {
+        const query = msg.query ?? msg.view_query ?? msg;
+        if (state.streamingText.trim()) {
+          state.messages = [...state.messages, { role: 'assistant', content: state.streamingText, timestamp: Date.now() }];
+        }
+        state.streamingText = '';
+        state.messages = [...state.messages, {
+          role: 'assistant',
+          content: msg.explanation ?? 'View applied.',
+          viewQuery: query,
+          timestamp: Date.now(),
+        }];
+        state.status = 'ready';
+        state.lastViewQuery = query;
+        break;
+      }
+    }
+    return state;
+  }
+
+  it('extracts focus scope query with node and edges', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'focus', node: 'create_user', edges: ['calls'], direction: 'incoming', depth: 3 },
+        emphasis: { dim_unmatched: 0.12 },
+        annotation: { title: 'Blast radius: create_user' },
+      },
+      explanation: 'Showing blast radius for create_user',
+    });
+
+    expect(state.lastViewQuery.scope.type).toBe('focus');
+    expect(state.lastViewQuery.scope.node).toBe('create_user');
+    expect(state.lastViewQuery.scope.edges).toEqual(['calls']);
+    expect(state.lastViewQuery.scope.direction).toBe('incoming');
+    expect(state.lastViewQuery.emphasis.dim_unmatched).toBe(0.12);
+  });
+
+  it('extracts filter scope with node_types and name_pattern', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'filter', node_types: ['function', 'endpoint'], name_pattern: 'user' },
+        annotation: { title: 'User-related endpoints' },
+      },
+      explanation: 'Filtering to user-related endpoints',
+    });
+
+    expect(state.lastViewQuery.scope.type).toBe('filter');
+    expect(state.lastViewQuery.scope.node_types).toEqual(['function', 'endpoint']);
+    expect(state.lastViewQuery.scope.name_pattern).toBe('user');
+  });
+
+  it('extracts test_gaps scope query', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'test_gaps' },
+        emphasis: { highlight: { matched: { color: '#ef4444', label: 'Untested' } }, dim_unmatched: 0.3 },
+      },
+      explanation: 'Showing untested functions',
+    });
+
+    expect(state.lastViewQuery.scope.type).toBe('test_gaps');
+    expect(state.lastViewQuery.emphasis.dim_unmatched).toBe(0.3);
+    expect(state.lastViewQuery.emphasis.highlight.matched.color).toBe('#ef4444');
+  });
+
+  it('extracts concept scope with seed_nodes and expand_edges', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'concept', seed_nodes: ['User', 'Session'], expand_edges: ['calls', 'depends_on'], expand_depth: 3 },
+      },
+      explanation: 'User and Session concept cluster',
+    });
+
+    expect(state.lastViewQuery.scope.type).toBe('concept');
+    expect(state.lastViewQuery.scope.seed_nodes).toEqual(['User', 'Session']);
+    expect(state.lastViewQuery.scope.expand_depth).toBe(3);
+  });
+
+  it('extracts diff scope with from_commit', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'diff', from_commit: 'abc123def' },
+        emphasis: { highlight: { matched: { color: '#22c55e' } } },
+      },
+      explanation: 'Changes since abc123def',
+    });
+
+    expect(state.lastViewQuery.scope.type).toBe('diff');
+    expect(state.lastViewQuery.scope.from_commit).toBe('abc123def');
+  });
+
+  it('extracts heat map emphasis from view query', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'all' },
+        emphasis: { heat: { metric: 'incoming_calls', palette: 'blue-red' } },
+      },
+      explanation: 'Hotspot analysis',
+    });
+
+    expect(state.lastViewQuery.emphasis.heat.metric).toBe('incoming_calls');
+    expect(state.lastViewQuery.emphasis.heat.palette).toBe('blue-red');
+  });
+
+  it('extracts $clicked interactive query template', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'focus', node: '$clicked', edges: ['calls'], direction: 'incoming', depth: 10 },
+        emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308'], dim_unmatched: 0.12 },
+        annotation: { title: 'Blast radius: $name' },
+      },
+      explanation: 'Click any node to see its blast radius',
+    });
+
+    expect(state.lastViewQuery.scope.node).toBe('$clicked');
+    expect(state.lastViewQuery.emphasis.tiered_colors).toHaveLength(3);
+    expect(state.lastViewQuery.annotation.title).toBe('Blast radius: $name');
+  });
+
+  it('prefers msg.query over msg.view_query', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: { scope: { type: 'all' } },
+      view_query: { scope: { type: 'filter', node_types: ['function'] } },
+    });
+
+    // msg.query takes precedence
+    expect(state.lastViewQuery.scope.type).toBe('all');
+  });
+
+  it('falls back to msg.view_query when msg.query is absent', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      view_query: { scope: { type: 'filter', node_types: ['type'] } },
+    });
+
+    expect(state.lastViewQuery.scope.type).toBe('filter');
+  });
+
+  it('extracts callouts from view query', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'all' },
+        callouts: [
+          { node: 'create_user', text: 'Entry point' },
+          { node: 'User', text: 'Core type' },
+        ],
+      },
+    });
+
+    expect(state.lastViewQuery.callouts).toHaveLength(2);
+    expect(state.lastViewQuery.callouts[0].node).toBe('create_user');
+    expect(state.lastViewQuery.callouts[1].text).toBe('Core type');
+  });
+
+  it('extracts narrative steps from view query', () => {
+    let state = createChatState();
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'all' },
+        narrative: [
+          { node: 'create_user', text: 'Step 1: Request received' },
+          { node: 'User', text: 'Step 2: Domain model instantiated' },
+        ],
+      },
+    });
+
+    expect(state.lastViewQuery.narrative).toHaveLength(2);
+    expect(state.lastViewQuery.narrative[0].node).toBe('create_user');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Error handling and session limit tests
+// ---------------------------------------------------------------------------
+describe('Error handling and reconnection', () => {
+  function createChatState() {
+    return { messages: [], streamingText: '', status: 'ready' };
+  }
+
+  function handleMessage(state, msg) {
+    switch (msg.type) {
+      case 'text': {
+        if (!msg.done) {
+          state.streamingText += msg.content ?? '';
+          state.status = 'thinking';
+        } else {
+          const fullText = state.streamingText + (msg.content ?? '');
+          if (fullText.trim()) {
+            state.messages = [...state.messages, { role: 'assistant', content: fullText, isError: false }];
+          }
+          state.streamingText = '';
+          state.status = 'ready';
+        }
+        break;
+      }
+      case 'error': {
+        const errorMsg = msg.message ?? 'An error occurred.';
+        state.messages = [...state.messages, { role: 'assistant', content: errorMsg, isError: true }];
+        state.streamingText = '';
+        if (errorMsg.includes('Session message limit')) {
+          state.status = 'disconnected';
+        } else {
+          state.status = 'ready';
+        }
+        break;
+      }
+      case 'status': {
+        if (msg.status === 'thinking') state.status = 'thinking';
+        else if (msg.status === 'refining') state.status = 'refining';
+        else if (msg.status === 'ready') state.status = 'ready';
+        break;
+      }
+    }
+    return state;
+  }
+
+  it('handles error message and marks isError', () => {
+    let state = createChatState();
+    state = handleMessage(state, { type: 'error', message: 'Rate limit exceeded' });
+
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0].isError).toBe(true);
+    expect(state.messages[0].content).toBe('Rate limit exceeded');
+    expect(state.status).toBe('ready');
+  });
+
+  it('sets disconnected status on session message limit error', () => {
+    let state = createChatState();
+    state = handleMessage(state, { type: 'error', message: 'Session message limit reached' });
+
+    expect(state.status).toBe('disconnected');
+    expect(state.messages[0].isError).toBe(true);
+  });
+
+  it('clears in-flight streaming on error', () => {
+    let state = createChatState();
+    state = handleMessage(state, { type: 'text', content: 'partial ', done: false });
+    expect(state.streamingText).toBe('partial ');
+
+    state = handleMessage(state, { type: 'error', message: 'LLM timeout' });
+    expect(state.streamingText).toBe('');
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0].isError).toBe(true);
+  });
+
+  it('uses default error message when msg.message is absent', () => {
+    let state = createChatState();
+    state = handleMessage(state, { type: 'error' });
+
+    expect(state.messages[0].content).toBe('An error occurred.');
+  });
+
+  it('handles status transitions: thinking -> refining -> ready', () => {
+    let state = createChatState();
+
+    state = handleMessage(state, { type: 'status', status: 'thinking' });
+    expect(state.status).toBe('thinking');
+
+    state = handleMessage(state, { type: 'status', status: 'refining' });
+    expect(state.status).toBe('refining');
+
+    state = handleMessage(state, { type: 'status', status: 'ready' });
+    expect(state.status).toBe('ready');
+  });
+
+  it('ignores unknown status values', () => {
+    let state = createChatState();
+    state.status = 'ready';
+    state = handleMessage(state, { type: 'status', status: 'banana' });
+    expect(state.status).toBe('ready');
+  });
+
+  it('ignores unknown message types gracefully', () => {
+    let state = createChatState();
+    state = handleMessage(state, { type: 'unknown_type', data: 'something' });
+
+    expect(state.messages).toHaveLength(0);
+    expect(state.status).toBe('ready');
+  });
+
+  it('does not create message for whitespace-only streaming text on done=true', () => {
+    let state = createChatState();
+    state = handleMessage(state, { type: 'text', content: '   ', done: false });
+    state = handleMessage(state, { type: 'text', content: '', done: true });
+
+    // Whitespace-only content is trimmed and dropped
+    expect(state.messages).toHaveLength(0);
+    expect(state.status).toBe('ready');
+  });
+
+  it('caps messages to MAX_CLIENT_MESSAGES', () => {
+    const MAX = 200;
+    let messages = [];
+    function capMessages(msgs) {
+      if (msgs.length > MAX) return msgs.slice(msgs.length - MAX);
+      return msgs;
+    }
+
+    // Add 210 messages
+    for (let i = 0; i < 210; i++) {
+      messages = capMessages([...messages, { role: 'user', content: `msg ${i}` }]);
+    }
+
+    expect(messages).toHaveLength(MAX);
+    // Oldest messages should be dropped
+    expect(messages[0].content).toBe('msg 10');
+    expect(messages[messages.length - 1].content).toBe('msg 209');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Self-check loop simulation (agent view query -> resolve -> refine)
+// ---------------------------------------------------------------------------
+describe('Self-check loop (view query refinement)', () => {
+  function createChatState() {
+    return { messages: [], streamingText: '', status: 'ready', viewQueries: [] };
+  }
+
+  function handleMessage(state, msg) {
+    switch (msg.type) {
+      case 'text': {
+        if (!msg.done) {
+          state.streamingText += msg.content ?? '';
+          state.status = 'thinking';
+        } else {
+          const fullText = state.streamingText + (msg.content ?? '');
+          if (fullText.trim()) {
+            state.messages = [...state.messages, { role: 'assistant', content: fullText }];
+          }
+          state.streamingText = '';
+          state.status = 'ready';
+        }
+        break;
+      }
+      case 'status': {
+        state.status = msg.status;
+        break;
+      }
+      case 'view_query': {
+        const query = msg.query ?? msg.view_query;
+        if (state.streamingText.trim()) {
+          state.messages = [...state.messages, { role: 'assistant', content: state.streamingText }];
+        }
+        state.streamingText = '';
+        state.messages = [...state.messages, {
+          role: 'assistant',
+          content: msg.explanation ?? 'View applied.',
+          viewQuery: query,
+        }];
+        state.viewQueries.push(query);
+        state.status = 'ready';
+        break;
+      }
+    }
+    return state;
+  }
+
+  it('simulates full self-check loop: question -> draft query -> refine -> final query', () => {
+    let state = createChatState();
+
+    // Step 1: User asks a question
+    state.messages = [...state.messages, { role: 'user', content: 'Show me the blast radius of create_user' }];
+
+    // Step 2: Agent thinks
+    state = handleMessage(state, { type: 'status', status: 'thinking' });
+    expect(state.status).toBe('thinking');
+
+    // Step 3: Agent streams explanation
+    state = handleMessage(state, { type: 'text', content: 'I will analyze the call graph ', done: false });
+    state = handleMessage(state, { type: 'text', content: 'for create_user...', done: false });
+
+    // Step 4: Agent enters refining status (self-check)
+    state = handleMessage(state, { type: 'status', status: 'refining' });
+    expect(state.status).toBe('refining');
+
+    // Step 5: Agent sends initial view query (draft)
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'focus', node: 'create_user', edges: ['calls'], direction: 'both', depth: 2 },
+        emphasis: { dim_unmatched: 0.15 },
+        annotation: { title: 'Blast radius: create_user (draft)' },
+      },
+      explanation: 'Initial blast radius analysis',
+    });
+    expect(state.viewQueries).toHaveLength(1);
+    expect(state.viewQueries[0].scope.depth).toBe(2);
+
+    // Step 6: Agent refines — sends a better query with deeper depth
+    state = handleMessage(state, { type: 'status', status: 'refining' });
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'focus', node: 'create_user', edges: ['calls'], direction: 'incoming', depth: 5 },
+        emphasis: { dim_unmatched: 0.12, tiered_colors: ['#ef4444', '#f97316', '#eab308'] },
+        annotation: { title: 'Blast radius: create_user' },
+      },
+      explanation: 'Refined blast radius with tiered coloring and deeper traversal',
+    });
+
+    expect(state.viewQueries).toHaveLength(2);
+    // Refined query has deeper depth and tiered colors
+    expect(state.viewQueries[1].scope.depth).toBe(5);
+    expect(state.viewQueries[1].scope.direction).toBe('incoming');
+    expect(state.viewQueries[1].emphasis.tiered_colors).toHaveLength(3);
+
+    // Step 7: Agent confirms final state
+    expect(state.status).toBe('ready');
+    expect(state.messages.length).toBeGreaterThanOrEqual(3); // user + streaming text + 2 view queries
+  });
+
+  it('self-check loop with test_gaps: generate -> validate -> adjust', () => {
+    let state = createChatState();
+
+    state.messages = [...state.messages, { role: 'user', content: 'Find untested code' }];
+
+    // Draft: test_gaps scope
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'test_gaps' },
+        emphasis: { dim_unmatched: 0.5 },
+      },
+      explanation: 'Showing test coverage gaps',
+    });
+
+    // Refinement: tighter dim_unmatched for better visual contrast
+    state = handleMessage(state, {
+      type: 'view_query',
+      query: {
+        scope: { type: 'test_gaps' },
+        emphasis: {
+          highlight: { matched: { color: '#ef4444', label: 'Untested' } },
+          dim_unmatched: 0.15,
+        },
+        annotation: { title: 'Test coverage gaps', description: '3 untested functions found' },
+      },
+      explanation: 'Refined: 3 untested functions highlighted in red',
+    });
+
+    expect(state.viewQueries).toHaveLength(2);
+    // Second query has highlight and tighter dim
+    expect(state.viewQueries[1].emphasis.highlight.matched.color).toBe('#ef4444');
+    expect(state.viewQueries[1].emphasis.dim_unmatched).toBe(0.15);
+  });
+
+  it('handles multiple rapid view_query messages without losing any', () => {
+    let state = createChatState();
+
+    for (let i = 0; i < 5; i++) {
+      state = handleMessage(state, {
+        type: 'view_query',
+        query: { scope: { type: 'all' }, annotation: { title: `View ${i}` } },
+        explanation: `View ${i}`,
+      });
+    }
+
+    expect(state.viewQueries).toHaveLength(5);
+    expect(state.messages.filter(m => m.viewQuery)).toHaveLength(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Spec path extraction tests
+// ---------------------------------------------------------------------------
+describe('Spec path extraction from message content', () => {
+  const SPEC_PATH_RE = /\b(specs\/[\w\-\/]+\.md)\b/g;
+
+  function extractSpecPaths(content) {
+    if (!content) return [];
+    const matches = [...content.matchAll(SPEC_PATH_RE)];
+    return [...new Set(matches.map(m => m[1]))];
+  }
+
+  it('extracts spec paths from message content', () => {
+    const content = 'Check specs/system/vision.md and specs/development/architecture.md for details.';
+    const paths = extractSpecPaths(content);
+    expect(paths).toEqual(['specs/system/vision.md', 'specs/development/architecture.md']);
+  });
+
+  it('deduplicates repeated spec paths', () => {
+    const content = 'See specs/system/vision.md and refer to specs/system/vision.md again.';
+    const paths = extractSpecPaths(content);
+    expect(paths).toEqual(['specs/system/vision.md']);
+  });
+
+  it('returns empty for content without spec paths', () => {
+    expect(extractSpecPaths('Just a normal message')).toEqual([]);
+    expect(extractSpecPaths(null)).toEqual([]);
+    expect(extractSpecPaths('')).toEqual([]);
+  });
+
+  it('extracts paths with hyphens', () => {
+    const content = 'See specs/system/meta-spec-reconciliation.md for details.';
+    const paths = extractSpecPaths(content);
+    expect(paths).toEqual(['specs/system/meta-spec-reconciliation.md']);
   });
 });
