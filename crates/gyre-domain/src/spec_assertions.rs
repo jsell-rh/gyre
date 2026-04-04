@@ -330,7 +330,7 @@ fn evaluate_one(
         Predicate::HasImplementors(cmp, n) => {
             eval_has_implementors(&subject_nodes, cmp, *n, edges, base)
         }
-        Predicate::GovernedBy(path) => eval_governed_by(&subject_nodes, path, base),
+        Predicate::GovernedBy(path) => eval_governed_by(&subject_nodes, path, nodes, edges, base),
         Predicate::Calls(target) => eval_calls(&subject_nodes, target, nodes, edges, base, false),
         Predicate::NotCalls(target) => eval_calls(&subject_nodes, target, nodes, edges, base, true),
         Predicate::TestCoverage(cmp, threshold) => eval_numeric_predicate(
@@ -509,11 +509,41 @@ fn eval_has_implementors(
 fn eval_governed_by(
     subject_nodes: &[&GraphNode],
     path: &str,
+    all_nodes: &[GraphNode],
+    edges: &[GraphEdge],
     base: AssertionResult,
 ) -> AssertionResult {
-    let any_governed = subject_nodes
+    let lower_path = path.to_lowercase();
+
+    // Check 1: spec_path match (case-insensitive substring, consistent with view_query_resolver)
+    let any_governed_by_path = subject_nodes.iter().any(|n| {
+        n.spec_path
+            .as_deref()
+            .map(|sp| sp.to_lowercase().contains(&lower_path))
+            .unwrap_or(false)
+    });
+
+    // Check 2: GovernedBy edge match — find spec nodes matching the path, then check edges
+    let spec_node_ids: std::collections::HashSet<String> = all_nodes
         .iter()
-        .any(|n| n.spec_path.as_deref().map(|sp| sp == path).unwrap_or(false));
+        .filter(|n| {
+            n.deleted_at.is_none()
+                && n.spec_path
+                    .as_ref()
+                    .map_or(false, |sp| sp.to_lowercase().contains(&lower_path))
+        })
+        .map(|n| n.id.to_string())
+        .collect();
+    let subject_ids: std::collections::HashSet<String> =
+        subject_nodes.iter().map(|n| n.id.to_string()).collect();
+    let any_governed_by_edge = edges.iter().any(|e| {
+        e.deleted_at.is_none()
+            && e.edge_type == gyre_common::graph::EdgeType::GovernedBy
+            && subject_ids.contains(&e.source_id.to_string())
+            && spec_node_ids.contains(&e.target_id.to_string())
+    });
+
+    let any_governed = any_governed_by_path || any_governed_by_edge;
 
     AssertionResult {
         passed: any_governed,
@@ -525,7 +555,7 @@ fn eval_governed_by(
                 .filter_map(|n| n.spec_path.as_deref().map(|s| format!("\"{s}\"")))
                 .collect();
             if actual.is_empty() {
-                format!("Subject has no spec_path (expected \"{path}\")")
+                format!("Subject has no spec_path and no GovernedBy edge (expected \"{path}\")")
             } else {
                 format!(
                     "Subject governed by {} (expected \"{path}\")",

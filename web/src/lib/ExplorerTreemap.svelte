@@ -3562,9 +3562,10 @@
     const node = contextMenu.node;
     contextMenu = null;
     if (action === 'trace') {
-      // Trace from here: show causal flow using Calls + RoutesTo edges
+      // Trace from here: show causal flow using Calls + RoutesTo edges.
+      // Depth capped at 5 to keep the visualization readable for branching call graphs.
       onInteractiveQuery({
-        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 10 },
+        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 5 },
         emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#94a3b8'], dim_unmatched: 0.12 },
         edges: { filter: ['calls', 'routes_to'] },
         zoom: 'fit',
