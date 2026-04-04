@@ -561,25 +561,43 @@ fn read_lsp_message(
 
 /// Read a single LSP message with a timeout.
 ///
-/// Spawns a background thread to perform the blocking read, then waits up to
-/// `timeout` for a result.  Returns `Ok(None)` on timeout rather than an error
-/// so callers can retry without treating it as fatal.
+/// Uses `poll(2)` on the stdout file descriptor to wait for data availability
+/// before attempting the blocking read. Returns `Ok(None)` on timeout rather
+/// than an error so callers can retry without treating it as fatal.
 fn read_lsp_message_with_timeout(
     reader: &mut BufReader<std::process::ChildStdout>,
     timeout: Duration,
 ) -> std::io::Result<Option<serde_json::Value>> {
-    // We cannot set a read timeout on ChildStdout directly, so we use a
-    // simple polling approach: check if data is available by attempting a
-    // non-blocking read of the header line.  Since the LSP server is local
-    // and actively sending progress notifications during indexing, the
-    // latency between messages is well under our 500ms polling interval.
-    //
-    // For simplicity (and because this only runs during the indexing wait),
-    // we just call the blocking `read_lsp_message` with the understanding
-    // that if rust-analyzer is alive it will send messages frequently.  The
-    // outer loop has its own deadline so we won't hang forever.
-    let _timeout = timeout; // acknowledged; blocking read is acceptable here
-    read_lsp_message(reader)
+    use std::os::unix::io::AsRawFd;
+
+    // If the BufReader already has buffered data, skip the poll and read directly.
+    if !reader.buffer().is_empty() {
+        return read_lsp_message(reader);
+    }
+
+    // Use poll(2) to wait for data on the stdout fd with a timeout.
+    let fd = reader.get_ref().as_raw_fd();
+    let timeout_ms = timeout.as_millis() as i32;
+
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+
+    // SAFETY: pollfd is a valid stack-allocated struct, nfds=1 is correct.
+    let ret = unsafe { libc::poll(&mut pollfd as *mut libc::pollfd, 1, timeout_ms) };
+
+    if ret <= 0 {
+        // 0 = timeout, negative = error (treat as timeout for simplicity)
+        return Ok(None);
+    }
+
+    if pollfd.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+        read_lsp_message(reader)
+    } else {
+        Ok(None)
+    }
 }
 
 fn read_lsp_response_with_timeout(
@@ -588,16 +606,9 @@ fn read_lsp_response_with_timeout(
     deadline: Instant,
 ) -> std::io::Result<Option<Vec<serde_json::Value>>> {
     // Read messages until we get the response with our ID or timeout.
-    // Use a thread to avoid blocking indefinitely on read_line.
+    // Uses poll-based read_lsp_message_with_timeout per message to avoid
+    // blocking indefinitely on a stuck LSP server.
     for _ in 0..100 {
-        if Instant::now() > deadline {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "LSP response timeout",
-            ));
-        }
-
-        // Read with a per-message timeout to avoid hanging on a stuck LSP.
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(std::io::Error::new(
@@ -606,7 +617,10 @@ fn read_lsp_response_with_timeout(
             ));
         }
 
-        match read_lsp_message(reader)? {
+        // Use at most 2 seconds per individual message read, capped by the overall deadline.
+        let per_msg_timeout = remaining.min(Duration::from_secs(2));
+
+        match read_lsp_message_with_timeout(reader, per_msg_timeout)? {
             Some(msg) => {
                 if let Some(id) = msg.get("id").and_then(|i| i.as_u64()) {
                     if id as usize == expected_id {
@@ -621,7 +635,15 @@ fn read_lsp_response_with_timeout(
                 }
                 // Not our response — continue reading (likely a notification)
             }
-            None => return Ok(None),
+            None => {
+                // Timeout on this message — check overall deadline
+                if Instant::now() > deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "LSP response timeout",
+                    ));
+                }
+            }
         }
     }
     Ok(None) // Gave up after too many messages
