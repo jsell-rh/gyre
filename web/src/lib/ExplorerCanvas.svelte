@@ -2541,7 +2541,9 @@
 
   // ── Ghost overlay drawing ─────────────────────────────────────────
   function drawGhostOverlays(ctx) {
-    const basePulse = 0.5 + 0.5 * Math.sin(ghostPulsePhase * Math.PI * 2);
+    // Structural lens: "No particles. No animation. Pure structure."
+    // Ghost overlays still render (they represent spec predictions) but without pulse.
+    const basePulse = lens === 'structural' ? 0 : 0.5 + 0.5 * Math.sin(ghostPulsePhase * Math.PI * 2);
     ghostNodePositions.clear();
 
     for (const ghost of ghostOverlays) {
@@ -4091,8 +4093,16 @@
     return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: maxX - minX, h: maxY - minY };
   }
 
-  // Keyboard: Escape to zoom out to root, / to search
+  // Keyboard: Escape to zoom out to root, / or Cmd+K to search
   function onKeyDown(e) {
+    // Cmd+K / Ctrl+K: global search (spec: "Cmd+K is global search")
+    if (e.key === 'k' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      searchOpen = true;
+      searchQuery = '';
+      requestAnimationFrame(() => searchInputEl?.focus());
+      return;
+    }
     if (e.key === '/' && !searchOpen) {
       e.preventDefault();
       searchOpen = true;
@@ -4684,18 +4694,47 @@
             <span class="tooltip-spec">spec: {tooltipNode.spec_path}</span>
           {/if}
           <div class="tooltip-eval">
-            {#if tooltipNode.complexity != null}<span>complexity: {tooltipNode.complexity}</span>{/if}
-            {#if tooltipNode.churn_count_30d != null}<span>churn/30d: {tooltipNode.churn_count_30d}</span>{/if}
-            {#if tooltipNode.test_coverage != null}<span>test coverage: {Math.round(tooltipNode.test_coverage * 100)}%</span>{/if}
             {#if tooltipNode.test_node}<span class="tooltip-test-badge">test function</span>{/if}
+            {#if tooltipNode.complexity != null || tooltipNode.churn_count_30d != null || tooltipNode.test_coverage != null}
+              <div class="tooltip-insight">
+                {#if (tooltipNode.complexity ?? 0) > 30}
+                  <span class="insight-warn">High complexity ({tooltipNode.complexity}) — candidate for decomposition</span>
+                {:else if (tooltipNode.complexity ?? 0) > 15}
+                  <span class="insight-note">Moderate complexity ({tooltipNode.complexity})</span>
+                {:else if tooltipNode.complexity != null}
+                  <span class="insight-ok">Simple ({tooltipNode.complexity})</span>
+                {/if}
+                {#if (tooltipNode.churn_count_30d ?? 0) > 15}
+                  <span class="insight-warn">Frequently changed ({tooltipNode.churn_count_30d}/month) — may need stabilization</span>
+                {:else if (tooltipNode.churn_count_30d ?? 0) > 5}
+                  <span class="insight-note">Active development ({tooltipNode.churn_count_30d}/month)</span>
+                {:else if tooltipNode.churn_count_30d != null && tooltipNode.churn_count_30d > 0}
+                  <span class="insight-ok">Stable ({tooltipNode.churn_count_30d}/month)</span>
+                {/if}
+                {#if tooltipNode.test_coverage != null && tooltipNode.test_coverage < 0.3}
+                  <span class="insight-warn">Low test coverage ({Math.round(tooltipNode.test_coverage * 100)}%)</span>
+                {:else if tooltipNode.test_coverage != null && tooltipNode.test_coverage < 0.7}
+                  <span class="insight-note">Partial coverage ({Math.round(tooltipNode.test_coverage * 100)}%)</span>
+                {:else if tooltipNode.test_coverage != null}
+                  <span class="insight-ok">Well tested ({Math.round(tooltipNode.test_coverage * 100)}%)</span>
+                {/if}
+                {#if (tooltipNode.complexity ?? 0) > 20 && (tooltipNode.test_coverage == null || tooltipNode.test_coverage < 0.5)}
+                  <span class="insight-risk">Risk: complex + undertested</span>
+                {/if}
+              </div>
+            {/if}
             {#if nodeSpanStats.get(tooltipNode.id)}
               {@const spanSt = nodeSpanStats.get(tooltipNode.id)}
               <div class="tooltip-span-stats">
-                <span>spans: {spanSt.spanCount}</span>
                 <span>p50: {spanSt.p50 < 1000 ? `${Math.round(spanSt.p50)}\u00B5s` : `${(spanSt.p50 / 1000).toFixed(1)}ms`}</span>
                 <span>p95: {spanSt.p95 < 1000 ? `${Math.round(spanSt.p95)}\u00B5s` : `${(spanSt.p95 / 1000).toFixed(1)}ms`}</span>
-                {#if spanSt.errorRate > 0}
-                  <span class="tooltip-error-rate">error rate: {Math.round(spanSt.errorRate * 100)}%</span>
+                {#if spanSt.p95 > spanSt.p50 * 5}
+                  <span class="insight-warn">High tail latency (p95/p50 = {(spanSt.p95 / Math.max(1, spanSt.p50)).toFixed(1)}x)</span>
+                {/if}
+                {#if spanSt.errorRate > 0.05}
+                  <span class="insight-warn">Error rate: {Math.round(spanSt.errorRate * 100)}%</span>
+                {:else if spanSt.errorRate > 0}
+                  <span class="insight-note">Error rate: {Math.round(spanSt.errorRate * 100)}%</span>
                 {/if}
               </div>
             {/if}
@@ -5130,9 +5169,14 @@
   .tooltip-eval { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; border-top: 1px solid #1e293b; padding-top: 4px; }
   .tooltip-eval span { font-size: 10px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace; }
   .tooltip-test-badge { color: #22c55e !important; font-weight: 600; }
+  .tooltip-insight { display: flex; flex-direction: column; gap: 1px; }
+  .tooltip-insight span { font-size: 10px; }
+  .insight-ok { color: #4ade80; }
+  .insight-note { color: #fbbf24; }
+  .insight-warn { color: #f97316; font-weight: 500; }
+  .insight-risk { color: #ef4444; font-weight: 600; font-size: 11px !important; }
   .tooltip-span-stats { margin-top: 2px; border-top: 1px dashed #334155; padding-top: 2px; }
-  .tooltip-span-stats span { display: inline-block; margin-right: 6px; }
-  .tooltip-error-rate { color: #ef4444 !important; font-weight: 600; }
+  .tooltip-span-stats span { display: inline-block; margin-right: 6px; font-size: 10px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace; }
 
   .treemap-minimap {
     position: absolute; bottom: 12px; right: 12px; border: 1px solid #334155;
