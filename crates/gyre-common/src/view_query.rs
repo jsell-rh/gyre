@@ -203,28 +203,102 @@ const MAX_DEPTH: u32 = 100;
 
 impl ViewQuery {
     /// Validate a ViewQuery and return a list of errors (empty = valid).
+    /// Known edge type strings.
+    const KNOWN_EDGE_TYPES: &'static [&'static str] = &[
+        "calls",
+        "contains",
+        "implements",
+        "depends_on",
+        "dependson",
+        "field_of",
+        "fieldof",
+        "returns",
+        "routes_to",
+        "routesto",
+        "renders",
+        "persists_to",
+        "persiststo",
+        "governed_by",
+        "governedby",
+        "produced_by",
+        "producedby",
+    ];
+
+    /// Known heat metric strings.
+    const KNOWN_HEAT_METRICS: &'static [&'static str] = &[
+        "complexity",
+        "churn",
+        "churn_count_30d",
+        "incoming_calls",
+        "outgoing_calls",
+        "test_coverage",
+        "field_count",
+        "test_fragility",
+    ];
+
+    /// Validate a ViewQuery and return a list of errors (empty = valid).
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
 
         // Bound depth fields to prevent DoS
         match &self.scope {
-            Scope::Focus { depth, .. } => {
+            Scope::Focus { depth, node, edges, .. } => {
                 if *depth > MAX_DEPTH {
                     errors.push(format!(
                         "Focus depth {} exceeds maximum of {MAX_DEPTH}",
                         depth
                     ));
                 }
+                if node.is_empty() {
+                    errors.push("Focus scope 'node' field must not be empty".to_string());
+                }
+                // Validate edge type strings
+                for e in edges {
+                    if !Self::KNOWN_EDGE_TYPES.contains(&e.to_lowercase().as_str()) {
+                        errors.push(format!(
+                            "Unknown edge type '{}' in Focus scope — known types: calls, contains, implements, depends_on, field_of, returns, routes_to, renders, persists_to, governed_by, produced_by",
+                            e
+                        ));
+                    }
+                }
             }
-            Scope::Concept { expand_depth, .. } => {
+            Scope::Concept {
+                expand_depth,
+                seed_nodes,
+                expand_edges,
+                ..
+            } => {
                 if *expand_depth > MAX_DEPTH {
                     errors.push(format!(
                         "Concept expand_depth {} exceeds maximum of {MAX_DEPTH}",
                         expand_depth
                     ));
                 }
+                if seed_nodes.is_empty() {
+                    errors.push(
+                        "Concept scope 'seed_nodes' must not be empty".to_string(),
+                    );
+                }
+                for e in expand_edges {
+                    if !Self::KNOWN_EDGE_TYPES.contains(&e.to_lowercase().as_str()) {
+                        errors.push(format!(
+                            "Unknown edge type '{}' in Concept scope — known types: calls, contains, implements, depends_on, field_of, returns, routes_to, renders, persists_to, governed_by, produced_by",
+                            e
+                        ));
+                    }
+                }
             }
             _ => {}
+        }
+
+        // Validate edge filter strings
+        for e in &self.edges.filter {
+            if !Self::KNOWN_EDGE_TYPES.contains(&e.to_lowercase().as_str()) {
+                errors.push(format!(
+                    "Unknown edge type '{}' in edge filter — known types: calls, contains, implements, depends_on, field_of, returns, routes_to, renders, persists_to, governed_by, produced_by",
+                    e
+                ));
+            }
         }
 
         // Validate dim_unmatched range (0.0-1.0)
@@ -232,6 +306,25 @@ impl ViewQuery {
             if !(0.0..=1.0).contains(&dim) {
                 errors.push(format!(
                     "dim_unmatched {dim} is out of range — must be between 0.0 and 1.0"
+                ));
+            }
+        }
+
+        // Validate tiered_colors is non-empty when present
+        if let Some(ref colors) = self.emphasis.tiered_colors {
+            if colors.is_empty() {
+                errors.push("tiered_colors array must not be empty when provided".to_string());
+            }
+        }
+
+        // Validate heat metric is recognized
+        if let Some(ref heat) = self.emphasis.heat {
+            if !heat.metric.is_empty()
+                && !Self::KNOWN_HEAT_METRICS.contains(&heat.metric.as_str())
+            {
+                errors.push(format!(
+                    "Unknown heat metric '{}' — known metrics: complexity, churn, incoming_calls, outgoing_calls, test_coverage, field_count, test_fragility",
+                    heat.metric
                 ));
             }
         }

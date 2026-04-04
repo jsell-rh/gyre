@@ -297,7 +297,16 @@ async fn handle_explorer_session(
                 // Use workspace_id from the repo we already validated.
                 let workspace_id = match state.repos.find_by_id(&rid).await {
                     Ok(Some(r)) => r.workspace_id.to_string(),
-                    _ => String::new(),
+                    _ => {
+                        let err = ExplorerServerMessage::Error {
+                            message: "Failed to resolve repository workspace. Please try again."
+                                .to_string(),
+                        };
+                        let _ = sender
+                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                            .await;
+                        continue;
+                    }
                 };
                 let now = crate::api::now_secs();
                 let view = SavedView {
@@ -456,6 +465,17 @@ async fn handle_explorer_session(
                         if v.is_system {
                             let err = ExplorerServerMessage::Error {
                                 message: "Cannot delete system views".to_string(),
+                            };
+                            let _ = sender
+                                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                                .await;
+                            continue;
+                        }
+                        // Only the creator can delete their own views.
+                        if v.created_by != auth.agent_id {
+                            let err = ExplorerServerMessage::Error {
+                                message: "Access denied: you can only delete your own views"
+                                    .to_string(),
                             };
                             let _ = sender
                                 .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
@@ -758,8 +778,10 @@ async fn run_explorer_agent_sdk(
         "history": history_json,
     });
 
+    let sdk_script = std::env::var("GYRE_EXPLORER_SDK_PATH")
+        .unwrap_or_else(|_| "scripts/explorer-agent.mjs".to_string());
     let mut child = tokio::process::Command::new("node")
-        .arg("scripts/explorer-agent.mjs")
+        .arg(&sdk_script)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -917,8 +939,12 @@ async fn run_explorer_agent(
     // Check if SDK-based explorer agent should be used.
     // Opt-in via GYRE_EXPLORER_SDK=1, or auto-enable when no LLM port is configured
     // but the SDK script exists (allows using the SDK as the sole LLM backend).
+    // SDK script path: use GYRE_EXPLORER_SDK_PATH env var for absolute path,
+    // or fall back to project-relative path only when GYRE_EXPLORER_SDK=1 is set explicitly.
+    let sdk_script_path = std::env::var("GYRE_EXPLORER_SDK_PATH")
+        .unwrap_or_else(|_| "scripts/explorer-agent.mjs".to_string());
     let use_sdk = std::env::var("GYRE_EXPLORER_SDK").unwrap_or_default() == "1"
-        || (std::path::Path::new("scripts/explorer-agent.mjs").exists() && state.llm.is_none());
+        || (std::path::Path::new(&sdk_script_path).exists() && state.llm.is_none());
     if use_sdk {
         return run_explorer_agent_sdk(
             state,
@@ -1521,13 +1547,14 @@ User messages may include a [Canvas: ...] prefix showing what's currently select
 - In practice, both resolve to the same node ID at query time. The difference is intent: $clicked implies the query should be re-evaluated on future clicks.
 
 ## Workflow
-1. Call graph_summary to understand the codebase structure
+1. Repository context is pre-loaded below — skip graph_summary unless you need detailed rankings or updated counts
 2. If you need specific nodes, call graph_nodes with a name_pattern
 3. If you need relationships, call graph_edges
-4. Generate a view query JSON and validate it with graph_query_dryrun
-5. If the dry-run has warnings, refine and dry-run again
-6. Output the view query in a <view_query>{ ... JSON ... }</view_query> block
-7. Provide a text explanation of what the visualization reveals
+4. For provenance questions ("who created X?", "when was Y modified?"), call node_provenance
+5. Generate a view query JSON and validate it with graph_query_dryrun
+6. If the dry-run has warnings, refine and dry-run again
+7. Output the view query in a <view_query>{ ... JSON ... }</view_query> block
+8. Provide a text explanation of what the visualization reveals
 
 ## Grounding Rules
 - EVERY claim must be traceable to actual nodes/edges from tool results
@@ -1583,8 +1610,7 @@ calls, contains, implements, depends_on, field_of, returns, routes_to, governed_
 4. For interactive (click-to-explore) queries, use $clicked in the focus node
 5. Keep groups focused (< 20 nodes each)
 6. Prefer "fit" zoom
-7. ALWAYS call graph_summary first
-8. ALWAYS dry-run before finalizing
+7. ALWAYS dry-run before finalizing
 9. Refine if dry-run returns warnings
 
 ## Output Format

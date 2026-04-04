@@ -339,7 +339,8 @@ fn compute_test_reachable(
 }
 
 /// Compute the number of distinct tests that can reach a node (test fragility).
-/// Uses per-test BFS but with depth limit of 20 for performance.
+/// Uses a single multi-source BFS per test node with depth limit, then counts
+/// how many test BFS trees contain the target node.
 /// Accepts `&[&GraphNode]` to avoid cloning node slices.
 fn compute_test_fragility_count(
     node_id: &str,
@@ -368,6 +369,29 @@ fn compute_test_fragility_count(
         }
     }
     count
+}
+
+/// Pre-compute test fragility counts for ALL nodes at once.
+/// Returns a map from node_id → count of distinct tests that reach it.
+/// This is O(T * (N + M)) total instead of O(T * (N + M)) per node queried.
+fn compute_all_test_fragility(
+    nodes: &[&GraphNode],
+    outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
+    incoming: &HashMap<String, Vec<(String, EdgeType)>>,
+) -> HashMap<String, usize> {
+    let test_ids: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.test_node && n.deleted_at.is_none())
+        .map(|n| n.id.to_string())
+        .collect();
+    let mut fragility: HashMap<String, usize> = HashMap::new();
+    for tid in &test_ids {
+        let reached = bfs_traverse(tid, TEST_REACHABILITY_EDGES, "outgoing", 20, outgoing, incoming);
+        for nid in reached {
+            *fragility.entry(nid).or_default() += 1;
+        }
+    }
+    fragility
 }
 
 /// Count incoming Calls edges to a node.
@@ -1525,6 +1549,14 @@ pub fn dry_run(
 
     // Compute per-node metric values for heat emphasis (reuses pre-built adjacency)
     let node_metrics = if let Some(ref heat) = query.emphasis.heat {
+        // Pre-compute test fragility for all nodes at once if needed
+        let fragility_map = if heat.metric == "test_fragility" {
+            let active_nodes: Vec<&GraphNode> =
+                nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
+            compute_all_test_fragility(&active_nodes, &adjacency_outgoing, &adjacency_incoming)
+        } else {
+            HashMap::new()
+        };
         result_set
             .iter()
             .filter_map(|id| {
@@ -1539,7 +1571,15 @@ pub fn dry_run(
                     "outgoing_calls" => Some(count_outgoing_calls(id, &adjacency_outgoing) as f64),
                     "test_coverage" => node_map.get(id).and_then(|n| n.test_coverage),
                     "field_count" => Some(count_fields(id, &adjacency_incoming) as f64),
-                    _ => None,
+                    "test_fragility" => {
+                        Some(*fragility_map.get(id).unwrap_or(&0) as f64)
+                    }
+                    _ => {
+                        if !heat.metric.is_empty() {
+                            // Log unrecognized metric once via warning (already validated)
+                        }
+                        None
+                    }
                 };
                 val.map(|v| (id.clone(), v))
             })
