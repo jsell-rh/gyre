@@ -56,6 +56,9 @@
   let predictLoading = $state(false);
   let predictError = $state('');
   let ghostOverlays = $state([]);
+  // Spec assertion results (system-explorer.md §9): green checkmark / red X per assertion
+  let specAssertionResults = $state([]); // [{ line, assertion_text, passed, explanation }]
+  let assertionsLoading = $state(false);
   // View query dry-run result (contains node_metrics for heat map)
   let viewQueryResult = $state(null);
 
@@ -94,11 +97,21 @@
     predictAffectedSpecs = [];
     predictEstimatedCost = null;
     predictConfidence = null;
+    specAssertionResults = [];
+    assertionsLoading = false;
     try {
       const spec = await api.specContent(specPath, selectedRepoId);
       const content = spec?.content ?? spec?.body ?? spec?.text ?? '';
       specEditorContent = content;
       specEditorOriginal = content;
+      // Check spec assertions in background (§9: green checkmark / red X inline)
+      if (content.includes('gyre:assert')) {
+        assertionsLoading = true;
+        api.checkSpecAssertions(selectedRepoId, specPath, content)
+          .then(result => { specAssertionResults = result?.assertions ?? []; })
+          .catch(() => { specAssertionResults = []; })
+          .finally(() => { assertionsLoading = false; });
+      }
     } catch (e) {
       specEditorError = e.message ?? 'Failed to load spec';
     } finally {
@@ -204,14 +217,55 @@
   let publishLoading = $state(false);
   let publishError = $state('');
 
+  // Debounced auto-prediction: run predictions 2s after user stops typing
+  // per spec §3.2-3.3: "the canvas updates live as you edit"
+  let predictDebounceTimer = null;
+  $effect(() => {
+    // Watch for spec content changes
+    const content = specEditorContent;
+    const original = specEditorOriginal;
+    const dirty = content !== original;
+    const path = specEditorPath;
+    const repo = selectedRepoId;
+
+    // Clear previous timer
+    if (predictDebounceTimer) clearTimeout(predictDebounceTimer);
+
+    // Only auto-predict when editing is dirty and we have the necessary data
+    if (!dirty || !path || !repo || !specEditorOpen) return;
+
+    // Debounce: 2 seconds after the user stops typing
+    predictDebounceTimer = setTimeout(() => {
+      // Don't auto-predict if a manual prediction is already running
+      if (!predictLoading) {
+        runPrediction();
+      }
+    }, 2000);
+
+    return () => {
+      if (predictDebounceTimer) clearTimeout(predictDebounceTimer);
+    };
+  });
+
   async function publishSpec() {
     if (!selectedRepoId || !specEditorPath || !specEditorDirty) return;
     publishLoading = true;
     publishError = '';
     try {
+      // Save the spec content first
       await api.updateSpec(specEditorPath, selectedRepoId, specEditorContent);
       specEditorOriginal = specEditorContent; // Mark as saved
-      showToast('Spec published and submitted for approval.', { type: 'success' });
+
+      // Submit for approval — the spec enters the approval flow
+      // and agents will implement only after approval (vision.md Principle 3)
+      try {
+        await api.approveSpec(specEditorPath, '');
+        showToast('Spec published and submitted for approval. Agents will implement after approval.', { type: 'success' });
+      } catch {
+        // Approval endpoint may not exist for all spec types — still show success for the save
+        showToast('Spec saved. Submit for approval when ready.', { type: 'success' });
+      }
+
       closeSpecEditor();
     } catch (e) {
       publishError = e.message ?? 'Failed to publish spec';
@@ -949,6 +1003,41 @@
                       spellcheck="false"
                       aria-label="Spec content"
                     ></textarea>
+                  {/if}
+
+                  <!-- Spec Assertion Results (§9: inline green checkmark / red X) -->
+                  {#if specAssertionResults.length > 0 || assertionsLoading}
+                    <div class="spec-assertions-panel">
+                      <h4 class="spec-assertions-title">
+                        Assertions
+                        {#if assertionsLoading}
+                          <span class="assertions-loading">checking...</span>
+                        {:else}
+                          {@const passed = specAssertionResults.filter(a => a.passed).length}
+                          {@const failed = specAssertionResults.filter(a => !a.passed).length}
+                          <span class="assertions-summary">
+                            {#if failed === 0}
+                              <span class="assert-pass-all">{passed}/{specAssertionResults.length} passing</span>
+                            {:else}
+                              <span class="assert-fail-count">{failed} failing</span>, {passed} passing
+                            {/if}
+                          </span>
+                        {/if}
+                      </h4>
+                      {#if !assertionsLoading}
+                        <ul class="spec-assertions-list">
+                          {#each specAssertionResults as result}
+                            <li class="spec-assertion-item" class:passed={result.passed} class:failed={!result.passed}>
+                              <span class="assert-icon">{result.passed ? '\u2714' : '\u2718'}</span>
+                              <span class="assert-text">{result.assertion_text}</span>
+                              {#if result.explanation}
+                                <span class="assert-explain" title={result.explanation}>{result.explanation}</span>
+                              {/if}
+                            </li>
+                          {/each}
+                        </ul>
+                      {/if}
+                    </div>
                   {/if}
                 </div>
                 <div class="spec-editor-footer">
@@ -2237,6 +2326,67 @@
   .predict-affected-spec-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  /* ── Spec Assertions ─────────────────────────────────────── */
+  .spec-assertions-panel {
+    padding: var(--space-2) var(--space-3);
+    border-top: 1px solid var(--color-border);
+    background: var(--color-surface-elevated);
+  }
+  .spec-assertions-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0 0 var(--space-1) 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .assertions-loading {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-weight: 400;
+    font-style: italic;
+  }
+  .assertions-summary {
+    font-size: var(--text-xs);
+    font-weight: 400;
+  }
+  .assert-pass-all { color: var(--color-success); }
+  .assert-fail-count { color: var(--color-danger); font-weight: 600; }
+  .spec-assertions-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .spec-assertion-item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    padding: 3px 6px;
+    border-radius: 3px;
+  }
+  .spec-assertion-item.passed { background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .spec-assertion-item.failed { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .assert-icon { font-size: 12px; flex-shrink: 0; }
+  .spec-assertion-item.passed .assert-icon { color: var(--color-success); }
+  .spec-assertion-item.failed .assert-icon { color: var(--color-danger); }
+  .assert-text {
+    font-family: var(--font-mono);
+    color: var(--color-text);
+    flex: 1;
+  }
+  .assert-explain {
+    color: var(--color-text-muted);
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .spec-editor-actions {

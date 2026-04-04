@@ -3079,7 +3079,18 @@
         breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })),
         recent_interactions: recentInteractions,
       };
-      onNodeDetail(hit.node);
+      // Enrich with trace path data if a trace is active
+      const enrichedNode = { ...hit.node };
+      if (tracePathOrder.size > 0) {
+        const stepNum = tracePathOrder.get(hit.node.id);
+        if (stepNum != null) {
+          enrichedNode._traceStep = stepNum;
+          enrichedNode._traceTotal = tracePathOrder.size;
+          // Build step-by-step trace list for the detail panel
+          enrichedNode._traceSteps = buildTraceStepList();
+        }
+      }
+      onNodeDetail(enrichedNode);
 
       // Interactive $clicked mode: re-evaluate query template with the clicked node
       if (interactiveQueryTemplate) {
@@ -3139,30 +3150,49 @@
     scheduleRedraw();
   }
 
+  // Drill into a node with smooth spatial zoom transition.
+  // Zooms INTO the clicked node's bounding box, fades unrelated nodes,
+  // then renders children in the same layout style.
+  function drillInto(node) {
+    const children = treeData.parentToChildren.get(node.id) ?? [];
+    if (children.length === 0) return;
+
+    // Find the layout node to get its world coordinates
+    const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === node.id);
+    const wx = ln?.x ?? cam.x;
+    const wy = ln?.y ?? cam.y;
+    const ww = ln?.w ?? 200;
+    const wh = ln?.h ?? 200;
+
+    // Start fade transition: dim unrelated nodes
+    drillFadeTarget = node.id;
+    drillFadeAlpha = 1.0;
+    trackInteraction(`drill:${node.name ?? node.id}`);
+    breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
+    selectedNodeId = null;
+    canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })), recent_interactions: recentInteractions };
+    onNodeDetail(null);
+
+    // Smooth spatial zoom: target camera to center on this node and fit it
+    targetCam.x = wx;
+    targetCam.y = wy;
+    const fitZoom = Math.min(W / (ww + 60), H / (wh + 60), 4) * 0.85;
+    targetCam.zoom = Math.max(fitZoom, cam.zoom * 1.5);
+    needsAnim = true;
+    scheduleRedraw();
+  }
+
   function onDblClick(e) {
     const hit = hitTest(e.clientX, e.clientY);
     if (!hit) return;
 
     // Progressive drill-down via Contains edges (explorer-canvas.md §Progressive Drill-Down):
-    // Double-click → filter to children, update breadcrumb, zoom transition.
+    // Double-click → filter to children, update breadcrumb, smooth zoom transition.
     const node = hit.node;
     if (node) {
       const children = treeData.parentToChildren.get(node.id) ?? [];
       if (children.length > 0) {
-        // This node has children — drill into it with fade transition
-        drillFadeTarget = node.id;
-        drillFadeAlpha = 1.0;
-        trackInteraction(`drill:${node.name ?? node.id}`);
-        breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
-        selectedNodeId = null;
-        canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })), recent_interactions: recentInteractions };
-        onNodeDetail(null);
-        // Zoom to fit the drilled-in region
-        targetCam.x = hit.x;
-        targetCam.y = hit.y;
-        const fitZoom = Math.min(W / (hit.w || 200), H / (hit.h || 200)) * 0.85;
-        targetCam.zoom = Math.max(fitZoom, cam.zoom * 1.5);
-        scheduleRedraw();
+        drillInto(node);
         return;
       }
     }
@@ -3258,16 +3288,38 @@
       const codeUrl = `/${repoId}/blob/main/${filePath}#L${line}`;
       window.open(codeUrl, '_blank');
     } else if (action === 'drill') {
-      // Drill into this node via Contains edges
+      // Drill into this node via Contains edges with smooth zoom transition
       const children = treeData.parentToChildren.get(node.id) ?? [];
       if (children.length > 0) {
-        breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
-        selectedNodeId = null;
-        canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })) };
-        onNodeDetail(null);
-        scheduleRedraw();
+        drillInto(node);
       }
     }
+  }
+
+  // Build a step-by-step trace list for the detail panel.
+  // Returns an array of { step, nodeId, name, type, specPath, edges } sorted by step number.
+  function buildTraceStepList() {
+    if (tracePathOrder.size === 0) return [];
+    const nodeMap = new Map();
+    for (const n of nodes) nodeMap.set(n.id, n);
+    const steps = [];
+    for (const [nodeId, stepNum] of tracePathOrder) {
+      const n = nodeMap.get(nodeId);
+      if (!n) continue;
+      // Find edges from this step to the next
+      const outEdges = tracePathEdges.filter(e => e.fromId === nodeId);
+      steps.push({
+        step: stepNum,
+        nodeId,
+        name: n.name ?? n.qualified_name ?? '?',
+        qualifiedName: n.qualified_name ?? '',
+        type: n.node_type ?? '',
+        specPath: n.spec_path ?? null,
+        outEdges: outEdges.map(e => ({ toId: e.toId, edgeType: e.edgeType, toStep: e.toStep })),
+      });
+    }
+    steps.sort((a, b) => a.step - b.step);
+    return steps;
   }
 
   // Navigate breadcrumb with smooth zoom-out animation.
@@ -3634,7 +3686,7 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn" onclick={() => { observableBannerVisible = true; setTimeout(() => { observableBannerVisible = false; }, 4000); }} type="button" title="Observable lens (coming soon)">Observable</button>
+      <button class="tb-btn tb-btn-disabled" disabled type="button" title="Requires production telemetry integration">Observable <span class="tb-coming-soon">(coming soon)</span></button>
     </div>
 
     {#if lens === 'evaluative'}
@@ -4058,6 +4110,8 @@
   .tb-btn.active { background: #1e293b; color: #e2e8f0; box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
+  .tb-btn-disabled { opacity: 0.35; cursor: not-allowed; }
+  .tb-coming-soon { font-size: 9px; opacity: 0.6; font-style: italic; }
   .eval-metric-group { display: flex; gap: 2px; align-items: center; }
   .eval-playback { display: flex; gap: 4px; align-items: center; margin-left: 4px; }
   .eval-scrubber { width: 80px; accent-color: #ef4444; height: 4px; cursor: pointer; }

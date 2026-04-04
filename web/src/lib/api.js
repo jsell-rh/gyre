@@ -585,6 +585,11 @@ export const api = {
     request(`/specs/${encodeURIComponent(path)}/links${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
   specHistoryRepo: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}/history${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  checkSpecAssertions: (repoId, specPath, content) =>
+    request(`/repos/${repoId}/spec-assertions/check`, {
+      method: 'POST',
+      body: JSON.stringify({ spec_path: specPath, content }),
+    }),
   specsAssist: (repoId, body) =>
     fetch(`${API_BASE}/repos/${repoId}/specs/assist`, {
       method: 'POST',

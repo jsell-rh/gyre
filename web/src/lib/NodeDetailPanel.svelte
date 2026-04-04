@@ -594,6 +594,38 @@
         </div>
       {/if}
 
+      <!-- Causal Flow Trace: step-by-step path when a trace is active -->
+      {#if node._traceSteps?.length > 0}
+        <details class="detail-collapsible" open>
+          <summary class="detail-section-title">
+            Causal Flow Trace
+            <span class="detail-badge">{node._traceSteps.length} steps</span>
+          </summary>
+          <div class="trace-step-list">
+            {#each node._traceSteps as step}
+              <button
+                class="trace-step-item"
+                class:trace-current={step.nodeId === node.id}
+                onclick={() => onNavigate(nodes.find(n => n.id === step.nodeId) ?? { id: step.nodeId, name: step.name })}
+                type="button"
+              >
+                <span class="trace-step-num">{step.step}</span>
+                <div class="trace-step-info">
+                  <span class="trace-step-name">{step.name}</span>
+                  <span class="trace-step-type">{step.type}</span>
+                  {#if step.specPath}
+                    <span class="trace-step-spec" title="Governed by spec">{step.specPath}</span>
+                  {/if}
+                </div>
+                {#if step.outEdges.length > 0}
+                  <span class="trace-step-arrow" title="Calls to step {step.outEdges[0].toStep}">&#8594;</span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+        </details>
+      {/if}
+
       <!-- ============================================ -->
       <!-- TYPE VIEW: fields / implements / used-by / story / risk -->
       <!-- ============================================ -->
@@ -2403,6 +2435,80 @@
     background: color-mix(in srgb, var(--color-link) 10%, transparent);
     padding: 1px 6px;
     border-radius: 3px;
+  }
+
+  /* ── Causal Flow Trace ─────────────────────────────────────── */
+  .trace-step-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-1) 0;
+  }
+  .trace-step-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 6px var(--space-2);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    transition: background 0.1s;
+  }
+  .trace-step-item:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+  }
+  .trace-step-item.trace-current {
+    background: color-mix(in srgb, var(--color-link) 12%, transparent);
+    border-color: var(--color-link);
+  }
+  .trace-step-num {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--color-link);
+    color: white;
+    font-size: 11px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .trace-step-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .trace-step-name {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .trace-step-type {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+  .trace-step-spec {
+    font-size: 10px;
+    color: var(--color-success);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .trace-step-arrow {
+    color: var(--color-text-muted);
+    font-size: 16px;
+    flex-shrink: 0;
   }
 
   @media (prefers-reduced-motion: reduce) {
