@@ -766,7 +766,7 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "name_pattern": { "type": "string", "description": "Substring match on name or qualified_name (case-insensitive)" },
-                    "node_type": { "type": "string", "description": "Filter by: package, module, type, interface, function, endpoint, component, table, constant, field" }
+                    "node_type": { "type": "string", "description": "Filter by: package, module, type, interface, function, endpoint, component, table, constant, field, spec" }
                 }
             }),
         },
@@ -1698,8 +1698,14 @@ User messages may include a [Canvas: ...] prefix showing what's currently select
 ### Edge Types
 calls, contains, implements, depends_on, field_of, returns, routes_to, governed_by
 
+### Node Types
+package, module, type, interface, function, endpoint, component, table, constant, field, spec
+
+Specs are first-class entities in the knowledge graph (Vision Principle 3). They appear as nodes with node_type "spec" and are linked to code via GovernedBy edges. When users ask about spec coverage, use $governed_by or filter by node_type "spec".
+
 ### Computed Expressions (for filter scope)
-- `$where(property, 'op', value)` — property: complexity, churn, test_coverage, incoming_calls, outgoing_calls, field_count, test_fragility. op: >, >=, <, <=, ==
+- `$where(property, 'op', value)` — property: complexity, churn, test_coverage, incoming_calls, outgoing_calls, field_count, test_fragility, risk_score. op: >, >=, <, <=, ==
+  - risk_score = churn × complexity × (1 - test_coverage) — composite risk metric
 - `$callers(node, depth?)`, `$callees(node, depth?)` — call graph traversal
 - `$implementors(trait)` — types implementing a trait
 - `$fields(type)` — fields of a type
@@ -1713,7 +1719,7 @@ calls, contains, implements, depends_on, field_of, returns, routes_to, governed_
 - `highlight`: { matched: { color, label } } for matched nodes
 - `dim_unmatched`: opacity 0.0-1.0 for non-matched
 - `tiered_colors`: array of colors by BFS depth (e.g. ["#ef4444", "#f97316", "#eab308", "#94a3b8"])
-- `heat`: { metric, palette } — metric: incoming_calls, complexity, churn, test_fragility, test_coverage
+- `heat`: { metric, palette } — metric: incoming_calls, complexity, churn, test_fragility, test_coverage, risk_score
 - `badges`: { template } — e.g. "{{count}} calls"
 
 ### Other Fields
