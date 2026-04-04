@@ -103,6 +103,10 @@
   let breadcrumb = $state([]);
   let animFrame = null;
 
+  // Drill-down fade transition: dim unrelated nodes during zoom
+  let drillFadeAlpha = $state(1.0); // 1.0 = fully visible, fading to 0.15
+  let drillFadeTarget = $state(null); // nodeId being drilled into (or null)
+
   // Recent interaction trail for conversational context (sent with messages)
   let recentInteractions = $state([]);
   function trackInteraction(action) {
@@ -1748,6 +1752,18 @@
           if (!connectedHighlight.has(ln.node.id)) drawOp *= 0.2;
         }
 
+        // Drill-down fade: dim nodes not being drilled into
+        if (drillFadeTarget && ln.node && ln.id !== drillFadeTarget) {
+          // Check if this node is a child of the drill target
+          let isChild = false;
+          let p = ln.parentTreeGroup;
+          while (p) {
+            if (p.id === drillFadeTarget) { isChild = true; break; }
+            p = p.parentTreeGroup;
+          }
+          if (!isChild) drawOp *= drillFadeAlpha;
+        }
+
         if (drawOp > 0.01) {
           ctx.save();
           ctx.globalAlpha = drawOp;
@@ -2732,6 +2748,15 @@
       if (ghostPulsePhase < prev) ghostAnimCycles++;
     }
 
+    // Advance drill-down fade transition
+    if (drillFadeTarget && drillFadeAlpha > 0.15) {
+      drillFadeAlpha = Math.max(0.15, drillFadeAlpha - 0.06);
+    } else if (!drillFadeTarget && drillFadeAlpha < 1.0) {
+      drillFadeAlpha = Math.min(1.0, drillFadeAlpha + 0.06);
+    } else if (drillFadeTarget && drillFadeAlpha <= 0.15) {
+      drillFadeTarget = null; // Fade complete
+    }
+
     // Advance evaluative trace particles
     if (lens === 'evaluative' && evalPlaying) {
       tickParticles(dt);
@@ -2747,7 +2772,8 @@
     // For ghosts: only animate the pulse for 3 cycles then stop to save CPU.
     const ghostNeedsAnim = hasGhosts && ghostAnimCycles < 3;
     const particlesPlaying = lens === 'evaluative' && evalPlaying;
-    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying) {
+    const fading = drillFadeTarget || drillFadeAlpha < 1.0;
+    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying || fading) {
       needsAnim = false;
       animFrame = requestAnimationFrame(animLoop);
     } else {
@@ -3047,10 +3073,13 @@
     if (node) {
       const children = treeData.parentToChildren.get(node.id) ?? [];
       if (children.length > 0) {
-        // This node has children — drill into it
+        // This node has children — drill into it with fade transition
+        drillFadeTarget = node.id;
+        drillFadeAlpha = 1.0;
+        trackInteraction(`drill:${node.name ?? node.id}`);
         breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
         selectedNodeId = null;
-        canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })) };
+        canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })), recent_interactions: recentInteractions };
         onNodeDetail(null);
         // Zoom to fit the drilled-in region
         targetCam.x = hit.x;
