@@ -1061,6 +1061,12 @@
               </button>
             </div>
           </div>
+          <!-- Status: one-line summary of what's happening -->
+          {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
+            <p class="ws-header-status">{statusSentence}</p>
+          {:else if workspace.description}
+            <p class="ws-header-desc">{workspace.description}</p>
+          {/if}
         </div>
       </header>
 
