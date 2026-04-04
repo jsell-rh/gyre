@@ -39,6 +39,7 @@ pub mod repository;
 pub mod review;
 pub mod rust_extractor;
 pub mod spec_approval;
+pub mod spec_assertions;
 pub mod spec_ledger;
 pub mod spec_policy;
 pub mod task;
@@ -87,6 +88,10 @@ pub use repository::{RepoStatus, Repository};
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use rust_extractor::RustExtractor;
 pub use spec_approval::SpecApproval;
+pub use spec_assertions::{
+    evaluate_assertions, parse_assertions, AssertionResult, Comparison, ParsedAssertion, Predicate,
+    Subject,
+};
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_policy::SpecPolicy;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};

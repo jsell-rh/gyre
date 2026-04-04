@@ -42,6 +42,7 @@ pub mod saved_views;
 pub mod scim;
 pub mod search;
 pub mod spawn;
+pub mod spec_assertions;
 pub mod spec_policy;
 pub mod specs;
 pub mod specs_assist;
@@ -775,6 +776,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/graph/query-dryrun",
             post(graph::view_query_dryrun),
+        )
+        // ── Spec assertions (system-explorer S9) ─────────────────────────
+        .route(
+            "/api/v1/repos/:id/spec-assertions/check",
+            post(spec_assertions::check_spec_assertions),
         )
         .route(
             "/api/v1/workspaces/:id/graph",
