@@ -28,10 +28,14 @@
   const RECONNECT_BASE_DELAY = 1000;
   const MAX_RECONNECTS = 5;
   const MAX_CLIENT_MESSAGES = 200;
+  // Align with server MAX_SESSION_MESSAGES — tracks all client-sent messages
+  // (not just rendered bubbles) to warn users before hitting the server limit.
+  const MAX_SESSION_MESSAGES = 200;
 
   // ── State ────────────────────────────────────────────────────────────────
   let messages = $state([]); // [{ id: number, role: 'user'|'assistant', content: string, viewQuery?: object, timestamp: number }]
   let nextMsgId = 0;
+  let sessionMessageCount = $state(0); // Tracks all messages sent to server this session
 
   /** Cap the messages array to MAX_CLIENT_MESSAGES, keeping the newest entries. */
   function capMessages(msgs) {
@@ -91,7 +95,11 @@
     // must be passed via query parameter. The server strips the token from
     // access logs to prevent leakage. Future: implement ticket-based auth
     // (POST /api/v1/explorer/ticket → short-lived ticket → WS ?ticket=).
-    const url = `${protocol}//${window.location.host}/api/v1/repos/${repoId}/explorer?token=${encodeURIComponent(token)}`;
+    // Derive WebSocket base from current page URL (works for CDN, proxy, and direct)
+    // Uses document.baseURI to respect <base href> if set, falling back to location.
+    const base = new URL('/api/v1/', document.baseURI || window.location.href);
+    const wsBase = `${protocol}//${base.host}${base.pathname}`;
+    const url = `${wsBase}repos/${repoId}/explorer?token=${encodeURIComponent(token)}`;
     const socket = new WebSocket(url);
 
     socket.onopen = () => {
@@ -99,6 +107,7 @@
       socket.send(JSON.stringify({ type: 'list_views' }));
       status = 'ready';
       reconnectCount = 0;
+      sessionMessageCount = 0; // Reset on fresh connection
     };
 
     socket.onmessage = (event) => {
@@ -231,8 +240,20 @@
   function sendMessage() {
     if (!inputText.trim() || !ws || ws.readyState !== WebSocket.OPEN) return;
 
+    // Warn before hitting server session limit
+    if (sessionMessageCount >= MAX_SESSION_MESSAGES - 5) {
+      const remaining = MAX_SESSION_MESSAGES - sessionMessageCount;
+      if (remaining <= 0) {
+        messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: '*Session message limit reached. Please reconnect for a fresh session.*', timestamp: Date.now() }]);
+        return;
+      }
+      // Show a soft warning at 5 messages remaining
+      messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: `*${remaining} messages remaining in this session.*`, timestamp: Date.now() }]);
+    }
+
     const text = inputText.trim();
     inputText = '';
+    sessionMessageCount++;
 
     messages = capMessages([...messages, { id: nextMsgId++, role: 'user', content: text, timestamp: Date.now() }]);
     scrollToBottom();
