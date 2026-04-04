@@ -531,7 +531,15 @@ fn resolve_scope_with_adjacency(
                     let ids = depth_map.keys().cloned().collect();
                     (ids, depth_map)
                 }
-                None => (HashSet::new(), no_depths()),
+                None => {
+                    if !resolved_name.is_empty() {
+                        warnings.push(format!(
+                            "Focus node '{}' not found in the graph. Check the name or use graph_nodes to find the correct qualified_name.",
+                            resolved_name
+                        ));
+                    }
+                    (HashSet::new(), no_depths())
+                }
             }
         }
 
@@ -594,6 +602,13 @@ fn resolve_scope_with_adjacency(
             from_commit,
             to_commit,
         } => {
+            // Warn if from and to are identical
+            if from_commit == to_commit {
+                warnings.push(format!(
+                    "Diff from '{}' to '{}' refers to the same commit; the diff will be empty.",
+                    from_commit, to_commit
+                ));
+            }
             // Find nodes that changed between two commits by looking at SHA matches.
             // A node is "changed" if its created_sha or last_modified_sha matches ANY
             // commit in the range. Since we don't have git history, we use a best-effort
@@ -835,10 +850,17 @@ fn resolve_computed_expression(
                         "field_count" => Some(count_fields(&nid, incoming) as f64),
                         "test_fragility" => Some(*fragility_map.get(&nid).unwrap_or(&0) as f64),
                         "risk_score" => {
-                            let churn = n.churn_count_30d as f64;
-                            let complexity = n.complexity.unwrap_or(1) as f64;
-                            let test_gap = 1.0 - n.test_coverage.unwrap_or(0.0);
-                            Some(churn * complexity * test_gap)
+                            // Only compute risk for nodes with actual complexity data;
+                            // defaulting complexity=1 would inflate scores for unanalyzed nodes.
+                            match n.complexity {
+                                Some(c) => {
+                                    let churn = n.churn_count_30d as f64;
+                                    let complexity = c as f64;
+                                    let test_gap = 1.0 - n.test_coverage.unwrap_or(0.0);
+                                    Some(churn * complexity * test_gap)
+                                }
+                                None => None, // Exclude unanalyzed nodes from risk calculations
+                            }
                         }
                         _ => None,
                     };
@@ -1019,7 +1041,7 @@ fn resolve_computed_expression(
         return HashSet::new();
     }
 
-    // $descendants(node) — cap depth at 20 to prevent DoS from unbounded traversal
+    // $descendants(node) — cap depth at 100 (sufficient for any real hierarchy)
     if trimmed.starts_with("$descendants(") && trimmed.ends_with(')') {
         let node_name = trimmed[13..trimmed.len() - 1]
             .trim()
@@ -1031,7 +1053,7 @@ fn resolve_computed_expression(
                 &found.id.to_string(),
                 &[EdgeType::Contains],
                 "outgoing",
-                20,
+                100,
                 outgoing,
                 incoming,
             );
@@ -1039,7 +1061,7 @@ fn resolve_computed_expression(
         return HashSet::new();
     }
 
-    // $ancestors(node) — cap depth at 20 to prevent DoS from unbounded traversal
+    // $ancestors(node) — cap depth at 100 (sufficient for any real hierarchy)
     if trimmed.starts_with("$ancestors(") && trimmed.ends_with(')') {
         let node_name = trimmed[11..trimmed.len() - 1]
             .trim()
@@ -1051,7 +1073,7 @@ fn resolve_computed_expression(
                 &found.id.to_string(),
                 &[EdgeType::Contains],
                 "incoming",
-                20,
+                100,
                 outgoing,
                 incoming,
             );
@@ -1089,15 +1111,30 @@ fn resolve_computed_expression(
             }
         }
 
-        // Also include nodes that have a matching spec_path directly
-        // (for backwards compatibility when GovernedBy edges aren't present)
-        if governed.is_empty() {
-            return spec_node_ids;
+        // When GovernedBy edges exist, also include the spec nodes themselves
+        if !governed.is_empty() {
+            governed.extend(spec_node_ids);
+            return governed;
         }
 
-        // Include the spec nodes themselves too
-        governed.extend(spec_node_ids);
-        return governed;
+        // Fallback: find code nodes with matching spec_path (backwards compatibility)
+        // but do NOT return the spec nodes themselves — only code nodes governed by them.
+        let code_nodes: HashSet<String> = active_nodes
+            .iter()
+            .filter(|n| {
+                n.spec_path
+                    .as_ref()
+                    .map_or(false, |sp| sp.to_lowercase().contains(&lower))
+                    && n.node_type != NodeType::Spec
+            })
+            .map(|n| n.id.to_string())
+            .collect();
+        if !code_nodes.is_empty() {
+            return code_nodes;
+        }
+
+        // As a last resort, return spec nodes so the user can see what spec was queried
+        return spec_node_ids;
     }
 
     // $test_fragility(node) — returns the count of distinct test paths as a metric,
