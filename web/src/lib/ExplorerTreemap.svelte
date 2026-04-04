@@ -119,7 +119,15 @@
     return m;
   });
   let hasGhosts = $derived(ghostOverlays.length > 0);
+  // Reset pulse cycle counter when ghost overlays change
+  $effect(() => {
+    if (ghostOverlays.length > 0) {
+      ghostAnimCycles = 0;
+      ghostPulsePhase = 0;
+    }
+  });
   let ghostPulsePhase = $state(0); // 0..1 pulsing animation
+  let ghostAnimCycles = $state(0); // count of completed pulse cycles
 
   // Trace path numbering state (BFS order badges for "Trace from here")
   let tracePathOrder = $state(new Map()); // nodeId → step number (1-based)
@@ -241,16 +249,18 @@
 
   function onLensChange(newLens) {
     if (newLens === 'evaluative') {
-      // When switching to evaluative lens, apply a heat map query
-      activeQuery = {
+      // When switching to evaluative lens, apply a heat map query overlay
+      const evalQuery = {
         scope: { type: 'all' },
         emphasis: { heat: { metric: evaluativeMetric, palette: 'blue-red' } },
         annotation: { title: `Evaluative: ${evaluativeMetric.replace('_', ' ')}`, description: 'Node heat shows relative metric intensity' },
+        _evaluative: true, // Tag so we can identify evaluative queries
       };
+      onInteractiveQuery(evalQuery);
     } else if (newLens === 'structural') {
       // Clear any evaluative-lens query when switching back
-      if (activeQuery?.annotation?.title?.startsWith('Evaluative:')) {
-        activeQuery = null;
+      if (activeQuery?._evaluative || activeQuery?.annotation?.title?.startsWith('Evaluative:')) {
+        onInteractiveQuery(null);
       }
     }
     scheduleRedraw();
@@ -926,8 +936,10 @@
     const scope = activeQuery.scope;
 
     if (scope.type === 'focus' && scope.node) {
-      const startName = scope.node === '$selected' || scope.node === '$clicked'
-        ? canvasState?.selectedNode?.name ?? '' : scope.node;
+      // $selected: resolves to current selection (one-time)
+      // $clicked: resolves via interactiveQueryTemplate (re-runs on each click)
+      const startName = (scope.node === '$selected' || scope.node === '$clicked')
+        ? (canvasState?.selectedNode?.qualified_name ?? canvasState?.selectedNode?.name ?? '') : scope.node;
       if (!startName) return null;
       const startNode = nodes.find(n => n.name === startName || n.qualified_name === startName || n.id === startName);
       if (!startNode) return null;
@@ -1575,9 +1587,10 @@
   }
 
   function drawGhostNewNode(ctx, ghost, pulse) {
-    // Position new ghost nodes near related nodes or in a default spot
+    // Position new ghost nodes near related nodes or in visible area
     let wx = 0, wy = 0;
     let gw = 100, gh = 40;
+    let positioned = false;
 
     // Try to position near a related edge target
     if (ghost.edges?.length) {
@@ -1588,6 +1601,35 @@
         wy = relLn.y + relLn.h * 0.3;
         gw = relLn.w * 0.7;
         gh = relLn.h * 0.7;
+        positioned = true;
+      }
+    }
+
+    // Fallback: position near the center of visible nodes, not at world (0,0)
+    if (!positioned) {
+      // Use the current camera center as fallback position
+      wx = cam.x + (layoutNodes.length > 0 ? layoutNodes[0].w * 0.5 : 0);
+      wy = cam.y;
+      // Try to find a node with a similar name to position near
+      const ghostNameLower = (ghost.name ?? '').toLowerCase();
+      if (ghostNameLower && layoutNodes.length > 0) {
+        let bestLn = null;
+        let bestScore = 0;
+        for (const ln of layoutNodes) {
+          if (ln.kind === 'tree-group') continue;
+          const lnName = (ln.label ?? '').toLowerCase();
+          // Simple substring match
+          if (lnName && ghostNameLower.includes(lnName.split('.').pop())) {
+            const score = lnName.length;
+            if (score > bestScore) { bestScore = score; bestLn = ln; }
+          }
+        }
+        if (bestLn) {
+          wx = bestLn.x + bestLn.w * 0.8;
+          wy = bestLn.y + bestLn.h * 0.3;
+          gw = bestLn.w * 0.7;
+          gh = bestLn.h * 0.7;
+        }
       }
     }
 
@@ -2208,8 +2250,11 @@
     lerpCam();
 
     // Advance ghost pulse animation (1 cycle per 1.5 seconds at ~60fps)
-    if (hasGhosts) {
+    // Stop after 3 full cycles to avoid perpetual CPU usage
+    if (hasGhosts && ghostAnimCycles < 3) {
+      const prev = ghostPulsePhase;
       ghostPulsePhase = (ghostPulsePhase + 0.011) % 1;
+      if (ghostPulsePhase < prev) ghostAnimCycles++;
     }
 
     drawFrame();
@@ -2218,7 +2263,10 @@
     const dx = Math.abs(cam.x - targetCam.x);
     const dy = Math.abs(cam.y - targetCam.y);
     const dz = Math.abs(cam.zoom - targetCam.zoom);
-    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || hasGhosts) {
+    // Keep animating when camera moving or a one-time redraw is needed.
+    // For ghosts: only animate the pulse for 3 cycles then stop to save CPU.
+    const ghostNeedsAnim = hasGhosts && ghostAnimCycles < 3;
+    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim) {
       needsAnim = false;
       animFrame = requestAnimationFrame(animLoop);
     } else {
@@ -2473,38 +2521,39 @@
     const node = contextMenu.node;
     contextMenu = null;
     if (action === 'trace') {
-      // Trace from here: activate a blast-radius query centered on this node
-      activeQuery = {
-        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'implements'], direction: 'both', depth: 10 },
+      // Trace from here: show causal flow using Calls + RoutesTo edges
+      onInteractiveQuery({
+        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 10 },
         emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#94a3b8'], dim_unmatched: 0.12 },
-        edges: { filter: ['calls', 'implements'] },
+        edges: { filter: ['calls', 'routes_to'] },
         zoom: 'fit',
-        annotation: { title: `Trace from: ${node.name}`, description: `Showing all connected nodes via calls/implements edges` },
-      };
+        annotation: { title: `Trace from: ${node.name}`, description: `Causal flow showing execution order` },
+        _trace: true,
+      });
     } else if (action === 'blast') {
-      activeQuery = {
+      onInteractiveQuery({
         scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'implements', 'field_of', 'depends_on'], direction: 'incoming', depth: 10 },
         emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'], dim_unmatched: 0.12 },
         edges: { filter: ['calls', 'implements', 'field_of', 'depends_on'] },
         zoom: 'fit',
         annotation: { title: `Blast radius: ${node.name}`, description: `What would break if this changes?` },
-      };
+      });
     } else if (action === 'callers') {
-      activeQuery = {
+      onInteractiveQuery({
         scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls'], direction: 'incoming', depth: 5 },
         emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'], dim_unmatched: 0.12 },
         edges: { filter: ['calls'] },
         zoom: 'fit',
         annotation: { title: `Callers of: ${node.name}`, description: `Who calls this?` },
-      };
+      });
     } else if (action === 'callees') {
-      activeQuery = {
-        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls'], direction: 'outgoing', depth: 5 },
+      onInteractiveQuery({
+        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 5 },
         emphasis: { tiered_colors: ['#3b82f6', '#60a5fa', '#93c5fd', '#94a3b8'], dim_unmatched: 0.12 },
-        edges: { filter: ['calls'] },
+        edges: { filter: ['calls', 'routes_to'] },
         zoom: 'fit',
         annotation: { title: `Callees of: ${node.name}`, description: `What does this call?` },
-      };
+      });
     } else if (action === 'spec') {
       if (node.spec_path) {
         onNodeDetail({ ...node, _action: 'view_spec' });
@@ -2551,7 +2600,7 @@
         return;
       }
       if (activeQuery) {
-        activeQuery = null;
+        onInteractiveQuery(null);
         return;
       }
       if (breadcrumb.length > 0) {
@@ -2563,14 +2612,6 @@
         // Fit all
         targetCam = { x: 0, y: 0, zoom: cam.zoom };
         scheduleRedraw();
-      }
-    }
-    // / key focuses search (if chat panel exists)
-    if (e.key === '/' && !e.ctrlKey && !e.metaKey) {
-      const chatInput = document.querySelector('.explorer-chat-input');
-      if (chatInput) {
-        e.preventDefault();
-        chatInput.focus();
       }
     }
   }
@@ -2659,7 +2700,21 @@
       const dy = e.touches[0].clientY - e.touches[1].clientY;
       const dist = Math.hypot(dx, dy);
       if (lastTouchDist > 0) {
-        targetCam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * (dist / lastTouchDist)));
+        const scale = dist / lastTouchDist;
+        const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, targetCam.zoom * scale));
+        // Zoom toward the pinch center (midpoint between two fingers)
+        const rect = canvasEl?.getBoundingClientRect();
+        if (rect) {
+          const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+          const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+          const worldBefore = screenToWorld(cx, cy);
+          targetCam.zoom = newZoom;
+          const worldAfter = screenToWorld(cx, cy);
+          targetCam.x -= (worldAfter.x - worldBefore.x);
+          targetCam.y -= (worldAfter.y - worldBefore.y);
+        } else {
+          targetCam.zoom = newZoom;
+        }
         scheduleRedraw();
       }
       lastTouchDist = dist;
@@ -2716,7 +2771,11 @@
 
   // Compute trace path BFS ordering and connecting edges when a trace query is active
   $effect(() => {
-    if (!activeQuery?.annotation?.title?.startsWith('Trace from:') || !queryMatchedWithDepth) {
+    // Detect trace queries: focus scope with outgoing direction (Calls/RoutesTo traversal)
+    const isTrace = activeQuery?.scope?.type === 'focus' &&
+      (activeQuery.scope.direction === 'outgoing' || activeQuery._trace) &&
+      queryMatchedWithDepth;
+    if (!isTrace) {
       tracePathOrder = new Map();
       tracePathEdges = [];
       return;
@@ -2783,7 +2842,7 @@
       {#if interactiveQueryTemplate}
         <span class="annotation-interactive-badge">click mode</span>
       {/if}
-      <button class="annotation-clear" onclick={() => { activeQuery = null; interactiveQueryTemplate = null; }} title="Clear" type="button" aria-label="Clear view query">
+      <button class="annotation-clear" onclick={() => { onInteractiveQuery(null); interactiveQueryTemplate = null; }} title="Clear" type="button" aria-label="Clear view query">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
