@@ -153,6 +153,60 @@ fn parse_and_validate(spec_json: &serde_json::Value) -> Result<(), ApiError> {
     validate_view_spec(&spec).map_err(ApiError::BadRequest)
 }
 
+/// Verify the caller has workspace membership (any role is sufficient for views).
+/// Agent/system tokens (user_id = None) skip the membership check but still
+/// verify workspace-tenant ownership when the workspace exists.
+async fn check_workspace_membership(
+    state: &AppState,
+    workspace_id: &str,
+    caller: &AuthenticatedAgent,
+) -> Result<(), ApiError> {
+    let wid = Id::new(workspace_id);
+    match state.workspaces.find_by_id(&wid).await {
+        Ok(Some(ws)) => {
+            // Workspace exists: verify it belongs to caller's tenant
+            if ws.tenant_id.as_str() != caller.tenant_id {
+                return Err(ApiError::Forbidden(
+                    "Access denied: workspace not in your tenant".to_string(),
+                ));
+            }
+        }
+        Ok(None) => {
+            // Workspace not found in DB. Non-user tokens (agents/system) are allowed
+            // through — they're already tenant-scoped by the auth layer. User tokens
+            // must have a real workspace.
+            if caller.user_id.is_some() {
+                return Err(ApiError::NotFound(format!(
+                    "Workspace not found: {workspace_id}"
+                )));
+            }
+            // Agent/system token: tenant-scoped auth is sufficient
+        }
+        Err(e) => {
+            return Err(ApiError::Internal(e));
+        }
+    }
+    // Check workspace membership for user tokens (agent tokens skip this)
+    if let Some(ref user_id) = caller.user_id {
+        match state
+            .workspace_memberships
+            .find_by_user_and_workspace(user_id, &wid)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(ApiError::Forbidden(
+                    "Access denied: not a member of this workspace".to_string(),
+                ));
+            }
+            Err(e) => {
+                return Err(ApiError::Internal(e));
+            }
+        }
+    }
+    Ok(())
+}
+
 // ── GET /api/v1/workspaces/:id/explorer-views ─────────────────────────────────
 
 pub async fn list_explorer_views(
@@ -160,6 +214,7 @@ pub async fn list_explorer_views(
     Path(workspace_id): Path<String>,
     caller: AuthenticatedAgent,
 ) -> Result<Json<Vec<ExplorerViewRecord>>, ApiError> {
+    check_workspace_membership(&state, &workspace_id, &caller).await?;
     seed_system_views_if_needed(&state, &workspace_id, &caller.tenant_id).await?;
 
     let wid = Id::new(&workspace_id);
@@ -186,6 +241,7 @@ pub async fn create_explorer_view(
     caller: AuthenticatedAgent,
     Json(req): Json<CreateViewRequest>,
 ) -> Result<(StatusCode, Json<ExplorerViewRecord>), ApiError> {
+    check_workspace_membership(&state, &workspace_id, &caller).await?;
     parse_and_validate(&req.spec)?;
 
     // Validate repo_id belongs to this workspace if provided.
@@ -225,6 +281,7 @@ pub async fn get_explorer_view(
     Path((workspace_id, view_id)): Path<(String, String)>,
     caller: AuthenticatedAgent,
 ) -> Result<Json<ExplorerViewRecord>, ApiError> {
+    check_workspace_membership(&state, &workspace_id, &caller).await?;
     let vid = Id::new(&view_id);
     let view = state
         .saved_views
@@ -253,6 +310,7 @@ pub async fn update_explorer_view(
     caller: AuthenticatedAgent,
     Json(req): Json<UpdateViewRequest>,
 ) -> Result<Json<ExplorerViewRecord>, ApiError> {
+    check_workspace_membership(&state, &workspace_id, &caller).await?;
     let vid = Id::new(&view_id);
     let existing = state
         .saved_views
@@ -306,6 +364,7 @@ pub async fn delete_explorer_view(
     Path((workspace_id, view_id)): Path<(String, String)>,
     caller: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
+    check_workspace_membership(&state, &workspace_id, &caller).await?;
     let vid = Id::new(&view_id);
     let view = state
         .saved_views
@@ -343,6 +402,7 @@ pub async fn generate_explorer_view(
     Json(req): Json<GenerateViewRequest>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
 {
+    check_workspace_membership(&state, &workspace_id, &caller).await?;
     // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
     {
         let mut limiter = state.llm_rate_limiter.lock().await;

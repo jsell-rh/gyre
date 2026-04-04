@@ -1047,12 +1047,23 @@
                       <span>{$t('explorer_view.spec_editor_error', { values: { error: specEditorError } })}</span>
                     </div>
                   {:else}
-                    <textarea
-                      class="spec-editor-textarea"
-                      bind:value={specEditorContent}
-                      spellcheck="false"
-                      aria-label="Spec content"
-                    ></textarea>
+                    <div class="spec-editor-with-lines">
+                      <div class="spec-line-numbers" aria-hidden="true">
+                        {#each (specEditorContent ?? '').split('\n') as _, i}
+                          <div class="spec-line-num">{i + 1}</div>
+                        {/each}
+                      </div>
+                      <textarea
+                        class="spec-editor-textarea"
+                        bind:value={specEditorContent}
+                        spellcheck="false"
+                        aria-label="Spec content"
+                        onscroll={(e) => {
+                          const gutter = e.target.previousElementSibling;
+                          if (gutter) gutter.scrollTop = e.target.scrollTop;
+                        }}
+                      ></textarea>
+                    </div>
                   {/if}
 
                   <!-- Spec Assertion Results (§9: inline green checkmark / red X) -->
@@ -2213,6 +2224,33 @@
     padding: var(--space-4);
     color: var(--color-danger);
     font-size: var(--text-sm);
+  }
+
+  .spec-editor-with-lines {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .spec-line-numbers {
+    width: 44px;
+    flex-shrink: 0;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--color-surface) 70%, var(--color-border));
+    border-right: 1px solid var(--color-border);
+    padding: var(--space-3) 0;
+    user-select: none;
+  }
+
+  .spec-line-num {
+    text-align: right;
+    padding: 0 8px 0 4px;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: 1.6;
+    color: var(--color-text-muted);
+    opacity: 0.5;
   }
 
   .spec-editor-textarea {

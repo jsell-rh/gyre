@@ -2310,11 +2310,26 @@
 
   // ── Ghost overlay drawing ─────────────────────────────────────────
   function drawGhostOverlays(ctx) {
-    const pulse = 0.5 + 0.5 * Math.sin(ghostPulsePhase * Math.PI * 2);
+    const basePulse = 0.5 + 0.5 * Math.sin(ghostPulsePhase * Math.PI * 2);
 
     for (const ghost of ghostOverlays) {
       // Try to find existing layout node for change/remove actions
       const existingLn = layoutNodeMap.get(ghost.id);
+
+      // Confidence-modulated opacity: higher confidence = more opaque ghost.
+      // confidence is 0-1 or a string like 'high'/'medium'/'low'.
+      let confAlpha = 1.0;
+      if (ghost.confidence != null) {
+        if (typeof ghost.confidence === 'number') {
+          confAlpha = Math.max(0.3, ghost.confidence);
+        } else if (ghost.confidence === 'low') {
+          confAlpha = 0.4;
+        } else if (ghost.confidence === 'medium') {
+          confAlpha = 0.7;
+        }
+        // 'high' or unrecognized → 1.0
+      }
+      const pulse = basePulse * confAlpha;
 
       if (ghost.action === 'add') {
         drawGhostNewNode(ctx, ghost, pulse);
