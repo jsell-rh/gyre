@@ -4282,7 +4282,7 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-disabled" disabled type="button" title="Requires production telemetry integration">Observable <span class="tb-coming-soon">(coming soon)</span></button>
+      <button class="tb-btn tb-btn-disabled" disabled type="button" title="Requires production telemetry integration">Observable <span class="tb-coming-soon">(requires telemetry)</span></button>
     </div>
 
     {#if lens === 'evaluative'}

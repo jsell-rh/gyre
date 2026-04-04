@@ -91,7 +91,10 @@ const MAX_CONVERSATION_HISTORY: usize = 20;
 /// Max length of a single user message in characters.
 const MAX_USER_MESSAGE_LENGTH: usize = 10_000;
 
-/// Minimum interval between user messages (rate limiting), in milliseconds.
+/// Minimum interval between LLM-triggering user messages (rate limiting), in milliseconds.
+/// Only applies to `Message` type — CRUD operations (SaveView, LoadView, ListViews,
+/// DeleteView) are not rate-limited as they're cheap DB queries (Vision Principle 6:
+/// "challenge every ceremony").
 const MIN_MESSAGE_INTERVAL_MS: u64 = 1000;
 
 /// WebSocket ping interval in seconds (keeps connections alive through proxies).
@@ -848,11 +851,22 @@ async fn handle_explorer_session(
                         // Seed system default views on first access when no system views exist.
                         // Check for system views specifically (not all views) to prevent
                         // re-seeding when a user deletes all personal views.
-                        let has_system_views = summaries.iter().any(|s| s.is_system);
-                        if !has_system_views {
+                        // Deduplication: check by name+is_system to prevent races between
+                        // concurrent sessions both seeing empty and creating duplicates.
+                        let existing_system_names: std::collections::HashSet<String> = summaries
+                            .iter()
+                            .filter(|s| s.is_system)
+                            .map(|s| s.name.clone())
+                            .collect();
+                        if existing_system_names.is_empty() {
                             let now = crate::api::now_secs();
                             let defaults = system_default_views();
                             for (name, description, query_json) in &defaults {
+                                // Skip if a system view with this name already exists
+                                // (handles concurrent seeding from another session)
+                                if existing_system_names.contains(*name) {
+                                    continue;
+                                }
                                 let view = SavedView {
                                     id: crate::api::new_id(),
                                     repo_id: rid.clone(),
@@ -877,7 +891,9 @@ async fn handle_explorer_session(
                                         });
                                     }
                                     Err(e) => {
-                                        warn!(error = ?e, "Failed to seed default view: {name}");
+                                        // Likely a concurrent insert — not fatal, just skip.
+                                        // The other session's views will appear on next list.
+                                        warn!(error = ?e, "Failed to seed default view (concurrent insert?): {name}");
                                     }
                                 }
                             }
@@ -1436,17 +1452,20 @@ async fn run_explorer_agent(
                     Ok(e) => {
                         // Enforce cache size limit to prevent memory exhaustion
                         if n.len() + e.len() > MAX_GRAPH_CACHE_ENTRIES {
+                            let original_nodes = n.len();
+                            let original_edges = e.len();
                             warn!(
                                 "Graph too large for session cache ({} nodes + {} edges > {}), truncating — keeping most recently modified nodes",
-                                n.len(), e.len(), MAX_GRAPH_CACHE_ENTRIES
+                                original_nodes, original_edges, MAX_GRAPH_CACHE_ENTRIES
                             );
                             // Sort by last_modified_at descending so we keep recent nodes
                             let mut sorted_nodes = n;
                             sorted_nodes
                                 .sort_by(|a, b| b.last_modified_at.cmp(&a.last_modified_at));
+                            let kept_count = MAX_GRAPH_CACHE_ENTRIES / 2;
                             let kept_node_ids: std::collections::HashSet<String> = sorted_nodes
                                 .iter()
-                                .take(MAX_GRAPH_CACHE_ENTRIES / 2)
+                                .take(kept_count)
                                 .map(|n| n.id.to_string())
                                 .collect();
                             // Keep edges that connect to retained nodes
@@ -1460,10 +1479,18 @@ async fn run_explorer_agent(
                             *cached_nodes = Some(
                                 sorted_nodes
                                     .into_iter()
-                                    .take(MAX_GRAPH_CACHE_ENTRIES / 2)
+                                    .take(kept_count)
                                     .collect(),
                             );
                             *cached_edges = Some(kept_edges);
+                            // Warn the user via WebSocket (Vision Principle 2: "surface the signal")
+                            let warning_msg = format!(
+                                "Note: This repository has a large graph ({} nodes, {} edges). \
+                                 Showing the {} most recently modified nodes. \
+                                 Older architectural elements may not appear in queries.",
+                                original_nodes, original_edges, kept_count
+                            );
+                            stream_text(sender, &warning_msg, false).await;
                         } else {
                             *cached_nodes = Some(n);
                             *cached_edges = Some(e);
@@ -1709,9 +1736,10 @@ async fn run_explorer_agent(
     let selected_node_id = canvas_state.selected_node.as_ref().map(|n| n.id.as_str());
 
     // Multi-turn agent loop with self-check.
-    // Budget: MAX_AGENT_TURNS (3) total LLM API calls per user message.
-    // Each call may involve tool use OR view query refinement — they share
-    // the same budget to cap per-query cost as specified in the spec.
+    // Budget: MAX_AGENT_TURNS (5) total LLM API calls per user message.
+    // Tool-use calls consume turns but refinement has its own separate budget
+    // (MAX_REFINEMENT_TURNS) so the agent can fully use both tool exploration
+    // and self-check without them competing.
     let mut refinement_count = 0;
     let mut view_query_sent = false;
     let max_total_turns = MAX_AGENT_TURNS;

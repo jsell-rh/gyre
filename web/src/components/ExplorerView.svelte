@@ -46,6 +46,22 @@
   let explorerSavedViews = $state([]);
   let detailNode = $state(null);
 
+  // ── Breadcrumb URL deep-linking ──────────────────────────────────────
+  // Encode breadcrumb path in URL hash so refresh/sharing preserves drill-down.
+  // Format: #drill=id1:name1/id2:name2
+  $effect(() => {
+    const bc = explorerCanvasState?.breadcrumb;
+    if (!bc || bc.length === 0) {
+      // Only clear hash if it was a drill= hash (don't clear other hashes)
+      if (window.location.hash.startsWith('#drill=')) {
+        history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+      return;
+    }
+    const encoded = bc.map(b => `${encodeURIComponent(b.id)}:${encodeURIComponent(b.name)}`).join('/');
+    history.replaceState(null, '', `${window.location.pathname}${window.location.search}#drill=${encoded}`);
+  });
+
   // Spec editor state (inline editing with progressive preview, §3)
   let specEditorOpen = $state(false);
   let specEditorPath = $state('');
