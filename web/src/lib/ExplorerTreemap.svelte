@@ -222,25 +222,48 @@
       }
     }
 
+    // Compute distribution-relative thresholds (percentile-based, not hardcoded)
+    const complexities = nodes.filter(n => n.complexity != null && !n.deleted_at).map(n => n.complexity);
+    const coverages = nodes.filter(n => n.test_coverage != null && !n.deleted_at).map(n => n.test_coverage);
+    const callCounts = [];
+    for (const n of nodes) {
+      if (!n.deleted_at && n.node_type !== 'tree-group') callCounts.push(incomingCallCounts.get(n.id) ?? 0);
+    }
+    function p90(arr) {
+      if (arr.length === 0) return Infinity;
+      const sorted = [...arr].sort((a, b) => a - b);
+      const idx = Math.min(Math.floor(sorted.length * 0.9), sorted.length - 1);
+      return sorted[idx];
+    }
+    function p10(arr) {
+      if (arr.length === 0) return 0;
+      const sorted = [...arr].sort((a, b) => a - b);
+      const idx = Math.min(Math.floor(sorted.length * 0.1), sorted.length - 1);
+      return sorted[idx];
+    }
+    const complexityThreshold = Math.max(10, p90(complexities));
+    const coverageThreshold = Math.min(0.5, p10(coverages));
+    const callThreshold = Math.max(3, p90(callCounts));
+
     for (const n of nodes) {
       if (n.node_type === 'tree-group' || n.deleted_at) continue;
       const calls = incomingCallCounts.get(n.id) ?? 0;
 
-      // Pattern 1: High complexity + low test coverage
-      if ((n.complexity ?? 0) > 15 && (n.test_coverage ?? 0) < 0.3) {
+      // Pattern 1: High complexity + low test coverage (distribution-relative)
+      if ((n.complexity ?? 0) > complexityThreshold && (n.test_coverage ?? 0) < coverageThreshold) {
         results.push({
           nodeId: n.id,
           nodeName: n.name ?? n.qualified_name ?? '?',
-          message: `High complexity (${n.complexity}) but low test coverage (${Math.round((n.test_coverage ?? 0) * 100)}%)`,
+          message: `High complexity (${n.complexity}, p90=${complexityThreshold}) but low test coverage (${Math.round((n.test_coverage ?? 0) * 100)}%)`,
           severity: 'high',
         });
       }
-      // Pattern 2: Heavily depended on with no spec
-      if (calls > 5 && !n.spec_path) {
+      // Pattern 2: Heavily depended on with no spec (distribution-relative)
+      if (calls > callThreshold && !n.spec_path) {
         results.push({
           nodeId: n.id,
           nodeName: n.name ?? n.qualified_name ?? '?',
-          message: `Heavily depended on (${calls} callers) with no spec`,
+          message: `Heavily depended on (${calls} callers, p90=${callThreshold}) with no spec`,
           severity: 'medium',
         });
       }
@@ -4067,9 +4090,11 @@
     scheduleRedraw();
   });
 
-  // Compute trace path DFS ordering and connecting edges when a trace query is active.
-  // Uses depth-first ordering to represent execution order (call stack) rather than
-  // breadth-first (wavefront), so A→B→C shows A's full chain before sibling branches.
+  // Compute trace path ordering and connecting edges when a trace query is active.
+  // Uses depth-first ordering to represent call-stack execution order: when A calls B
+  // and B calls C, the order is A(1)→B(2)→C(3) — which matches the actual execution
+  // stack. For functions with multiple sequential callees, children are sorted
+  // alphabetically for determinism (we lack source-order information from static analysis).
   $effect(() => {
     // Detect trace queries: focus scope with outgoing direction (Calls/RoutesTo traversal)
     const isTrace = activeQuery?.scope?.type === 'focus' &&
