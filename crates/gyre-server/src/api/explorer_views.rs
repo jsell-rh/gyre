@@ -371,7 +371,10 @@ pub async fn generate_explorer_view(
         .map(|t| t.content)
         .unwrap_or_else(|| crate::llm_defaults::PROMPT_EXPLORER_GENERATE.to_string());
 
-    let system_prompt = template_content.replace("{{question}}", &req.question);
+    // Do NOT inject user input into the system prompt — that enables prompt injection.
+    // The template may contain {{question}} for backward compatibility, but we strip it
+    // and pass the user's question solely as the user prompt.
+    let system_prompt = template_content.replace("{{question}}", "");
     let user_prompt = req.question.clone();
 
     // Resolve model and call LLM for structured JSON output.

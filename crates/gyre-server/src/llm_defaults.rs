@@ -38,9 +38,9 @@ Be concise and maintain the existing document structure and markdown formatting.
 
 /// Fallback system prompt for explorer view generation.
 ///
-/// Variables: `{{question}}`.
+/// The user's question is passed as the user prompt (not injected here).
 pub const PROMPT_EXPLORER_GENERATE: &str = "You are a code explorer assistant. \
-Generate a ViewSpec JSON object that answers: {{question}} \
+Generate a ViewSpec JSON object that answers the user's question. \
 The ViewSpec must have: name (string), description (string), \
 data (object with node_types array, edge_types array, depth integer 1-5), \
 layout (one of: \"graph\", \"hierarchical\", \"list\"). \

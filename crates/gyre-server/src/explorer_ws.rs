@@ -49,8 +49,14 @@ const MAX_SESSION_MESSAGES: usize = 50;
 /// Max conversation history entries before summarization window.
 const MAX_CONVERSATION_HISTORY: usize = 20;
 
+/// Max length of a single user message in characters.
+const MAX_USER_MESSAGE_LENGTH: usize = 10_000;
+
 /// Minimum interval between user messages (rate limiting), in milliseconds.
 const MIN_MESSAGE_INTERVAL_MS: u64 = 1000;
+
+/// WebSocket ping interval in seconds (keeps connections alive through proxies).
+const WS_PING_INTERVAL_SECS: u64 = 30;
 
 pub async fn explorer_ws(
     ws: WebSocketUpgrade,
@@ -86,8 +92,9 @@ async fn handle_explorer_session(
             return;
         }
         Err(e) => {
+            warn!("Failed to look up repository {repo_id}: {e}");
             let err = ExplorerServerMessage::Error {
-                message: format!("Failed to look up repository: {e}"),
+                message: "Repository lookup failed".to_string(),
             };
             let _ = sender
                 .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
@@ -132,22 +139,39 @@ async fn handle_explorer_session(
     let mut cached_nodes: Option<Vec<gyre_common::graph::GraphNode>> = None;
     let mut cached_edges: Option<Vec<gyre_common::graph::GraphEdge>> = None;
 
-    while let Some(msg) = receiver.next().await {
-        let msg = match msg {
-            Ok(Message::Text(text)) => text,
-            Ok(Message::Close(_)) => break,
-            Ok(_) => continue,
-            Err(e) => {
-                warn!("WebSocket error: {e}");
-                break;
+    // Ping/pong keepalive: keeps connections alive through proxies/load balancers.
+    let mut ping_interval =
+        tokio::time::interval(std::time::Duration::from_secs(WS_PING_INTERVAL_SECS));
+    ping_interval.tick().await; // consume the immediate first tick
+
+    loop {
+        let msg = tokio::select! {
+            incoming = receiver.next() => {
+                match incoming {
+                    Some(Ok(Message::Text(text))) => text,
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Pong(_))) => continue,
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => {
+                        warn!("WebSocket error: {e}");
+                        break;
+                    }
+                }
+            }
+            _ = ping_interval.tick() => {
+                if sender.send(Message::Ping(vec![].into())).await.is_err() {
+                    break; // Client disconnected
+                }
+                continue;
             }
         };
 
         let client_msg: ExplorerClientMessage = match serde_json::from_str(&msg) {
             Ok(m) => m,
             Err(e) => {
+                warn!(error = ?e, "Invalid explorer WebSocket message");
                 let err = ExplorerServerMessage::Error {
-                    message: format!("Invalid message: {e}"),
+                    message: "Invalid message format".to_string(),
                 };
                 let _ = sender
                     .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
@@ -158,6 +182,21 @@ async fn handle_explorer_session(
 
         match client_msg {
             ExplorerClientMessage::Message { text, canvas_state } => {
+                // Input length validation: reject oversized messages.
+                if text.len() > MAX_USER_MESSAGE_LENGTH {
+                    let err = ExplorerServerMessage::Error {
+                        message: format!(
+                            "Message too long ({} chars). Maximum is {} characters.",
+                            text.len(),
+                            MAX_USER_MESSAGE_LENGTH
+                        ),
+                    };
+                    let _ = sender
+                        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                        .await;
+                    continue;
+                }
+
                 // Rate limiting: enforce minimum interval between messages.
                 let now = std::time::Instant::now();
                 let elapsed = now.duration_since(last_message_time).as_millis() as u64;
@@ -211,8 +250,9 @@ async fn handle_explorer_session(
                 {
                     Ok(()) => {}
                     Err(e) => {
+                        warn!(repo_id = %repo_id, error = ?e, "Explorer query failed");
                         let err = ExplorerServerMessage::Error {
-                            message: format!("Explorer query failed: {e}"),
+                            message: "Explorer query failed. Please try again.".to_string(),
                         };
                         let _ = sender
                             .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
@@ -288,8 +328,9 @@ async fn handle_explorer_session(
                         }
                     }
                     Err(e) => {
+                        warn!(error = ?e, "Failed to save view");
                         let err = ExplorerServerMessage::Error {
-                            message: format!("Failed to save view: {e}"),
+                            message: "Failed to save view. Please try again.".to_string(),
                         };
                         let _ = sender
                             .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
@@ -325,8 +366,9 @@ async fn handle_explorer_session(
                         let query: serde_json::Value = match serde_json::from_str(&v.query_json) {
                             Ok(q) => q,
                             Err(e) => {
+                                warn!(view_id = %view_id, error = ?e, "Malformed view query JSON");
                                 let err = ExplorerServerMessage::Error {
-                                    message: format!("Malformed view query: {e}"),
+                                    message: "Saved view has invalid query data".to_string(),
                                 };
                                 let _ = sender
                                     .send(Message::Text(
@@ -350,8 +392,9 @@ async fn handle_explorer_session(
                             .await;
                     }
                     Err(e) => {
+                        warn!(view_id = %view_id, error = ?e, "Failed to load view");
                         let err = ExplorerServerMessage::Error {
-                            message: format!("Failed to load view: {e}"),
+                            message: "Failed to load view. Please try again.".to_string(),
                         };
                         let _ = sender
                             .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
@@ -380,8 +423,9 @@ async fn handle_explorer_session(
                             .await;
                     }
                     Err(e) => {
+                        warn!(repo_id = %repo_id, error = ?e, "Failed to list views");
                         let err = ExplorerServerMessage::Error {
-                            message: format!("Failed to list views: {e}"),
+                            message: "Failed to list views. Please try again.".to_string(),
                         };
                         let _ = sender
                             .send(Message::Text(serde_json::to_string(&err).unwrap().into()))

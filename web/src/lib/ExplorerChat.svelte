@@ -27,9 +27,19 @@
   const AUTH_TOKEN_KEY = 'gyre_auth_token';
   const RECONNECT_DELAY = 3000;
   const MAX_RECONNECTS = 5;
+  const MAX_CLIENT_MESSAGES = 200;
 
   // ── State ────────────────────────────────────────────────────────────────
   let messages = $state([]); // [{ role: 'user'|'assistant', content: string, viewQuery?: object, timestamp: number }]
+
+  /** Cap the messages array to MAX_CLIENT_MESSAGES, keeping the newest entries. */
+  function capMessages(msgs) {
+    if (msgs.length > MAX_CLIENT_MESSAGES) {
+      return msgs.slice(msgs.length - MAX_CLIENT_MESSAGES);
+    }
+    return msgs;
+  }
+
   let inputText = $state('');
   let status = $state('connecting'); // 'connecting' | 'ready' | 'thinking' | 'refining' | 'error' | 'disconnected'
   let ws = $state(null);
@@ -118,7 +128,7 @@
           // Final text message (done=true)
           const fullText = streamingText + (msg.content ?? '');
           if (fullText.trim()) {
-            messages = [...messages, { role: 'assistant', content: fullText, timestamp: Date.now() }];
+            messages = capMessages([...messages, { role: 'assistant', content: fullText, timestamp: Date.now() }]);
           }
           streamingText = '';
           status = 'ready';
@@ -130,16 +140,16 @@
         const query = msg.query ?? msg.view_query ?? msg;
         // Finalize any in-flight streaming text before clearing
         if (streamingText.trim()) {
-          messages = [...messages, { role: 'assistant', content: streamingText, timestamp: Date.now() }];
+          messages = capMessages([...messages, { role: 'assistant', content: streamingText, timestamp: Date.now() }]);
         }
         streamingText = '';
         // Add as assistant message with view query
-        messages = [...messages, {
+        messages = capMessages([...messages, {
           role: 'assistant',
           content: msg.explanation ?? $t('explorer_chat.view_applied'),
           viewQuery: query,
           timestamp: Date.now(),
-        }];
+        }]);
         status = 'ready';
         onViewQuery(query);
         scrollToBottom();
@@ -160,7 +170,7 @@
       }
       case 'error': {
         const errorMsg = msg.message ?? $t('explorer_chat.error_occurred');
-        messages = [...messages, { role: 'assistant', content: errorMsg, timestamp: Date.now(), isError: true }];
+        messages = capMessages([...messages, { role: 'assistant', content: errorMsg, timestamp: Date.now(), isError: true }]);
         streamingText = '';
         // Session limit reached — mark as disconnected so user knows to reconnect
         if (errorMsg.includes('Session message limit')) {
@@ -184,7 +194,7 @@
     const text = inputText.trim();
     inputText = '';
 
-    messages = [...messages, { role: 'user', content: text, timestamp: Date.now() }];
+    messages = capMessages([...messages, { role: 'user', content: text, timestamp: Date.now() }]);
     scrollToBottom();
 
     ws.send(JSON.stringify({
