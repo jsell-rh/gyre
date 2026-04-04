@@ -3089,7 +3089,12 @@
   }
 
   function drawEdges(ctx) {
-    if (cam.zoom < 0.3) return; // Don't draw edges at very low zoom
+    // At low zoom, draw bundled inter-group edges instead of individual edges.
+    // This prevents visual clutter while preserving connectivity awareness.
+    if (cam.zoom < 0.5) {
+      drawBundledEdges(ctx);
+      return;
+    }
 
     const maxEdges = 1500;
     let count = 0;
@@ -3183,6 +3188,104 @@
           ctx.fillText(labelText, 0, 0);
           ctx.restore();
         }
+      }
+    }
+  }
+
+  // Draw bundled inter-group edges at low zoom for structural awareness.
+  // Groups edges by their source/target tree-group containers and draws
+  // aggregate arrows with thickness proportional to edge count.
+  function drawBundledEdges(ctx) {
+    // Find visible summary-mode tree groups
+    const summaryGroups = layoutNodes.filter(ln =>
+      ln.kind === 'tree-group' && isSummaryMode(ln) && nodeOpacity(ln) > 0.1
+    );
+    if (summaryGroups.length === 0) return;
+
+    // Map each graph node to its closest visible summary group
+    const nodeToGroup = new Map();
+    function mapDescendants(treeNode, groupId) {
+      if (!treeNode) return;
+      for (const gn of (treeNode.graphNodes ?? [])) {
+        nodeToGroup.set(gn.id, groupId);
+      }
+      if (treeNode.children) {
+        for (const child of treeNode.children.values()) {
+          mapDescendants(child, groupId);
+        }
+      }
+    }
+    for (const ln of summaryGroups) {
+      if (!ln.treeNode) continue;
+      mapDescendants(ln.treeNode, ln.id);
+    }
+
+    // Also map leaf layout nodes to their parent tree group
+    for (const ln of layoutNodes) {
+      if (ln.kind !== 'leaf' || !ln.node) continue;
+      if (nodeToGroup.has(ln.node.id)) continue;
+      // Walk up parent chain to find summary group
+      let p = ln.parentTreeGroup;
+      while (p) {
+        if (summaryGroups.some(sg => sg.id === p.id)) {
+          nodeToGroup.set(ln.node.id, p.id);
+          break;
+        }
+        p = p.parentTreeGroup;
+      }
+    }
+
+    // Bundle edges by source/target group
+    const bundles = new Map();
+    for (const e of renderEdges) {
+      const srcId = edgeSrc(e);
+      const tgtId = edgeTgt(e);
+      const sg = nodeToGroup.get(srcId);
+      const tg = nodeToGroup.get(tgtId);
+      if (!sg || !tg || sg === tg) continue;
+
+      const key = sg < tg ? `${sg}|${tg}` : `${tg}|${sg}`;
+      if (!bundles.has(key)) bundles.set(key, { sg, tg, count: 0 });
+      bundles.get(key).count++;
+    }
+
+    for (const [, bundle] of bundles) {
+      const sln = layoutNodeMap.get(bundle.sg);
+      const tln = layoutNodeMap.get(bundle.tg);
+      if (!sln || !tln) continue;
+
+      const ss = worldToScreen(sln.x, sln.y);
+      const ts = worldToScreen(tln.x, tln.y);
+
+      // Frustum cull
+      if (ss.x < -50 && ts.x < -50) continue;
+      if (ss.x > W + 50 && ts.x > W + 50) continue;
+      if (ss.y < -50 && ts.y < -50) continue;
+      if (ss.y > H + 50 && ts.y > H + 50) continue;
+
+      const thickness = Math.max(1, Math.min(5, Math.log2(bundle.count + 1)));
+      const alpha = Math.min(0.6, 0.2 + bundle.count / 100);
+
+      drawArrow(ctx, ss.x, ss.y, ts.x, ts.y, '#64748b', alpha, thickness);
+
+      // Label bundle count
+      if (thickness > 1.5) {
+        const mx = (ss.x + ts.x) / 2;
+        const my = (ss.y + ts.y) / 2;
+        ctx.save();
+        ctx.globalAlpha = Math.max(alpha, 0.5);
+        const labelFont = "9px 'SF Mono', Menlo, monospace";
+        ctx.font = labelFont;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const label = `${bundle.count} edges`;
+        const tw = measureText(ctx, label, labelFont);
+        roundRect(ctx, mx - tw / 2 - 4, my - 8, tw + 8, 16, 4);
+        ctx.fillStyle = 'rgba(15,15,26,0.85)';
+        ctx.fill();
+        ctx.fillStyle = '#94a3b8';
+        ctx.fillText(label, mx, my);
+        ctx.restore();
       }
     }
   }

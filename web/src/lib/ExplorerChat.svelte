@@ -142,6 +142,16 @@
     }, delay);
   }
 
+  // Manual reconnect for session limit or error states
+  function manualReconnect() {
+    if (ws) { ws.onclose = null; ws.close(); ws = null; }
+    reconnectCount = 0;
+    messages = [];
+    streamingText = '';
+    status = 'connecting';
+    connect();
+  }
+
   function handleMessage(msg) {
     switch (msg.type) {
       case 'text': {
@@ -559,6 +569,14 @@
       </div>
     {/if}
   </div>
+
+  <!-- Reconnect bar (shown when disconnected or error) -->
+  {#if status === 'disconnected' || status === 'error'}
+    <div class="reconnect-bar">
+      <span class="reconnect-text">{status === 'disconnected' ? 'Session ended' : 'Connection lost'}</span>
+      <button class="reconnect-btn" onclick={manualReconnect} type="button">Reconnect</button>
+    </div>
+  {/if}
 
   <!-- Input area -->
   <div class="chat-input-area">
@@ -1108,6 +1126,32 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+
+  .reconnect-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    background: rgba(239, 68, 68, 0.08);
+    border-top: 1px solid rgba(239, 68, 68, 0.2);
+  }
+  .reconnect-text {
+    font-size: var(--font-sm);
+    color: var(--color-text-muted);
+  }
+  .reconnect-btn {
+    padding: var(--space-1) var(--space-3);
+    background: var(--color-primary, #3b82f6);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    font-size: var(--font-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity var(--transition-fast);
+  }
+  .reconnect-btn:hover { opacity: 0.85; }
 
   .send-btn {
     width: 36px;
