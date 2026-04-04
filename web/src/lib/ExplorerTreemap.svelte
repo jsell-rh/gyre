@@ -53,7 +53,7 @@
     if (conf === 'high') return '#22c55e';
     // Amber: suggested link (medium or low confidence)
     if (conf === 'medium') return '#eab308';
-    if (conf === 'low') return '#f97316';
+    if (conf === 'low') return '#eab308';
     // Check GovernedBy edges for this node
     const nodeId = node.id;
     if (nodeId) {
@@ -340,6 +340,19 @@
   });
   let searchHighlightIds = $derived(new Set(searchResults.map(n => n.id)));
   let searchInputEl = $state(null);
+
+  function zoomToNode(nodeId) {
+    const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === nodeId);
+    if (ln) {
+      targetCam.x = ln.x;
+      targetCam.y = ln.y;
+      targetCam.zoom = Math.min(W / (ln.w + 60), H / (ln.h + 60), 4) * 0.85;
+      if (targetCam.zoom < 1) targetCam.zoom = 2;
+      needsAnim = true;
+      selectedNodeId = nodeId;
+      scheduleRedraw();
+    }
+  }
 
   // Evaluative heat map config — separate from view queries so it overlays
   // on top of any active query rather than replacing it
@@ -1327,6 +1340,114 @@
     }
   }
 
+  function computeFields(nodeName) {
+    const start = resolveNodeByName(nodeName);
+    if (!start) return new Set();
+    const result = new Set();
+    for (const nb of (adjacency.get(start.id) ?? [])) {
+      if (nb.edgeType === 'field_of' && nb.reverse) result.add(nb.targetId);
+    }
+    return result;
+  }
+
+  function computeDescendantsSet(nodeName) {
+    const start = resolveNodeByName(nodeName);
+    if (!start) return new Set();
+    const result = new Set([start.id]);
+    const q = [start.id];
+    while (q.length > 0) {
+      const id = q.shift();
+      for (const nb of (adjacency.get(id) ?? [])) {
+        if (nb.edgeType === 'contains' && !nb.reverse && !result.has(nb.targetId)) {
+          result.add(nb.targetId);
+          q.push(nb.targetId);
+        }
+      }
+    }
+    return result;
+  }
+
+  function computeAncestorsSet(nodeName) {
+    const start = resolveNodeByName(nodeName);
+    if (!start) return new Set();
+    const result = new Set([start.id]);
+    const q = [start.id];
+    while (q.length > 0) {
+      const id = q.shift();
+      for (const nb of (adjacency.get(id) ?? [])) {
+        if (nb.edgeType === 'contains' && nb.reverse && !result.has(nb.targetId)) {
+          result.add(nb.targetId);
+          q.push(nb.targetId);
+        }
+      }
+    }
+    return result;
+  }
+
+  function computeTestFragility(nodeName) {
+    const start = resolveNodeByName(nodeName);
+    if (!start) return new Set();
+    const testNodes = nodes.filter(n => n.test_node);
+    let count = 0;
+    for (const tn of testNodes) {
+      const reached = new Set([tn.id]);
+      const q = [tn.id];
+      while (q.length > 0) {
+        const id = q.shift();
+        for (const nb of (adjacency.get(id) ?? [])) {
+          if (['calls', 'implements', 'routes_to', 'contains'].includes(nb.edgeType) && !nb.reverse && !reached.has(nb.targetId)) {
+            reached.add(nb.targetId);
+            q.push(nb.targetId);
+          }
+        }
+      }
+      if (reached.has(start.id)) count++;
+    }
+    if (count > 0) return new Set([start.id]);
+    return new Set();
+  }
+
+  function computeReachable(nodeName, edgeTypes, direction, depth) {
+    const start = resolveNodeByName(nodeName);
+    if (!start) return new Set();
+    const allowedEdges = new Set(edgeTypes.map(e => e.toLowerCase()));
+    const result = new Set([start.id]);
+    const q = [{ id: start.id, d: 0 }];
+    while (q.length > 0) {
+      const { id, d } = q.shift();
+      if (d >= depth) continue;
+      for (const nb of (adjacency.get(id) ?? [])) {
+        if (!allowedEdges.has(nb.edgeType) || result.has(nb.targetId)) continue;
+        if (direction === 'outgoing' && nb.reverse) continue;
+        if (direction === 'incoming' && !nb.reverse) continue;
+        result.add(nb.targetId);
+        q.push({ id: nb.targetId, d: d + 1 });
+      }
+    }
+    return result;
+  }
+
+  // Split arguments respecting balanced parentheses and brackets
+  function splitBalancedArgs(s) {
+    const parts = [];
+    let depth = 0;
+    let bracketDepth = 0;
+    let last = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (c === '(') depth++;
+      else if (c === ')') depth--;
+      else if (c === '[') bracketDepth++;
+      else if (c === ']') bracketDepth--;
+      else if (c === ',' && depth === 0 && bracketDepth === 0) {
+        parts.push(s.substring(last, i));
+        last = i + 1;
+      }
+    }
+    parts.push(s.substring(last));
+    return parts;
+  }
+
   // Resolve a computed expression string like "$callers(FooService, 5)" or "$test_unreachable"
   function resolveComputed(expr) {
     if (!expr || typeof expr !== 'string') return null;
@@ -1335,33 +1456,57 @@
     // Simple references
     if (e === '$test_unreachable') return computeTestUnreachable();
     if (e === '$test_reachable') return computeTestReachable();
+    if (e === '$clicked' || e === '$selected') {
+      const selId = canvasState?.selectedNode?.id;
+      if (selId) return new Set([selId]);
+      return new Set();
+    }
 
-    // Function-style: $fn(args)
-    const fnMatch = e.match(/^\$(\w+)\((.+)\)$/);
-    if (fnMatch) {
-      const fn = fnMatch[1];
-      const args = fnMatch[2].split(/,\s*/);
+    // Parse function-style: $fn(...) with proper balanced parenthesis matching
+    const dollarIdx = e.indexOf('$');
+    const parenIdx = e.indexOf('(', dollarIdx);
+    if (dollarIdx === 0 && parenIdx > 0 && e.endsWith(')')) {
+      const fn = e.substring(1, parenIdx);
+      const inner = e.substring(parenIdx + 1, e.length - 1);
+      const args = splitBalancedArgs(inner);
+
       switch (fn) {
-        case 'callers': return computeCallers(args[0], args[1] ? parseInt(args[1]) : 10);
-        case 'callees': return computeCallees(args[0], args[1] ? parseInt(args[1]) : 10);
-        case 'implementors': return computeImplementors(args[0]);
-        case 'governed_by': return computeGovernedBy(args[0]);
-        case 'where': return computeWhere(args[0], args[1]?.replace(/'/g, ''), args[2]?.replace(/'/g, ''));
+        case 'callers': return computeCallers(args[0]?.trim().replace(/^['"]|['"]$/g, ''), args[1] ? parseInt(args[1].trim()) : 10);
+        case 'callees': return computeCallees(args[0]?.trim().replace(/^['"]|['"]$/g, ''), args[1] ? parseInt(args[1].trim()) : 10);
+        case 'implementors': return computeImplementors(args[0]?.trim().replace(/^['"]|['"]$/g, ''));
+        case 'governed_by': return computeGovernedBy(args[0]?.trim().replace(/^['"]|['"]$/g, ''));
+        case 'where': return computeWhere(
+          args[0]?.trim().replace(/^['"]|['"]$/g, ''),
+          args[1]?.trim().replace(/^['"]|['"]$/g, ''),
+          args[2]?.trim().replace(/^['"]|['"]$/g, '')
+        );
+        case 'fields': return computeFields(args[0]?.trim().replace(/^['"]|['"]$/g, ''));
+        case 'descendants': return computeDescendantsSet(args[0]?.trim().replace(/^['"]|['"]$/g, ''));
+        case 'ancestors': return computeAncestorsSet(args[0]?.trim().replace(/^['"]|['"]$/g, ''));
+        case 'test_fragility': return computeTestFragility(args[0]?.trim().replace(/^['"]|['"]$/g, ''));
+        case 'reachable': {
+          const nodeName = args[0]?.trim().replace(/^['"]|['"]$/g, '');
+          const edgeTypesStr = args[1]?.trim() ?? 'calls';
+          const direction = args[2]?.trim().replace(/^['"]|['"]$/g, '') ?? 'outgoing';
+          const depth = args[3] ? parseInt(args[3].trim()) : 10;
+          const edgeTypes = edgeTypesStr.replace(/[\[\]]/g, '').split(',').map(s => s.trim().replace(/^['"]|['"]$/g, ''));
+          return computeReachable(nodeName, edgeTypes, direction, depth);
+        }
         case 'intersect': {
-          const a = resolveComputed(args[0]);
-          const b = resolveComputed(args[1]);
+          const a = resolveComputed(args[0]?.trim());
+          const b = resolveComputed(args[1]?.trim());
           if (a && b) return computedSetOp('intersect', a, b);
           return a ?? b ?? new Set();
         }
         case 'union': {
-          const a = resolveComputed(args[0]);
-          const b = resolveComputed(args[1]);
+          const a = resolveComputed(args[0]?.trim());
+          const b = resolveComputed(args[1]?.trim());
           if (a && b) return computedSetOp('union', a, b);
           return a ?? b ?? new Set();
         }
         case 'diff': {
-          const a = resolveComputed(args[0]);
-          const b = resolveComputed(args[1]);
+          const a = resolveComputed(args[0]?.trim());
+          const b = resolveComputed(args[1]?.trim());
           if (a && b) return computedSetOp('diff', a, b);
           return a ?? new Set();
         }
@@ -1835,6 +1980,13 @@
       // Too small to see at all — skip this node and all children
       if (ss > 0 && ss < 10) return;
       if (!isTreeGroup && op < 0.01) return;
+
+      // Semantic zoom: hide implementation detail at overview zoom levels
+      if (!isTreeGroup && ln.node) {
+        const nt = ln.node.node_type ?? '';
+        if (cam.zoom < 0.15 && ['function', 'field', 'type', 'constant', 'endpoint'].includes(nt)) return;
+        if (cam.zoom < 0.3 && ['function', 'field'].includes(nt)) return;
+      }
 
       // Draw this node if it has any opacity
       if (op > 0.01) {
@@ -3919,14 +4071,10 @@
           if (e.key === 'Escape') { searchOpen = false; searchQuery = ''; scheduleRedraw(); }
           if (e.key === 'Enter' && searchResults.length > 0) {
             const hit = searchResults[0];
-            selectedNodeId = hit.id;
             canvasState = { ...canvasState, selectedNode: { id: hit.id, name: hit.name, node_type: hit.node_type, qualified_name: hit.qualified_name } };
             onNodeDetail(hit);
-            // Pan to the node
-            const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === hit.id);
-            if (ln) { targetCam.x = ln.x; targetCam.y = ln.y; targetCam.zoom = Math.max(cam.zoom, 2); }
+            zoomToNode(hit.id);
             searchOpen = false; searchQuery = '';
-            scheduleRedraw();
           }
         }}
         aria-label="Search entities"
@@ -3943,13 +4091,10 @@
         {#each searchResults.slice(0, 8) as result}
           <button class="search-result-item" role="option"
             onclick={() => {
-              selectedNodeId = result.id;
               canvasState = { ...canvasState, selectedNode: { id: result.id, name: result.name, node_type: result.node_type, qualified_name: result.qualified_name } };
               onNodeDetail(result);
-              const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === result.id);
-              if (ln) { targetCam.x = ln.x; targetCam.y = ln.y; targetCam.zoom = Math.max(cam.zoom, 2); }
+              zoomToNode(result.id);
               searchOpen = false; searchQuery = '';
-              scheduleRedraw();
             }}
             type="button"
           >
