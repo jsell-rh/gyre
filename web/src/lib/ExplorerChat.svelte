@@ -306,7 +306,11 @@
   });
 
   onDestroy(() => {
-    if (ws) { ws.onclose = null; ws.close(); }
+    if (ws && ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+      ws.onclose = null;
+      ws.close();
+    }
+    ws = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
   });
 </script>
@@ -407,7 +411,7 @@
         </div>
       </div>
     {:else}
-      {#each messages as msg, i (i)}
+      {#each messages as msg, i (msg.timestamp + '-' + i)}
         <div class="chat-message {msg.role}" class:error={msg.isError}>
           <div class="message-meta">
             <span class="message-role">{msg.role === 'user' ? $t('explorer_chat.you') : $t('explorer_chat.assistant')}</span>
