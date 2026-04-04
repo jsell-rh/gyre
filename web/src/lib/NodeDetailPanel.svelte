@@ -1,6 +1,4 @@
 <script>
-  import { t } from 'svelte-i18n';
-
   let {
     node = null,
     nodes = [],
@@ -89,6 +87,18 @@
     if (testedBy.length === 0) {
       for (const caller of calledBy) {
         if (caller.test_node) testedBy.push(caller);
+      }
+    }
+
+    // Populate usedBy: types/traits/endpoints that reference this node
+    // via incoming Calls, Contains, FieldOf, or RoutesTo edges
+    for (const e of edges) {
+      const src = e.source_id ?? e.from_node_id ?? e.from;
+      const tgt = e.target_id ?? e.to_node_id ?? e.to;
+      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      if (tgt === nodeId && (et === 'calls' || et === 'field_of' || et === 'routes_to' || et === 'contains')) {
+        const srcNode = nodes.find(n => n.id === src);
+        if (srcNode && !usedBy.some(u => u.id === srcNode.id)) usedBy.push(srcNode);
       }
     }
 
@@ -229,7 +239,12 @@
     const visited = new Set();
     const chain = []; // array of { node, depth }
     let frontier = [...handlerIds];
-    for (const hid of frontier) visited.add(hid);
+    // Include handlers themselves as Step 0 in the flow chain
+    for (const hid of frontier) {
+      visited.add(hid);
+      const handlerNode = nodes.find(n => n.id === hid);
+      if (handlerNode) chain.push({ node: handlerNode, depth: 0 });
+    }
 
     for (let depth = 1; depth <= 3; depth++) {
       const nextFrontier = [];
@@ -296,7 +311,9 @@
         if (meta.gate) gates.push(meta.gate);
         if (meta.role_required) gates.push(`Role: ${meta.role_required}`);
         if (meta.auth_required !== undefined) gates.push(meta.auth_required ? 'Auth required' : 'Public');
-      } catch (e) {}
+      } catch (e) {
+        gates.push(`[malformed gate metadata: ${e.message}]`);
+      }
     }
     // Check doc_comment for gate hints
     if (node.doc_comment) {
@@ -822,7 +839,7 @@
             <summary class="detail-section-title">Implementation Completeness</summary>
             <div class="spec-completeness-meter">
               <div class="completeness-bar">
-                <div class="completeness-fill" style="width: {specCompleteness.total > 0 ? (specGovernedNodes.length > 0 ? 100 : 0) : 0}%"></div>
+                <div class="completeness-fill" style="width: {specCompleteness.pct}%"></div>
                 <div class="completeness-tested-fill" style="width: {specCompleteness.pct}%"></div>
               </div>
               <div class="completeness-stats">
