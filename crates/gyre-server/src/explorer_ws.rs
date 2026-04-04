@@ -1796,8 +1796,8 @@ async fn run_explorer_agent(
                     );
                     // Don't send unvalidated queries to the frontend.
                     // Stream a warning with the raw JSON so the user can see what was attempted.
-                    let raw_preview = serde_json::to_string_pretty(&raw_query)
-                        .unwrap_or_else(|_| raw_query.to_string());
+                    let raw_preview = serde_json::to_string_pretty(&query_json)
+                        .unwrap_or_else(|_| query_json.to_string());
                     let truncated = if raw_preview.len() > 500 {
                         format!("{}...", &raw_preview[..500])
                     } else {
