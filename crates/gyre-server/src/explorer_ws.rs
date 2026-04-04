@@ -2630,7 +2630,9 @@ Specs are first-class entities in the knowledge graph (Vision Principle 3). They
 5. Keep groups focused (< 20 nodes each)
 6. Prefer "fit" zoom
 7. ALWAYS dry-run before finalizing
-9. Refine if dry-run returns warnings
+8. Refine if dry-run returns warnings
+9. When the user's intent is ambiguous or could match multiple interpretations, ASK a clarifying question rather than silently picking one interpretation. For example: "Did you mean the SearchService type or the search_service module?" or "Are you looking for test coverage gaps or call-graph structure?" — engaging the human's judgment is the whole point.
+10. Surface signal, not noise: default to views that reveal what's architecturally significant (boundaries, interfaces, uncovered specs) rather than showing everything. Right context > all context.
 
 ## Output Format
 - Conversational explanation (what it shows, what's interesting, what to look at)

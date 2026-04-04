@@ -263,8 +263,9 @@ impl ViewQuery {
                 for e in edges {
                     if !Self::KNOWN_EDGE_TYPES.contains(&e.to_lowercase().as_str()) {
                         errors.push(format!(
-                            "Unknown edge type '{}' in Focus scope — known types: calls, contains, implements, depends_on, field_of, returns, routes_to, renders, persists_to, governed_by, produced_by",
-                            e
+                            "Unknown edge type '{}' in Focus scope — known types: {}",
+                            e,
+                            Self::KNOWN_EDGE_TYPES.join(", ")
                         ));
                     }
                 }
@@ -287,8 +288,9 @@ impl ViewQuery {
                 for e in expand_edges {
                     if !Self::KNOWN_EDGE_TYPES.contains(&e.to_lowercase().as_str()) {
                         errors.push(format!(
-                            "Unknown edge type '{}' in Concept scope — known types: calls, contains, implements, depends_on, field_of, returns, routes_to, renders, persists_to, governed_by, produced_by",
-                            e
+                            "Unknown edge type '{}' in Concept scope — known types: {}",
+                            e,
+                            Self::KNOWN_EDGE_TYPES.join(", ")
                         ));
                     }
                 }
@@ -300,8 +302,9 @@ impl ViewQuery {
         for e in &self.edges.filter {
             if !Self::KNOWN_EDGE_TYPES.contains(&e.to_lowercase().as_str()) {
                 errors.push(format!(
-                    "Unknown edge type '{}' in edge filter — known types: calls, contains, implements, depends_on, field_of, returns, routes_to, renders, persists_to, governed_by, produced_by",
-                    e
+                    "Unknown edge type '{}' in edge filter — known types: {}",
+                    e,
+                    Self::KNOWN_EDGE_TYPES.join(", ")
                 ));
             }
         }
@@ -354,13 +357,41 @@ impl ViewQuery {
             }
         }
 
+        // Validate group color fields
+        for group in &self.groups {
+            if let Some(ref c) = group.color {
+                if !Self::is_valid_color(c) {
+                    errors.push(format!(
+                        "Invalid color '{}' in group '{}' — expected hex, named CSS color, or hsl/rgb function",
+                        c, group.name
+                    ));
+                }
+            }
+        }
+
+        // Validate narrative step order uniqueness
+        if !self.narrative.is_empty() {
+            let mut seen_orders: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            for step in &self.narrative {
+                if let Some(order) = step.order {
+                    if !seen_orders.insert(order) {
+                        errors.push(format!(
+                            "Duplicate narrative step order {} for node '{}' — each step must have a unique order",
+                            order, step.node
+                        ));
+                    }
+                }
+            }
+        }
+
         // Validate heat metric is recognized
         if let Some(ref heat) = self.emphasis.heat {
             if !heat.metric.is_empty() && !Self::KNOWN_HEAT_METRICS.contains(&heat.metric.as_str())
             {
                 errors.push(format!(
-                    "Unknown heat metric '{}' — known metrics: complexity, churn, churn_count_30d, incoming_calls, outgoing_calls, test_coverage, field_count, test_fragility, risk_score",
-                    heat.metric
+                    "Unknown heat metric '{}' — known metrics: {}",
+                    heat.metric,
+                    Self::KNOWN_HEAT_METRICS.join(", ")
                 ));
             }
         }

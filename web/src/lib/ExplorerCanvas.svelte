@@ -593,6 +593,7 @@
         active_lens: lens,
         visible_tree_groups: visibleGroups,
         zoom_level: cam.zoom,
+        recent_interactions: recentInteractions,
       };
     } catch { /* ignore during init */ }
   }

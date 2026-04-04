@@ -53,6 +53,7 @@
   let messagesEl = $state(null);
   let inputEl = $state(null);
   let streamingText = $state('');
+  let streamingTimeout = null; // Auto-finalize after 30s of no chunks
   let savedViewsDropdownOpen = $state(false);
   let activeViewId = $state(null);
 
@@ -116,6 +117,8 @@
         msg = JSON.parse(event.data);
       } catch (e) {
         console.warn('[ExplorerChat] Malformed WebSocket JSON:', e.message);
+        // Surface parse error to user instead of silently dropping
+        messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: '*Received malformed response from server. The explorer may need to reconnect.*', timestamp: Date.now(), isError: true }]);
         return;
       }
       handleMessage(msg);
@@ -123,6 +126,12 @@
 
     socket.onclose = () => {
       ws = null;
+      // Finalize any orphaned streaming text on disconnect
+      // (prevents indefinite accumulation if server crashes mid-stream)
+      if (streamingText.trim()) {
+        messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: streamingText, timestamp: Date.now() }]);
+        streamingText = '';
+      }
       if (status !== 'error') {
         status = 'disconnected';
       }
@@ -169,8 +178,19 @@
           const chunk = typeof msg.content === 'string' ? msg.content : String(msg.content ?? '');
           streamingText += chunk;
           status = 'thinking';
+          // Reset streaming timeout: auto-finalize if no chunks for 30s
+          if (streamingTimeout) clearTimeout(streamingTimeout);
+          streamingTimeout = setTimeout(() => {
+            if (streamingText.trim()) {
+              messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: streamingText + '\n\n*[Response timed out]*', timestamp: Date.now() }]);
+              streamingText = '';
+              status = 'ready';
+              scrollToBottom();
+            }
+          }, 30000);
         } else {
           // Final text message (done=true)
+          if (streamingTimeout) { clearTimeout(streamingTimeout); streamingTimeout = null; }
           const doneChunk = typeof msg.content === 'string' ? msg.content : String(msg.content ?? '');
           const fullText = streamingText + doneChunk;
           if (fullText.trim()) {
@@ -398,6 +418,7 @@
     }
     ws = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (streamingTimeout) clearTimeout(streamingTimeout);
     // Safety: $effect cleanup handles this, but onDestroy may fire first in edge cases
     document.removeEventListener('keydown', onKeyDown);
   });
