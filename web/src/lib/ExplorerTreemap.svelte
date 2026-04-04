@@ -264,7 +264,21 @@
         dedupedMarkers.push(m);
       }
     }
-    return { visibleIds, ghostIds, minT, maxT, fromT, toT, totalWithTime, markers: dedupedMarkers.slice(0, 10) };
+    // Compute structural delta: what changed between the selected time range and now
+    const delta = { added: 0, removed: 0, modified: 0, byType: new Map() };
+    for (const n of nodes) {
+      if (n.deleted_at) continue;
+      const t = n.first_seen_at || 0;
+      const nt = n.node_type ?? 'unknown';
+      if (t > toT) {
+        delta.added++;
+        delta.byType.set(nt, (delta.byType.get(nt) ?? 0) + 1);
+      }
+      if (t < fromT && n.last_modified_at && n.last_modified_at > fromT) {
+        delta.modified++;
+      }
+    }
+    return { visibleIds, ghostIds, minT, maxT, fromT, toT, totalWithTime, markers: dedupedMarkers.slice(0, 10), delta };
   });
 
   // Canvas-scoped search state
@@ -2721,6 +2735,43 @@
     zoomDecayFrame = requestAnimationFrame(zoomDecayLoop);
   }
 
+  // Edge hit testing: find edge closest to click point within a threshold
+  function edgeHitTest(clientX, clientY) {
+    const rect = canvasEl?.getBoundingClientRect();
+    if (!rect || cam.zoom < 0.3) return null;
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
+    const threshold = 8; // pixels
+
+    let best = null;
+    let bestDist = threshold;
+    for (const e of renderEdges) {
+      const srcId = e.source_id ?? e.from_node_id ?? e.from;
+      const tgtId = e.target_id ?? e.to_node_id ?? e.to;
+      const sln = layoutNodeMap.get(srcId);
+      const tln = layoutNodeMap.get(tgtId);
+      if (!sln || !tln) continue;
+      const ss = worldToScreen(sln.x, sln.y);
+      const ts = worldToScreen(tln.x, tln.y);
+      // Point-to-line-segment distance
+      const dx = ts.x - ss.x, dy = ts.y - ss.y;
+      const len2 = dx * dx + dy * dy;
+      if (len2 < 100) continue; // Too short to click
+      let t = ((sx - ss.x) * dx + (sy - ss.y) * dy) / len2;
+      t = Math.max(0, Math.min(1, t));
+      const px = ss.x + t * dx, py = ss.y + t * dy;
+      const dist = Math.sqrt((sx - px) ** 2 + (sy - py) ** 2);
+      if (dist < bestDist) {
+        bestDist = dist;
+        const srcNode = nodes.find(n => n.id === srcId);
+        const tgtNode = nodes.find(n => n.id === tgtId);
+        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+        best = { edge: e, edgeType: et, source: srcNode, target: tgtNode };
+      }
+    }
+    return best;
+  }
+
   function onClick(e) {
     if (Math.abs(e.clientX - panStart.x) > 4 || Math.abs(e.clientY - panStart.y) > 4) return;
 
@@ -2753,9 +2804,26 @@
         onInteractiveQuery(q);
       }
     } else {
-      selectedNodeId = null;
-      canvasState = { ...canvasState, selectedNode: null };
-      onNodeDetail(null);
+      // No node hit — check for edge click
+      const edgeHit = edgeHitTest(e.clientX, e.clientY);
+      if (edgeHit) {
+        // Show edge relationship in detail panel
+        const edgeInfo = {
+          id: `edge-${edgeHit.source?.id}-${edgeHit.target?.id}`,
+          name: `${edgeHit.source?.name ?? '?'} → ${edgeHit.target?.name ?? '?'}`,
+          node_type: 'edge',
+          edge_type: edgeHit.edgeType,
+          source_node: edgeHit.source,
+          target_node: edgeHit.target,
+          file_path: edgeHit.source?.file_path,
+          doc_comment: `${edgeHit.edgeType.replace('_', ' ')} relationship from ${edgeHit.source?.qualified_name ?? edgeHit.source?.name ?? '?'} to ${edgeHit.target?.qualified_name ?? edgeHit.target?.name ?? '?'}`,
+        };
+        onNodeDetail(edgeInfo);
+      } else {
+        selectedNodeId = null;
+        canvasState = { ...canvasState, selectedNode: null };
+        onNodeDetail(null);
+      }
     }
     scheduleRedraw();
   }
@@ -3459,6 +3527,20 @@
             ({timelineNodes.ghostIds.size} ghosted)
           {/if}
         </span>
+        {#if timelineNodes.delta && (timelineNodes.delta.added > 0 || timelineNodes.delta.modified > 0)}
+          <span class="timeline-delta">
+            Since then:
+            {#if timelineNodes.delta.added > 0}
+              <span class="diff-ins">+{timelineNodes.delta.added}</span>
+            {/if}
+            {#if timelineNodes.delta.modified > 0}
+              <span class="diff-mod">{timelineNodes.delta.modified} modified</span>
+            {/if}
+            {#if timelineNodes.delta.byType.size > 0}
+              ({[...timelineNodes.delta.byType.entries()].map(([t, c]) => `${c} ${t}s`).join(', ')})
+            {/if}
+          </span>
+        {/if}
       {/if}
     </div>
   {/if}
