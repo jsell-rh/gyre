@@ -15,6 +15,7 @@
     onInteractiveQuery = () => {},
     ghostOverlays = [],
     filters = null,
+    traceData = null, // { spans: [], root_spans: [] } from GateTraceResponse
   } = $props();
 
   // ── Interactive $clicked mode ──────────────────────────────────────────
@@ -340,6 +341,81 @@
     // Lens toggle simply changes the lens state — no query manipulation needed.
     // The evaluative overlay is computed independently from any active query.
     scheduleRedraw();
+  }
+
+  // ── Evaluative lens: OTLP trace particle animation ──────────────────────
+  let evalPlaying = $state(false);
+  let evalSpeed = $state(1.0);
+  let evalScrubber = $state(0); // 0..1 normalized time position
+  let evalParticles = $state([]); // [{edgeKey, progress, span, color}]
+
+  // Pre-compute span-to-graph-node mapping and edge call frequencies
+  let traceEdgeFrequency = $derived.by(() => {
+    if (!traceData?.spans?.length) return new Map();
+    const freq = new Map(); // "srcId->tgtId" → count
+    // Map span parent→child to graph nodes via graph_node_id
+    const spanById = new Map();
+    for (const s of traceData.spans) spanById.set(s.span_id, s);
+    for (const s of traceData.spans) {
+      if (!s.parent_span_id || !s.graph_node_id) continue;
+      const parent = spanById.get(s.parent_span_id);
+      if (!parent?.graph_node_id) continue;
+      const key = `${parent.graph_node_id}->${s.graph_node_id}`;
+      freq.set(key, (freq.get(key) ?? 0) + 1);
+    }
+    return freq;
+  });
+
+  let traceMaxFreq = $derived(Math.max(1, ...traceEdgeFrequency.values()));
+
+  // Build particles from trace data when evaluative lens is active
+  let traceSpanTimeline = $derived.by(() => {
+    if (!traceData?.spans?.length || lens !== 'evaluative') return null;
+    const spans = traceData.spans;
+    const minTime = Math.min(...spans.map(s => s.start_time));
+    const maxTime = Math.max(...spans.map(s => s.start_time + s.duration_us));
+    const totalDuration = maxTime - minTime || 1;
+    return { minTime, maxTime, totalDuration, spans };
+  });
+
+  function tickParticles(dt) {
+    if (!traceSpanTimeline || !evalPlaying) return;
+    const { minTime, totalDuration, spans } = traceSpanTimeline;
+    const spanById = new Map();
+    for (const s of spans) spanById.set(s.span_id, s);
+
+    // Advance scrubber
+    const step = (dt / 1000) * evalSpeed * (1 / Math.max(1, totalDuration / 1000000));
+    evalScrubber = Math.min(1, evalScrubber + step);
+    if (evalScrubber >= 1) {
+      evalScrubber = 0; // Loop
+    }
+
+    const currentTime = minTime + evalScrubber * totalDuration;
+    const newParticles = [];
+
+    for (const span of spans) {
+      if (!span.graph_node_id || !span.parent_span_id) continue;
+      const parent = spanById.get(span.parent_span_id);
+      if (!parent?.graph_node_id) continue;
+
+      const spanStart = span.start_time;
+      const spanEnd = span.start_time + span.duration_us;
+
+      if (currentTime >= spanStart && currentTime <= spanEnd) {
+        const progress = (currentTime - spanStart) / (span.duration_us || 1);
+        const isError = span.status === 'error' || span.status === 'ERROR';
+        newParticles.push({
+          fromId: parent.graph_node_id,
+          toId: span.graph_node_id,
+          progress: Math.min(1, Math.max(0, progress)),
+          span,
+          color: isError ? '#ef4444' : '#60a5fa',
+          glow: isError ? '#ef4444' : '#3b82f6',
+        });
+      }
+    }
+    evalParticles = newParticles;
   }
 
   // Inertial zoom velocity
@@ -1579,6 +1655,11 @@
     // Draw edges first (below nodes)
     drawEdges(ctx);
 
+    // Draw evaluative trace particles (above edges, below nodes)
+    if (lens === 'evaluative' && evalParticles.length > 0) {
+      drawTraceParticles(ctx);
+    }
+
     // Draw view query group boundaries
     if (activeQuery?.groups?.length) {
       const GROUP_COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#ef4444'];
@@ -2400,6 +2481,46 @@
     }
   }
 
+  function drawTraceParticles(ctx) {
+    for (const p of evalParticles) {
+      const sln = layoutNodeMap.get(p.fromId);
+      const tln = layoutNodeMap.get(p.toId);
+      if (!sln || !tln) continue;
+
+      const ss = worldToScreen(sln.x, sln.y);
+      const ts = worldToScreen(tln.x, tln.y);
+
+      // Interpolate position along edge
+      const px = ss.x + (ts.x - ss.x) * p.progress;
+      const py = ss.y + (ts.y - ss.y) * p.progress;
+
+      // Frustum cull
+      if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
+
+      const radius = 4 + cam.zoom * 0.5;
+
+      // Glow
+      ctx.save();
+      ctx.shadowColor = p.glow;
+      ctx.shadowBlur = 10;
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(px, py, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // Core
+      ctx.save();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(px, py, radius * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
   function drawEdges(ctx) {
     if (cam.zoom < 0.3) return; // Don't draw edges at very low zoom
 
@@ -2434,6 +2555,16 @@
       let color = EDGE_COLORS[et] ?? '#64748b';
       let edgeAlpha = alpha;
       let lineWidth = 1.2;
+
+      // Evaluative lens: modulate edge thickness by call frequency from traces
+      if (lens === 'evaluative' && traceEdgeFrequency.size > 0) {
+        const freqKey = `${srcId}->${tgtId}`;
+        const freq = traceEdgeFrequency.get(freqKey) ?? 0;
+        if (freq > 0) {
+          lineWidth = 1.5 + (freq / traceMaxFreq) * 4;
+          edgeAlpha = Math.max(alpha, 0.6);
+        }
+      }
 
       // Connected highlight
       if (connectedHighlight) {
@@ -2581,7 +2712,10 @@
     if (Math.abs(cam.zoom - targetCam.zoom) < 0.0005) cam.zoom = targetCam.zoom;
   }
 
-  function animLoop() {
+  let lastAnimTime = 0;
+  function animLoop(timestamp) {
+    const dt = lastAnimTime ? (timestamp - lastAnimTime) : 16;
+    lastAnimTime = timestamp;
     lerpCam();
 
     // Advance ghost pulse animation (1 cycle per 1.5 seconds at ~60fps)
@@ -2590,6 +2724,11 @@
       const prev = ghostPulsePhase;
       ghostPulsePhase = (ghostPulsePhase + 0.011) % 1;
       if (ghostPulsePhase < prev) ghostAnimCycles++;
+    }
+
+    // Advance evaluative trace particles
+    if (lens === 'evaluative' && evalPlaying) {
+      tickParticles(dt);
     }
 
     drawFrame();
@@ -2601,7 +2740,8 @@
     // Keep animating when camera moving or a one-time redraw is needed.
     // For ghosts: only animate the pulse for 3 cycles then stop to save CPU.
     const ghostNeedsAnim = hasGhosts && ghostAnimCycles < 3;
-    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim) {
+    const particlesPlaying = lens === 'evaluative' && evalPlaying;
+    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying) {
       needsAnim = false;
       animFrame = requestAnimationFrame(animLoop);
     } else {
@@ -2752,6 +2892,29 @@
     zoomDecayFrame = requestAnimationFrame(zoomDecayLoop);
   }
 
+  // Particle hit testing: find if a click hit an animated trace particle
+  function particleHitTest(clientX, clientY) {
+    if (lens !== 'evaluative' || evalParticles.length === 0) return null;
+    const rect = canvasEl?.getBoundingClientRect();
+    if (!rect) return null;
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
+    const threshold = 12;
+
+    for (const p of evalParticles) {
+      const sln = layoutNodeMap.get(p.fromId);
+      const tln = layoutNodeMap.get(p.toId);
+      if (!sln || !tln) continue;
+      const ss = worldToScreen(sln.x, sln.y);
+      const ts = worldToScreen(tln.x, tln.y);
+      const px = ss.x + (ts.x - ss.x) * p.progress;
+      const py = ss.y + (ts.y - ss.y) * p.progress;
+      const dist = Math.sqrt((sx - px) ** 2 + (sy - py) ** 2);
+      if (dist < threshold) return p;
+    }
+    return null;
+  }
+
   // Edge hit testing: find edge closest to click point within a threshold
   function edgeHitTest(clientX, clientY) {
     const rect = canvasEl?.getBoundingClientRect();
@@ -2821,7 +2984,28 @@
         onInteractiveQuery(q);
       }
     } else {
-      // No node hit — check for edge click
+      // No node hit — check for particle click (evaluative lens)
+      const particleHit = particleHitTest(e.clientX, e.clientY);
+      if (particleHit) {
+        // Show span detail in the detail panel
+        const span = particleHit.span;
+        onNodeDetail({
+          id: `span-${span.span_id}`,
+          name: span.operation_name,
+          node_type: 'span',
+          span_id: span.span_id,
+          duration_us: span.duration_us,
+          status: span.status,
+          service_name: span.service_name,
+          attributes: span.attributes,
+          input_summary: span.input_summary,
+          output_summary: span.output_summary,
+          graph_node_id: span.graph_node_id,
+        });
+        scheduleRedraw();
+        return;
+      }
+      // Check for edge click
       const edgeHit = edgeHitTest(e.clientX, e.clientY);
       if (edgeHit) {
         // Show edge relationship in detail panel
@@ -3292,6 +3476,27 @@
           <button class="tb-btn tb-btn-sm" class:active={evaluativeMetric === key} onclick={() => { evaluativeMetric = key; onLensChange('evaluative'); }} type="button">{label}</button>
         {/each}
       </div>
+      {#if traceData?.spans?.length}
+        <div class="eval-playback" role="group" aria-label="Trace playback">
+          <button class="tb-btn tb-btn-sm" onclick={() => { evalPlaying = !evalPlaying; if (evalPlaying) scheduleRedraw(); }} type="button" title={evalPlaying ? 'Pause' : 'Play'}>
+            {evalPlaying ? '\u23F8' : '\u25B6'}
+          </button>
+          <input type="range" min="0" max="100" value={Math.round(evalScrubber * 100)}
+            oninput={(e) => { evalScrubber = parseInt(e.target.value) / 100; scheduleRedraw(); }}
+            class="eval-scrubber" title="Trace timeline position" />
+          <select class="eval-speed" value={evalSpeed}
+            onchange={(e) => { evalSpeed = parseFloat(e.target.value); }}>
+            <option value="0.25">0.25x</option>
+            <option value="0.5">0.5x</option>
+            <option value="1">1x</option>
+            <option value="2">2x</option>
+            <option value="5">5x</option>
+          </select>
+          <span class="eval-particle-count">{evalParticles.length} spans</span>
+        </div>
+      {:else}
+        <span class="eval-no-trace">No trace data</span>
+      {/if}
       <div class="tb-sep"></div>
     {/if}
 
@@ -3629,6 +3834,11 @@
   .observable-note { font-size: 10px; font-style: italic; color: #64748b; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .eval-metric-group { display: flex; gap: 2px; align-items: center; }
+  .eval-playback { display: flex; gap: 4px; align-items: center; margin-left: 4px; }
+  .eval-scrubber { width: 80px; accent-color: #ef4444; height: 4px; cursor: pointer; }
+  .eval-speed { background: rgba(15,15,26,0.9); color: #94a3b8; border: 1px solid #334155; border-radius: 4px; padding: 2px 4px; font-size: 11px; font-family: 'SF Mono', Menlo, monospace; cursor: pointer; }
+  .eval-particle-count { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; white-space: nowrap; }
+  .eval-no-trace { font-size: 11px; color: #64748b; font-style: italic; margin-left: 4px; }
 
   .tb-sep { width: 1px; height: 20px; background: #334155; margin: 0 4px; }
 

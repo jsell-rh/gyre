@@ -56,6 +56,8 @@
   let predictLoading = $state(false);
   let predictError = $state('');
   let ghostOverlays = $state([]);
+  // Evaluative lens: trace data from most recent MR
+  let traceData = $state(null);
   let predictAffectedSpecs = $state([]);
   let predictEstimatedCost = $state(null);
   let predictConfidence = $state(null);
@@ -256,13 +258,16 @@
   }
 
   async function loadGraph(repoId) {
-    if (!repoId) { graph = null; return; }
+    if (!repoId) { graph = null; traceData = null; return; }
     loading = true;
     graph = null;
     graphError = null;
     selectedNode = null;
+    traceData = null;
     try {
       graph = await api.repoGraph(repoId);
+      // Load trace data for evaluative lens (best-effort, non-blocking)
+      loadTraceData(repoId);
     } catch (e) {
       showToast($t('explorer_view.graph_error', { values: { error: e.message } }), { type: 'error' });
       graphError = e.message;
@@ -270,6 +275,23 @@
     } finally {
       loading = false;
     }
+  }
+
+  async function loadTraceData(repoId) {
+    try {
+      // Find the most recent MR for this repo that has trace data
+      const mrs = await api.mergeRequests({ repo_id: repoId, per_page: 5 });
+      const mrList = mrs?.merge_requests ?? mrs ?? [];
+      for (const mr of mrList) {
+        try {
+          const trace = await api.mrTrace(mr.id);
+          if (trace?.spans?.length > 0) {
+            traceData = trace;
+            return;
+          }
+        } catch { /* no trace for this MR, try next */ }
+      }
+    } catch { /* trace loading is best-effort */ }
   }
 
   function onRepoChange(e) {
@@ -634,6 +656,7 @@
                 onNodeDetail={(n) => { detailNode = n; }}
                 onInteractiveQuery={(q) => { activeViewQuery = q; }}
                 {ghostOverlays}
+                {traceData}
               />
               <!-- Architecture Insights — collapsible panel inside canvas area -->
               {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
