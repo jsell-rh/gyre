@@ -34,11 +34,13 @@ const EDGES = [
 ];
 
 describe('NodeDetailPanel', () => {
-  it('renders nothing when node is null', () => {
+  it('renders common flows when node is null', () => {
     const { container } = render(NodeDetailPanel, {
       props: { node: null, nodes: [], edges: [] },
     });
-    expect(container.querySelector('.detail-panel')).toBeFalsy();
+    const panel = container.querySelector('.detail-panel');
+    expect(panel).toBeTruthy();
+    expect(panel.textContent).toContain('Common Flows');
   });
 
   it('renders detail panel with node data', () => {
