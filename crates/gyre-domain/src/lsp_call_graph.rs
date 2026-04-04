@@ -14,10 +14,66 @@ use gyre_common::graph::{EdgeType, GraphEdge, GraphNode, NodeType};
 use gyre_common::Id;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read as _, Write};
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+/// RAII guard that kills the child process on drop to prevent leaks.
+struct ChildGuard {
+    child: Child,
+    /// Collected stderr output (drained by a background thread).
+    stderr_output: std::sync::Arc<std::sync::Mutex<String>>,
+    /// Handle to the stderr draining thread.
+    _stderr_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ChildGuard {
+    fn new(mut child: Child) -> Self {
+        // Take stderr and drain it in a background thread to prevent
+        // the OS pipe buffer from filling up and deadlocking the child.
+        let stderr_output = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let stderr_thread = if let Some(stderr) = child.stderr.take() {
+            let output = stderr_output.clone();
+            Some(std::thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                let mut buf = String::new();
+                while reader.read_line(&mut buf).unwrap_or(0) > 0 {
+                    if let Ok(mut out) = output.lock() {
+                        // Cap at 64KB to avoid unbounded memory growth.
+                        if out.len() < 65536 {
+                            out.push_str(&buf);
+                        }
+                    }
+                    buf.clear();
+                }
+            }))
+        } else {
+            None
+        };
+
+        Self {
+            child,
+            stderr_output,
+            _stderr_thread: stderr_thread,
+        }
+    }
+
+    /// Get collected stderr output (best-effort).
+    fn stderr_snapshot(&self) -> String {
+        self.stderr_output
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 /// Result of LSP call graph extraction.
 pub struct LspCallGraphResult {
@@ -114,15 +170,15 @@ pub fn extract_call_graph(
     // Ensure no trailing slash.
     let repo_root_normalized = repo_root_str.trim_end_matches('/');
 
-    // Start rust-analyzer
-    let mut child = match Command::new("rust-analyzer")
+    // Start rust-analyzer wrapped in an RAII guard that kills the child on drop.
+    let mut guard = match Command::new("rust-analyzer")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(repo_root)
         .spawn()
     {
-        Ok(c) => c,
+        Ok(c) => ChildGuard::new(c),
         Err(e) => {
             result
                 .errors
@@ -131,8 +187,8 @@ pub fn extract_call_graph(
         }
     };
 
-    let stdin = child.stdin.as_mut().unwrap();
-    let stdout = child.stdout.take().unwrap();
+    let stdin = guard.child.stdin.as_mut().unwrap();
+    let stdout = guard.child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
 
     // Per-query timeout: 10 seconds. Overall extraction timeout: 120 seconds.
@@ -160,7 +216,7 @@ pub fn extract_call_graph(
         result
             .errors
             .push(format!("Failed to send initialize: {e}"));
-        let _ = child.kill();
+        // guard's Drop will kill the child
         return result;
     }
 
@@ -169,14 +225,12 @@ pub fn extract_call_graph(
         Ok(Some(_)) => {}
         Ok(None) => {
             result.errors.push("No initialize response".into());
-            let _ = child.kill();
             return result;
         }
         Err(e) => {
             result
                 .errors
                 .push(format!("Failed to read initialize response: {e}"));
-            let _ = child.kill();
             return result;
         }
     }
@@ -241,12 +295,28 @@ pub fn extract_call_graph(
             .file_path
             .strip_prefix("./")
             .unwrap_or(&func_node.file_path);
+
+        // Path traversal guard: canonicalize and verify the resolved path
+        // is within repo_root to prevent reading arbitrary files.
+        let candidate = repo_root.join(normalized_path);
+        let resolved = match safe_resolve_path(repo_root, &candidate) {
+            Some(p) => p,
+            None => {
+                result.errors.push(format!(
+                    "Path traversal blocked for {}",
+                    func_node.file_path
+                ));
+                continue;
+            }
+        };
+        let _ = &resolved; // used below via normalized_path which is validated
+
         let file_uri = format!("file://{repo_root_normalized}/{normalized_path}");
 
         // Send textDocument/didOpen if we haven't opened this file yet.
         if opened_files.insert(normalized_path.to_string()) {
-            // Read the file content for didOpen.
-            let file_content = match std::fs::read_to_string(repo_root.join(normalized_path)) {
+            // Read the file content for didOpen (path already validated above).
+            let file_content = match std::fs::read_to_string(&resolved) {
                 Ok(c) => c,
                 Err(_) => continue, // Skip files we can't read
             };
@@ -347,7 +417,7 @@ pub fn extract_call_graph(
         }
     }
 
-    // Shutdown LSP
+    // Shutdown LSP gracefully; ChildGuard's Drop is the safety net.
     let shutdown = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 999999,
@@ -363,7 +433,27 @@ pub fn extract_call_graph(
         "params": null
     });
     let _ = send_lsp_message(stdin, &exit);
-    let _ = child.wait();
+
+    // Wait for exit and capture stderr diagnostics on failure.
+    match guard.child.wait() {
+        Ok(status) if !status.success() => {
+            let stderr = guard.stderr_snapshot();
+            let stderr_summary = if stderr.len() > 1024 {
+                format!("{}...(truncated)", &stderr[..1024])
+            } else {
+                stderr
+            };
+            result.errors.push(format!(
+                "rust-analyzer exited with {status}; stderr: {stderr_summary}"
+            ));
+        }
+        Err(e) => {
+            result
+                .errors
+                .push(format!("Failed to wait for rust-analyzer: {e}"));
+        }
+        _ => {}
+    }
 
     result
 }
@@ -377,7 +467,12 @@ pub fn extract_call_graph(
 /// defined via macros), and finally to column 0.
 fn compute_char_position(repo_root: &Path, file_path: &str, node: &GraphNode) -> u32 {
     let full_path = repo_root.join(file_path);
-    let Ok(content) = std::fs::read_to_string(&full_path) else {
+    // Validate the resolved path is within repo_root.
+    let resolved = match safe_resolve_path(repo_root, &full_path) {
+        Some(p) => p,
+        None => return 0,
+    };
+    let Ok(content) = std::fs::read_to_string(&resolved) else {
         return 0;
     };
     let line_idx = node.line_start.saturating_sub(1) as usize;
@@ -410,6 +505,19 @@ fn compute_char_position(repo_root: &Path, file_path: &str, node: &GraphNode) ->
         return pos as u32;
     }
     0
+}
+
+/// Resolve `candidate` to an absolute path and verify it is within `repo_root`.
+///
+/// Returns `None` if the path escapes the repo root (e.g. via `../`).
+fn safe_resolve_path(repo_root: &Path, candidate: &Path) -> Option<PathBuf> {
+    let canon_root = repo_root.canonicalize().ok()?;
+    let canon_path = candidate.canonicalize().ok()?;
+    if canon_path.starts_with(&canon_root) {
+        Some(canon_path)
+    } else {
+        None
+    }
 }
 
 fn send_lsp_message(
