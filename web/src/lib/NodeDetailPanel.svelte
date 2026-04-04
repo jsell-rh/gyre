@@ -921,6 +921,88 @@
         {/if}
 
       <!-- ============================================ -->
+      <!-- EDGE VIEW: relationship between two nodes -->
+      <!-- ============================================ -->
+      {:else if node.node_type === 'edge'}
+        <div class="detail-section">
+          <h4 class="detail-section-title">Relationship</h4>
+          <p class="detail-edge-type"><code>{(node.edge_type ?? '').replace('_', ' ')}</code></p>
+          {#if node.source_node}
+            <div class="detail-edge-endpoint">
+              <span class="detail-muted">From:</span>
+              <button class="detail-ref-link" onclick={() => handleNodeClick(node.source_node)} type="button">
+                <span class="ref-type">{node.source_node.node_type}</span> {node.source_node.name}
+              </button>
+              {#if node.source_node.file_path}
+                <code class="detail-muted detail-small">{node.source_node.file_path}{node.source_node.line_start ? `:${node.source_node.line_start}` : ''}</code>
+              {/if}
+            </div>
+          {/if}
+          {#if node.target_node}
+            <div class="detail-edge-endpoint">
+              <span class="detail-muted">To:</span>
+              <button class="detail-ref-link" onclick={() => handleNodeClick(node.target_node)} type="button">
+                <span class="ref-type">{node.target_node.node_type}</span> {node.target_node.name}
+              </button>
+              {#if node.target_node.file_path}
+                <code class="detail-muted detail-small">{node.target_node.file_path}{node.target_node.line_start ? `:${node.target_node.line_start}` : ''}</code>
+              {/if}
+            </div>
+          {/if}
+        </div>
+
+      <!-- ============================================ -->
+      <!-- SPAN VIEW: OTLP trace span detail (from evaluative particles) -->
+      <!-- ============================================ -->
+      {:else if node.node_type === 'span'}
+        <div class="detail-section">
+          <h4 class="detail-section-title">Span</h4>
+          <div class="span-detail-grid">
+            <span class="detail-muted">Operation</span>
+            <code>{node.name}</code>
+            {#if node.service_name}
+              <span class="detail-muted">Service</span>
+              <code>{node.service_name}</code>
+            {/if}
+            <span class="detail-muted">Duration</span>
+            <code>{node.duration_us != null ? (node.duration_us > 1000 ? `${(node.duration_us / 1000).toFixed(1)}ms` : `${node.duration_us}\u00B5s`) : '?'}</code>
+            <span class="detail-muted">Status</span>
+            <code class:span-error={node.status === 'error' || node.status === 'ERROR'}>{node.status}</code>
+            {#if node.span_id}
+              <span class="detail-muted">Span ID</span>
+              <code class="detail-small">{node.span_id}</code>
+            {/if}
+          </div>
+        </div>
+        {#if node.attributes && Object.keys(node.attributes).length > 0}
+          <div class="detail-section">
+            <details open>
+              <summary class="detail-section-title">Attributes ({Object.keys(node.attributes).length})</summary>
+              <div class="span-attributes">
+                {#each Object.entries(node.attributes) as [key, value]}
+                  <div class="span-attr-row">
+                    <span class="span-attr-key">{key}</span>
+                    <span class="span-attr-value">{value}</span>
+                  </div>
+                {/each}
+              </div>
+            </details>
+          </div>
+        {/if}
+        {#if node.input_summary}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Input</h4>
+            <pre class="span-io-summary">{node.input_summary}</pre>
+          </div>
+        {/if}
+        {#if node.output_summary}
+          <div class="detail-section">
+            <h4 class="detail-section-title">Output</h4>
+            <pre class="span-io-summary">{node.output_summary}</pre>
+          </div>
+        {/if}
+
+      <!-- ============================================ -->
       <!-- GENERIC VIEW: function / module / package / constant / other -->
       <!-- ============================================ -->
       {:else}
@@ -1737,4 +1819,19 @@
     .detail-collapsible > summary::before { transition: none; }
     .completeness-fill, .completeness-tested-fill { transition: none; }
   }
+
+  /* Edge view */
+  .detail-edge-type { font-size: 14px; margin-bottom: 8px; }
+  .detail-edge-endpoint { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+  .detail-small { font-size: 11px; }
+
+  /* Span view */
+  .span-detail-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+  .span-detail-grid code { word-break: break-all; }
+  .span-error { color: #ef4444; font-weight: 600; }
+  .span-attributes { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+  .span-attr-row { display: flex; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--color-border); }
+  .span-attr-key { color: var(--color-text-muted); min-width: 80px; flex-shrink: 0; font-family: 'SF Mono', Menlo, monospace; }
+  .span-attr-value { color: var(--color-text); word-break: break-all; font-family: 'SF Mono', Menlo, monospace; }
+  .span-io-summary { font-size: 12px; font-family: 'SF Mono', Menlo, monospace; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; max-height: 120px; overflow-y: auto; }
 </style>
