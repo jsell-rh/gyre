@@ -2058,6 +2058,25 @@
       const u = (t - 0.66) / 0.34;
       return `hsl(${40 - u * 40}, ${70 + u * 15}%, ${50 - u * 10}%)`;
     }
+    if (palette === 'green-yellow-red') {
+      // Green (0 = governed/covered) → Yellow (0.5 = partial) → Red (1 = unspecified/risky)
+      if (t < 0.5) {
+        const u = t / 0.5;
+        return `hsl(${120 - u * 60}, ${65 + u * 10}%, ${35 + u * 10}%)`;
+      }
+      const u = (t - 0.5) / 0.5;
+      return `hsl(${60 - u * 60}, ${75 + u * 10}%, ${45 - u * 5}%)`;
+    }
+    if (palette === 'purple-orange') {
+      // Purple (0) → Orange (1) — good for coupling/fragility
+      if (t < 0.5) {
+        const u = t / 0.5;
+        return `hsl(${280 - u * 40}, ${60 + u * 15}%, ${40 + u * 10}%)`;
+      }
+      const u = (t - 0.5) / 0.5;
+      return `hsl(${240 - u * 210}, ${75 + u * 10}%, ${50 - u * 5}%)`;
+    }
+    // Fallback: simple blue-to-red gradient
     return `hsl(${(1 - t) * 240}, 70%, 45%)`;
   }
 

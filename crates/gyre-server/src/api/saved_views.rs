@@ -73,6 +73,43 @@ async fn resolve_workspace_id(state: &AppState, repo_id: &str) -> String {
     }
 }
 
+/// Verify the caller has workspace membership for the repo.
+/// Agent/service tokens (no user_id) skip this check — they use tenant-level auth.
+async fn check_workspace_membership(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    repo_id: &str,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    if let Some(ref user_id) = auth.user_id {
+        let workspace_id = resolve_workspace_id(state, repo_id).await;
+        if workspace_id.is_empty() {
+            return Err((
+                axum::http::StatusCode::NOT_FOUND,
+                "Repository not found".to_string(),
+            ));
+        }
+        let wid = Id::new(&workspace_id);
+        match state
+            .workspace_memberships
+            .find_by_user_and_workspace(user_id, &wid)
+            .await
+        {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err((
+                axum::http::StatusCode::FORBIDDEN,
+                "Access denied: not a member of this workspace".to_string(),
+            )),
+            Err(_) => Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Workspace membership check failed".to_string(),
+            )),
+        }
+    } else {
+        // Agent/service tokens rely on tenant-level auth
+        Ok(())
+    }
+}
+
 pub async fn list_views(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -177,6 +214,7 @@ pub async fn create_view(
     auth: AuthenticatedAgent,
     Json(req): Json<CreateViewRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ViewResponse>), (axum::http::StatusCode, String)> {
+    check_workspace_membership(&state, &auth, &repo_id).await?;
     let now = now_secs();
 
     // Validate name and description length
@@ -251,6 +289,7 @@ pub async fn get_view(
     Path((repo_id, view_id)): Path<(String, String)>,
     auth: AuthenticatedAgent,
 ) -> Result<Json<ViewResponse>, (axum::http::StatusCode, String)> {
+    check_workspace_membership(&state, &auth, &repo_id).await?;
     let vid = Id::new(&view_id);
     match state.saved_views.get(&vid).await {
         Ok(Some(v)) => {
@@ -286,6 +325,7 @@ pub async fn update_view(
     auth: AuthenticatedAgent,
     Json(req): Json<UpdateViewRequest>,
 ) -> Result<Json<ViewResponse>, (axum::http::StatusCode, String)> {
+    check_workspace_membership(&state, &auth, &repo_id).await?;
     let vid = Id::new(&view_id);
     let existing = match state.saved_views.get(&vid).await {
         Ok(Some(v)) => v,
@@ -376,6 +416,7 @@ pub async fn delete_view(
     Path((repo_id, view_id)): Path<(String, String)>,
     auth: AuthenticatedAgent,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    check_workspace_membership(&state, &auth, &repo_id).await?;
     let vid = Id::new(&view_id);
     // Verify ownership before deleting.
     match state.saved_views.get(&vid).await {
