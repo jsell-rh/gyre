@@ -249,24 +249,29 @@ fn bfs_traverse_with_depths(
 }
 
 /// Find a node by name or qualified_name (case-insensitive partial match).
-fn find_node_by_name<'a>(nodes: &'a [GraphNode], name: &str) -> Option<&'a GraphNode> {
+/// Accepts `&[&GraphNode]` to avoid cloning node slices.
+fn find_node_by_name<'a>(nodes: &[&'a GraphNode], name: &str) -> Option<&'a GraphNode> {
     let lower = name.to_lowercase();
     // Exact match first.
     let exact = nodes
         .iter()
         .find(|n| n.qualified_name.to_lowercase() == lower || n.name.to_lowercase() == lower);
-    if exact.is_some() {
-        return exact;
+    if let Some(found) = exact {
+        return Some(found);
     }
     // Partial match fallback.
-    nodes.iter().find(|n| {
-        n.qualified_name.to_lowercase().contains(&lower) || n.name.to_lowercase().contains(&lower)
-    })
+    nodes
+        .iter()
+        .find(|n| {
+            n.qualified_name.to_lowercase().contains(&lower)
+                || n.name.to_lowercase().contains(&lower)
+        })
+        .copied()
 }
 
 /// Find a node by name, returning whether the match was partial (not exact).
 fn find_node_by_name_with_match_type<'a>(
-    nodes: &'a [GraphNode],
+    nodes: &[&'a GraphNode],
     name: &str,
 ) -> Option<(&'a GraphNode, bool)> {
     let lower = name.to_lowercase();
@@ -284,7 +289,7 @@ fn find_node_by_name_with_match_type<'a>(
             n.qualified_name.to_lowercase().contains(&lower)
                 || n.name.to_lowercase().contains(&lower)
         })
-        .map(|n| (n, true))
+        .map(|n| (*n, true))
 }
 
 /// Edge types traversed for test reachability analysis.
@@ -299,8 +304,9 @@ const TEST_REACHABILITY_EDGES: &[EdgeType] = &[
 
 /// Compute the set of nodes reachable from test functions.
 /// Pre-computes a single BFS from all test nodes for O(T + N + M) total.
+/// Accepts `&[&GraphNode]` to avoid cloning node slices.
 fn compute_test_reachable(
-    nodes: &[GraphNode],
+    nodes: &[&GraphNode],
     outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
 ) -> HashSet<String> {
     let test_node_ids: Vec<String> = nodes
@@ -334,9 +340,10 @@ fn compute_test_reachable(
 
 /// Compute the number of distinct tests that can reach a node (test fragility).
 /// Uses per-test BFS but with depth limit of 20 for performance.
+/// Accepts `&[&GraphNode]` to avoid cloning node slices.
 fn compute_test_fragility_count(
     node_id: &str,
-    nodes: &[GraphNode],
+    nodes: &[&GraphNode],
     outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
     incoming: &HashMap<String, Vec<(String, EdgeType)>>,
 ) -> usize {
@@ -472,16 +479,8 @@ fn resolve_scope_with_adjacency(
                 active_nodes
                     .iter()
                     .find(|n| n.id.to_string() == resolved_name)
-                    .or_else(|| {
-                        find_node_by_name(
-                            &active_nodes
-                                .iter()
-                                .map(|n| (*n).clone())
-                                .collect::<Vec<_>>(),
-                            resolved_name,
-                        )
-                        .and_then(|found| active_nodes.iter().find(|n| n.id == found.id))
-                    })
+                    .copied()
+                    .or_else(|| find_node_by_name(&active_nodes, resolved_name))
             };
 
             match start_node {
@@ -543,13 +542,7 @@ fn resolve_scope_with_adjacency(
         }
 
         Scope::TestGaps => {
-            let reachable = compute_test_reachable(
-                &active_nodes
-                    .iter()
-                    .map(|n| (*n).clone())
-                    .collect::<Vec<_>>(),
-                outgoing,
-            );
+            let reachable = compute_test_reachable(&active_nodes, outgoing);
             // Include Functions, Endpoints, and Types — not just Functions.
             // Endpoints and Types without test coverage are high-risk gaps.
             let result = active_nodes
@@ -600,7 +593,6 @@ fn resolve_scope_with_adjacency(
             expand_depth,
             expand_direction,
         } => {
-            let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
             let edge_types: Vec<EdgeType> = expand_edges
                 .iter()
                 .filter_map(|s| parse_edge_type(s))
@@ -614,7 +606,7 @@ fn resolve_scope_with_adjacency(
             let mut all_depths = HashMap::new();
 
             for seed_name in seed_nodes {
-                if let Some(seed) = find_node_by_name(&all_nodes_vec, seed_name) {
+                if let Some(seed) = find_node_by_name(&active_nodes, seed_name) {
                     let depth_map = bfs_traverse_with_depths(
                         &seed.id.to_string(),
                         &edge_types,
@@ -666,8 +658,7 @@ fn resolve_computed_expression(
     }
 
     if trimmed == "$test_unreachable" {
-        let all_nodes: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        let reachable = compute_test_reachable(&all_nodes, outgoing);
+        let reachable = compute_test_reachable(active_nodes, outgoing);
         return active_nodes
             .iter()
             .filter(|n| !reachable.contains(&n.id.to_string()))
@@ -682,8 +673,7 @@ fn resolve_computed_expression(
     }
 
     if trimmed == "$test_reachable" {
-        let all_nodes: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        return compute_test_reachable(&all_nodes, outgoing);
+        return compute_test_reachable(active_nodes, outgoing);
     }
 
     // $where(property, op, value)
@@ -827,8 +817,7 @@ fn resolve_computed_expression(
         let depth: u32 = parts.get(1).and_then(|d| d.parse().ok()).unwrap_or(10);
 
         let resolved_name = resolve_node_ref(node_ref, selected_node_id);
-        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
+        if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
             return bfs_traverse(
                 &found.id.to_string(),
                 &[EdgeType::Calls],
@@ -849,8 +838,7 @@ fn resolve_computed_expression(
         let depth: u32 = parts.get(1).and_then(|d| d.parse().ok()).unwrap_or(10);
 
         let resolved_name = resolve_node_ref(node_ref, selected_node_id);
-        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
+        if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
             return bfs_traverse(
                 &found.id.to_string(),
                 &[EdgeType::Calls],
@@ -870,8 +858,7 @@ fn resolve_computed_expression(
             .trim_matches('\'')
             .trim_matches('"');
         let resolved_name = resolve_node_ref(node_name, selected_node_id);
-        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
+        if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
             let found_id = found.id.to_string();
             return incoming
                 .get(&found_id)
@@ -894,8 +881,7 @@ fn resolve_computed_expression(
             .trim_matches('\'')
             .trim_matches('"');
         let resolved_name = resolve_node_ref(node_name, selected_node_id);
-        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
+        if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
             let found_id = found.id.to_string();
             // FieldOf: source is the field, target is the parent type
             return incoming
@@ -919,8 +905,7 @@ fn resolve_computed_expression(
             .trim_matches('\'')
             .trim_matches('"');
         let resolved_name = resolve_node_ref(node_name, selected_node_id);
-        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
+        if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
             return bfs_traverse(
                 &found.id.to_string(),
                 &[EdgeType::Contains],
@@ -940,8 +925,7 @@ fn resolve_computed_expression(
             .trim_matches('\'')
             .trim_matches('"');
         let resolved_name = resolve_node_ref(node_name, selected_node_id);
-        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
+        if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
             return bfs_traverse(
                 &found.id.to_string(),
                 &[EdgeType::Contains],
@@ -1003,10 +987,9 @@ fn resolve_computed_expression(
             .trim_matches('\'')
             .trim_matches('"');
         let resolved_name = resolve_node_ref(node_name, selected_node_id);
-        let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-        if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
+        if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
             let found_id = found.id.to_string();
-            let count = compute_test_fragility_count(&found_id, &all_nodes_vec, outgoing, incoming);
+            let count = compute_test_fragility_count(&found_id, active_nodes, outgoing, incoming);
             if count > 0 {
                 let mut result = HashSet::new();
                 result.insert(found_id);
@@ -1041,8 +1024,7 @@ fn resolve_computed_expression(
                 .collect();
 
             let resolved_name = resolve_node_ref(node_name, selected_node_id);
-            let all_nodes_vec: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-            if let Some(found) = find_node_by_ref(&all_nodes_vec, &resolved_name) {
+            if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
                 return bfs_traverse(
                     &found.id.to_string(),
                     &edge_types,
@@ -1119,11 +1101,13 @@ fn resolve_node_ref(reference: &str, selected_node_id: Option<&str>) -> String {
 }
 
 /// Find a node by ID first, then fall back to name matching.
-fn find_node_by_ref<'a>(nodes: &'a [GraphNode], reference: &str) -> Option<&'a GraphNode> {
+/// Accepts `&[&GraphNode]` to avoid cloning node slices.
+fn find_node_by_ref<'a>(nodes: &[&'a GraphNode], reference: &str) -> Option<&'a GraphNode> {
     // Try direct ID match first (for resolved $clicked/$selected).
     nodes
         .iter()
         .find(|n| n.id.to_string() == reference)
+        .copied()
         .or_else(|| find_node_by_name(nodes, reference))
 }
 
@@ -1281,12 +1265,9 @@ pub fn dry_run(
                 selected_node_id.and_then(|id| node_map.get(id).map(|n| n.name.clone()))
             } else {
                 // Try to find the actual node name
-                let all_nodes: Vec<GraphNode> = nodes
-                    .iter()
-                    .filter(|n| n.deleted_at.is_none())
-                    .cloned()
-                    .collect();
-                find_node_by_name(&all_nodes, node)
+                let active: Vec<&GraphNode> =
+                    nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
+                find_node_by_name(&active, node)
                     .map(|n| n.name.clone())
                     .or_else(|| Some(node.clone()))
             }
@@ -1303,11 +1284,7 @@ pub fn dry_run(
 
     // Warn on partial (non-exact) node name matches in scope
     {
-        let all_nodes: Vec<GraphNode> = nodes
-            .iter()
-            .filter(|n| n.deleted_at.is_none())
-            .cloned()
-            .collect();
+        let active: Vec<&GraphNode> = nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
         let scope_names: Vec<&str> = match &query.scope {
             Scope::Focus { node, .. } if node != "$clicked" && node != "$selected" => {
                 vec![node.as_str()]
@@ -1316,7 +1293,7 @@ pub fn dry_run(
             _ => vec![],
         };
         for name in scope_names {
-            if let Some((found, is_partial)) = find_node_by_name_with_match_type(&all_nodes, name) {
+            if let Some((found, is_partial)) = find_node_by_name_with_match_type(&active, name) {
                 if is_partial {
                     warnings.push(format!(
                         "Partial match: '{}' resolved to '{}' (not an exact match — use the qualified_name for precision)",
@@ -1446,6 +1423,7 @@ pub fn dry_run(
         .iter()
         .filter_map(|s| parse_edge_type(s))
         .collect();
+    const MAX_MATCHED_EDGES: usize = 1000;
     let matched_edges: Vec<MatchedEdge> = edges
         .iter()
         .filter(|e| e.deleted_at.is_none())
@@ -1454,12 +1432,20 @@ pub fn dry_run(
                 && result_set.contains(&e.target_id.to_string())
         })
         .filter(|e| edge_type_filters.is_empty() || edge_type_filters.contains(&e.edge_type))
+        .take(MAX_MATCHED_EDGES + 1)
         .map(|e| MatchedEdge {
             source_id: e.source_id.to_string(),
             target_id: e.target_id.to_string(),
             edge_type: edge_type_str(&e.edge_type).to_string(),
         })
         .collect();
+    if matched_edges.len() > MAX_MATCHED_EDGES {
+        warnings.push(format!(
+            "Matched edges capped at {MAX_MATCHED_EDGES} (total exceeded limit)"
+        ));
+    }
+    let matched_edges: Vec<MatchedEdge> =
+        matched_edges.into_iter().take(MAX_MATCHED_EDGES).collect();
 
     // Compute per-node metric values for heat emphasis (reuses pre-built adjacency)
     let node_metrics = if let Some(ref heat) = query.emphasis.heat {
@@ -1585,8 +1571,7 @@ pub fn compute_graph_summary(
     // Test coverage
     let (outgoing, _) = build_adjacency(edges);
     let test_functions = active_nodes.iter().filter(|n| n.test_node).count();
-    let all_nodes_owned: Vec<GraphNode> = active_nodes.iter().map(|n| (*n).clone()).collect();
-    let reachable = compute_test_reachable(&all_nodes_owned, &outgoing);
+    let reachable = compute_test_reachable(&active_nodes, &outgoing);
     let total_functions = active_nodes
         .iter()
         .filter(|n| n.node_type == NodeType::Function)
@@ -2746,5 +2731,550 @@ mod tests {
             "valid expression should not produce a computed expression error warning"
         );
         assert_eq!(result.matched_nodes, 1);
+    }
+
+    // ── $test_unreachable with Endpoints and Types ──────────────────────────
+
+    #[test]
+    fn test_computed_test_unreachable_includes_endpoints_and_types() {
+        let nodes = vec![
+            make_node("n1", "tested_fn", NodeType::Function),
+            make_node("n2", "untested_endpoint", NodeType::Endpoint),
+            make_node("n3", "untested_type", NodeType::Type),
+            make_node("n4", "untested_module", NodeType::Module),
+            make_node("n5", "untested_component", NodeType::Component),
+            make_test_node("t1", "test_fn"),
+        ];
+        let edges = vec![make_edge("e1", "t1", "n1", EdgeType::Calls)];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$test_unreachable",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(
+            result.contains("n2"),
+            "Endpoints should be in $test_unreachable"
+        );
+        assert!(
+            result.contains("n3"),
+            "Types should be in $test_unreachable"
+        );
+        assert!(
+            !result.contains("n4"),
+            "Modules should NOT be in $test_unreachable"
+        );
+        assert!(
+            !result.contains("n5"),
+            "Components should NOT be in $test_unreachable"
+        );
+        assert!(
+            !result.contains("n1"),
+            "Tested functions should NOT be in $test_unreachable"
+        );
+    }
+
+    // ── $intersect between $where and $test_unreachable ─────────────────────
+
+    #[test]
+    fn test_intersect_where_and_test_unreachable() {
+        let mut nodes = vec![
+            make_node("n1", "high_complex_untested", NodeType::Function),
+            make_node("n2", "low_complex_untested", NodeType::Function),
+            make_node("n3", "high_complex_tested", NodeType::Function),
+            make_node("n4", "high_complex_untested_endpoint", NodeType::Endpoint),
+            make_test_node("t1", "test_fn"),
+        ];
+        nodes[0].complexity = Some(50);
+        nodes[1].complexity = Some(3);
+        nodes[2].complexity = Some(40);
+        nodes[3].complexity = Some(45);
+        let edges = vec![make_edge("e1", "t1", "n3", EdgeType::Calls)];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$intersect($where(complexity, '>', 20), $test_unreachable)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(result.contains("n1"));
+        assert!(!result.contains("n2"));
+        assert!(!result.contains("n3"));
+        assert!(result.contains("n4"));
+    }
+
+    // ── $callers and $callees with depth limits ─────────────────────────────
+
+    #[test]
+    fn test_callers_with_depth_limit() {
+        let nodes = vec![
+            make_node("n1", "target", NodeType::Function),
+            make_node("n2", "caller1", NodeType::Function),
+            make_node("n3", "caller2", NodeType::Function),
+            make_node("n4", "caller3", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n2", "n1", EdgeType::Calls),
+            make_edge("e2", "n3", "n2", EdgeType::Calls),
+            make_edge("e3", "n4", "n3", EdgeType::Calls),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+
+        let result = resolve_computed_expression(
+            "$callers(target, 1)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(result.contains("n1"), "target itself at depth 0");
+        assert!(result.contains("n2"), "immediate caller at depth 1");
+        assert!(
+            !result.contains("n3"),
+            "transitive caller at depth 2 excluded"
+        );
+        assert!(
+            !result.contains("n4"),
+            "transitive caller at depth 3 excluded"
+        );
+
+        let result2 = resolve_computed_expression(
+            "$callers(target, 2)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(result2.contains("n1"));
+        assert!(result2.contains("n2"));
+        assert!(result2.contains("n3"));
+        assert!(!result2.contains("n4"));
+    }
+
+    #[test]
+    fn test_callees_with_depth_limit() {
+        let nodes = vec![
+            make_node("n1", "root", NodeType::Function),
+            make_node("n2", "callee1", NodeType::Function),
+            make_node("n3", "callee2", NodeType::Function),
+            make_node("n4", "callee3", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Calls),
+            make_edge("e3", "n3", "n4", EdgeType::Calls),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+
+        let result = resolve_computed_expression(
+            "$callees(root, 2)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(result.contains("n1"));
+        assert!(result.contains("n2"));
+        assert!(result.contains("n3"));
+        assert!(
+            !result.contains("n4"),
+            "depth 3 should be excluded with depth=2"
+        );
+    }
+
+    // ── $governed_by with GovernedBy edges ──────────────────────────────────
+
+    #[test]
+    fn test_governed_by_multiple_code_nodes() {
+        let mut nodes = vec![
+            make_node("n1", "AuthService", NodeType::Type),
+            make_node("n2", "LoginHandler", NodeType::Function),
+            make_node("n3", "auth_spec", NodeType::Type),
+            make_node("n4", "Unrelated", NodeType::Function),
+        ];
+        nodes[2].spec_path = Some("specs/auth.md".to_string());
+        let edges = vec![
+            make_edge("e1", "n1", "n3", EdgeType::GovernedBy),
+            make_edge("e2", "n2", "n3", EdgeType::GovernedBy),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$governed_by(auth.md)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(result.contains("n1"), "AuthService governed by auth spec");
+        assert!(result.contains("n2"), "LoginHandler governed by auth spec");
+        assert!(result.contains("n3"), "Spec node itself included");
+        assert!(!result.contains("n4"), "Unrelated node excluded");
+    }
+
+    #[test]
+    fn test_governed_by_fallback_without_edges() {
+        let mut nodes = vec![
+            make_node("n1", "AuthService", NodeType::Type),
+            make_node("n2", "other", NodeType::Function),
+        ];
+        nodes[0].spec_path = Some("specs/auth.md".to_string());
+        let edges: Vec<GraphEdge> = vec![];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$governed_by(auth.md)",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(result.contains("n1"), "Should fall back to spec_path match");
+        assert!(!result.contains("n2"));
+    }
+
+    // ── Edge filtering in dry_run ───────────────────────────────────────────
+
+    #[test]
+    fn test_dry_run_edge_filtering_multiple_types() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Type),
+            make_node("n3", "C", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Contains),
+            make_edge("e3", "n1", "n3", EdgeType::Implements),
+        ];
+        let query = ViewQuery {
+            scope: Scope::All,
+            emphasis: Default::default(),
+            edges: gyre_common::view_query::EdgeFilter {
+                filter: vec!["calls".to_string(), "implements".to_string()],
+            },
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert_eq!(result.matched_edges.len(), 2);
+        let edge_types: Vec<&str> = result
+            .matched_edges
+            .iter()
+            .map(|e| e.edge_type.as_str())
+            .collect();
+        assert!(edge_types.contains(&"calls"));
+        assert!(edge_types.contains(&"implements"));
+        assert!(!edge_types.contains(&"contains"));
+    }
+
+    #[test]
+    fn test_dry_run_edge_filtering_empty_shows_all() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n2", EdgeType::Calls),
+            make_edge("e2", "n1", "n2", EdgeType::Contains),
+        ];
+        let query = ViewQuery {
+            scope: Scope::All,
+            emphasis: Default::default(),
+            edges: gyre_common::view_query::EdgeFilter { filter: vec![] },
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &edges, None);
+        assert_eq!(
+            result.matched_edges.len(),
+            2,
+            "Empty filter should show all edge types"
+        );
+    }
+
+    // ── Annotation template resolution ─────────────────────────────────────
+
+    #[test]
+    fn test_annotation_template_with_name_count_group() {
+        let resolved = resolve_annotation_template(
+            "$name: {{count}} nodes across {{group_count}} modules",
+            Some("MyService"),
+            25,
+            4,
+        );
+        assert_eq!(resolved, "MyService: 25 nodes across 4 modules");
+    }
+
+    #[test]
+    fn test_annotation_template_zero_counts() {
+        let resolved = resolve_annotation_template(
+            "Found {{count}} items in {{group_count}} groups",
+            None,
+            0,
+            0,
+        );
+        assert_eq!(resolved, "Found 0 items in 0 groups");
+    }
+
+    // ── ViewQuery validation ───────────────────────────────────────────────
+
+    #[test]
+    fn test_viewquery_validate_depth_exceeds_max() {
+        let query = ViewQuery {
+            scope: Scope::Focus {
+                node: "A".to_string(),
+                edges: vec!["calls".to_string()],
+                direction: "outgoing".to_string(),
+                depth: 150,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("exceeds maximum")),
+            "Should warn about depth > 100, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_viewquery_validate_concept_depth_exceeds_max() {
+        let query = ViewQuery {
+            scope: Scope::Concept {
+                seed_nodes: vec!["A".to_string()],
+                expand_edges: vec![],
+                expand_depth: 200,
+                expand_direction: "outgoing".to_string(),
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("exceeds maximum")),
+            "Should warn about expand_depth > 100, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_viewquery_validate_dim_unmatched_out_of_range() {
+        let query = ViewQuery {
+            scope: Scope::All,
+            emphasis: gyre_common::view_query::Emphasis {
+                dim_unmatched: Some(1.5),
+                ..Default::default()
+            },
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("dim_unmatched") && e.contains("out of range")),
+            "Should warn about dim_unmatched > 1.0, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_viewquery_validate_negative_dim_unmatched() {
+        let query = ViewQuery {
+            scope: Scope::All,
+            emphasis: gyre_common::view_query::Emphasis {
+                dim_unmatched: Some(-0.1),
+                ..Default::default()
+            },
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("dim_unmatched")),
+            "Should warn about negative dim_unmatched, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_viewquery_validate_valid_passes() {
+        let query = ViewQuery {
+            scope: Scope::Focus {
+                node: "A".to_string(),
+                edges: vec!["calls".to_string()],
+                direction: "outgoing".to_string(),
+                depth: 5,
+            },
+            emphasis: gyre_common::view_query::Emphasis {
+                dim_unmatched: Some(0.3),
+                ..Default::default()
+            },
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors.is_empty(),
+            "Valid query should have no errors, got: {:?}",
+            errors
+        );
+    }
+
+    // ── Partial match warnings in dry_run ───────────────────────────────────
+
+    #[test]
+    fn test_dry_run_partial_match_warning() {
+        let nodes = vec![make_node("n1", "AuthenticationService", NodeType::Type)];
+        let query = ViewQuery {
+            scope: Scope::Focus {
+                node: "Auth".to_string(),
+                edges: vec![],
+                direction: "outgoing".to_string(),
+                depth: 2,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("Partial match")),
+            "Should warn about partial match, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_no_partial_match_for_exact() {
+        let nodes = vec![make_node("n1", "AuthService", NodeType::Type)];
+        let query = ViewQuery {
+            scope: Scope::Focus {
+                node: "AuthService".to_string(),
+                edges: vec![],
+                direction: "outgoing".to_string(),
+                depth: 2,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("Partial match")),
+            "Exact match should NOT produce partial match warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    // ── graph_summary computation ──────────────────────────────────────────
+
+    #[test]
+    fn test_graph_summary_top_types_by_fields() {
+        let nodes = vec![
+            make_node("t1", "BigType", NodeType::Type),
+            make_node("t2", "SmallType", NodeType::Type),
+            make_node("f1", "field_a", NodeType::Field),
+            make_node("f2", "field_b", NodeType::Field),
+            make_node("f3", "field_c", NodeType::Field),
+            make_node("f4", "field_d", NodeType::Field),
+        ];
+        let edges = vec![
+            make_edge("e1", "f1", "t1", EdgeType::FieldOf),
+            make_edge("e2", "f2", "t1", EdgeType::FieldOf),
+            make_edge("e3", "f3", "t1", EdgeType::FieldOf),
+            make_edge("e4", "f4", "t2", EdgeType::FieldOf),
+        ];
+        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        assert!(
+            !summary.top_types_by_fields.is_empty(),
+            "Should have top types"
+        );
+        assert!(
+            summary.top_types_by_fields[0].contains("BigType"),
+            "BigType should be first, got: {:?}",
+            summary.top_types_by_fields
+        );
+        assert!(
+            summary.top_types_by_fields[0].contains("3 fields"),
+            "Should show 3 fields, got: {}",
+            summary.top_types_by_fields[0]
+        );
+    }
+
+    #[test]
+    fn test_graph_summary_test_coverage_counts() {
+        let nodes = vec![
+            make_node("n1", "fn_a", NodeType::Function),
+            make_node("n2", "fn_b", NodeType::Function),
+            make_node("n3", "fn_c", NodeType::Function),
+            make_test_node("t1", "test_a"),
+            make_test_node("t2", "test_b"),
+        ];
+        let edges = vec![
+            make_edge("e1", "t1", "n1", EdgeType::Calls),
+            make_edge("e2", "t2", "n2", EdgeType::Calls),
+        ];
+        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        assert_eq!(summary.test_coverage.test_functions, 2);
+        // Reachable: BFS from t1 reaches {t1,n1}; from t2 reaches {t2,n2}. Total = 4.
+        assert_eq!(summary.test_coverage.reachable_from_tests, 4);
+        // Total functions = 5, unreachable = 1 (n3)
+        assert_eq!(
+            summary.test_coverage.unreachable, 1,
+            "Only n3 should be unreachable"
+        );
     }
 }

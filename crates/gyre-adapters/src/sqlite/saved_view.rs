@@ -103,6 +103,9 @@ impl SavedViewRepository for SqliteStorage {
         .await?
     }
 
+    // TODO: Add tenant_id parameter to the port trait and filter in SQL
+    // instead of relying on repo_id alone. Currently the caller must ensure
+    // tenant isolation at a higher layer.
     async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<SavedView>> {
         let pool = Arc::clone(&self.pool);
         let rid = repo_id.clone();
@@ -118,6 +121,9 @@ impl SavedViewRepository for SqliteStorage {
         .await?
     }
 
+    // TODO: Add tenant_id parameter to the port trait and filter in SQL
+    // instead of relying on workspace_id alone. Currently the caller must
+    // ensure tenant isolation at a higher layer.
     async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<SavedView>> {
         let pool = Arc::clone(&self.pool);
         let wid = workspace_id.clone();
