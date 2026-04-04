@@ -41,10 +41,19 @@ use gyre_ports::{
     ContentBlock, ConversationContent, ConversationMessage, ToolCall, ToolDefinition,
 };
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::{auth::AuthenticatedAgent, AppState};
+
+/// Global per-user concurrent session counter.
+/// Uses std::sync::Mutex for Drop compatibility (Drop cannot be async).
+static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Maximum concurrent explorer sessions per user.
+const MAX_SESSIONS_PER_USER: usize = 3;
 
 /// Max agent refinement turns (spec says 3).
 const MAX_AGENT_TURNS: usize = 3;
@@ -83,6 +92,44 @@ async fn handle_explorer_session(
     auth: AuthenticatedAgent,
 ) {
     let (mut sender, mut receiver) = socket.split();
+
+    // Per-user concurrent session limit (prevents unbounded LLM cost).
+    let session_user = auth.agent_id.clone();
+    let session_allowed = {
+        let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        let count = sessions.entry(session_user.clone()).or_default();
+        if *count >= MAX_SESSIONS_PER_USER {
+            false
+        } else {
+            *count += 1;
+            true
+        }
+    };
+    if !session_allowed {
+        let err = ExplorerServerMessage::Error {
+            message: format!(
+                "Too many concurrent explorer sessions (max {MAX_SESSIONS_PER_USER}). Close an existing session first."
+            ),
+        };
+        let _ = sender
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return;
+    }
+    // Guard: decrement on drop (even if we return early below)
+    struct SessionGuard(String);
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(count) = sessions.get_mut(&self.0) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    sessions.remove(&self.0);
+                }
+            }
+        }
+    }
+    let _session_guard = SessionGuard(session_user);
 
     // Verify the user has access to this repo via workspace → tenant chain.
     let rid = Id::new(&repo_id);
