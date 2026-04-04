@@ -152,6 +152,7 @@
   let panCamStart = { x: 0, y: 0 };
 
   let selectedNodeId = $state(null);
+  let multiSelectedIds = $state(new Set()); // Shift+Click multi-select for concept creation
   let hoveredNodeId = $state(null);
   let breadcrumb = $state([]);
   let animFrame = null;
@@ -2973,8 +2974,21 @@
     ctx.fillStyle = fillColor;
     ctx.fill();
 
+    // Multi-select highlight (Shift+Click for concept creation)
+    const isMultiSelected = multiSelectedIds.has(ln.id);
+    if (isMultiSelected) {
+      ctx.save();
+      ctx.strokeStyle = '#a78bfa'; // purple for multi-select
+      ctx.lineWidth = 3;
+      ctx.setLineDash([4, 3]);
+      roundRect(ctx, s.x - sw / 2 - 2, s.y - sh / 2 - 2, sw + 4, sh + 4, r + 1);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
     // Border — colored by spec confidence, width scaled by churn
-    let borderColor = ln.id === selectedNodeId ? '#ef4444' : specBorderColor(n);
+    let borderColor = ln.id === selectedNodeId ? '#ef4444' : isMultiSelected ? '#a78bfa' : specBorderColor(n);
     const churnWidth = 1 + Math.min((n?.churn_count_30d ?? 0) / 3, 4);
     let borderWidth = ln.id === selectedNodeId ? 2 : churnWidth;
     if (qColor && ln.id !== selectedNodeId) {
@@ -3776,6 +3790,22 @@
 
     const hit = hitTest(e.clientX, e.clientY);
     if (hit) {
+      // Shift+Click: multi-select for concept creation
+      if (e.shiftKey) {
+        const newSet = new Set(multiSelectedIds);
+        if (newSet.has(hit.id)) {
+          newSet.delete(hit.id);
+        } else {
+          newSet.add(hit.id);
+        }
+        multiSelectedIds = newSet;
+        scheduleRedraw();
+        return;
+      }
+      // Regular click: clear multi-select
+      if (multiSelectedIds.size > 0) {
+        multiSelectedIds = new Set();
+      }
       selectedNodeId = hit.id;
       trackInteraction(`click:${hit.node.name ?? hit.node.id}(${hit.node.node_type})`);
       canvasState = {
@@ -4496,6 +4526,32 @@
 </script>
 
 <div class="treemap-container">
+  <!-- Multi-select concept creation bar -->
+  {#if multiSelectedIds.size > 0}
+    <div class="concept-creation-bar" role="status">
+      <span class="concept-count">{multiSelectedIds.size} nodes selected</span>
+      <button class="concept-create-btn" type="button" onclick={() => {
+        const seedNodes = [...multiSelectedIds].map(id => {
+          const n = nodes.find(nd => nd.id === id);
+          return n?.qualified_name ?? n?.name ?? id;
+        });
+        const conceptQuery = {
+          scope: { type: 'concept', seed_nodes: seedNodes, expand_edges: ['calls', 'implements', 'contains'], expand_depth: 1 },
+          emphasis: { highlight: { matched: { color: '#a78bfa' } }, dim_unmatched: 0.12 },
+          zoom: 'fit',
+          annotation: { title: `Concept: ${seedNodes.length} seed nodes`, description: `{{count}} related nodes across {{group_count}} modules` },
+        };
+        onInteractiveQuery(conceptQuery);
+        multiSelectedIds = new Set();
+      }}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+        Create Concept
+      </button>
+      <button class="concept-clear-btn" type="button" onclick={() => { multiSelectedIds = new Set(); scheduleRedraw(); }}>Clear</button>
+      <span class="concept-hint">Shift+Click to add/remove</span>
+    </div>
+  {/if}
+
   <!-- Query annotation -->
   {#if activeQuery?.annotation?.title}
     {@const matchCount = queryMatchedIds?.size ?? '?'}
@@ -4578,7 +4634,7 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" disabled type="button" title="Observable lens — requires production OpenTelemetry collector integration (see system-explorer.md §Observable)" onclick={() => { observableBannerVisible = true; }}>Observable</button>
+      <button class="tb-btn tb-btn-observable" type="button" title="Observable lens — requires production OpenTelemetry collector integration" onclick={() => { observableBannerVisible = true; }}>Observable</button>
     </div>
 
     {#if lens === 'evaluative'}
@@ -4990,7 +5046,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0">
         <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
       </svg>
-      <span>Requires production telemetry integration</span>
+      <span>Observable lens requires an OpenTelemetry collector. Configure <code>GYRE_OTLP_ENDPOINT</code> to see live SLIs, error rates, and latency on the architecture canvas.</span>
       <button class="observable-banner-close" onclick={() => { observableBannerVisible = false; }} type="button" title="Dismiss">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
@@ -5082,7 +5138,8 @@
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .tb-btn-disabled { opacity: 0.35; cursor: not-allowed; }
-  .tb-btn-observable { opacity: 0.35; cursor: not-allowed; font-style: italic; }
+  .tb-btn-observable { opacity: 0.5; font-style: italic; }
+  .tb-btn-observable:hover { opacity: 0.8; }
   .tb-btn-observable::after { content: ''; display: inline-block; width: 6px; height: 6px; background: #475569; border-radius: 50%; margin-left: 4px; vertical-align: middle; }
   .eval-metric-group { display: flex; gap: 2px; align-items: center; }
   .eval-label { font-size: 10px; color: #64748b; margin: 0 2px; white-space: nowrap; }
@@ -5478,6 +5535,28 @@
     0%, 100% { opacity: 0.4; transform: scale(0.8); }
     50% { opacity: 1; transform: scale(1.2); }
   }
+
+  /* Concept creation bar (multi-select) */
+  .concept-creation-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px; background: rgba(167, 139, 250, 0.1);
+    border: 1px solid rgba(167, 139, 250, 0.3); border-radius: 8px;
+    margin: 6px 12px 0;
+  }
+  .concept-count { font-size: 12px; color: #a78bfa; font-weight: 600; white-space: nowrap; }
+  .concept-create-btn {
+    display: flex; align-items: center; gap: 4px;
+    padding: 4px 12px; background: rgba(167, 139, 250, 0.2); border: 1px solid #a78bfa;
+    border-radius: 6px; color: #e2e8f0; font-size: 12px; cursor: pointer; font-weight: 500;
+    transition: all 0.15s;
+  }
+  .concept-create-btn:hover { background: rgba(167, 139, 250, 0.35); }
+  .concept-clear-btn {
+    padding: 3px 8px; background: transparent; border: 1px solid #475569;
+    border-radius: 4px; color: #94a3b8; font-size: 11px; cursor: pointer;
+  }
+  .concept-clear-btn:hover { background: #1e293b; color: #e2e8f0; }
+  .concept-hint { font-size: 10px; color: #64748b; font-style: italic; margin-left: auto; }
 
   @media (prefers-reduced-motion: reduce) {
     .tb-btn, .breadcrumb-item, .treemap-minimap { transition: none; }
