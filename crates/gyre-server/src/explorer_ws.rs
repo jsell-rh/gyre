@@ -517,17 +517,28 @@ async fn handle_explorer_session(
                         };
                         // Check for stale references in the loaded view query
                         let mut stale_warning = None;
-                        if let Ok(vq) = serde_json::from_value::<gyre_common::view_query::ViewQuery>(query.clone()) {
-                            if let gyre_common::view_query::Scope::Focus { ref node, .. } = vq.scope {
+                        if let Ok(vq) = serde_json::from_value::<gyre_common::view_query::ViewQuery>(
+                            query.clone(),
+                        ) {
+                            if let gyre_common::view_query::Scope::Focus { ref node, .. } = vq.scope
+                            {
                                 if node != "$clicked" && node != "$selected" {
                                     // Refresh graph cache if needed
                                     if cached_nodes.is_none() {
                                         let rid = Id::new(&repo_id);
                                         cached_nodes = Some(
-                                            state.graph_store.list_nodes(&rid, None).await.unwrap_or_default(),
+                                            state
+                                                .graph_store
+                                                .list_nodes(&rid, None)
+                                                .await
+                                                .unwrap_or_default(),
                                         );
                                         cached_edges = Some(
-                                            state.graph_store.list_edges(&rid, None).await.unwrap_or_default(),
+                                            state
+                                                .graph_store
+                                                .list_edges(&rid, None)
+                                                .await
+                                                .unwrap_or_default(),
                                         );
                                     }
                                     if let Some(ref graph_nodes) = cached_nodes {
@@ -553,7 +564,9 @@ async fn handle_explorer_session(
                                 done: true,
                             };
                             let _ = sender
-                                .send(Message::Text(serde_json::to_string(&warn_msg).unwrap().into()))
+                                .send(Message::Text(
+                                    serde_json::to_string(&warn_msg).unwrap().into(),
+                                ))
                                 .await;
                         }
                         let msg = ExplorerServerMessage::ViewQuery {
@@ -1661,13 +1674,20 @@ async fn execute_tool(
             let target_id = tool_call.input.get("target_id").and_then(|v| v.as_str());
 
             // Pre-build node lookups for O(1) access instead of O(N) per edge
-            let node_info: std::collections::HashMap<
-                &gyre_common::Id,
-                (&str, Option<&str>, &str),
-            > = nodes
-                .iter()
-                .map(|n| (&n.id, (n.name.as_str(), n.spec_path.as_deref(), n.qualified_name.as_str())))
-                .collect();
+            let node_info: std::collections::HashMap<&gyre_common::Id, (&str, Option<&str>, &str)> =
+                nodes
+                    .iter()
+                    .map(|n| {
+                        (
+                            &n.id,
+                            (
+                                n.name.as_str(),
+                                n.spec_path.as_deref(),
+                                n.qualified_name.as_str(),
+                            ),
+                        )
+                    })
+                    .collect();
 
             let filtered: Vec<serde_json::Value> = edges
                 .iter()
