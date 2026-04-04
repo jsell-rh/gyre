@@ -119,6 +119,19 @@
           .catch(() => { specAssertionResults = []; })
           .finally(() => { assertionsLoading = false; });
       }
+      // Auto-highlight governed code on canvas (spec→code navigation, Vision §3)
+      activeViewQuery = {
+        scope: { type: 'filter', computed: `$governed_by('${specPath}')` },
+        emphasis: {
+          highlight: { matched: { color: '#22c55e', label: 'Governed' } },
+          dim_unmatched: 0.15,
+        },
+        zoom: 'fit',
+        annotation: {
+          title: `Spec: ${specPath.split('/').pop()}`,
+          description: `Code governed by ${specPath}`,
+        },
+      };
     } catch (e) {
       specEditorError = e.message ?? 'Failed to load spec';
     } finally {
@@ -137,6 +150,10 @@
     predictAffectedSpecs = [];
     predictEstimatedCost = null;
     predictConfidence = null;
+    // Clear the spec-governance highlight when closing the editor
+    if (activeViewQuery?.annotation?.title?.startsWith('Spec:')) {
+      activeViewQuery = null;
+    }
   }
 
   // Instant preview tier: compute link graph impact without LLM (§3 Instant tier)
