@@ -1812,6 +1812,13 @@
         </button>
       {/if}
       <div class="panel-entity">
+        {#if entity.data?.repo_id || entity.data?.repository_id}
+          {@const repoId = entity.data.repo_id ?? entity.data.repository_id}
+          <span class="panel-breadcrumb">
+            <span class="breadcrumb-repo">{sharedEntityName('repo', repoId)}</span>
+            <span class="breadcrumb-sep">/</span>
+          </span>
+        {/if}
         <span class="entity-type">{entity.type === 'mr' ? 'Merge Request' : entity.type === 'spec' ? 'Specification' : entity.type === 'agent' ? 'Agent' : entity.type === 'task' ? 'Task' : entity.type === 'node' ? 'Architecture Node' : entity.type === 'commit' ? 'Commit' : entity.type}</span>
         <span class="entity-id">{entity.data?.name ?? entity.data?.title ?? (entity.type === 'spec' ? (entity.id?.split('/').pop()?.replace(/\.md$/, '') ?? entity.id) : entity.type === 'commit' ? ((entity.data?.sha ?? entity.id ?? '').slice(0, 7)) : entityName(entity.type, entity.id))}</span>
       </div>
@@ -4763,6 +4770,24 @@
     gap: var(--space-1);
     overflow: hidden;
     min-width: 0;
+  }
+
+  .panel-breadcrumb {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .breadcrumb-repo {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-weight: 500;
+  }
+
+  .breadcrumb-sep {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    opacity: 0.5;
   }
 
   .entity-type {
