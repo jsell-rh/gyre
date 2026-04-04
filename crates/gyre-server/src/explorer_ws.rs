@@ -1476,12 +1476,8 @@ async fn run_explorer_agent(
                                         || kept_node_ids.contains(&e.target_id.to_string())
                                 })
                                 .collect();
-                            *cached_nodes = Some(
-                                sorted_nodes
-                                    .into_iter()
-                                    .take(kept_count)
-                                    .collect(),
-                            );
+                            *cached_nodes =
+                                Some(sorted_nodes.into_iter().take(kept_count).collect());
                             *cached_edges = Some(kept_edges);
                             // Warn the user via WebSocket (Vision Principle 2: "surface the signal")
                             let warning_msg = format!(
