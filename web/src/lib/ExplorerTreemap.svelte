@@ -58,15 +58,17 @@
 
   function specBorderColor(node) {
     if (!node) return '#64748b';
-    // Green: governed by spec (explicit spec_path or high confidence)
-    if (node.spec_path) return '#22c55e';
     const conf = node.spec_confidence;
-    if (conf === 'high') return '#22c55e';
-    // Amber: suggested link (medium or low confidence)
+    // Check precomputed GovernedBy index (O(1) instead of O(E))
+    const hasGovEdge = node.id && governedByIndex.has(node.id);
+    // Green: governed by spec with high confidence or explicit GovernedBy edge
+    if (conf === 'high' || hasGovEdge) return '#22c55e';
+    // Green: explicit spec_path with no confidence rating (backwards compat for spec nodes)
+    if (node.spec_path && !conf) return '#22c55e';
+    // Amber: spec_path present but low/medium confidence (heuristic match)
+    if (node.spec_path && (conf === 'medium' || conf === 'low')) return '#eab308';
     if (conf === 'medium') return '#eab308';
     if (conf === 'low') return '#eab308';
-    // Check precomputed GovernedBy index (O(1) instead of O(E))
-    if (node.id && governedByIndex.has(node.id)) return '#22c55e';
     // Red: no spec coverage
     return '#ef4444';
   }
@@ -573,8 +575,18 @@
     const result = new Map();
     for (const [nid, st] of statsMap) {
       const sorted = st.durations.slice().sort((a, b) => a - b);
-      const p50 = sorted[Math.floor(sorted.length * 0.5)] ?? 0;
-      const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 0;
+      // Use linear interpolation for percentiles (correct for small samples)
+      const percentile = (arr, p) => {
+        if (arr.length === 0) return 0;
+        if (arr.length === 1) return arr[0];
+        const idx = p * (arr.length - 1);
+        const lo = Math.floor(idx);
+        const hi = Math.ceil(idx);
+        const frac = idx - lo;
+        return arr[lo] * (1 - frac) + arr[hi] * frac;
+      };
+      const p50 = percentile(sorted, 0.5);
+      const p95 = percentile(sorted, 0.95);
       const mean = sorted.reduce((a, b) => a + b, 0) / sorted.length;
       result.set(nid, {
         spanCount: st.total,
@@ -603,11 +615,14 @@
     const spanById = new Map();
     for (const s of spans) spanById.set(s.span_id, s);
 
-    // Advance scrubber
-    const step = (dt / 1000) * evalSpeed * (1 / Math.max(1, totalDuration / 1000000));
+    // Advance scrubber: normalize playback to ~5 seconds for 1x speed
+    // regardless of actual trace duration (microsecond or minute-long)
+    const normalizedDuration = 5.0; // seconds for full playback at 1x
+    const step = (dt / 1000) * evalSpeed / normalizedDuration;
     evalScrubber = Math.min(1, evalScrubber + step);
     if (evalScrubber >= 1) {
-      evalScrubber = 0; // Loop
+      evalPlaying = false; // Stop at end (single-play mode)
+      evalScrubber = 1;
     }
 
     const currentTime = minTime + evalScrubber * totalDuration;
@@ -841,10 +856,12 @@
     let row = [items[0]], rowW = items[0].weight;
     let bestAspect = worstAspect(row, rowW, side, total, w, h, horizontal);
     for (let i = 1; i < items.length; i++) {
-      const cand = [...row, items[i]], candW = rowW + items[i].weight;
-      const candA = worstAspect(cand, candW, side, total, w, h, horizontal);
-      if (candA <= bestAspect) { row = cand; rowW = candW; bestAspect = candA; }
-      else break;
+      // Push to test candidate aspect ratio, then pop if worse (avoids O(k^2) spread copies)
+      row.push(items[i]);
+      const candW = rowW + items[i].weight;
+      const candA = worstAspect(row, candW, side, total, w, h, horizontal);
+      if (candA <= bestAspect) { rowW = candW; bestAspect = candA; }
+      else { row.pop(); break; }
     }
     const rowFrac = rowW / total;
     const rowSize = horizontal ? w * rowFrac : h * rowFrac;
@@ -3601,9 +3618,10 @@
     const ww = ln?.w ?? 200;
     const wh = ln?.h ?? 200;
 
-    // Start fade transition: dim unrelated nodes
+    // Start fade transition: dim unrelated nodes (animated in render loop)
     drillFadeTarget = node.id;
     drillFadeAlpha = 1.0;
+    needsAnim = true; // Ensure the render loop picks up the fade animation
     trackInteraction(`drill:${node.name ?? node.id}`);
     breadcrumb = [...breadcrumb, { id: node.id, name: node.name ?? node.qualified_name ?? '?' }];
     selectedNodeId = null;
@@ -3720,6 +3738,10 @@
       if (node.spec_path) {
         onNodeDetail({ ...node, _action: 'view_spec' });
       }
+    } else if (action === 'create_spec') {
+      // Open spec editor with a template for the uncovered node
+      const suggestedPath = `specs/system/${(node.name ?? 'new').toLowerCase().replace(/[^a-z0-9]+/g, '-')}.md`;
+      onNodeDetail({ ...node, _action: 'create_spec', suggested_spec_path: suggestedPath });
     } else if (action === 'detail') {
       selectedNodeId = node.id;
       onNodeDetail(node);
@@ -4397,11 +4419,16 @@
               Drill into
             </button>
           {/if}
+          <div class="ctx-sep"></div>
           {#if contextMenu.node.spec_path}
-            <div class="ctx-sep"></div>
             <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('spec')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               View spec
+            </button>
+          {:else}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('create_spec')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+              Create spec
             </button>
           {/if}
           <div class="ctx-sep"></div>
