@@ -647,62 +647,109 @@ async fn run_explorer_agent_sdk(
         drop(stdin);
     }
 
-    // Read stdout line by line and forward to WebSocket
+    // Read stdout line by line and forward to WebSocket, with a timeout to
+    // prevent the session from being blocked forever if Node.js hangs.
+    const SDK_TIMEOUT_SECS: u64 = 60;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(SDK_TIMEOUT_SECS);
+
     if let Some(stdout) = child.stdout.take() {
         use tokio::io::{AsyncBufReadExt, BufReader};
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-                let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                match msg_type {
-                    "text" => {
-                        let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                        let done = msg.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
-                        if !stream_text(sender, content, done).await {
-                            break;
+        loop {
+            let line_result = tokio::time::timeout_at(deadline, lines.next_line()).await;
+            match line_result {
+                Err(_) => {
+                    // Timeout: kill the child process and bail.
+                    let _ = child.kill().await;
+                    warn!("Explorer SDK process timed out after {SDK_TIMEOUT_SECS}s");
+                    anyhow::bail!(
+                        "Explorer SDK process timed out after {SDK_TIMEOUT_SECS} seconds"
+                    );
+                }
+                Ok(Err(e)) => {
+                    warn!("Explorer SDK stdout read error: {e}");
+                    break;
+                }
+                Ok(Ok(None)) => break, // EOF
+                Ok(Ok(Some(line))) => {
+                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
+                        let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        match msg_type {
+                            "text" => {
+                                let content =
+                                    msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                                let done =
+                                    msg.get("done").and_then(|d| d.as_bool()).unwrap_or(false);
+                                if !stream_text(sender, content, done).await {
+                                    break; // Client disconnected
+                                }
+                            }
+                            "view_query" => {
+                                if let Some(query) = msg.get("query") {
+                                    let view_msg = ExplorerServerMessage::ViewQuery {
+                                        query: query.clone(),
+                                    };
+                                    if sender
+                                        .send(Message::Text(
+                                            serde_json::to_string(&view_msg).unwrap().into(),
+                                        ))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break; // Client disconnected
+                                    }
+                                }
+                            }
+                            "status" => {
+                                if let Some(status) = msg.get("status").and_then(|s| s.as_str()) {
+                                    if !send_status(sender, status).await {
+                                        break; // Client disconnected
+                                    }
+                                }
+                            }
+                            "error" => {
+                                let err_msg = msg
+                                    .get("message")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("Explorer SDK error");
+                                let err = ExplorerServerMessage::Error {
+                                    message: err_msg.to_string(),
+                                };
+                                if sender
+                                    .send(Message::Text(
+                                        serde_json::to_string(&err).unwrap().into(),
+                                    ))
+                                    .await
+                                    .is_err()
+                                {
+                                    break; // Client disconnected
+                                }
+                            }
+                            "done" => break,
+                            _ => {}
                         }
                     }
-                    "view_query" => {
-                        if let Some(query) = msg.get("query") {
-                            let view_msg = ExplorerServerMessage::ViewQuery {
-                                query: query.clone(),
-                            };
-                            let _ = sender
-                                .send(Message::Text(
-                                    serde_json::to_string(&view_msg).unwrap().into(),
-                                ))
-                                .await;
-                        }
-                    }
-                    "status" => {
-                        if let Some(status) = msg.get("status").and_then(|s| s.as_str()) {
-                            send_status(sender, status).await;
-                        }
-                    }
-                    "error" => {
-                        let err_msg = msg
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Explorer SDK error");
-                        let err = ExplorerServerMessage::Error {
-                            message: err_msg.to_string(),
-                        };
-                        let _ = sender
-                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                            .await;
-                    }
-                    "done" => break,
-                    _ => {}
                 }
             }
         }
     }
 
-    let status = child.wait().await?;
-    if !status.success() {
-        // Read stderr for diagnostics
-        anyhow::bail!("Explorer SDK process exited with status: {}", status);
+    // Wait for the child with the same deadline.
+    match tokio::time::timeout_at(deadline, child.wait()).await {
+        Err(_) => {
+            let _ = child.kill().await;
+            warn!("Explorer SDK process timed out waiting for exit");
+            anyhow::bail!("Explorer SDK process timed out after {SDK_TIMEOUT_SECS} seconds");
+        }
+        Ok(Err(e)) => {
+            anyhow::bail!("Explorer SDK process wait error: {e}");
+        }
+        Ok(Ok(status)) => {
+            if !status.success() {
+                anyhow::bail!("Explorer SDK process exited with status: {}", status);
+            }
+        }
     }
 
     // Add to conversation history so subsequent messages have context
@@ -811,19 +858,37 @@ async fn run_explorer_agent(
     let user_content = format!("{canvas_summary}{user_question}");
 
     // Truncate conversation history to prevent unbounded growth.
-    // Keep the first message (for context) and the most recent messages.
+    // Keep the most recent messages, preceded by a synthetic summary.
+    // Ensure correct role alternation: the Claude API requires messages to
+    // alternate user/assistant. We insert a synthetic "user" summary followed
+    // by an "assistant" acknowledgment so the first real message (regardless
+    // of its role) doesn't create a role collision.
     if conversation_history.len() > MAX_CONVERSATION_HISTORY {
-        let keep_recent = MAX_CONVERSATION_HISTORY - 2;
-        let summary_msg = ConversationMessage {
-            role: "assistant".to_string(),
-            content: ConversationContent::Text(
-                "[Earlier conversation context was summarized. I'll continue based on what follows.]".to_string(),
-            ),
-        };
-        let recent: Vec<ConversationMessage> =
+        let keep_recent = MAX_CONVERSATION_HISTORY - 3; // leave room for 2 summary + 1 possible skip
+        let mut recent: Vec<ConversationMessage> =
             conversation_history.split_off(conversation_history.len() - keep_recent);
         conversation_history.clear();
-        conversation_history.push(summary_msg);
+
+        // Insert user→assistant pair so the next message (user or assistant) is valid.
+        conversation_history.push(ConversationMessage {
+            role: "user".to_string(),
+            content: ConversationContent::Text(
+                "[System: earlier conversation context was truncated for brevity.]".to_string(),
+            ),
+        });
+        conversation_history.push(ConversationMessage {
+            role: "assistant".to_string(),
+            content: ConversationContent::Text(
+                "Understood, I'll continue based on the recent context.".to_string(),
+            ),
+        });
+
+        // If the first recent message is "assistant", we already have an assistant
+        // message above — skip it to avoid assistant→assistant.
+        if recent.first().map(|m| m.role.as_str()) == Some("assistant") {
+            recent.remove(0);
+        }
+
         conversation_history.extend(recent);
     }
 
