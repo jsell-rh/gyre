@@ -406,10 +406,11 @@ pub fn extract_call_graph(
                                     let meta = if commit_sha.is_empty() {
                                         r#"{"source":"lsp"}"#.to_string()
                                     } else {
-                                        format!(
-                                            r#"{{"source":"lsp","commit_sha":"{}"}}"#,
-                                            commit_sha
-                                        )
+                                        serde_json::json!({
+                                            "source": "lsp",
+                                            "commit_sha": commit_sha
+                                        })
+                                        .to_string()
                                     };
                                     result.edges.push(GraphEdge {
                                         id: Id::new(Uuid::new_v4().to_string()),
@@ -1038,10 +1039,11 @@ fn extract_call_graph_via_lsp(
                                     let meta = if commit_sha.is_empty() {
                                         r#"{"source":"lsp"}"#.to_string()
                                     } else {
-                                        format!(
-                                            r#"{{"source":"lsp","commit_sha":"{}"}}"#,
-                                            commit_sha
-                                        )
+                                        serde_json::json!({
+                                            "source": "lsp",
+                                            "commit_sha": commit_sha
+                                        })
+                                        .to_string()
                                     };
                                     result.edges.push(GraphEdge {
                                         id: Id::new(Uuid::new_v4().to_string()),

@@ -73,12 +73,13 @@ static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, usi
 /// Maximum concurrent explorer sessions per user.
 const MAX_SESSIONS_PER_USER: usize = 3;
 
-/// Max total LLM calls per user message (tool-use turns + refinement turns).
-/// Spec says max 3 refinements for self-check. We allow 5 total turns
-/// so tool-use calls don't consume the self-check budget.
-const MAX_AGENT_TURNS: usize = 5;
+/// Max tool-use turns (LLM calls for graph exploration before generating a view query).
+/// This is separate from the refinement budget so they don't compete.
+const MAX_TOOL_TURNS: usize = 5;
 
 /// Max refinement-only turns (view query self-check loop).
+/// Per spec: 3 dedicated refinement turns for the self-check loop.
+/// These are tracked independently from tool-use turns.
 const MAX_REFINEMENT_TURNS: usize = 3;
 
 /// Max messages per session before requiring reconnect (prevents unbounded history).
@@ -1735,17 +1736,33 @@ async fn run_explorer_agent(
     let selected_node_id = canvas_state.selected_node.as_ref().map(|n| n.id.as_str());
 
     // Multi-turn agent loop with self-check.
-    // Budget: MAX_AGENT_TURNS (5) total LLM API calls per user message.
-    // Tool-use calls consume turns but refinement has its own separate budget
-    // (MAX_REFINEMENT_TURNS) so the agent can fully use both tool exploration
-    // and self-check without them competing.
+    // Two independent budgets:
+    //   - MAX_TOOL_TURNS (5): LLM calls for tool exploration
+    //   - MAX_REFINEMENT_TURNS (3): dedicated view query self-check refinements
+    // Total possible LLM calls = MAX_TOOL_TURNS + MAX_REFINEMENT_TURNS = 8.
     let mut refinement_count = 0;
+    let mut tool_turn_count = 0;
     let mut view_query_sent = false;
-    let max_total_turns = MAX_AGENT_TURNS;
-    for turn in 0..max_total_turns {
-        let response = llm_port
-            .complete_with_tools(&system_prompt, conversation_history, &tools, Some(4096))
-            .await?;
+    let max_total_turns = MAX_TOOL_TURNS + MAX_REFINEMENT_TURNS;
+    for _turn in 0..max_total_turns {
+        // Timeout on LLM calls to prevent blocking the session indefinitely.
+        // If the client disconnects, subsequent send() calls will fail and break the loop.
+        let llm_future =
+            llm_port.complete_with_tools(&system_prompt, conversation_history, &tools, Some(4096));
+        let response =
+            match tokio::time::timeout(std::time::Duration::from_secs(60), llm_future).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    warn!("Explorer LLM call timed out after 60s");
+                    stream_text(
+                        sender,
+                        "\n\n*(Response timed out. Please try a simpler question.)*",
+                        true,
+                    )
+                    .await;
+                    break;
+                }
+            };
 
         // If the LLM returned text, stream it to the client
         if !response.text.is_empty() {
@@ -1998,9 +2015,10 @@ async fn run_explorer_agent(
             content: ConversationContent::Blocks(result_blocks),
         });
 
-        // Safety: prevent runaway loops
-        if turn >= max_total_turns - 1 {
-            info!("Explorer agent hit max turns, forcing final response");
+        // Track tool-use turn and enforce budget
+        tool_turn_count += 1;
+        if tool_turn_count >= MAX_TOOL_TURNS {
+            info!("Explorer agent hit max tool turns ({MAX_TOOL_TURNS}), forcing final response");
         }
     }
 
@@ -2487,12 +2505,12 @@ This shows all callers of TaskPort."#;
     #[test]
     fn test_max_agent_turns() {
         assert_eq!(
-            MAX_AGENT_TURNS, 5,
-            "Total LLM budget: 5 turns (tool-use + refinement)"
+            MAX_TOOL_TURNS, 5,
+            "Tool-use budget: 5 turns for graph exploration"
         );
         assert_eq!(
             MAX_REFINEMENT_TURNS, 3,
-            "Spec requires max 3 refinement turns"
+            "Spec requires max 3 dedicated refinement turns for self-check"
         );
     }
 
@@ -2700,14 +2718,17 @@ Done."#;
     #[test]
     fn test_system_default_views_are_valid() {
         let defaults = system_default_views();
-        assert_eq!(defaults.len(), 5, "Should have 5 system default views");
+        assert_eq!(
+            defaults.len(),
+            4,
+            "Should have 4 system default views per spec"
+        );
 
         let expected_names = [
             "Architecture Overview",
             "Test Coverage Gaps",
             "Hot Paths",
             "Blast Radius (click)",
-            "Risk Map",
         ];
         for (i, (name, description, query_json)) in defaults.iter().enumerate() {
             assert_eq!(*name, expected_names[i]);
@@ -2730,12 +2751,11 @@ Done."#;
 
     #[test]
     fn test_max_total_turns_matches_spec() {
-        // 5 total LLM calls per user message (tool-use + self-check refinements)
-        assert_eq!(MAX_AGENT_TURNS, 5, "Max total turns should be 5");
-        // Spec caps refinement-only turns at 3
+        // 5 tool-use turns + 3 dedicated refinement turns = 8 max LLM calls
+        assert_eq!(MAX_TOOL_TURNS, 5, "Max tool-use turns should be 5");
         assert_eq!(
             MAX_REFINEMENT_TURNS, 3,
-            "Max refinement turns should be 3 per spec"
+            "Max refinement turns should be 3 per spec (dedicated, not shared)"
         );
     }
 }

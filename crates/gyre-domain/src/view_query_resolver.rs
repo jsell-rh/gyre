@@ -548,7 +548,23 @@ fn resolve_scope_with_adjacency(
             computed,
             name_pattern,
         } => {
-            if let Some(expr) = computed {
+            // Parse node_types and name_pattern first — they apply as additional
+            // filters even when computed is set (spec: Filter has BOTH).
+            for nt_str in node_types {
+                if parse_node_type(nt_str).is_none() {
+                    warnings.push(format!(
+                        "Unrecognized node type '{}' in filter — ignored. Valid types: package, module, type, interface, function, endpoint, component, table, constant, field, spec",
+                        nt_str
+                    ));
+                }
+            }
+            let types: Vec<NodeType> = node_types
+                .iter()
+                .filter_map(|s| parse_node_type(s))
+                .collect();
+            let pattern = name_pattern.as_ref().map(|p| p.to_lowercase());
+
+            let base_set = if let Some(expr) = computed {
                 // Validate expression before resolving — catches typos like $caller vs $callers
                 if let Some(validation_err) = validate_computed_expression(expr) {
                     warnings.push(format!(
@@ -567,36 +583,37 @@ fn resolve_scope_with_adjacency(
                 if result.is_empty() {
                     warnings.push(format!("Computed expression '{}' matched 0 nodes", expr));
                 }
-                (result, no_depths())
+                result
             } else {
-                // Warn on unrecognized node types — misspelled types silently show everything
-                for nt_str in node_types {
-                    if parse_node_type(nt_str).is_none() {
-                        warnings.push(format!(
-                            "Unrecognized node type '{}' in filter — ignored. Valid types: package, module, type, interface, function, endpoint, component, table, constant, field, spec",
-                            nt_str
-                        ));
-                    }
-                }
-                let types: Vec<NodeType> = node_types
+                // No computed expression — start from all active nodes
+                active_nodes.iter().map(|n| n.id.to_string()).collect()
+            };
+
+            // Apply node_types and name_pattern as additional filters on the base set
+            let result = if types.is_empty() && pattern.is_none() {
+                base_set
+            } else {
+                let node_map: std::collections::HashMap<String, &GraphNode> = active_nodes
                     .iter()
-                    .filter_map(|s| parse_node_type(s))
+                    .map(|n| (n.id.to_string(), *n))
                     .collect();
-                let pattern = name_pattern.as_ref().map(|p| p.to_lowercase());
-                let result = active_nodes
-                    .iter()
-                    .filter(|n| {
-                        let type_match = types.is_empty() || types.contains(&n.node_type);
-                        let name_match = pattern.as_ref().map_or(true, |p| {
-                            n.name.to_lowercase().contains(p)
-                                || n.qualified_name.to_lowercase().contains(p)
-                        });
-                        type_match && name_match
+                base_set
+                    .into_iter()
+                    .filter(|id| {
+                        if let Some(n) = node_map.get(id) {
+                            let type_match = types.is_empty() || types.contains(&n.node_type);
+                            let name_match = pattern.as_ref().map_or(true, |p| {
+                                n.name.to_lowercase().contains(p)
+                                    || n.qualified_name.to_lowercase().contains(p)
+                            });
+                            type_match && name_match
+                        } else {
+                            false
+                        }
                     })
-                    .map(|n| n.id.to_string())
-                    .collect();
-                (result, no_depths())
-            }
+                    .collect()
+            };
+            (result, no_depths())
         }
 
         Scope::TestGaps => {
