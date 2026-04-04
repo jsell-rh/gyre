@@ -16,7 +16,11 @@ export function safeHref(url) {
 }
 
 function getAuthToken() {
-  return localStorage.getItem(AUTH_TOKEN_KEY) || 'gyre-dev-token';
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token && typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+    console.warn('[api] No auth token in localStorage and not on localhost — API calls may fail');
+  }
+  return token || 'gyre-dev-token';
 }
 
 export function setAuthToken(token) {

@@ -13,33 +13,36 @@
   const INTERFACE_TYPES = new Set(['trait', 'interface', 'protocol', 'abstract_class']);
   const DATA_TYPES = new Set(['struct', 'enum', 'type', 'table', 'model', 'class', 'union']);
 
-  let boundaryNodes = $derived(
-    nodes.filter(n => BOUNDARY_TYPES.has((n.node_type ?? '').toLowerCase()))
-  );
-  let interfaceNodes = $derived(
-    nodes.filter(n => INTERFACE_TYPES.has((n.node_type ?? '').toLowerCase()))
-  );
-  let dataNodes = $derived(
-    nodes.filter(n => DATA_TYPES.has((n.node_type ?? '').toLowerCase()))
-  );
-  let specPaths = $derived(() => {
+  // Single-pass categorization of nodes for O(N) instead of O(N*3)
+  let categorized = $derived.by(() => {
+    const boundaries = [];
+    const interfaces = [];
+    const data = [];
     const paths = new Set();
     for (const n of nodes) {
+      const nt = (n.node_type ?? '').toLowerCase();
+      if (BOUNDARY_TYPES.has(nt)) boundaries.push(n);
+      if (INTERFACE_TYPES.has(nt)) interfaces.push(n);
+      if (DATA_TYPES.has(nt)) data.push(n);
       if (n.spec_path) paths.add(n.spec_path);
     }
     // Also check governed_by edges for spec targets
+    const nodeById = new Map(nodes.map(n => [n.id, n]));
     for (const e of edges) {
       const et = (e.edge_type ?? e.type ?? '').toLowerCase();
       if (et === 'governed_by') {
         const targetId = e.target_id ?? e.to_node_id ?? e.to;
-        const targetNode = nodes.find(nd => nd.id === targetId);
+        const targetNode = nodeById.get(targetId);
         if (targetNode?.spec_path) paths.add(targetNode.spec_path);
         if (targetNode?.name && !targetNode?.spec_path) paths.add(targetNode.name);
       }
     }
-    return [...paths].sort();
+    return { boundaries, interfaces, data, specPaths: [...paths].sort() };
   });
-  let specPathList = $derived(specPaths());
+  let boundaryNodes = $derived(categorized.boundaries);
+  let interfaceNodes = $derived(categorized.interfaces);
+  let dataNodes = $derived(categorized.data);
+  let specPathList = $derived(categorized.specPaths);
 
   // ── Collapsible section state ──────────────────────────────────────
   let boundariesOpen = $state(true);
@@ -78,13 +81,20 @@
     emitFilter();
   }
 
+  let filterDebounceTimer = null;
   function emitFilter(extra) {
-    onfilterchange?.({
+    const payload = {
       categories: [...activeCategories],
       visibility: visibility === 'all' ? null : visibility,
       min_churn: minChurn > 0 ? minChurn : null,
       ...extra,
-    });
+    };
+    // Debounce rapid filter changes (e.g. slider dragging)
+    if (filterDebounceTimer) clearTimeout(filterDebounceTimer);
+    filterDebounceTimer = setTimeout(() => {
+      onfilterchange?.(payload);
+      filterDebounceTimer = null;
+    }, 50);
   }
 
   // ── Item click handlers ────────────────────────────────────────────

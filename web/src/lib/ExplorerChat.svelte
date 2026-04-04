@@ -25,7 +25,7 @@
 
   // ── Constants ────────────────────────────────────────────────────────────
   const AUTH_TOKEN_KEY = 'gyre_auth_token';
-  const RECONNECT_DELAY = 3000;
+  const RECONNECT_BASE_DELAY = 1000;
   const MAX_RECONNECTS = 5;
   const MAX_CLIENT_MESSAGES = 200;
 
@@ -112,7 +112,12 @@
 
   function scheduleReconnect() {
     if (reconnectTimer) return;
-    if (reconnectCount >= MAX_RECONNECTS) return;
+    if (reconnectCount >= MAX_RECONNECTS) {
+      status = 'error';
+      return;
+    }
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s
+    const delay = RECONNECT_BASE_DELAY * Math.pow(2, reconnectCount);
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       reconnectCount++;
@@ -140,7 +145,8 @@
         break;
       }
       case 'view_query': {
-        const query = msg.query ?? msg.view_query ?? msg;
+        const query = msg.query ?? msg.view_query;
+        if (!query || typeof query !== 'object' || !query.scope) break;
         // Finalize any in-flight streaming text before clearing
         if (streamingText.trim()) {
           messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: streamingText, timestamp: Date.now() }]);
@@ -318,6 +324,21 @@
     };
   });
 
+  // Keyboard handler for Escape to dismiss dropdown (WCAG 2.1)
+  function onKeyDown(e) {
+    if (e.key === 'Escape' && savedViewsDropdownOpen) {
+      savedViewsDropdownOpen = false;
+      e.stopPropagation();
+    }
+  }
+
+  $effect(() => {
+    if (savedViewsDropdownOpen) {
+      document.addEventListener('keydown', onKeyDown);
+      return () => document.removeEventListener('keydown', onKeyDown);
+    }
+  });
+
   onDestroy(() => {
     if (ws && ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
       ws.onclose = null;
@@ -325,6 +346,7 @@
     }
     ws = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
+    document.removeEventListener('keydown', onKeyDown);
   });
 </script>
 

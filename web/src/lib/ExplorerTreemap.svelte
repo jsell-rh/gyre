@@ -59,8 +59,8 @@
     if (nodeId) {
       for (const e of edges) {
         if (e.deleted_at) continue; // stale GovernedBy edge from deleted spec
-        const src = e.source_id ?? e.from_node_id ?? e.from;
-        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+        const src = edgeSrc(e);
+        const et = edgeType(e);
         if (et === 'governed_by' && src === nodeId) return '#22c55e';
       }
     }
@@ -76,6 +76,14 @@
     routes_to: '#f97316',
     governed_by: '#fbbf24',
   };
+
+  // ── Edge field normalization helpers ──────────────────────────────────
+  // The API can return edges with different field names depending on the
+  // serialization path. These helpers normalize access to avoid 50+ inline
+  // fallback chains throughout the rendering code.
+  function edgeSrc(e) { return e.source_id ?? e.from_node_id ?? e.from; }
+  function edgeTgt(e) { return e.target_id ?? e.to_node_id ?? e.to; }
+  function edgeType(e) { return (e.edge_type ?? e.type ?? '').toLowerCase(); }
 
   // ── Constants ────────────────────────────────────────────────────────
   const MINIMAP_W = 180;
@@ -95,6 +103,30 @@
   let cam = { x: 0, y: 0, zoom: 0.5 };
   let targetCam = { x: 0, y: 0, zoom: 0.5 };
   let needsAnim = $state(true);
+
+  // ── ResizeObserver: keep W/H in sync with container ────────────────
+  $effect(() => {
+    const el = containerEl;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const { width, height } = entry.contentRect;
+      if (width > 0 && height > 0) {
+        W = Math.round(width);
+        H = Math.round(height);
+        scheduleRedraw();
+      }
+    });
+    ro.observe(el);
+    // Initial measurement
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      W = Math.round(rect.width);
+      H = Math.round(rect.height);
+    }
+    return () => ro.disconnect();
+  });
 
   let isPanning = $state(false);
   let panStart = { x: 0, y: 0 };
@@ -151,8 +183,8 @@
   let incomingCallCounts = $derived.by(() => {
     const counts = new Map();
     for (const e of edges) {
-      const tgt = e.target_id ?? e.to_node_id ?? e.to;
-      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const tgt = edgeTgt(e);
+      const et = edgeType(e);
       if (et === 'calls' && tgt) {
         counts.set(tgt, (counts.get(tgt) ?? 0) + 1);
       }
@@ -170,9 +202,9 @@
     // Pre-compute trait implementation counts
     const traitImplCounts = new Map(); // traitId → { total, tested }
     for (const e of edges) {
-      const src = e.source_id ?? e.from_node_id ?? e.from;
-      const tgt = e.target_id ?? e.to_node_id ?? e.to;
-      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const src = edgeSrc(e);
+      const tgt = edgeTgt(e);
+      const et = edgeType(e);
       if (et === 'implements') {
         const tgtNode = nodeById.get(tgt);
         if (tgtNode && (tgtNode.node_type === 'interface' || tgtNode.node_type === 'trait')) {
@@ -224,8 +256,8 @@
         let hasGovEdge = false;
         for (const e of edges) {
           if (e.deleted_at) continue;
-          const src = e.source_id ?? e.from_node_id ?? e.from;
-          const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+          const src = edgeSrc(e);
+          const et = edgeType(e);
           if (et === 'governed_by' && src === n.id) { hasGovEdge = true; break; }
         }
         if (!hasGovEdge) {
@@ -615,10 +647,10 @@
     const nodeById = new Map();
     for (const n of nodes) nodeById.set(n.id, n);
     for (const e of edges) {
-      const etype = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const etype = edgeType(e);
       if (etype !== 'contains') continue;
-      const parentId = e.source_id ?? e.from_node_id ?? e.from;
-      const childId = e.target_id ?? e.to_node_id ?? e.to;
+      const parentId = edgeSrc(e);
+      const childId = edgeTgt(e);
       if (!parentId || !childId) continue;
       childToParent.set(childId, parentId);
       if (!parentToChildren.has(parentId)) parentToChildren.set(parentId, []);
@@ -646,7 +678,7 @@
   // Non-contains edges for rendering
   let renderEdges = $derived.by(() => {
     return edges.filter(e => {
-      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const et = edgeType(e);
       return et !== 'contains' && et !== 'field_of';
     });
   });
@@ -655,9 +687,9 @@
   let parentMap = $derived.by(() => {
     const m = new Map();
     for (const e of edges) {
-      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const et = edgeType(e);
       if (et === 'contains') {
-        m.set(e.target_id ?? e.to_node_id ?? e.to, e.source_id ?? e.from_node_id ?? e.from);
+        m.set(edgeTgt(e), edgeSrc(e));
       }
     }
     return m;
@@ -1193,8 +1225,8 @@
     const s = new Set();
     for (const e of edges) {
       if ((e.edge_type ?? e.type ?? '').toLowerCase() === 'calls') {
-        s.add(e.source_id ?? e.from_node_id ?? e.from);
-        s.add(e.target_id ?? e.to_node_id ?? e.to);
+        s.add(edgeSrc(e));
+        s.add(edgeTgt(e));
       }
     }
     return s;
@@ -1259,9 +1291,9 @@
   let adjacency = $derived.by(() => {
     const adj = new Map();
     for (const e of edges) {
-      const src = e.source_id ?? e.from_node_id ?? e.from;
-      const tgt = e.target_id ?? e.to_node_id ?? e.to;
-      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const src = edgeSrc(e);
+      const tgt = edgeTgt(e);
+      const et = edgeType(e);
       if (src && tgt) {
         if (!adj.has(src)) adj.set(src, []);
         adj.get(src).push({ targetId: tgt, edgeType: et });
@@ -1334,12 +1366,12 @@
     }
     for (const e of edges) {
       if (e.deleted_at) continue;
-      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const et = edgeType(e);
       if (et === 'governed_by') {
-        const tgt = e.target_id ?? e.to_node_id ?? e.to;
+        const tgt = edgeTgt(e);
         const tgtNode = nodes.find(n => n.id === tgt);
         if (tgtNode && (tgtNode.name === specPath || tgtNode.spec_path === specPath)) {
-          result.add(e.source_id ?? e.from_node_id ?? e.from);
+          result.add(edgeSrc(e));
         }
       }
     }
@@ -1878,9 +1910,9 @@
     if (!selectedNodeId) return null;
     const connected = new Set([selectedNodeId]);
     for (const e of edges) {
-      const src = e.source_id ?? e.from_node_id ?? e.from;
-      const tgt = e.target_id ?? e.to_node_id ?? e.to;
-      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const src = edgeSrc(e);
+      const tgt = edgeTgt(e);
+      const et = edgeType(e);
       if (et === 'contains' || et === 'field_of') continue;
       if (src === selectedNodeId) connected.add(tgt);
       if (tgt === selectedNodeId) connected.add(src);
@@ -2715,8 +2747,8 @@
       if (nodeId) {
         for (const e of edges) {
           if (e.deleted_at) continue;
-          const src = e.source_id ?? e.from_node_id ?? e.from;
-          const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+          const src = edgeSrc(e);
+          const et = edgeType(e);
           if (et === 'governed_by' && src === nodeId) { hasGovEdge = true; break; }
         }
       }
@@ -2950,8 +2982,8 @@
       if (count >= maxEdges) break;
       if (!filterEdge(e)) continue;
 
-      const srcId = e.source_id ?? e.from_node_id ?? e.from;
-      const tgtId = e.target_id ?? e.to_node_id ?? e.to;
+      const srcId = edgeSrc(e);
+      const tgtId = edgeTgt(e);
       const sln = layoutNodeMap.get(srcId);
       const tln = layoutNodeMap.get(tgtId);
       if (!sln || !tln) continue;
@@ -2970,7 +3002,7 @@
       if (ss.y < -50 && ts.y < -50) continue;
       if (ss.y > H + 50 && ts.y > H + 50) continue;
 
-      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const et = edgeType(e);
       let color = EDGE_COLORS[et] ?? '#64748b';
       let edgeAlpha = alpha;
       let lineWidth = 1.2;
@@ -3183,6 +3215,7 @@
   }
 
   function scheduleRedraw() {
+    if (destroyed) return;
     needsAnim = true;
     if (!animFrame) animFrame = requestAnimationFrame(animLoop);
   }
@@ -3359,8 +3392,8 @@
     let best = null;
     let bestDist = threshold;
     for (const e of renderEdges) {
-      const srcId = e.source_id ?? e.from_node_id ?? e.from;
-      const tgtId = e.target_id ?? e.to_node_id ?? e.to;
+      const srcId = edgeSrc(e);
+      const tgtId = edgeTgt(e);
       const sln = layoutNodeMap.get(srcId);
       const tln = layoutNodeMap.get(tgtId);
       if (!sln || !tln) continue;
@@ -3378,7 +3411,7 @@
         bestDist = dist;
         const srcNode = nodes.find(n => n.id === srcId);
         const tgtNode = nodes.find(n => n.id === tgtId);
-        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+        const et = edgeType(e);
         best = { edge: e, edgeType: et, source: srcNode, target: tgtNode };
       }
     }
@@ -3898,9 +3931,9 @@
     const matchedIds = new Set(queryMatchedWithDepth.keys());
     const outAdj = new Map();
     for (const e of edges) {
-      const srcId = e.source_id ?? e.from_node_id ?? e.from;
-      const tgtId = e.target_id ?? e.to_node_id ?? e.to;
-      const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+      const srcId = edgeSrc(e);
+      const tgtId = edgeTgt(e);
+      const et = edgeType(e);
       if ((et === 'calls' || et === 'routes_to' || et === 'routesto') &&
           matchedIds.has(srcId) && matchedIds.has(tgtId)) {
         if (!outAdj.has(srcId)) outAdj.set(srcId, []);
@@ -3983,9 +4016,11 @@
     }
   });
 
+  let destroyed = false;
   onDestroy(() => {
-    if (animFrame) cancelAnimationFrame(animFrame);
-    if (zoomDecayFrame) cancelAnimationFrame(zoomDecayFrame);
+    destroyed = true;
+    if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+    if (zoomDecayFrame) { cancelAnimationFrame(zoomDecayFrame); zoomDecayFrame = null; }
   });
 
   let legendItems = $derived(lens === 'evaluative' ? [
