@@ -61,15 +61,28 @@
     const conf = node.spec_confidence;
     // Check precomputed GovernedBy index (O(1) instead of O(E))
     const hasGovEdge = node.id && governedByIndex.has(node.id);
-    // Green: governed by spec with high confidence or explicit GovernedBy edge
-    if (conf === 'high' || hasGovEdge) return '#22c55e';
-    // Amber: spec_path present without explicit confidence — treat as heuristic match,
-    // not high confidence. Only GovernedBy edges or explicit 'high' confidence get green.
-    if (node.spec_path && !conf) return '#eab308';
-    // Amber: spec_path present but low/medium confidence (heuristic match)
-    if (node.spec_path && (conf === 'medium' || conf === 'low')) return '#eab308';
-    if (conf === 'medium') return '#eab308';
-    if (conf === 'low') return '#eab308';
+    // Green: explicit high confidence or confirmed GovernedBy edge (without conflicting heuristic)
+    if (conf === 'high') return '#22c55e';
+    if (hasGovEdge && !node.spec_path) return '#22c55e';
+    // If both GovernedBy edge AND heuristic spec_path exist, check if they agree.
+    // When they might conflict (spec_path from heuristic != GovernedBy spec), show amber.
+    if (hasGovEdge && node.spec_path) {
+      // Look up the GovernedBy edge target to compare with heuristic spec_path
+      const govEdge = edges.find(e => !e.deleted_at && edgeSrc(e) === node.id && edgeType(e) === 'governed_by');
+      if (govEdge) {
+        const govSpecNode = nodes.find(n => n.id === edgeTgt(govEdge));
+        const govSpecPath = govSpecNode?.file_path || govSpecNode?.name || '';
+        // If they match, it's a confirmed strong signal
+        if (govSpecPath && node.spec_path.includes(govSpecPath.replace(/^specs\//, ''))) {
+          return '#22c55e';
+        }
+      }
+      // Ambiguous: GovernedBy from different spec than heuristic spec_path
+      return '#22c55e'; // Still green — GovernedBy is the stronger signal
+    }
+    // Amber: spec_path present without GovernedBy edge — heuristic match only
+    if (node.spec_path) return '#eab308';
+    if (conf === 'medium' || conf === 'low') return '#eab308';
     // Red: no spec coverage
     return '#ef4444';
   }
@@ -204,9 +217,10 @@
     return counts;
   });
 
-  // Anomaly detection state (evaluative lens)
+  // Anomaly detection state — visible in both structural and evaluative lenses
+  // (spec: Risk Map is an overlay on the architecture canvas, not evaluative-only)
   let anomalies = $derived.by(() => {
-    if (lens !== 'evaluative') return [];
+    if (lens !== 'structural' && lens !== 'evaluative') return [];
     const results = [];
     const nodeById = new Map();
     for (const n of nodes) nodeById.set(n.id, n);
@@ -1147,9 +1161,13 @@
       const complexity = n.complexity ?? 0;
       const churn = n.churn_count_30d ?? n.churn ?? 0;
       const descendants = descendantCounts.get(n.id) ?? 1;
-      // Weighted sum: complexity is primary, churn is secondary signal
-      const signal = complexity + churn * 0.5;
-      return Math.max(1, signal > 0 ? signal : descendants);
+      const lineCount = n.line_end && n.line_start ? (n.line_end - n.line_start + 1) : 0;
+      // Spec: "Size indicates complexity or churn."
+      // Weighted sum: complexity is primary, churn is secondary signal,
+      // line count is tertiary (proxy for complexity when metric is missing).
+      // Add 1 baseline so even trivial nodes get visible cells.
+      const signal = complexity * 2 + churn + (lineCount > 0 ? Math.log2(lineCount + 1) : 0);
+      return Math.max(1, signal > 0 ? signal + 1 : descendants);
     }
 
     function layoutLeafNodes(graphNodes, x, y, w, h, parentLn, depth) {
@@ -3931,7 +3949,7 @@
       breadcrumb = breadcrumb.slice(0, index + 1);
     }
     selectedNodeId = null;
-    canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })) };
+    canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })), recent_interactions: recentInteractions };
     onNodeDetail(null);
 
     // Smooth zoom-out: animate camera to the target parent node or fit all.
@@ -4480,6 +4498,16 @@
         aria-label="Architecture explorer canvas"
         tabindex="0"
       ></canvas>
+
+      <!-- Screen reader: announce selected node -->
+      <div class="sr-only" aria-live="polite" aria-atomic="true">
+        {#if selectedNodeId}
+          {@const sel = layoutNodeMap.get(selectedNodeId)}
+          {#if sel?.node}
+            Selected: {sel.node.name} ({sel.node.node_type}){sel.node.spec_path ? `, governed by ${sel.node.spec_path}` : ', no spec'}
+          {/if}
+        {/if}
+      </div>
 
       <!-- Tooltip -->
       {#if tooltipNode && !isPanning}
