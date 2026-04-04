@@ -714,8 +714,10 @@ fn resolve_scope_with_adjacency(
                 .iter()
                 .filter_map(|s| parse_edge_type(s))
                 .collect();
+            // Default to "both" (consistent with the ViewQuery struct's default).
+            // Empty string is treated as default rather than a distinct value.
             let direction = if expand_direction.is_empty() {
-                "outgoing"
+                "both"
             } else {
                 expand_direction.as_str()
             };

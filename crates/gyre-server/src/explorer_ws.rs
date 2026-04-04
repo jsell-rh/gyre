@@ -1667,11 +1667,14 @@ async fn run_explorer_agent(
                                 tool_names_used.push(name.clone());
                             }
                             ContentBlock::ToolResult { content, .. } => {
-                                // Include a brief snippet of tool results
-                                let snippet: String = content.chars().take(60).collect();
+                                // Include a longer snippet of tool results to preserve
+                                // grounding data (node counts, names, warnings) that the
+                                // LLM needs for accurate claims in later turns.
+                                let snippet: String = content.chars().take(300).collect();
                                 parts.push(format!(
-                                    "[tool result: {}...]",
-                                    snippet.replace('\n', " ")
+                                    "[tool result: {}{}]",
+                                    snippet.replace('\n', " "),
+                                    if content.len() > 300 { "..." } else { "" }
                                 ));
                             }
                         }
@@ -2312,7 +2315,7 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 - `focus`: BFS from a node. Fields: node (name or "$clicked"), edges (array), direction ("outgoing"/"incoming"/"both"), depth (number)
 - `filter`: Filter by node_types (array), computed (expression), or name_pattern
 - `test_gaps`: Functions not reachable from any test
-- `diff`: Changed nodes between commits. Fields: from_commit, to_commit
+- `diff`: Changed nodes between commits. Fields: from_commit, to_commit (SHA prefixes, min 4 chars). For temporal diff, prefix with ~ and use epoch seconds: "~1711929600"
 - `concept`: Cross-cutting concept. Fields: seed_nodes (array), expand_edges (array), expand_depth (number), expand_direction ("outgoing"/"incoming"/"both")
 
 ### Edge Types

@@ -366,11 +366,41 @@
       }
 
       closeSpecEditor();
+      // Execute→Observe loop (vision.md Principle 5): after publishing,
+      // poll for graph changes so ghost overlays transition to real nodes.
+      // The agent implements the spec in the background; when the graph
+      // updates, we re-fetch and the user sees real nodes replace ghosts.
+      pollForGraphUpdate(selectedRepoId, 5, 10000);
     } catch (e) {
       publishError = e.message ?? 'Failed to publish spec';
     } finally {
       publishLoading = false;
     }
+  }
+
+  // Poll for graph changes after spec publish (Execute→Observe step).
+  // Checks up to `maxAttempts` times with `intervalMs` delay.
+  let publishPolling = $state(false);
+  async function pollForGraphUpdate(repoId, maxAttempts, intervalMs) {
+    if (!repoId) return;
+    publishPolling = true;
+    const baselineCount = graph?.nodes?.length ?? 0;
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, intervalMs));
+      if (selectedRepoId !== repoId) break; // User navigated away
+      try {
+        const newGraph = await api.repoGraph(repoId);
+        const newCount = newGraph?.nodes?.length ?? 0;
+        if (newCount !== baselineCount) {
+          // Graph changed — transition ghosts to real nodes
+          graph = newGraph;
+          ghostOverlays = [];
+          showToast('Architecture updated — agents implemented the spec changes.', { type: 'success' });
+          break;
+        }
+      } catch { /* graph fetch failed, keep polling */ }
+    }
+    publishPolling = false;
   }
 
   function cancelPublish() {
