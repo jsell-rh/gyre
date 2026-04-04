@@ -695,6 +695,578 @@ fn read_lsp_response_with_timeout(
     Ok(None) // Gave up after too many messages
 }
 
+// ── Multi-language support ──────────────────────────────────────────────────
+// The extractors below follow the same LSP pattern as the Rust extractor
+// but delegate to pyright (Python), gopls (Go), and typescript-language-server (TypeScript).
+
+/// Detected primary language of a repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoLanguage {
+    Rust,
+    Python,
+    Go,
+    TypeScript,
+    Unknown,
+}
+
+/// Detect the primary language of a repository by checking for manifest files.
+pub fn detect_language(repo_root: &Path) -> RepoLanguage {
+    if repo_root.join("Cargo.toml").is_file() {
+        RepoLanguage::Rust
+    } else if repo_root.join("go.mod").is_file() {
+        RepoLanguage::Go
+    } else if repo_root.join("pyproject.toml").is_file()
+        || repo_root.join("setup.py").is_file()
+        || repo_root.join("requirements.txt").is_file()
+    {
+        RepoLanguage::Python
+    } else if repo_root.join("tsconfig.json").is_file() || repo_root.join("package.json").is_file()
+    {
+        RepoLanguage::TypeScript
+    } else {
+        RepoLanguage::Unknown
+    }
+}
+
+/// Check if pyright is available.
+pub fn pyright_available() -> bool {
+    Command::new("pyright-langserver")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or_else(|_| {
+            // Try npx pyright as fallback
+            Command::new("npx")
+                .args(["pyright-langserver", "--version"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+}
+
+/// Check if gopls is available.
+pub fn gopls_available() -> bool {
+    Command::new("gopls")
+        .arg("version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Check if typescript-language-server is available.
+pub fn tsserver_available() -> bool {
+    Command::new("typescript-language-server")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Generic LSP-based call graph extraction that works for any language server.
+///
+/// The pattern is identical across languages:
+/// 1. Start the language server subprocess
+/// 2. Initialize with LSP protocol
+/// 3. For each function node, send textDocument/references
+/// 4. Resolve reference sites to enclosing functions → emit Calls edges
+fn extract_call_graph_via_lsp(
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    existing_edges: &[GraphEdge],
+    repo_id: &Id,
+    commit_sha: &str,
+    lsp_command: &str,
+    lsp_args: &[&str],
+    language_id: &str,
+    file_extension: &str,
+) -> LspCallGraphResult {
+    let mut result = LspCallGraphResult {
+        edges: Vec::new(),
+        errors: Vec::new(),
+        definitions_queried: 0,
+        new_edges_found: 0,
+        total_definitions: 0,
+        incomplete: false,
+    };
+
+    // Build lookup maps
+    let function_nodes: Vec<&GraphNode> = nodes
+        .iter()
+        .filter(|n| {
+            n.deleted_at.is_none()
+                && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
+                && n.file_path.ends_with(file_extension)
+        })
+        .collect();
+
+    if function_nodes.is_empty() {
+        return result;
+    }
+
+    // Build file → sorted vec of (line_start, line_end, node_id)
+    let mut file_functions: HashMap<String, Vec<(u32, u32, String)>> = HashMap::new();
+    for n in nodes.iter().filter(|n| n.deleted_at.is_none()) {
+        if !n.file_path.ends_with(file_extension) {
+            continue;
+        }
+        file_functions
+            .entry(n.file_path.clone())
+            .or_default()
+            .push((n.line_start, n.line_end, n.id.to_string()));
+    }
+    for fns in file_functions.values_mut() {
+        fns.sort_by_key(|(start, _, _)| *start);
+    }
+
+    // Collect existing edge pairs
+    let mut existing_pairs: HashSet<(String, String)> = HashSet::new();
+    for e in existing_edges {
+        if e.edge_type == EdgeType::Calls && e.deleted_at.is_none() {
+            existing_pairs.insert((e.source_id.to_string(), e.target_id.to_string()));
+        }
+    }
+
+    let repo_root_str = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let repo_root_normalized = repo_root_str.trim_end_matches('/');
+
+    // Start LSP server
+    let mut cmd = Command::new(lsp_command);
+    cmd.args(lsp_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(repo_root);
+    let mut guard = match cmd.spawn() {
+        Ok(c) => ChildGuard::new(c),
+        Err(e) => {
+            result
+                .errors
+                .push(format!("Failed to start {lsp_command}: {e}"));
+            return result;
+        }
+    };
+
+    let stdin = guard.child.stdin.as_mut().unwrap();
+    let stdout = guard.child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    let query_timeout = Duration::from_secs(10);
+    let overall_deadline = Instant::now() + Duration::from_secs(120);
+
+    // Initialize LSP
+    let root_uri = format!("file://{repo_root_normalized}");
+    let init_msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+            "processId": std::process::id(),
+            "rootUri": root_uri,
+            "capabilities": {
+                "textDocument": {
+                    "references": { "dynamicRegistration": false }
+                }
+            },
+        }
+    });
+
+    if let Err(e) = send_lsp_message(stdin, &init_msg) {
+        result
+            .errors
+            .push(format!("Failed to send initialize: {e}"));
+        return result;
+    }
+
+    match read_lsp_message(&mut reader) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            result.errors.push("No initialize response".into());
+            return result;
+        }
+        Err(e) => {
+            result
+                .errors
+                .push(format!("Failed to read initialize response: {e}"));
+            return result;
+        }
+    }
+
+    let initialized = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "initialized",
+        "params": {}
+    });
+    let _ = send_lsp_message(stdin, &initialized);
+
+    // Wait for indexing (with shorter timeout than Rust)
+    let index_deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if Instant::now() > index_deadline {
+            break;
+        }
+        match read_lsp_message_with_timeout(&mut reader, Duration::from_millis(500)) {
+            Ok(Some(msg)) => {
+                if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
+                    if method == "$/progress" {
+                        if let Some(value) = msg.get("params").and_then(|p| p.get("value")) {
+                            if value.get("kind").and_then(|k| k.as_str()) == Some("end") {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None) | Err(_) => continue,
+        }
+    }
+
+    let mut opened_files: HashSet<String> = HashSet::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    result.total_definitions = function_nodes.len();
+
+    for (idx, func_node) in function_nodes.iter().enumerate() {
+        if Instant::now() > overall_deadline {
+            result.incomplete = true;
+            result.errors.push(format!(
+                "Overall extraction timeout after {}/{} definitions",
+                result.definitions_queried, result.total_definitions,
+            ));
+            break;
+        }
+        result.definitions_queried += 1;
+
+        let normalized_path = func_node
+            .file_path
+            .strip_prefix("./")
+            .unwrap_or(&func_node.file_path);
+        let candidate = repo_root.join(normalized_path);
+        let resolved = match safe_resolve_path(repo_root, &candidate) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let file_uri = format!("file://{repo_root_normalized}/{normalized_path}");
+
+        if opened_files.insert(normalized_path.to_string()) {
+            let file_content = match std::fs::read_to_string(&resolved) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let did_open = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {
+                    "textDocument": {
+                        "uri": file_uri,
+                        "languageId": language_id,
+                        "version": 1,
+                        "text": file_content
+                    }
+                }
+            });
+            let _ = send_lsp_message(stdin, &did_open);
+        }
+
+        // For non-Rust languages, use column 0 (name is usually at start of definition)
+        let char_pos = func_node.line_start.saturating_sub(1);
+        let _ = char_pos; // suppress unused warning
+        let refs_msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": idx + 1,
+            "method": "textDocument/references",
+            "params": {
+                "textDocument": { "uri": file_uri },
+                "position": {
+                    "line": func_node.line_start.saturating_sub(1),
+                    "character": 0
+                },
+                "context": { "includeDeclaration": false }
+            }
+        });
+
+        if let Err(e) = send_lsp_message(stdin, &refs_msg) {
+            result
+                .errors
+                .push(format!("Failed to query refs for {}: {e}", func_node.name));
+            continue;
+        }
+
+        let deadline = Instant::now() + query_timeout;
+        match read_lsp_response_with_timeout(&mut reader, idx + 1, deadline) {
+            Ok(Some(locations)) => {
+                for loc in locations {
+                    if let (Some(uri), Some(line)) = (
+                        loc.get("uri").and_then(|u| u.as_str()),
+                        loc.get("range")
+                            .and_then(|r| r.get("start"))
+                            .and_then(|s| s.get("line"))
+                            .and_then(|l| l.as_u64()),
+                    ) {
+                        let prefix = format!("file://{repo_root_normalized}/");
+                        let file_path = uri.strip_prefix(&prefix).unwrap_or(uri);
+                        let line_num = (line + 1) as u32;
+
+                        if let Some(functions) = file_functions.get(file_path) {
+                            let caller_id = functions
+                                .iter()
+                                .filter(|(start, end, _)| *start <= line_num && *end >= line_num)
+                                .max_by_key(|(start, _, _)| *start)
+                                .map(|(_, _, id)| id.clone());
+
+                            if let Some(caller) = caller_id {
+                                let target = func_node.id.to_string();
+                                if caller != target
+                                    && !existing_pairs.contains(&(caller.clone(), target.clone()))
+                                {
+                                    existing_pairs.insert((caller.clone(), target.clone()));
+                                    let meta = if commit_sha.is_empty() {
+                                        r#"{"source":"lsp"}"#.to_string()
+                                    } else {
+                                        format!(
+                                            r#"{{"source":"lsp","commit_sha":"{}"}}"#,
+                                            commit_sha
+                                        )
+                                    };
+                                    result.edges.push(GraphEdge {
+                                        id: Id::new(Uuid::new_v4().to_string()),
+                                        repo_id: repo_id.clone(),
+                                        source_id: Id::new(caller),
+                                        target_id: func_node.id.clone(),
+                                        edge_type: EdgeType::Calls,
+                                        metadata: Some(meta),
+                                        first_seen_at: now,
+                                        last_seen_at: now,
+                                        deleted_at: None,
+                                    });
+                                    result.new_edges_found += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                result
+                    .errors
+                    .push(format!("Failed to read refs for {}: {e}", func_node.name));
+            }
+        }
+    }
+
+    // Shutdown
+    let shutdown =
+        serde_json::json!({ "jsonrpc": "2.0", "id": 999999, "method": "shutdown", "params": null });
+    let _ = send_lsp_message(stdin, &shutdown);
+    let _ = read_lsp_message(&mut reader);
+    let exit = serde_json::json!({ "jsonrpc": "2.0", "method": "exit", "params": null });
+    let _ = send_lsp_message(stdin, &exit);
+
+    match guard.child.wait() {
+        Ok(status) if !status.success() => {
+            let stderr = guard.stderr_snapshot();
+            let summary = if stderr.len() > 1024 {
+                format!("{}...", &stderr[..1024])
+            } else {
+                stderr
+            };
+            result.errors.push(format!(
+                "{lsp_command} exited with {status}; stderr: {summary}"
+            ));
+        }
+        Err(e) => {
+            result
+                .errors
+                .push(format!("Failed to wait for {lsp_command}: {e}"));
+        }
+        _ => {}
+    }
+
+    result
+}
+
+/// Extract call graph from a Python repository using pyright LSP.
+pub fn extract_call_graph_python(
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    existing_edges: &[GraphEdge],
+    repo_id: &Id,
+    commit_sha: &str,
+) -> LspCallGraphResult {
+    if !pyright_available() {
+        return LspCallGraphResult {
+            edges: Vec::new(),
+            errors: vec!["pyright-langserver not found — skipping Python LSP call graph".into()],
+            definitions_queried: 0,
+            new_edges_found: 0,
+            total_definitions: 0,
+            incomplete: false,
+        };
+    }
+
+    extract_call_graph_via_lsp(
+        repo_root,
+        nodes,
+        existing_edges,
+        repo_id,
+        commit_sha,
+        "pyright-langserver",
+        &["--stdio"],
+        "python",
+        ".py",
+    )
+}
+
+/// Extract call graph from a Go repository using gopls LSP.
+pub fn extract_call_graph_go(
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    existing_edges: &[GraphEdge],
+    repo_id: &Id,
+    commit_sha: &str,
+) -> LspCallGraphResult {
+    if !gopls_available() {
+        return LspCallGraphResult {
+            edges: Vec::new(),
+            errors: vec!["gopls not found — skipping Go LSP call graph".into()],
+            definitions_queried: 0,
+            new_edges_found: 0,
+            total_definitions: 0,
+            incomplete: false,
+        };
+    }
+
+    extract_call_graph_via_lsp(
+        repo_root,
+        nodes,
+        existing_edges,
+        repo_id,
+        commit_sha,
+        "gopls",
+        &["serve"],
+        "go",
+        ".go",
+    )
+}
+
+/// Extract call graph from a TypeScript/JavaScript repository using typescript-language-server.
+pub fn extract_call_graph_typescript(
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    existing_edges: &[GraphEdge],
+    repo_id: &Id,
+    commit_sha: &str,
+) -> LspCallGraphResult {
+    if !tsserver_available() {
+        return LspCallGraphResult {
+            edges: Vec::new(),
+            errors: vec![
+                "typescript-language-server not found — skipping TypeScript LSP call graph".into(),
+            ],
+            definitions_queried: 0,
+            new_edges_found: 0,
+            total_definitions: 0,
+            incomplete: false,
+        };
+    }
+
+    // typescript-language-server handles both .ts and .js files.
+    // We extract for .ts first, then .js separately and merge.
+    let mut ts_result = extract_call_graph_via_lsp(
+        repo_root,
+        nodes,
+        existing_edges,
+        repo_id,
+        commit_sha,
+        "typescript-language-server",
+        &["--stdio"],
+        "typescript",
+        ".ts",
+    );
+
+    // Also handle .js/.jsx/.tsx files
+    let js_nodes: Vec<&GraphNode> = nodes
+        .iter()
+        .filter(|n| {
+            n.deleted_at.is_none()
+                && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
+                && (n.file_path.ends_with(".js")
+                    || n.file_path.ends_with(".jsx")
+                    || n.file_path.ends_with(".tsx"))
+        })
+        .collect();
+
+    if !js_nodes.is_empty() {
+        let js_result = extract_call_graph_via_lsp(
+            repo_root,
+            nodes,
+            existing_edges,
+            repo_id,
+            commit_sha,
+            "typescript-language-server",
+            &["--stdio"],
+            "javascript",
+            ".js",
+        );
+        ts_result.edges.extend(js_result.edges);
+        ts_result.errors.extend(js_result.errors);
+        ts_result.definitions_queried += js_result.definitions_queried;
+        ts_result.new_edges_found += js_result.new_edges_found;
+        ts_result.total_definitions += js_result.total_definitions;
+        ts_result.incomplete = ts_result.incomplete || js_result.incomplete;
+    }
+
+    ts_result
+}
+
+/// Extract call graph for any supported language, auto-detecting the language.
+pub fn extract_call_graph_auto(
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    existing_edges: &[GraphEdge],
+    repo_id: &Id,
+    commit_sha: &str,
+) -> LspCallGraphResult {
+    match detect_language(repo_root) {
+        RepoLanguage::Rust => {
+            extract_call_graph(repo_root, nodes, existing_edges, repo_id, commit_sha)
+        }
+        RepoLanguage::Python => {
+            extract_call_graph_python(repo_root, nodes, existing_edges, repo_id, commit_sha)
+        }
+        RepoLanguage::Go => {
+            extract_call_graph_go(repo_root, nodes, existing_edges, repo_id, commit_sha)
+        }
+        RepoLanguage::TypeScript => {
+            extract_call_graph_typescript(repo_root, nodes, existing_edges, repo_id, commit_sha)
+        }
+        RepoLanguage::Unknown => LspCallGraphResult {
+            edges: Vec::new(),
+            errors: vec!["Unknown language — no LSP call graph extractor available".into()],
+            definitions_queried: 0,
+            new_edges_found: 0,
+            total_definitions: 0,
+            incomplete: false,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,5 +1440,90 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let node = make_function_node("n1", "missing", "missing.rs", 1, 1);
         assert_eq!(compute_char_position(dir.path(), "missing.rs", &node), 0);
+    }
+
+    // ── Multi-language detection tests ───────────────────────────────
+
+    #[test]
+    fn detect_rust_by_cargo_toml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
+        assert_eq!(detect_language(dir.path()), RepoLanguage::Rust);
+    }
+
+    #[test]
+    fn detect_python_by_pyproject() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"test\"",
+        )
+        .unwrap();
+        assert_eq!(detect_language(dir.path()), RepoLanguage::Python);
+    }
+
+    #[test]
+    fn detect_go_by_go_mod() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module test\ngo 1.21").unwrap();
+        assert_eq!(detect_language(dir.path()), RepoLanguage::Go);
+    }
+
+    #[test]
+    fn detect_typescript_by_tsconfig() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        assert_eq!(detect_language(dir.path()), RepoLanguage::TypeScript);
+    }
+
+    #[test]
+    fn detect_unknown_empty_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(detect_language(dir.path()), RepoLanguage::Unknown);
+    }
+
+    #[test]
+    fn language_tool_availability_checks() {
+        // These just exercise the availability checks — they may return
+        // true or false depending on the environment, but should not panic.
+        let _ = pyright_available();
+        let _ = gopls_available();
+        let _ = tsserver_available();
+    }
+
+    #[test]
+    fn extract_auto_unknown_language() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = extract_call_graph_auto(dir.path(), &[], &[], &Id::new("repo1"), "abc123");
+        assert_eq!(result.edges.len(), 0);
+        assert!(result.errors[0].contains("Unknown language"));
+    }
+
+    #[test]
+    fn extract_python_empty_nodes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]").unwrap();
+        let result = extract_call_graph_python(dir.path(), &[], &[], &Id::new("repo1"), "abc123");
+        assert_eq!(result.edges.len(), 0);
+        assert_eq!(result.definitions_queried, 0);
+    }
+
+    #[test]
+    fn extract_go_empty_nodes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module test").unwrap();
+        let result = extract_call_graph_go(dir.path(), &[], &[], &Id::new("repo1"), "abc123");
+        assert_eq!(result.edges.len(), 0);
+        assert_eq!(result.definitions_queried, 0);
+    }
+
+    #[test]
+    fn extract_typescript_empty_nodes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        let result =
+            extract_call_graph_typescript(dir.path(), &[], &[], &Id::new("repo1"), "abc123");
+        assert_eq!(result.edges.len(), 0);
+        assert_eq!(result.definitions_queried, 0);
     }
 }

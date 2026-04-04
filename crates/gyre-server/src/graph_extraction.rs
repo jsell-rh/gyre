@@ -787,11 +787,15 @@ pub fn extract_lsp_edges(
     repo_id: &Id,
     commit_sha: &str,
 ) -> Vec<GraphEdge> {
-    if !repo_root.join("Cargo.toml").is_file() {
+    // Auto-detect language and use the appropriate LSP extractor.
+    // Supports Rust (rust-analyzer), Python (pyright), Go (gopls),
+    // and TypeScript (typescript-language-server).
+    let lang = gyre_domain::lsp_call_graph::detect_language(repo_root);
+    if lang == gyre_domain::lsp_call_graph::RepoLanguage::Unknown {
         return vec![];
     }
 
-    let lsp_result = gyre_domain::lsp_call_graph::extract_call_graph(
+    let lsp_result = gyre_domain::lsp_call_graph::extract_call_graph_auto(
         repo_root,
         nodes,
         existing_edges,
