@@ -295,6 +295,50 @@ impl ViewQuery {
                     }
                 }
             }
+            Scope::Diff {
+                from_commit,
+                to_commit,
+            } => {
+                if from_commit.is_empty() {
+                    errors.push("Diff scope 'from_commit' must not be empty".to_string());
+                }
+                if to_commit.is_empty() {
+                    errors.push("Diff scope 'to_commit' must not be empty".to_string());
+                }
+                // Non-temporal SHAs need at least 4 hex chars
+                if !from_commit.starts_with('~') && !from_commit.is_empty() {
+                    if from_commit.len() < 4 {
+                        errors.push(format!(
+                            "Diff from_commit '{}' too short — need at least 4 hex characters for SHA prefix matching",
+                            from_commit
+                        ));
+                    } else if !from_commit.chars().all(|c| c.is_ascii_hexdigit()) {
+                        errors.push(format!(
+                            "Diff from_commit '{}' contains non-hex characters — use hex SHA prefix or ~epoch for temporal diff",
+                            from_commit
+                        ));
+                    }
+                }
+                if !to_commit.starts_with('~') && !to_commit.is_empty() {
+                    if to_commit.len() < 4 {
+                        errors.push(format!(
+                            "Diff to_commit '{}' too short — need at least 4 hex characters for SHA prefix matching",
+                            to_commit
+                        ));
+                    } else if !to_commit.chars().all(|c| c.is_ascii_hexdigit()) {
+                        errors.push(format!(
+                            "Diff to_commit '{}' contains non-hex characters — use hex SHA prefix or ~epoch for temporal diff",
+                            to_commit
+                        ));
+                    }
+                }
+                if from_commit == to_commit && !from_commit.is_empty() {
+                    errors.push(format!(
+                        "Diff from_commit and to_commit are identical ('{}') — diff will be empty",
+                        from_commit
+                    ));
+                }
+            }
             _ => {}
         }
 
@@ -565,15 +609,29 @@ impl ViewQuery {
                     parts.len()
                 ));
             } else {
-                if !Self::KNOWN_HEAT_METRICS.contains(&parts[0]) {
+                // String-valued properties that support = and != with string values
+                let string_props = ["node_type", "visibility", "spec_confidence"];
+                let is_string_prop = string_props.contains(&parts[0]);
+
+                if !is_string_prop && !Self::KNOWN_HEAT_METRICS.contains(&parts[0]) {
                     errors.push(format!("Unknown $where metric '{}'", parts[0]));
                 }
-                let known_ops = [">", ">=", "<", "<=", "==", "="];
-                if !known_ops.contains(&parts[1]) {
-                    errors.push(format!("Unknown $where operator '{}'", parts[1]));
-                }
-                if parts[2].parse::<f64>().is_err() {
-                    errors.push(format!("$where value '{}' is not a number", parts[2]));
+                if is_string_prop {
+                    let known_str_ops = ["=", "==", "!="];
+                    if !known_str_ops.contains(&parts[1]) {
+                        errors.push(format!(
+                            "$where operator '{}' not valid for string property '{}' — use = or !=",
+                            parts[1], parts[0]
+                        ));
+                    }
+                } else {
+                    let known_ops = [">", ">=", "<", "<=", "==", "="];
+                    if !known_ops.contains(&parts[1]) {
+                        errors.push(format!("Unknown $where operator '{}'", parts[1]));
+                    }
+                    if parts[2].parse::<f64>().is_err() {
+                        errors.push(format!("$where value '{}' is not a number", parts[2]));
+                    }
                 }
             }
         }

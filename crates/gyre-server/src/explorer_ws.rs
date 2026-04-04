@@ -369,6 +369,28 @@ async fn handle_explorer_session(
                     cached_edges = None;
                     cache_time = std::time::Instant::now();
                 }
+                // Heuristic cache invalidation: if the user's message suggests they
+                // expect fresh data (e.g. after a push), force-invalidate regardless
+                // of TTL. Catches the common case where a user pushes code and
+                // immediately asks the explorer about changes.
+                {
+                    let q_lower = text.to_lowercase();
+                    let freshness_keywords = [
+                        "what changed",
+                        "after push",
+                        "latest",
+                        "new code",
+                        "just pushed",
+                        "just committed",
+                        "refresh",
+                        "updated",
+                    ];
+                    if freshness_keywords.iter().any(|kw| q_lower.contains(kw)) {
+                        cached_nodes = None;
+                        cached_edges = None;
+                        cache_time = std::time::Instant::now();
+                    }
+                }
                 if message_count > MAX_SESSION_MESSAGES {
                     let err = ExplorerServerMessage::Error {
                         message:
@@ -396,9 +418,11 @@ async fn handle_explorer_session(
                     &text,
                     &canvas_state,
                     &mut sender,
+                    &mut receiver,
                     &mut conversation_history,
                     &mut cached_nodes,
                     &mut cached_edges,
+                    &auth,
                 )
                 .await
                 {
@@ -790,12 +814,16 @@ async fn handle_explorer_session(
                                 .await;
                             continue;
                         }
-                        // Only the creator or an admin can delete views.
-                        let is_admin = auth
-                            .roles
-                            .iter()
-                            .any(|r| matches!(r, gyre_domain::user::UserRole::Admin));
-                        if v.created_by != auth.agent_id && !is_admin {
+                        // Only the creator or a human admin can delete views.
+                        // Agent tokens (user_id=None) can ONLY delete views they
+                        // created — they never get admin override, preventing agents
+                        // from deleting human-created views.
+                        let is_human_admin = auth.user_id.is_some()
+                            && auth
+                                .roles
+                                .iter()
+                                .any(|r| matches!(r, gyre_domain::user::UserRole::Admin));
+                        if v.created_by != auth.agent_id && !is_human_admin {
                             let err = ExplorerServerMessage::Error {
                                 message: "Access denied: you can only delete your own views"
                                     .to_string(),
@@ -1156,6 +1184,11 @@ async fn run_explorer_agent_sdk(
         "http://localhost:{}",
         std::env::var("GYRE_PORT").unwrap_or_else(|_| "3000".into())
     );
+    // SECURITY: The SDK subprocess uses the server's master auth_token (not the
+    // authenticated user's token) because there is no per-user token to forward.
+    // Access to this code path is gated to admin-only users in run_explorer_agent()
+    // to prevent privilege escalation (a read-only member would otherwise get
+    // server-level graph access via the subprocess).
     let token = &state.auth_token;
     let system_prompt = build_system_prompt();
     let model = std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
@@ -1636,9 +1669,11 @@ async fn run_explorer_agent(
     user_question: &str,
     canvas_state: &gyre_common::view_query::CanvasState,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    receiver: &mut futures_util::stream::SplitStream<WebSocket>,
     conversation_history: &mut Vec<ConversationMessage>,
     cached_nodes: &mut Option<Vec<gyre_common::graph::GraphNode>>,
     cached_edges: &mut Option<Vec<gyre_common::graph::GraphEdge>>,
+    auth: &AuthenticatedAgent,
 ) -> anyhow::Result<()> {
     // Check if SDK-based explorer agent should be used.
     // Opt-in via GYRE_EXPLORER_SDK=1, or auto-enable when no LLM port is configured
@@ -1683,15 +1718,29 @@ async fn run_explorer_agent(
         && (std::env::var("GYRE_EXPLORER_SDK").unwrap_or_default() == "1"
             || (sdk_path.exists() && state.llm.is_none()));
     if use_sdk {
-        return run_explorer_agent_sdk(
-            state,
-            repo_id,
-            user_question,
-            canvas_state,
-            sender,
-            conversation_history,
-        )
-        .await;
+        // SECURITY: SDK path uses the server's master auth_token, not the user's.
+        // Restrict to admin-only to prevent RBAC bypass (a read-only member would
+        // otherwise get server-level graph access through the subprocess).
+        let is_admin = auth
+            .roles
+            .iter()
+            .any(|r| matches!(r, gyre_domain::user::UserRole::Admin));
+        if !is_admin {
+            warn!(
+                user = %auth.agent_id,
+                "Non-admin attempted SDK explorer path — falling through to native LLM"
+            );
+        } else {
+            return run_explorer_agent_sdk(
+                state,
+                repo_id,
+                user_question,
+                canvas_state,
+                sender,
+                conversation_history,
+            )
+            .await;
+        }
     }
 
     let llm = match &state.llm {
@@ -1833,12 +1882,16 @@ async fn run_explorer_agent(
         let mut edge_counts = std::collections::HashMap::new();
         for n in nodes.iter() {
             *type_counts
-                .entry(format!("{:?}", n.node_type).to_lowercase())
+                .entry(
+                    gyre_domain::view_query_resolver::node_type_str_pub(&n.node_type).to_string(),
+                )
                 .or_insert(0u32) += 1;
         }
         for e in edges.iter() {
             *edge_counts
-                .entry(format!("{:?}", e.edge_type).to_lowercase())
+                .entry(
+                    gyre_domain::view_query_resolver::edge_type_str_pub(&e.edge_type).to_string(),
+                )
                 .or_insert(0u32) += 1;
         }
         let mut type_summary: Vec<_> = type_counts.iter().collect();
@@ -2268,10 +2321,13 @@ async fn run_explorer_agent(
         // If no tool calls or stop_reason indicates completion, we're done
         if response.tool_calls.is_empty() || response.stop_reason != "tool_use" {
             // Add final assistant response to conversation history
-            conversation_history.push(ConversationMessage {
-                role: "assistant".to_string(),
-                content: ConversationContent::Text(response.text.clone()),
-            });
+            // (skip if already pushed during view_query extraction above)
+            if !view_query_sent {
+                conversation_history.push(ConversationMessage {
+                    role: "assistant".to_string(),
+                    content: ConversationContent::Text(response.text.clone()),
+                });
+            }
 
             // If max_tokens and no view_query was already sent (avoid double-done)
             if response.stop_reason == "max_tokens" && !response.text.is_empty() && !view_query_sent
@@ -2332,6 +2388,33 @@ async fn run_explorer_agent(
         tool_turn_count += 1;
         if tool_turn_count >= MAX_TOOL_TURNS {
             info!("Explorer agent hit max tool turns ({MAX_TOOL_TURNS}), forcing final response");
+            // Force one final response without tools so the LLM synthesizes
+            let final_response = llm_port
+                .complete_with_tools(
+                    &system_prompt,
+                    &conversation_history,
+                    &[], // no tools → forces text-only response
+                    Some(4096),
+                )
+                .await;
+            if let Ok(final_resp) = final_response {
+                if !final_resp.text.is_empty() {
+                    let (text_only, vq_json) = parse_view_query_from_text(&final_resp.text);
+                    stream_text(sender, &text_only, true).await;
+                    // Check for view_query in the final response too
+                    if let Some(vq) = vq_json {
+                        let view_msg = ExplorerServerMessage::ViewQuery {
+                            query: vq,
+                            explanation: None,
+                        };
+                        let _ = sender
+                            .send(Message::Text(
+                                serialize_msg(&view_msg).unwrap_or_default().into(),
+                            ))
+                            .await;
+                    }
+                }
+            }
             break;
         }
     }

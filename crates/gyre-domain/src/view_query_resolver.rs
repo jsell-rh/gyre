@@ -129,6 +129,16 @@ fn parse_node_type(s: &str) -> Option<NodeType> {
     }
 }
 
+/// Public wrapper for node_type_str (used by server for LLM prompt).
+pub fn node_type_str_pub(nt: &NodeType) -> &'static str {
+    node_type_str(nt)
+}
+
+/// Public wrapper for edge_type_str (used by server for LLM prompt).
+pub fn edge_type_str_pub(et: &EdgeType) -> &'static str {
+    edge_type_str(et)
+}
+
 fn node_type_str(nt: &NodeType) -> &'static str {
     match nt {
         NodeType::Package => "package",
@@ -844,7 +854,7 @@ fn normalize_computed_expression(expr: &str) -> String {
 /// $descendants(...), $ancestors(...), $governed_by(...), $test_fragility(...),
 /// $reachable(...)
 /// Maximum recursion depth for resolver (mirrors validation MAX_COMPUTED_DEPTH).
-const RESOLVER_MAX_DEPTH: u32 = 5;
+const RESOLVER_MAX_DEPTH: u32 = 20;
 
 fn resolve_computed_expression(
     expr: &str,
@@ -926,7 +936,32 @@ fn resolve_computed_expression_inner(
         if parts.len() == 3 {
             let prop = parts[0];
             let op = parts[1];
-            let val: f64 = match parts[2].parse() {
+            let val_str = parts[2];
+
+            // Support string-valued properties (node_type, visibility, spec_confidence)
+            let string_props = ["node_type", "visibility", "spec_confidence"];
+            if string_props.contains(&prop) {
+                let val_lower = val_str.to_lowercase();
+                return active_nodes
+                    .iter()
+                    .filter(|n| {
+                        let node_str = match prop {
+                            "node_type" => node_type_str(&n.node_type).to_string(),
+                            "visibility" => format!("{:?}", n.visibility).to_lowercase(),
+                            "spec_confidence" => format!("{:?}", n.spec_confidence).to_lowercase(),
+                            _ => String::new(),
+                        };
+                        match op {
+                            "=" | "==" => node_str == val_lower,
+                            "!=" => node_str != val_lower,
+                            _ => false,
+                        }
+                    })
+                    .map(|n| n.id.to_string())
+                    .collect();
+            }
+
+            let val: f64 = match val_str.parse() {
                 Ok(v) => v,
                 Err(_) => {
                     // Invalid number — return empty set rather than silently treating as 0.0
@@ -1400,9 +1435,10 @@ fn split_node_and_depth(inner: &str) -> (String, u32) {
         }
     }
     // No depth separator found — entire thing is the node ref.
-    // Default depth matches RESOLVER_MAX_DEPTH (5) for reasonable traversal scope.
+    // Default depth is 5 for reasonable traversal scope (not RESOLVER_MAX_DEPTH
+    // which is the recursion limit for nested expressions, not traversal depth).
     let node_ref = inner.trim_matches('\'').trim_matches('"');
-    (node_ref.to_string(), RESOLVER_MAX_DEPTH)
+    (node_ref.to_string(), 5)
 }
 
 fn resolve_node_ref(reference: &str, selected_node_id: Option<&str>) -> String {
@@ -1558,7 +1594,9 @@ pub fn dry_run(
 
     if result_set.is_empty() {
         let is_interactive = matches!(&query.scope, Scope::Focus { node, .. } if node == "$clicked" || node == "$selected");
-        if !is_interactive {
+        if is_interactive && selected_node_id.is_none() {
+            warnings.push("Interactive mode: click a node on the canvas to see results".to_string());
+        } else if !is_interactive {
             warnings.push("Scope matched 0 nodes".to_string());
         }
     }
@@ -1682,18 +1720,34 @@ pub fn dry_run(
             None
         };
 
-    // Resolve groups
+    // Resolve groups — exact matching preferred, substring fallback only when
+    // no exact match found (prevents "Task" matching "TaskPort", "TaskFilter", etc.)
     let mut groups_resolved = Vec::new();
     for group in &query.groups {
         let mut group_matched = Vec::new();
         for node_pattern in &group.nodes {
             let lower = node_pattern.to_lowercase();
-            for (id, n) in &node_map {
-                if result_set.contains(id)
-                    && (n.qualified_name.to_lowercase().contains(&lower)
-                        || n.name.to_lowercase().contains(&lower))
-                {
-                    group_matched.push(n.qualified_name.clone());
+            // Try exact match first (qualified_name or name)
+            let exact: Vec<String> = node_map
+                .iter()
+                .filter(|(id, n)| {
+                    result_set.contains(*id)
+                        && (n.qualified_name.to_lowercase() == lower
+                            || n.name.to_lowercase() == lower)
+                })
+                .map(|(_, n)| n.qualified_name.clone())
+                .collect();
+            if !exact.is_empty() {
+                group_matched.extend(exact);
+            } else {
+                // Substring fallback only when no exact match
+                for (id, n) in &node_map {
+                    if result_set.contains(id)
+                        && (n.qualified_name.to_lowercase().contains(&lower)
+                            || n.name.to_lowercase().contains(&lower))
+                    {
+                        group_matched.push(n.qualified_name.clone());
+                    }
                 }
             }
         }
