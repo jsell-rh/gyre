@@ -679,15 +679,25 @@ fn resolve_scope_with_adjacency(
                     .map(|n| n.id.to_string())
                     .collect()
             } else {
-                // SHA-based diff: select nodes modified at or after to_commit but not
-                // at from_commit. This is a best-effort heuristic — we only have the
-                // last_modified_sha on each node, not the full git log, so nodes
-                // changed by intermediate commits between from and to will be missed.
-                // Prefer temporal diff (epoch prefix) for accurate ranges.
+                // SHA-based diff: best-effort heuristic for finding nodes changed
+                // between two commits.
+                //
+                // Limitations (inherent to the graph model):
+                //   - Each node stores only `created_sha` and `last_modified_sha`.
+                //     We have no access to the full git log, so nodes changed by
+                //     intermediate commits between from_commit and to_commit will
+                //     be missed unless their last_modified_sha still points to one
+                //     of the boundary commits.
+                //   - Prefix matching requires at least 4 hex characters to avoid
+                //     false positives on short SHA fragments.
+                //
+                // For accurate range queries, prefer temporal diff with epoch
+                // prefixes (e.g., Scope::Diff { from: "~1712000000", to: "~1712100000" }).
                 warnings.push(
                     "SHA-based diff is approximate: only nodes whose last_modified_sha \
-                     matches the target commit are shown. Intermediate commits are not \
-                     visible. Use temporal diff (~epoch) for full range accuracy."
+                     or created_sha matches the target commit are included. Intermediate \
+                     commits are not visible. Use temporal diff (~epoch) for full range \
+                     accuracy."
                         .to_string(),
                 );
                 let sha_matches = |sha: &str, target: &str| -> bool {
@@ -711,9 +721,13 @@ fn resolve_scope_with_adjacency(
                         let created_matches_to = sha_matches(&n.created_sha, &to_lower);
                         let modified_matches_to = sha_matches(&n.last_modified_sha, &to_lower);
                         let created_matches_from = sha_matches(&n.created_sha, &from_lower);
+                        let modified_matches_from = sha_matches(&n.last_modified_sha, &from_lower);
 
-                        // Node was created or modified at to_commit, but not created at from_commit
-                        (created_matches_to || modified_matches_to) && !created_matches_from
+                        // Include nodes created or modified at to_commit.
+                        // Exclude nodes that already existed unchanged at from_commit
+                        // (created AND last-modified at or before from_commit).
+                        (created_matches_to || modified_matches_to)
+                            && !(created_matches_from && modified_matches_from)
                     })
                     .map(|n| n.id.to_string())
                     .collect()
