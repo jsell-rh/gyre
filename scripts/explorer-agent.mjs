@@ -65,12 +65,26 @@ const fullPrompt = promptParts.join('\n\n');
 
 console.log(JSON.stringify({ type: 'status', status: 'thinking' }));
 
-// Build MCP server config for the specific repo's tools
+// Build MCP server config pointing to the Gyre server's MCP endpoint.
+// The MCP tools (graph_summary, graph_query_dryrun, graph_nodes, graph_edges,
+// search) are served by the Gyre server at /mcp.
 const mcpUrl = `${server_url}/mcp`;
+
+// MCP tool names as they appear after the SDK prefixes them with mcp__<server>__
+const mcpToolNames = [
+  'mcp__gyre__graph_summary',
+  'mcp__gyre__graph_query_dryrun',
+  'mcp__gyre__graph_nodes',
+  'mcp__gyre__graph_edges',
+  'mcp__gyre__search',
+];
 
 const options = {
   model: agentModel,
   systemPrompt: system_prompt,
+  // Disable all built-in tools (Read, Edit, Bash, etc.) — only MCP tools should be available.
+  tools: [],
+  // MCP connection to the Gyre server for graph exploration tools.
   mcpServers: {
     gyre: {
       type: 'http',
@@ -78,27 +92,54 @@ const options = {
       headers: { Authorization: `Bearer ${token}` },
     },
   },
-  allowedTools: [
-    'mcp__gyre__graph_summary',
-    'mcp__gyre__graph_query_dryrun',
-    'mcp__gyre__graph_nodes',
-    'mcp__gyre__graph_edges',
-    'mcp__gyre__search',
-  ],
+  // Auto-approve MCP tool calls without prompting (headless subprocess).
+  allowedTools: mcpToolNames,
+  // Bypass permission prompts — this is a headless subprocess, not interactive.
+  permissionMode: 'bypassPermissions',
+  allowDangerouslySkipPermissions: true,
   maxTurns: 9,
+  // Disable session persistence — this is a one-shot subprocess.
+  persistSession: false,
 };
 
 try {
   let fullText = '';
 
   for await (const message of query({ prompt: fullPrompt, options })) {
-    if (message.type === 'text') {
-      console.log(JSON.stringify({ type: 'text', content: message.content, done: false }));
-      fullText += message.content;
-    } else if (message.type === 'tool_use') {
-      console.log(JSON.stringify({ type: 'status', status: 'refining' }));
+    switch (message.type) {
+      case 'assistant': {
+        // Complete assistant message with content blocks.
+        // Extract text content from the message's content blocks.
+        if (message.message?.content) {
+          for (const block of message.message.content) {
+            if (block.type === 'text') {
+              console.log(JSON.stringify({ type: 'text', content: block.text, done: false }));
+              fullText += block.text;
+            } else if (block.type === 'tool_use') {
+              // Tool use block — signal refining status.
+              console.log(JSON.stringify({ type: 'status', status: 'refining' }));
+            }
+          }
+        }
+        break;
+      }
+
+      case 'result': {
+        // Final result message. Extract the result text if present and not
+        // already captured from assistant messages.
+        if (message.subtype === 'success' && message.result && !fullText) {
+          fullText = message.result;
+          console.log(JSON.stringify({ type: 'text', content: message.result, done: false }));
+        }
+        break;
+      }
+
+      // Ignore stream_event, system, tool_progress, tool_use_summary, etc.
+      // We use the complete 'assistant' messages rather than streaming deltas
+      // since we need the full text to parse view_query blocks.
+      default:
+        break;
     }
-    // tool_result messages are internal — no need to forward
   }
 
   // Parse <view_query> blocks from the accumulated text
