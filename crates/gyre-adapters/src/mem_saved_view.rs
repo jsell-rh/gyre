@@ -46,6 +46,17 @@ impl SavedViewRepository for MemSavedViewRepository {
             .collect())
     }
 
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<SavedView>> {
+        Ok(self
+            .views
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|v| v.workspace_id == *workspace_id)
+            .cloned()
+            .collect())
+    }
+
     async fn update(&self, view: SavedView) -> Result<SavedView> {
         let mut views = self.views.lock().unwrap();
         if let Some(existing) = views.iter_mut().find(|v| v.id == view.id) {

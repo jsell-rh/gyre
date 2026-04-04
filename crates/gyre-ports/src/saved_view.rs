@@ -27,6 +27,7 @@ pub trait SavedViewRepository: Send + Sync {
     async fn create(&self, view: SavedView) -> Result<SavedView>;
     async fn get(&self, id: &Id) -> Result<Option<SavedView>>;
     async fn list_by_repo(&self, repo_id: &Id) -> Result<Vec<SavedView>>;
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<SavedView>>;
     async fn update(&self, view: SavedView) -> Result<SavedView>;
     async fn delete(&self, id: &Id) -> Result<()>;
 }

@@ -8,8 +8,8 @@
 ///   PUT  /api/v1/workspaces/:id/explorer-views/:view_id  — update
 ///   DELETE /api/v1/workspaces/:id/explorer-views/:view_id — delete
 ///
-/// Storage: kv_store with namespace "explorer_view" (per-view) and
-///          "workspace_explorer_views" (workspace→[view_id] index).
+/// Storage: delegates to SavedViewRepository port (shared with the repo-scoped
+///          /api/v1/repos/:id/views endpoints). Views are scoped by workspace_id.
 ///
 /// Spec: specs/system/ui-layout.md §4, specs/system/human-system-interface.md §3.
 use axum::{
@@ -24,6 +24,7 @@ use gyre_common::{
     Id,
 };
 use gyre_domain::CostEntry;
+use gyre_ports::saved_view::SavedView;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -35,25 +36,42 @@ use crate::{
     AppState,
 };
 
-// ── Storage constants ─────────────────────────────────────────────────────────
-
-const NS_VIEW: &str = "explorer_view";
-const NS_INDEX: &str = "workspace_explorer_views";
-
 // ── Domain types ──────────────────────────────────────────────────────────────
 
+/// Response shape for explorer-views endpoints (workspace-scoped).
+///
+/// Maps from the canonical `SavedView` port model, translating field names
+/// for backward compatibility with existing frontend consumers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExplorerViewRecord {
     pub id: String,
     pub workspace_id: String,
     pub name: String,
     pub description: Option<String>,
-    /// Raw ViewSpec as JSON value (round-tripped to preserve unknown fields).
+    /// Raw ViewSpec as JSON value (maps from SavedView.query_json).
     pub spec: serde_json::Value,
     pub created_by: String,
     pub is_builtin: bool,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+impl From<SavedView> for ExplorerViewRecord {
+    fn from(v: SavedView) -> Self {
+        let spec = serde_json::from_str(&v.query_json)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        Self {
+            id: v.id.to_string(),
+            workspace_id: v.workspace_id.to_string(),
+            name: v.name,
+            description: v.description,
+            spec,
+            created_by: v.created_by,
+            is_builtin: v.is_system,
+            created_at: v.created_at,
+            updated_at: v.updated_at,
+        }
+    }
 }
 
 // ── Request / response shapes ─────────────────────────────────────────────────
@@ -78,187 +96,76 @@ pub struct GenerateViewRequest {
     pub repo_id: Option<String>,
 }
 
-// ── KV helpers ────────────────────────────────────────────────────────────────
+// ── Built-in view seeding (uses SavedViewRepository) ─────────────────────────
 
-async fn load_view(state: &AppState, view_id: &str) -> Result<ExplorerViewRecord, ApiError> {
-    let raw = state
-        .kv_store
-        .kv_get(NS_VIEW, view_id)
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("explorer view {view_id} not found")))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize view: {e}")))
-}
-
-async fn save_view(state: &AppState, view: &ExplorerViewRecord) -> Result<(), ApiError> {
-    let raw = serde_json::to_string(view)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize view: {e}")))?;
-    state
-        .kv_store
-        .kv_set(NS_VIEW, &view.id, raw)
-        .await
-        .map_err(ApiError::Internal)
-}
-
-async fn add_to_workspace_index(
-    state: &AppState,
-    workspace_id: &str,
-    view_id: &str,
-) -> Result<(), ApiError> {
-    let mut ids = load_workspace_index(state, workspace_id).await?;
-    if !ids.contains(&view_id.to_string()) {
-        ids.push(view_id.to_string());
-        let raw = serde_json::to_string(&ids)
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize index: {e}")))?;
-        state
-            .kv_store
-            .kv_set(NS_INDEX, workspace_id, raw)
-            .await
-            .map_err(ApiError::Internal)?;
-    }
-    Ok(())
-}
-
-async fn remove_from_workspace_index(
-    state: &AppState,
-    workspace_id: &str,
-    view_id: &str,
-) -> Result<(), ApiError> {
-    let mut ids = load_workspace_index(state, workspace_id).await?;
-    ids.retain(|id| id != view_id);
-    let raw = serde_json::to_string(&ids)
-        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize index: {e}")))?;
-    state
-        .kv_store
-        .kv_set(NS_INDEX, workspace_id, raw)
-        .await
-        .map_err(ApiError::Internal)
-}
-
-async fn load_workspace_index(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<Vec<String>, ApiError> {
-    match state
-        .kv_store
-        .kv_get(NS_INDEX, workspace_id)
-        .await
-        .map_err(ApiError::Internal)?
-    {
-        None => Ok(vec![]),
-        Some(raw) => serde_json::from_str(&raw)
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("deserialize index: {e}"))),
-    }
-}
-
-// ── Built-in view seeding ─────────────────────────────────────────────────────
-
-/// Seed the 4 built-in views for a workspace if they haven't been seeded yet.
+/// Seed the 4 system default views for a workspace if they haven't been seeded.
 ///
-/// Called lazily on the first list request for a workspace (idempotent: checks
-/// `workspace_explorer_views_seeded:<workspace_id>` sentinel key).
-async fn seed_builtin_views_if_needed(
+/// Uses the same canonical defaults as the repo-scoped saved_views API.
+/// The check-then-insert race is handled by INSERT OR IGNORE at the adapter level.
+async fn seed_system_views_if_needed(
     state: &AppState,
     workspace_id: &str,
+    tenant_id: &str,
 ) -> Result<(), ApiError> {
-    let sentinel_ns = "workspace_explorer_views_seeded";
-    if state
-        .kv_store
-        .kv_get(sentinel_ns, workspace_id)
-        .await
-        .map_err(ApiError::Internal)?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    let builtins: &[(&str, Option<&str>, serde_json::Value)] = &[
-        (
-            "API Surface",
-            Some("Public endpoints and functions"),
-            json!({
-                "name": "API Surface",
-                "description": "Public endpoints and functions",
-                "data": {
-                    "node_types": ["Endpoint", "Function"],
-                    "edge_types": [],
-                    "depth": 2
-                },
-                "layout": "hierarchical"
-            }),
-        ),
-        (
-            "Domain Model",
-            Some("Types and interfaces across all repos"),
-            json!({
-                "name": "Domain Model",
-                "description": "Types and interfaces across all repos",
-                "data": {
-                    "node_types": ["Type", "Interface"],
-                    "edge_types": [],
-                    "depth": 3
-                },
-                "layout": "graph"
-            }),
-        ),
-        (
-            "Security Boundary",
-            Some("Auth-related code and dependencies"),
-            json!({
-                "name": "Security Boundary",
-                "description": "Auth-related code and dependencies",
-                "data": {
-                    "concept": "auth",
-                    "node_types": [],
-                    "edge_types": [],
-                    "depth": 2
-                },
-                "layout": "hierarchical"
-            }),
-        ),
-        (
-            "Test Coverage",
-            Some("Functions and their test nodes"),
-            json!({
-                "name": "Test Coverage",
-                "description": "Functions and their test nodes",
-                "data": {
-                    "node_types": ["Function", "Test"],
-                    "edge_types": [],
-                    "depth": 1
-                },
-                "layout": "list"
-            }),
-        ),
-    ];
-
-    let now = now_secs();
-    for (name, desc, spec_json) in builtins {
-        let id = new_id().to_string();
-        let view = ExplorerViewRecord {
-            id: id.clone(),
-            workspace_id: workspace_id.to_string(),
-            name: name.to_string(),
-            description: desc.map(|s| s.to_string()),
-            spec: spec_json.clone(),
-            created_by: "system".to_string(),
-            is_builtin: true,
-            created_at: now,
-            updated_at: now,
-        };
-        save_view(state, &view).await?;
-        add_to_workspace_index(state, workspace_id, &id).await?;
-    }
-
-    // Mark as seeded.
-    state
-        .kv_store
-        .kv_set(sentinel_ns, workspace_id, "1".to_string())
+    let wid = Id::new(workspace_id);
+    let views = state
+        .saved_views
+        .list_by_workspace(&wid)
         .await
         .map_err(ApiError::Internal)?;
 
+    if views.iter().any(|v| v.is_system) {
+        return Ok(());
+    }
+
+    let now = now_secs();
+    for default in system_default_views() {
+        let query_json = default.2.to_string();
+        let view = SavedView {
+            id: new_id(),
+            // Workspace-scoped views use a sentinel repo_id.
+            repo_id: Id::new("__workspace__"),
+            workspace_id: Id::new(workspace_id),
+            tenant_id: Id::new(tenant_id),
+            name: default.0.to_string(),
+            description: Some(default.1.to_string()),
+            query_json,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+            is_system: true,
+        };
+        // INSERT OR IGNORE handles races — duplicates are silently dropped.
+        let _ = state.saved_views.create(view).await;
+    }
+
     Ok(())
+}
+
+/// Canonical system default views (shared with saved_views.rs).
+fn system_default_views() -> Vec<(&'static str, &'static str, &'static str)> {
+    vec![
+        (
+            "Architecture Overview",
+            "Full codebase structure",
+            r##"{"scope":{"type":"all"},"zoom":"fit"}"##,
+        ),
+        (
+            "Test Coverage Gaps",
+            "Functions not reachable from any test",
+            r##"{"scope":{"type":"test_gaps"},"emphasis":{"highlight":{"matched":{"color":"#ef4444","label":"Untested"}},"dim_unmatched":0.3},"annotation":{"title":"Test coverage gaps","description":"{{count}} functions not reachable from any test"}}"##,
+        ),
+        (
+            "Hot Paths",
+            "Most-called functions",
+            r##"{"scope":{"type":"all"},"emphasis":{"heat":{"metric":"incoming_calls","palette":"blue-red"}},"annotation":{"title":"Hot paths"}}"##,
+        ),
+        (
+            "Blast Radius (click)",
+            "Click any node to see what it impacts",
+            r##"{"scope":{"type":"focus","node":"$clicked","edges":["calls","implements","field_of","depends_on"],"direction":"incoming","depth":10},"emphasis":{"tiered_colors":["#ef4444","#f97316","#eab308","#94a3b8"],"dim_unmatched":0.12},"edges":{"filter":["calls","implements","field_of","depends_on"]},"zoom":"fit","annotation":{"title":"Blast radius: $name","description":"{{count}} transitive callers/implementors"}}"##,
+        ),
+    ]
 }
 
 // ── ViewSpec validation helper ────────────────────────────────────────────────
@@ -274,22 +181,24 @@ fn parse_and_validate(spec_json: &serde_json::Value) -> Result<(), ApiError> {
 pub async fn list_explorer_views(
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
-    _caller: AuthenticatedAgent,
+    caller: AuthenticatedAgent,
 ) -> Result<Json<Vec<ExplorerViewRecord>>, ApiError> {
-    seed_builtin_views_if_needed(&state, &workspace_id).await?;
+    seed_system_views_if_needed(&state, &workspace_id, &caller.tenant_id).await?;
 
-    let ids = load_workspace_index(&state, &workspace_id).await?;
-    let mut views = Vec::with_capacity(ids.len());
-    for id in &ids {
-        match load_view(&state, id).await {
-            Ok(v) => views.push(v),
-            Err(ApiError::NotFound(_)) => {
-                // Stale index entry — skip.
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(Json(views))
+    let wid = Id::new(&workspace_id);
+    let views = state
+        .saved_views
+        .list_by_workspace(&wid)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let records: Vec<ExplorerViewRecord> = views
+        .into_iter()
+        .filter(|v| v.tenant_id.as_str() == caller.tenant_id)
+        .map(ExplorerViewRecord::from)
+        .collect();
+
+    Ok(Json(records))
 }
 
 // ── POST /api/v1/workspaces/:id/explorer-views ────────────────────────────────
@@ -305,24 +214,31 @@ pub async fn create_explorer_view(
     // Validate repo_id belongs to this workspace if provided.
     validate_repo_ownership(&state, &workspace_id, &req.spec).await?;
 
+    let query_json = serde_json::to_string(&req.spec)
+        .map_err(|e| ApiError::BadRequest(format!("invalid spec JSON: {e}")))?;
+
     let now = now_secs();
-    let id = new_id().to_string();
-    let view = ExplorerViewRecord {
-        id: id.clone(),
-        workspace_id: workspace_id.clone(),
+    let view = SavedView {
+        id: new_id(),
+        repo_id: Id::new("__workspace__"),
+        workspace_id: Id::new(&workspace_id),
+        tenant_id: Id::new(&caller.tenant_id),
         name: req.name,
         description: req.description,
-        spec: req.spec,
+        query_json,
         created_by: caller.agent_id.to_string(),
-        is_builtin: false,
         created_at: now,
         updated_at: now,
+        is_system: false,
     };
 
-    save_view(&state, &view).await?;
-    add_to_workspace_index(&state, &workspace_id, &id).await?;
+    let created = state
+        .saved_views
+        .create(view)
+        .await
+        .map_err(ApiError::Internal)?;
 
-    Ok((StatusCode::CREATED, Json(view)))
+    Ok((StatusCode::CREATED, Json(ExplorerViewRecord::from(created))))
 }
 
 // ── GET /api/v1/workspaces/:id/explorer-views/:view_id ───────────────────────
@@ -332,13 +248,21 @@ pub async fn get_explorer_view(
     Path((workspace_id, view_id)): Path<(String, String)>,
     _caller: AuthenticatedAgent,
 ) -> Result<Json<ExplorerViewRecord>, ApiError> {
-    let view = load_view(&state, &view_id).await?;
-    if view.workspace_id != workspace_id {
+    let vid = Id::new(&view_id);
+    let view = state
+        .saved_views
+        .get(&vid)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("explorer view {view_id} not found")))?;
+
+    if view.workspace_id.as_str() != workspace_id {
         return Err(ApiError::NotFound(format!(
             "explorer view {view_id} not found in workspace {workspace_id}"
         )));
     }
-    Ok(Json(view))
+
+    Ok(Json(ExplorerViewRecord::from(view)))
 }
 
 // ── PUT /api/v1/workspaces/:id/explorer-views/:view_id ───────────────────────
@@ -349,31 +273,47 @@ pub async fn update_explorer_view(
     caller: AuthenticatedAgent,
     Json(req): Json<UpdateViewRequest>,
 ) -> Result<Json<ExplorerViewRecord>, ApiError> {
-    let mut view = load_view(&state, &view_id).await?;
-    if view.workspace_id != workspace_id {
+    let vid = Id::new(&view_id);
+    let existing = state
+        .saved_views
+        .get(&vid)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("explorer view {view_id} not found")))?;
+
+    if existing.workspace_id.as_str() != workspace_id {
         return Err(ApiError::NotFound(format!(
             "explorer view {view_id} not found in workspace {workspace_id}"
         )));
     }
 
-    // Ownership check: only creator or Admin may update.
-    check_ownership(&view, &caller)?;
+    // Ownership check: only creator or Admin may update. System views reject edits.
+    check_ownership(&existing, &caller)?;
 
-    if let Some(name) = req.name {
-        view.name = name;
-    }
-    if let Some(desc) = req.description {
-        view.description = Some(desc);
-    }
-    if let Some(spec) = req.spec {
-        parse_and_validate(&spec)?;
-        validate_repo_ownership(&state, &workspace_id, &spec).await?;
-        view.spec = spec;
-    }
-    view.updated_at = now_secs();
+    let query_json = if let Some(spec) = &req.spec {
+        parse_and_validate(spec)?;
+        validate_repo_ownership(&state, &workspace_id, spec).await?;
+        serde_json::to_string(spec)
+            .map_err(|e| ApiError::BadRequest(format!("invalid spec JSON: {e}")))?
+    } else {
+        existing.query_json.clone()
+    };
 
-    save_view(&state, &view).await?;
-    Ok(Json(view))
+    let updated = SavedView {
+        name: req.name.unwrap_or(existing.name),
+        description: req.description.or(existing.description),
+        query_json,
+        updated_at: now_secs(),
+        ..existing
+    };
+
+    let saved = state
+        .saved_views
+        .update(updated)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(ExplorerViewRecord::from(saved)))
 }
 
 // ── DELETE /api/v1/workspaces/:id/explorer-views/:view_id ────────────────────
@@ -383,8 +323,15 @@ pub async fn delete_explorer_view(
     Path((workspace_id, view_id)): Path<(String, String)>,
     caller: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
-    let view = load_view(&state, &view_id).await?;
-    if view.workspace_id != workspace_id {
+    let vid = Id::new(&view_id);
+    let view = state
+        .saved_views
+        .get(&vid)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("explorer view {view_id} not found")))?;
+
+    if view.workspace_id.as_str() != workspace_id {
         return Err(ApiError::NotFound(format!(
             "explorer view {view_id} not found in workspace {workspace_id}"
         )));
@@ -393,11 +340,10 @@ pub async fn delete_explorer_view(
     check_ownership(&view, &caller)?;
 
     state
-        .kv_store
-        .kv_remove(NS_VIEW, &view_id)
+        .saved_views
+        .delete(&vid)
         .await
         .map_err(ApiError::Internal)?;
-    remove_from_workspace_index(&state, &workspace_id, &view_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -485,16 +431,14 @@ pub async fn generate_explorer_view(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Check that the caller is the view creator (builtin views reject all edits
+/// Check that the caller is the view creator (system views reject all edits
 /// since created_by is "system").
-fn check_ownership(view: &ExplorerViewRecord, caller: &AuthenticatedAgent) -> Result<(), ApiError> {
-    if view.is_builtin {
+fn check_ownership(view: &SavedView, caller: &AuthenticatedAgent) -> Result<(), ApiError> {
+    if view.is_system {
         return Err(ApiError::Forbidden(
             "built-in views cannot be modified".to_string(),
         ));
     }
-    // Admin role bypass: caller.role is checked here if available.
-    // For now enforce created_by == caller.
     if view.created_by != caller.agent_id {
         return Err(ApiError::Forbidden(
             "only the creator may modify this view".to_string(),
@@ -593,13 +537,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         let arr = body.as_array().unwrap();
-        // 4 built-in views should be seeded.
+        // 4 system default views should be seeded.
         assert_eq!(arr.len(), 4);
         let names: Vec<&str> = arr.iter().map(|v| v["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"API Surface"));
-        assert!(names.contains(&"Domain Model"));
-        assert!(names.contains(&"Security Boundary"));
-        assert!(names.contains(&"Test Coverage"));
+        assert!(names.contains(&"Architecture Overview"));
+        assert!(names.contains(&"Test Coverage Gaps"));
+        assert!(names.contains(&"Hot Paths"));
+        assert!(names.contains(&"Blast Radius (click)"));
     }
 
     #[tokio::test]

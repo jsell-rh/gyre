@@ -79,7 +79,7 @@ impl SavedViewRepository for SqliteStorage {
                 updated_at: v.updated_at as i64,
                 is_system: v.is_system,
             };
-            diesel::insert_into(saved_views::table)
+            diesel::insert_or_ignore_into(saved_views::table)
                 .values(&row)
                 .execute(&mut *conn)
                 .context("insert saved view")?;
@@ -113,6 +113,21 @@ impl SavedViewRepository for SqliteStorage {
                 .order(saved_views::created_at.asc())
                 .load::<SavedViewRow>(&mut *conn)
                 .context("list saved views by repo")?;
+            Ok(rows.into_iter().map(SavedViewRow::into_view).collect())
+        })
+        .await?
+    }
+
+    async fn list_by_workspace(&self, workspace_id: &Id) -> Result<Vec<SavedView>> {
+        let pool = Arc::clone(&self.pool);
+        let wid = workspace_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<SavedView>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = saved_views::table
+                .filter(saved_views::workspace_id.eq(wid.as_str()))
+                .order(saved_views::created_at.asc())
+                .load::<SavedViewRow>(&mut *conn)
+                .context("list saved views by workspace")?;
             Ok(rows.into_iter().map(SavedViewRow::into_view).collect())
         })
         .await?
