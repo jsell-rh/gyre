@@ -1450,4 +1450,135 @@ This shows all callers of TaskPort."#;
             "System prompt should require grounded claims"
         );
     }
+
+    // ── parse_view_query_from_text with malformed JSON ──────────────────────
+
+    #[test]
+    fn test_parse_view_query_malformed_json() {
+        let text = r#"Here is the view:
+
+<view_query>{not valid json!!!}</view_query>
+
+Some trailing text."#;
+        let (clean, query) = parse_view_query_from_text(text);
+        assert!(
+            query.is_none(),
+            "Malformed JSON should not parse as a view query"
+        );
+        assert!(clean.contains("Here is the view"));
+        assert!(clean.contains("Some trailing text"));
+    }
+
+    #[test]
+    fn test_parse_view_query_unclosed_tag() {
+        let text = r#"Start text <view_query>{"scope": {"type": "all"}} no closing tag"#;
+        let (clean, query) = parse_view_query_from_text(text);
+        assert!(
+            query.is_none(),
+            "Unclosed view_query tag should not produce a query"
+        );
+        // The text from the unclosed tag onwards is captured as-is
+        assert!(clean.contains("Start text"));
+    }
+
+    // ── parse_view_query_from_text with multiple blocks (should take last) ──
+
+    #[test]
+    fn test_parse_view_query_multiple_blocks_takes_last() {
+        let text = r#"First attempt:
+
+<view_query>{"scope": {"type": "all"}}</view_query>
+
+Actually, let me refine that:
+
+<view_query>{"scope": {"type": "test_gaps"}}</view_query>
+
+Done."#;
+        let (clean, query) = parse_view_query_from_text(text);
+        assert!(query.is_some(), "Should parse a view query");
+        let q = query.unwrap();
+        assert_eq!(
+            q["scope"]["type"], "test_gaps",
+            "Should take the LAST view_query block, not the first"
+        );
+        assert!(clean.contains("First attempt"));
+        assert!(clean.contains("refine"));
+        assert!(clean.contains("Done"));
+    }
+
+    // ── System prompt contains all tool descriptions ────────────────────────
+
+    #[test]
+    fn test_system_prompt_contains_all_tool_names() {
+        let prompt = build_system_prompt();
+        let tools = explorer_tool_definitions();
+        for tool in &tools {
+            assert!(
+                prompt.contains(&tool.name),
+                "System prompt should mention tool '{}' but it doesn't",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_contains_computed_expressions() {
+        let prompt = build_system_prompt();
+        // All important computed expressions should be documented
+        let expressions = [
+            "$where",
+            "$callers",
+            "$callees",
+            "$implementors",
+            "$fields",
+            "$descendants",
+            "$ancestors",
+            "$governed_by",
+            "$test_unreachable",
+            "$test_reachable",
+            "$intersect",
+            "$union",
+            "$diff",
+            "$reachable",
+        ];
+        for expr in &expressions {
+            assert!(
+                prompt.contains(expr),
+                "System prompt should document computed expression '{}' but it doesn't",
+                expr
+            );
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_contains_scope_types() {
+        let prompt = build_system_prompt();
+        let scope_types = ["all", "focus", "filter", "test_gaps", "diff", "concept"];
+        for scope in &scope_types {
+            assert!(
+                prompt.contains(scope),
+                "System prompt should document scope type '{}' but it doesn't",
+                scope
+            );
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_contains_emphasis_types() {
+        let prompt = build_system_prompt();
+        let emphasis_types = [
+            "highlight",
+            "dim_unmatched",
+            "tiered_colors",
+            "heat",
+            "badges",
+        ];
+        for emph in &emphasis_types {
+            assert!(
+                prompt.contains(emph),
+                "System prompt should document emphasis type '{}' but it doesn't",
+                emph
+            );
+        }
+    }
 }

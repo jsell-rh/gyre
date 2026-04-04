@@ -343,3 +343,192 @@ pub async fn delete_view(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── System default views ───────────────────────────────────────────────
+
+    #[test]
+    fn test_system_default_views_count() {
+        let defaults = system_default_views();
+        assert_eq!(
+            defaults.len(),
+            4,
+            "Should have exactly 4 system default views"
+        );
+    }
+
+    #[test]
+    fn test_system_default_views_names() {
+        let defaults = system_default_views();
+        let names: Vec<&str> = defaults.iter().map(|(n, _, _)| *n).collect();
+        assert!(names.contains(&"Architecture Overview"));
+        assert!(names.contains(&"Test Coverage Gaps"));
+        assert!(names.contains(&"Hot Paths"));
+        assert!(names.contains(&"Blast Radius (click)"));
+    }
+
+    #[test]
+    fn test_system_default_views_have_valid_json() {
+        let defaults = system_default_views();
+        for (name, _desc, query_json) in &defaults {
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(query_json);
+            assert!(
+                parsed.is_ok(),
+                "System view '{}' has invalid JSON: {}",
+                name,
+                parsed.err().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_system_default_views_have_scope() {
+        let defaults = system_default_views();
+        for (name, _desc, query_json) in &defaults {
+            let parsed: serde_json::Value = serde_json::from_str(query_json).unwrap();
+            assert!(
+                parsed.get("scope").is_some(),
+                "System view '{}' should have a scope field",
+                name
+            );
+            assert!(
+                parsed["scope"].get("type").is_some(),
+                "System view '{}' scope should have a type field",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_architecture_overview_uses_all_scope() {
+        let defaults = system_default_views();
+        let overview = defaults
+            .iter()
+            .find(|(n, _, _)| *n == "Architecture Overview")
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(overview.2).unwrap();
+        assert_eq!(parsed["scope"]["type"], "all");
+    }
+
+    #[test]
+    fn test_test_coverage_gaps_uses_test_gaps_scope() {
+        let defaults = system_default_views();
+        let gaps = defaults
+            .iter()
+            .find(|(n, _, _)| *n == "Test Coverage Gaps")
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(gaps.2).unwrap();
+        assert_eq!(parsed["scope"]["type"], "test_gaps");
+        // Should have emphasis highlighting
+        assert!(
+            parsed.get("emphasis").is_some(),
+            "Test Coverage Gaps should have emphasis"
+        );
+    }
+
+    #[test]
+    fn test_hot_paths_uses_heat_emphasis() {
+        let defaults = system_default_views();
+        let hot = defaults.iter().find(|(n, _, _)| *n == "Hot Paths").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(hot.2).unwrap();
+        assert!(
+            parsed["emphasis"]["heat"].is_object(),
+            "Hot Paths should use heat emphasis"
+        );
+        assert_eq!(
+            parsed["emphasis"]["heat"]["metric"], "incoming_calls",
+            "Hot Paths should use incoming_calls metric"
+        );
+    }
+
+    #[test]
+    fn test_blast_radius_uses_clicked_focus() {
+        let defaults = system_default_views();
+        let blast = defaults
+            .iter()
+            .find(|(n, _, _)| *n == "Blast Radius (click)")
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(blast.2).unwrap();
+        assert_eq!(parsed["scope"]["type"], "focus");
+        assert_eq!(
+            parsed["scope"]["node"], "$clicked",
+            "Blast Radius should use $clicked for interactive exploration"
+        );
+        // Should have tiered_colors
+        assert!(
+            parsed["emphasis"]["tiered_colors"].is_array(),
+            "Blast Radius should use tiered_colors emphasis"
+        );
+    }
+
+    // ── ViewResponse conversion ────────────────────────────────────────────
+
+    #[test]
+    fn test_view_response_from_saved_view() {
+        let view = SavedView {
+            id: Id::new("v1"),
+            repo_id: Id::new("repo1"),
+            workspace_id: Id::new("ws1"),
+            tenant_id: Id::new("t1"),
+            name: "Test View".to_string(),
+            description: Some("A test".to_string()),
+            query_json: r#"{"scope":{"type":"all"}}"#.to_string(),
+            created_by: "user1".to_string(),
+            created_at: 1000,
+            updated_at: 2000,
+            is_system: false,
+        };
+        let response = ViewResponse::from(view);
+        assert_eq!(response.id, "v1");
+        assert_eq!(response.repo_id, "repo1");
+        assert_eq!(response.name, "Test View");
+        assert_eq!(response.description.as_deref(), Some("A test"));
+        assert_eq!(response.query["scope"]["type"], "all");
+        assert_eq!(response.created_by, "user1");
+        assert_eq!(response.created_at, 1000);
+        assert_eq!(response.updated_at, 2000);
+        assert!(!response.is_system);
+    }
+
+    #[test]
+    fn test_view_response_with_invalid_query_json() {
+        let view = SavedView {
+            id: Id::new("v1"),
+            repo_id: Id::new("repo1"),
+            workspace_id: Id::new("ws1"),
+            tenant_id: Id::new("t1"),
+            name: "Bad View".to_string(),
+            description: None,
+            query_json: "not valid json".to_string(),
+            created_by: "user1".to_string(),
+            created_at: 1000,
+            updated_at: 2000,
+            is_system: false,
+        };
+        let response = ViewResponse::from(view);
+        // Should fall back to empty object, not panic
+        assert!(response.query.is_object());
+    }
+
+    #[test]
+    fn test_view_response_system_flag() {
+        let view = SavedView {
+            id: Id::new("v1"),
+            repo_id: Id::new("repo1"),
+            workspace_id: Id::new("ws1"),
+            tenant_id: Id::new("t1"),
+            name: "System View".to_string(),
+            description: None,
+            query_json: r#"{"scope":{"type":"all"}}"#.to_string(),
+            created_by: "system".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+            is_system: true,
+        };
+        let response = ViewResponse::from(view);
+        assert!(response.is_system, "System flag should be preserved");
+    }
+}
