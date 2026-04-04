@@ -1431,6 +1431,62 @@
                 </button>
               </div>
 
+              <!-- ── Needs Attention — surfaces the specific items requiring action ── -->
+              {#if !specsLoading && !mrsLoading && !agentsLoading}
+                {@const attentionItems = [
+                  ...specs.filter(s => (s.approval_status ?? s.status) === 'pending').map(s => ({
+                    type: 'spec', entity: s, variant: 'warning',
+                    icon: '!', label: 'Spec needs approval',
+                    title: s.title ?? s.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled',
+                    why: 'Agents cannot begin until this spec is approved',
+                    action: 'Approve',
+                  })),
+                  ...wsMrs.filter(m => m._gates?.failed > 0).map(m => ({
+                    type: 'mr', entity: m, variant: 'danger',
+                    icon: '✗', label: 'Gate failure',
+                    title: m.title ?? 'Untitled MR',
+                    why: `${m._gates.failed} quality gate${m._gates.failed !== 1 ? 's' : ''} failed — merge blocked`,
+                    action: 'View gates',
+                  })),
+                  ...wsAgents.filter(a => a.status === 'failed').map(a => ({
+                    type: 'agent', entity: a, variant: 'danger',
+                    icon: '✗', label: 'Agent failed',
+                    title: a.name ?? formatId('agent', a.id),
+                    why: 'Check logs for root cause',
+                    action: 'View logs',
+                  })),
+                ]}
+                {#if attentionItems.length > 0}
+                  <div class="pipeline-attention">
+                    <div class="pipeline-attention-header">
+                      <span class="pipeline-attention-icon">!</span>
+                      <span class="pipeline-attention-title">{attentionItems.length} item{attentionItems.length !== 1 ? 's' : ''} need{attentionItems.length === 1 ? 's' : ''} your attention</span>
+                    </div>
+                    {#each attentionItems.slice(0, 5) as item}
+                      <button class="pipeline-attention-item pipeline-attention-{item.variant}" onclick={() => {
+                        if (item.type === 'spec') navigateToSpec(item.entity);
+                        else if (item.type === 'mr') nav('mr', item.entity.id, { repo_id: item.entity.repository_id ?? item.entity.repo_id, title: item.entity.title, _openTab: item.action === 'View gates' ? 'gates' : undefined });
+                        else if (item.type === 'agent') nav('agent', item.entity.id, { repo_id: item.entity.repo_id, name: item.entity.name, _openTab: 'history' });
+                      }}>
+                        <span class="attention-icon attention-icon-{item.variant}">{item.icon}</span>
+                        <div class="attention-content">
+                          <span class="attention-label">{item.label}</span>
+                          <span class="attention-title">{item.title}</span>
+                          {#if item.entity.repo_id && repoMap[item.entity.repo_id]}
+                            <span class="attention-repo">{repoMap[item.entity.repo_id].name}</span>
+                          {/if}
+                        </div>
+                        <span class="attention-why">{item.why}</span>
+                        <span class="attention-action">{item.action}</span>
+                      </button>
+                    {/each}
+                    {#if attentionItems.length > 5}
+                      <span class="pipeline-attention-more">+{attentionItems.length - 5} more</span>
+                    {/if}
+                  </div>
+                {/if}
+              {/if}
+
               <!-- ── Specs section ──────────────────────────────────────── -->
               <div class="pipeline-section" class:pipeline-section-collapsed={!pipelineExpandedSections.specs}>
                 <button class="pipeline-section-header" onclick={() => { pipelineExpandedSections = { ...pipelineExpandedSections, specs: !pipelineExpandedSections.specs }; }}>
@@ -2128,6 +2184,131 @@
   @keyframes pipeline-pulse {
     0%, 100% { opacity: 1; transform: scale(1); }
     50% { opacity: 0.4; transform: scale(0.7); }
+  }
+
+  /* ── Pipeline attention section ──────────────────────────────────── */
+  .pipeline-attention {
+    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, var(--color-border));
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--color-warning) 3%, var(--color-surface));
+    overflow: hidden;
+  }
+
+  .pipeline-attention-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-warning);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 15%, transparent);
+  }
+
+  .pipeline-attention-icon {
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--color-warning);
+    color: white;
+    font-size: 11px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  .pipeline-attention-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    width: 100%;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    font-family: var(--font-body);
+    text-align: left;
+    transition: background var(--transition-fast);
+  }
+
+  .pipeline-attention-item:last-child,
+  .pipeline-attention-item:has(+ .pipeline-attention-more) { border-bottom: none; }
+  .pipeline-attention-item:hover { background: var(--color-surface-elevated); }
+
+  .attention-icon {
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    font-size: 11px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  .attention-icon-warning { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
+  .attention-icon-danger { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
+
+  .attention-content {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .attention-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+  }
+
+  .attention-title {
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .attention-repo {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .attention-why {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .attention-action {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-primary);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .pipeline-attention-more {
+    display: block;
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-align: center;
   }
 
   /* ═══ Focused Dashboard ═══════════════════════════════════════════════ */
