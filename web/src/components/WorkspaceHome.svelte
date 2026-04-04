@@ -1161,7 +1161,8 @@
         </section>
       {/if}
 
-      <!-- ── Pipeline hero — always visible ──────────────────────── -->
+      <!-- ── Pipeline hero — visible once data loads ──────────────── -->
+      {#if !specsLoading || !tasksLoading || !mrsLoading || !agentsLoading || specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
       <div class="pipeline-hero" data-testid="pipeline-hero">
         <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineSpecs.pending > 0} class:pipeline-hero-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} class:pipeline-hero-selected={expandedStage === 'specs'} onclick={() => toggleStage('specs')}>
           <span class="pipeline-hero-count">{specs.length}</span>
@@ -1214,6 +1215,7 @@
           <span class="pipeline-hero-label">Merged</span>
         </button>
       </div>
+      {/if}
 
       <!-- ── Pipeline stage popover — shows top items when a stage is clicked ── -->
       {#if expandedStage}
