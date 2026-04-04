@@ -872,22 +872,7 @@ async fn handle_explorer_session(
             }
 
             ExplorerClientMessage::ListViews => {
-                // Rate limit ListViews: max 10 per 60s (read-only but triggers DB + seeding)
-                let now_list = std::time::Instant::now();
-                view_op_timestamps.retain(|t| now_list.duration_since(*t).as_secs() < 60);
-                if view_op_timestamps.len() >= 10 {
-                    let err = ExplorerServerMessage::Error {
-                        message: "Too many view operations. Please wait.".to_string(),
-                    };
-                    let _ = sender
-                        .send(Message::Text(
-                            serialize_msg(&err).unwrap_or_default().into(),
-                        ))
-                        .await;
-                    continue;
-                }
-                view_op_timestamps.push(now_list);
-
+                // ListViews is read-only — not rate-limited (unlike SaveView/DeleteView).
                 let tenant_id = Id::new(&auth.tenant_id);
                 match state
                     .saved_views
@@ -1580,11 +1565,64 @@ async fn handle_no_llm_fallback(
                 ))
                 .await;
         } else {
-            stream_text(
-                sender,
-                "LLM is not configured — conversational exploration requires GYRE_VERTEX_PROJECT and GYRE_VERTEX_LOCATION.\n\nYou can still use saved views, the filter panel, and search (/) to explore the codebase. Try asking about \"blast radius\", \"test gaps\", \"hot paths\", or \"complexity\".",
-                true,
-            ).await;
+            // No keyword or node name match — surface interesting graph patterns
+            // instead of a dead-end message.
+            let mut suggestions = Vec::new();
+            if let Some(ref nodes) = cached_nodes {
+                // Find top 5 most complex functions lacking test coverage
+                let mut candidates: Vec<_> = nodes
+                    .iter()
+                    .filter(|n| n.deleted_at.is_none())
+                    .filter(|n| {
+                        matches!(
+                            n.node_type,
+                            gyre_common::NodeType::Function | gyre_common::NodeType::Method
+                        )
+                    })
+                    .filter(|n| n.complexity.unwrap_or(0) > 5)
+                    .filter(|n| n.test_coverage.map_or(true, |c| c < 0.5))
+                    .collect();
+                candidates
+                    .sort_by(|a, b| b.complexity.unwrap_or(0).cmp(&a.complexity.unwrap_or(0)));
+                for n in candidates.iter().take(5) {
+                    suggestions.push(format!(
+                        "- **{}** (complexity: {}, test coverage: {})",
+                        n.name,
+                        n.complexity.unwrap_or(0),
+                        n.test_coverage
+                            .map_or("none".to_string(), |c| format!("{:.0}%", c * 100.0))
+                    ));
+                }
+            }
+            if suggestions.is_empty() {
+                stream_text(
+                    sender,
+                    "LLM is not configured — conversational exploration requires GYRE_VERTEX_PROJECT and GYRE_VERTEX_LOCATION.\n\nYou can still use saved views, the filter panel, and search (/) to explore the codebase. Try asking about \"blast radius\", \"test gaps\", \"hot paths\", or \"complexity\".",
+                    true,
+                ).await;
+            } else {
+                let msg = format!(
+                    "I couldn't find a specific match, but here are high-complexity functions that may need attention (low or no test coverage):\n\n{}\n\nTry clicking one of these names, or ask about \"blast radius\", \"test gaps\", \"hot paths\", or \"complexity\".\n\n*Note: LLM is not configured — set GYRE_VERTEX_PROJECT for conversational exploration.*",
+                    suggestions.join("\n")
+                );
+                stream_text(sender, &msg, true).await;
+                // Show a complexity heat map so the user gets something visual
+                let query = json!({
+                    "scope": { "type": "filter", "node_types": ["function", "method"], "computed": "$where(complexity, '>', 5)" },
+                    "emphasis": { "heat": { "metric": "complexity", "palette": "blue-red" } },
+                    "zoom": "fit",
+                    "annotation": { "title": "High-complexity functions" }
+                });
+                let view_msg = ExplorerServerMessage::ViewQuery {
+                    query,
+                    explanation: None,
+                };
+                let _ = sender
+                    .send(Message::Text(
+                        serialize_msg(&view_msg).unwrap_or_default().into(),
+                    ))
+                    .await;
+            }
         }
     }
     Ok(())
@@ -1737,12 +1775,12 @@ async fn run_explorer_agent(
                                 .take(kept_count)
                                 .map(|n| n.id.to_string())
                                 .collect();
-                            // Keep edges that connect to retained nodes
+                            // Keep edges where BOTH endpoints are retained (avoids dangling refs)
                             let kept_edges: Vec<_> = e
                                 .into_iter()
                                 .filter(|e| {
                                     kept_node_ids.contains(&e.source_id.to_string())
-                                        || kept_node_ids.contains(&e.target_id.to_string())
+                                        && kept_node_ids.contains(&e.target_id.to_string())
                                 })
                                 .collect();
                             *cached_nodes =
@@ -1795,12 +1833,12 @@ async fn run_explorer_agent(
         let mut edge_counts = std::collections::HashMap::new();
         for n in nodes.iter() {
             *type_counts
-                .entry(format!("{:?}", n.node_type))
+                .entry(format!("{:?}", n.node_type).to_lowercase())
                 .or_insert(0u32) += 1;
         }
         for e in edges.iter() {
             *edge_counts
-                .entry(format!("{:?}", e.edge_type))
+                .entry(format!("{:?}", e.edge_type).to_lowercase())
                 .or_insert(0u32) += 1;
         }
         let mut type_summary: Vec<_> = type_counts.iter().collect();
@@ -2016,7 +2054,7 @@ async fn run_explorer_agent(
         // Timeout on LLM calls to prevent blocking the session indefinitely.
         // If the client disconnects, subsequent send() calls will fail and break the loop.
         let llm_future =
-            llm_port.complete_with_tools(&system_prompt, conversation_history, &tools, Some(4096));
+            llm_port.complete_with_tools(&system_prompt, conversation_history, &tools, Some(8192));
         let response =
             match tokio::time::timeout(std::time::Duration::from_secs(60), llm_future).await {
                 Ok(result) => result?,
@@ -2217,6 +2255,13 @@ async fn run_explorer_agent(
                 {
                     break;
                 }
+
+                // Record the assistant response containing the view query in
+                // conversation history so follow-up messages have context.
+                conversation_history.push(ConversationMessage {
+                    role: "assistant".to_string(),
+                    content: ConversationContent::Text(response.text.clone()),
+                });
             }
         }
 
@@ -2287,6 +2332,7 @@ async fn run_explorer_agent(
         tool_turn_count += 1;
         if tool_turn_count >= MAX_TOOL_TURNS {
             info!("Explorer agent hit max tool turns ({MAX_TOOL_TURNS}), forcing final response");
+            break;
         }
     }
 
