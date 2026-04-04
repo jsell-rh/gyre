@@ -549,6 +549,13 @@ fn resolve_scope_with_adjacency(
             name_pattern,
         } => {
             if let Some(expr) = computed {
+                // Validate expression before resolving — catches typos like $caller vs $callers
+                if let Some(validation_err) = validate_computed_expression(expr) {
+                    warnings.push(format!(
+                        "Computed expression '{}' is invalid: {}",
+                        expr, validation_err
+                    ));
+                }
                 let result = resolve_computed_expression(
                     expr,
                     &active_nodes,
@@ -557,8 +564,23 @@ fn resolve_scope_with_adjacency(
                     incoming,
                     selected_node_id,
                 );
+                if result.is_empty() {
+                    warnings.push(format!(
+                        "Computed expression '{}' matched 0 nodes",
+                        expr
+                    ));
+                }
                 (result, no_depths())
             } else {
+                // Warn on unrecognized node types — misspelled types silently show everything
+                for nt_str in node_types {
+                    if parse_node_type(nt_str).is_none() {
+                        warnings.push(format!(
+                            "Unrecognized node type '{}' in filter — ignored. Valid types: package, module, type, interface, function, endpoint, component, table, constant, field, spec",
+                            nt_str
+                        ));
+                    }
+                }
                 let types: Vec<NodeType> = node_types
                     .iter()
                     .filter_map(|s| parse_node_type(s))
@@ -659,11 +681,8 @@ fn resolve_scope_with_adjacency(
                         return false;
                     }
                     let sha_lower = sha.to_lowercase();
-                    if target.len() >= 7 {
-                        sha_lower.starts_with(target)
-                    } else {
-                        sha_lower == *target
-                    }
+                    // Always use prefix matching — short SHAs are prefixes of full SHAs
+                    sha_lower.starts_with(target) || target.starts_with(&sha_lower)
                 };
 
                 active_nodes
@@ -1317,7 +1336,7 @@ fn split_balanced_args(s: &str) -> Vec<&str> {
     let mut depth_bracket = 0;
     let mut last = 0;
 
-    for (i, c) in s.chars().enumerate() {
+    for (i, c) in s.char_indices() {
         match c {
             '(' => depth_paren += 1,
             ')' => depth_paren -= 1,
@@ -1325,7 +1344,7 @@ fn split_balanced_args(s: &str) -> Vec<&str> {
             ']' => depth_bracket -= 1,
             ',' if depth_paren == 0 && depth_bracket == 0 => {
                 parts.push(&s[last..i]);
-                last = i + 1;
+                last = i + c.len_utf8();
             }
             _ => {}
         }
@@ -1337,7 +1356,7 @@ fn split_balanced_args(s: &str) -> Vec<&str> {
 /// Find the position of the first comma that isn't inside balanced parentheses.
 fn find_balanced_comma(s: &str) -> Option<usize> {
     let mut depth = 0;
-    for (i, c) in s.chars().enumerate() {
+    for (i, c) in s.char_indices() {
         match c {
             '(' => depth += 1,
             ')' => depth -= 1,
@@ -1624,6 +1643,14 @@ pub fn dry_run(
     }
 
     // Apply edge filtering: restrict edges to connections between matched nodes
+    for et_str in &query.edges.filter {
+        if parse_edge_type(et_str).is_none() {
+            warnings.push(format!(
+                "Unrecognized edge type '{}' in filter — ignored. Valid types: calls, contains, implements, depends_on, field_of, returns, routes_to, renders, persists_to, governed_by, produced_by",
+                et_str
+            ));
+        }
+    }
     let edge_type_filters: Vec<EdgeType> = query
         .edges
         .filter
@@ -1631,6 +1658,16 @@ pub fn dry_run(
         .filter_map(|s| parse_edge_type(s))
         .collect();
     const MAX_MATCHED_EDGES: usize = 1000;
+    // First count the total matching edges for accurate reporting
+    let total_matching_edges = edges
+        .iter()
+        .filter(|e| e.deleted_at.is_none())
+        .filter(|e| {
+            result_set.contains(&e.source_id.to_string())
+                && result_set.contains(&e.target_id.to_string())
+        })
+        .filter(|e| edge_type_filters.is_empty() || edge_type_filters.contains(&e.edge_type))
+        .count();
     let matched_edges: Vec<MatchedEdge> = edges
         .iter()
         .filter(|e| e.deleted_at.is_none())
@@ -1639,21 +1676,19 @@ pub fn dry_run(
                 && result_set.contains(&e.target_id.to_string())
         })
         .filter(|e| edge_type_filters.is_empty() || edge_type_filters.contains(&e.edge_type))
-        .take(MAX_MATCHED_EDGES + 1)
+        .take(MAX_MATCHED_EDGES)
         .map(|e| MatchedEdge {
             source_id: e.source_id.to_string(),
             target_id: e.target_id.to_string(),
             edge_type: edge_type_str(&e.edge_type).to_string(),
         })
         .collect();
-    if matched_edges.len() > MAX_MATCHED_EDGES {
+    if total_matching_edges > MAX_MATCHED_EDGES {
         warnings.push(format!(
             "Matched edges capped at {MAX_MATCHED_EDGES} (total: {} edges before truncation)",
-            matched_edges.len()
+            total_matching_edges
         ));
     }
-    let matched_edges: Vec<MatchedEdge> =
-        matched_edges.into_iter().take(MAX_MATCHED_EDGES).collect();
 
     // Compute per-node metric values for heat emphasis (reuses pre-built adjacency)
     let node_metrics = if let Some(ref heat) = query.emphasis.heat {
@@ -1682,11 +1717,15 @@ pub fn dry_run(
                     "test_fragility" => Some(*fragility_map.get(id).unwrap_or(&0) as f64),
                     "risk_score" => {
                         // Composite risk: churn × complexity × (1 - test_coverage)
-                        node_map.get(id).map(|n| {
-                            let churn = n.churn_count_30d as f64;
-                            let complexity = n.complexity.unwrap_or(1) as f64;
-                            let test_gap = 1.0 - n.test_coverage.unwrap_or(0.0);
-                            churn * complexity * test_gap
+                        // Only compute for nodes with actual complexity data — consistent
+                        // with $where(risk_score, ...) which returns None for unanalyzed nodes.
+                        node_map.get(id).and_then(|n| {
+                            n.complexity.map(|c| {
+                                let churn = n.churn_count_30d as f64;
+                                let complexity = c as f64;
+                                let test_gap = 1.0 - n.test_coverage.unwrap_or(0.0);
+                                churn * complexity * test_gap
+                            })
                         })
                     }
                     _ => {
