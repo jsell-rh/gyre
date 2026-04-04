@@ -711,7 +711,7 @@
 
     <!-- Main content -->
     <div class="explorer-body">
-      <ExplorerFilterPanel visible={filterVisible} onfilterchange={onFilterChange} />
+      <ExplorerFilterPanel visible={filterVisible} onfilterchange={onFilterChange} nodes={graph?.nodes ?? []} edges={graph?.edges ?? []} />
 
       <div class="explorer-body-main">
         {#if !selectedRepoId}
@@ -755,7 +755,12 @@
                 lens={explorerLens}
                 filters={activeFilters}
                 bind:canvasState={explorerCanvasState}
-                onNodeDetail={(n) => { detailNode = n; }}
+                onNodeDetail={(n) => {
+                  detailNode = n;
+                  if (n?._action === 'view_spec' && n.spec_path) {
+                    openSpecEditor(n.spec_path);
+                  }
+                }}
                 onInteractiveQuery={(q) => { activeViewQuery = q; }}
                 {ghostOverlays}
                 {traceData}
@@ -918,6 +923,15 @@
                     </svg>
                   </button>
                 </div>
+                {#if instantImpact && specEditorDirty}
+                  <div class="instant-impact" role="status">
+                    <span class="instant-label">Instant impact:</span>
+                    <span class="instant-count">{instantImpact.governedCount} governed node{instantImpact.governedCount !== 1 ? 's' : ''}</span>
+                    {#if instantImpact.byType}
+                      <span class="instant-types">({instantImpact.byType})</span>
+                    {/if}
+                  </div>
+                {/if}
                 <div class="spec-editor-body">
                   {#if specEditorLoading}
                     <div class="spec-editor-loading">
@@ -938,15 +952,6 @@
                   {/if}
                 </div>
                 <div class="spec-editor-footer">
-                  {#if instantImpact && specEditorDirty}
-                    <div class="instant-impact" role="status">
-                      <span class="instant-label">Instant impact:</span>
-                      <span class="instant-count">{instantImpact.governedCount} governed node{instantImpact.governedCount !== 1 ? 's' : ''}</span>
-                      {#if instantImpact.byType}
-                        <span class="instant-types">({instantImpact.byType})</span>
-                      {/if}
-                    </div>
-                  {/if}
                   {#if predictError}
                     <div class="spec-editor-predict-error" role="alert">
                       {$t('explorer_view.spec_editor_predict_error', { values: { error: predictError } })}
@@ -2077,10 +2082,13 @@
   .instant-impact {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
-    padding: var(--space-1) 0;
+    padding: var(--space-2) var(--space-4);
     display: flex;
     gap: 6px;
     align-items: center;
+    background: color-mix(in srgb, #60a5fa 6%, var(--color-surface-elevated));
+    border-bottom: 1px solid var(--color-border);
+    flex-shrink: 0;
   }
   .instant-label { font-weight: 600; color: #60a5fa; }
   .instant-count { color: var(--color-text); }
