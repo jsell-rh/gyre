@@ -3057,20 +3057,23 @@
       ctx.stroke();
       ctx.globalAlpha = op;
 
-      // Label at top-left of container
-      const fontSize = Math.max(7, Math.min(14, sh * 0.04));
-      const labelAlpha = Math.max(0.3, Math.min(0.8, 400 / screenSize));
-      ctx.globalAlpha = op * labelAlpha;
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = `500 ${fontSize}px system-ui, sans-serif`;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      const lx = s.x - sw / 2 + 6;
-      const ly = s.y - sh / 2 + 4;
-      let label = ln.label;
-      if (ln.totalChildren > 0) label += ` (${ln.totalChildren.toLocaleString()})`;
-      ctx.fillText(label, lx, ly);
-      ctx.globalAlpha = op;
+      // Label at top-left of container — LOD: skip at very low zoom
+      // At zoom < 0.3, container labels are unreadable; only summary labels matter
+      if (cam.zoom >= 0.3) {
+        const fontSize = Math.max(7, Math.min(14, sh * 0.04));
+        const labelAlpha = Math.max(0.3, Math.min(0.8, 400 / screenSize));
+        ctx.globalAlpha = op * labelAlpha;
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = `500 ${fontSize}px system-ui, sans-serif`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        const lx = s.x - sw / 2 + 6;
+        const ly = s.y - sh / 2 + 4;
+        let label = ln.label;
+        if (ln.totalChildren > 0) label += ` (${ln.totalChildren.toLocaleString()})`;
+        ctx.fillText(label, lx, ly);
+        ctx.globalAlpha = op;
+      }
     }
   }
 
@@ -3196,8 +3199,9 @@
       ctx.restore();
     }
 
-    // Label
-    if (sw > 30 && sh > 14) {
+    // Label — LOD: skip text on leaf nodes at low zoom for performance
+    // At zoom < 0.5, leaf labels are too small to read anyway
+    if (sw > 30 && sh > 14 && cam.zoom >= 0.5) {
       const fontSize = Math.max(8, Math.min(13, Math.min(sw * 0.14, sh * 0.4)));
       ctx.fillStyle = '#e2e8f0';
       ctx.font = `500 ${fontSize}px 'SF Mono', Menlo, monospace`;
@@ -3417,7 +3421,9 @@
   function drawEdges(ctx) {
     // At low zoom, draw bundled inter-group edges instead of individual edges.
     // This prevents visual clutter while preserving connectivity awareness.
-    if (cam.zoom < 0.5) {
+    // Also auto-switch to bundled edges for very large graphs (5000+ edges)
+    // regardless of zoom level to maintain interactive frame rates.
+    if (cam.zoom < 0.5 || renderEdges.length > 5000) {
       drawBundledEdges(ctx);
       return;
     }
@@ -5809,26 +5815,37 @@
     50% { opacity: 1; transform: scale(1.2); }
   }
 
-  /* Concept creation bar (multi-select) */
+  /* Concept creation bar (multi-select) — floating glassmorphism style matching context menu */
   .concept-creation-bar {
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 12px; background: rgba(167, 139, 250, 0.1);
-    border: 1px solid rgba(167, 139, 250, 0.3); border-radius: 8px;
-    margin: 6px 12px 0;
+    position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+    z-index: 35;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 16px;
+    background: rgba(15, 15, 26, 0.92);
+    border: 1px solid rgba(167, 139, 250, 0.4);
+    border-radius: 10px;
+    backdrop-filter: blur(16px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+    animation: concept-bar-in 0.15s ease-out;
+  }
+  @keyframes concept-bar-in {
+    from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+    to { opacity: 1; transform: translateX(-50%) translateY(0); }
   }
   .concept-count { font-size: 12px; color: #a78bfa; font-weight: 600; white-space: nowrap; }
   .concept-create-btn {
-    display: flex; align-items: center; gap: 4px;
-    padding: 4px 12px; background: rgba(167, 139, 250, 0.2); border: 1px solid #a78bfa;
+    display: flex; align-items: center; gap: 5px;
+    padding: 5px 14px; background: rgba(167, 139, 250, 0.2); border: 1px solid #a78bfa;
     border-radius: 6px; color: #e2e8f0; font-size: 12px; cursor: pointer; font-weight: 500;
     transition: all 0.15s;
   }
-  .concept-create-btn:hover { background: rgba(167, 139, 250, 0.35); }
+  .concept-create-btn:hover { background: rgba(167, 139, 250, 0.4); }
   .concept-clear-btn {
-    padding: 3px 8px; background: transparent; border: 1px solid #475569;
-    border-radius: 4px; color: #94a3b8; font-size: 11px; cursor: pointer;
+    padding: 4px 10px; background: transparent; border: 1px solid #475569;
+    border-radius: 5px; color: #94a3b8; font-size: 11px; cursor: pointer;
+    transition: all 0.15s;
   }
-  .concept-clear-btn:hover { background: #1e293b; color: #e2e8f0; }
+  .concept-clear-btn:hover { background: rgba(30, 41, 59, 0.8); color: #e2e8f0; }
   .concept-hint { font-size: 10px; color: #64748b; font-style: italic; margin-left: auto; }
 
   @media (prefers-reduced-motion: reduce) {
