@@ -299,8 +299,32 @@
     const currentAssertCount = (specEditorContent.match(/gyre:assert/g) ?? []).length;
     const newAssertions = currentAssertCount - originalAssertCount;
 
+    // Compute transitive blast radius: nodes reachable from governed nodes via calls/implements
+    const transitiveIds = new Set(governedNodeIds);
+    if (specEditorDirty) {
+      // Only compute blast radius when content has actually changed
+      let frontier = new Set(governedNodeIds);
+      for (let d = 0; d < 3; d++) { // 3 hops to estimate downstream impact
+        const nextFrontier = new Set();
+        for (const e of (graph.edges ?? [])) {
+          const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+          if (et !== 'calls' && et !== 'implements' && et !== 'depends_on') continue;
+          const src = e.source_id ?? e.from_node_id ?? e.from;
+          const tgt = e.target_id ?? e.to_node_id ?? e.to;
+          // Incoming callers are what breaks if governed code changes
+          if (frontier.has(tgt) && !transitiveIds.has(src)) {
+            transitiveIds.add(src);
+            nextFrontier.add(src);
+          }
+        }
+        frontier = nextFrontier;
+        if (frontier.size === 0) break;
+      }
+    }
+
     return {
       governedCount: governedNodeIds.size,
+      blastRadius: transitiveIds.size - governedNodeIds.size, // additional nodes affected
       connectedSpecs: connectedSpecIds.size,
       implementingRepos: repoIds.size,
       byType: [...affectedTypes.entries()].map(([t, c]) => `${c} ${t}${c !== 1 ? 's' : ''}`).join(', '),
@@ -1421,6 +1445,10 @@
                       <span class="instant-sep">|</span>
                     {/if}
                     <span class="instant-count">{instantImpact.governedCount} governed node{instantImpact.governedCount !== 1 ? 's' : ''}</span>
+                    {#if instantImpact.blastRadius > 0}
+                      <span class="instant-sep">|</span>
+                      <span class="instant-count instant-blast">{instantImpact.blastRadius} downstream affected</span>
+                    {/if}
                     {#if instantImpact.byType}
                       <span class="instant-types">({instantImpact.byType})</span>
                     {/if}
@@ -2753,6 +2781,7 @@
   .instant-sep { color: var(--color-text-muted); }
   .instant-types { color: var(--color-text-muted); font-family: 'SF Mono', Menlo, monospace; font-size: 11px; }
   .instant-new-assertion { color: #f59e0b; font-weight: 600; }
+  .instant-blast { color: #ef4444; font-weight: 600; }
 
   .spec-editor-predict-error {
     font-size: var(--text-xs);

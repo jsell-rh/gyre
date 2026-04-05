@@ -39,15 +39,13 @@
       interactiveQueryTemplate = JSON.parse(JSON.stringify(activeQuery));
     } else if (activeQuery?.scope?.node === '$selected') {
       selectedQueryTemplate = JSON.parse(JSON.stringify(activeQuery));
-    } else if (!activeQuery) {
-      // Only clear templates when query is explicitly cleared (null),
-      // not when a different non-interactive query replaces them.
-      // Interactive modes are persistent per spec §7.
+    } else {
+      // Clear interactive templates when query is explicitly cleared (null)
+      // OR when a different non-interactive query replaces them.
+      // Keeping stale templates causes confusing state where two queries fight.
       interactiveQueryTemplate = null;
       selectedQueryTemplate = null;
     }
-    // Non-interactive queries do NOT clear interactive templates.
-    // The user can still click nodes to re-trigger the interactive mode.
   });
 
   // Re-evaluate $selected query whenever selectedNodeId changes
@@ -108,8 +106,10 @@
       if (govEdge) {
         const govSpecNode = nodes.find(n => n.id === edgeTgt(govEdge));
         const govSpecPath = govSpecNode?.file_path || govSpecNode?.name || '';
-        // If they match, it's a confirmed strong signal
-        if (govSpecPath && node.spec_path.includes(govSpecPath.replace(/^specs\//, ''))) {
+        // If they match, it's a confirmed strong signal (exact path comparison, not substring)
+        const normalizedGovPath = govSpecPath?.replace(/^specs\//, '') ?? '';
+        const normalizedSpecPath = node.spec_path?.replace(/^specs\//, '') ?? '';
+        if (normalizedGovPath && (normalizedSpecPath === normalizedGovPath || node.spec_path === govSpecPath)) {
           return '#22c55e';
         }
       }
@@ -135,7 +135,7 @@
     persists_to: '#2dd4bf',   // teal-400
     produced_by: '#fb923c',   // orange-400
     returns: '#38bdf8',       // sky-400
-    contains: '#cbd5e1',      // slate-300
+    contains: '#64748b',      // slate-500 — visible on dark canvas
   };
 
   // ── Edge field normalization helpers ──────────────────────────────────
@@ -200,6 +200,18 @@
   let multiSelectedIds = $state(new Set()); // Shift+Click multi-select for concept creation
   let hoveredNodeId = $state(null);
   let breadcrumb = $state([]);
+  // Restore breadcrumb from canvasState on init (deep-link URL hash support)
+  let breadcrumbInitialized = false;
+  $effect(() => {
+    if (breadcrumbInitialized) return;
+    const bc = canvasState?.breadcrumb;
+    if (bc?.length > 0 && nodes.length > 0) {
+      breadcrumbInitialized = true;
+      breadcrumb = bc;
+    } else if (nodes.length > 0) {
+      breadcrumbInitialized = true;
+    }
+  });
   let animFrame = null;
 
   // Drill-down fade transition: dim unrelated nodes during zoom
@@ -458,6 +470,28 @@
     return m;
   });
   let anomalyPanelOpen = $state(true);
+
+  // Risk heat map overlay: continuous color layer showing risk_score across all nodes
+  let riskHeatMapActive = $state(false);
+  function toggleRiskHeatMap() {
+    riskHeatMapActive = !riskHeatMapActive;
+    if (riskHeatMapActive) {
+      // Activate a risk_score heat map via view query
+      onInteractiveQuery({
+        scope: { type: 'all' },
+        emphasis: { heat: { metric: 'risk_score', palette: 'green-yellow-red' }, dim_unmatched: 0.3 },
+        zoom: 'none',
+        annotation: { title: 'Risk Map', description: 'Heat map: churn × complexity × (1 − test coverage)' },
+      });
+    } else {
+      onInteractiveQuery(null);
+    }
+    scheduleRedraw();
+  }
+  // Clear riskHeatMapActive when user clears query via annotation X button
+  $effect(() => {
+    if (!activeQuery && riskHeatMapActive) riskHeatMapActive = false;
+  });
 
   // Timeline scrubber state
   let timelineEnabled = $state(false);
@@ -4185,6 +4219,8 @@
   // Zooms INTO the clicked node's bounding box, fades unrelated nodes,
   // then renders children in the same layout style.
   function drillInto(node) {
+    // Guard: prevent rapid double-clicks from queuing multiple drill transitions
+    if (drillTransitioning) return;
     const children = treeData.parentToChildren.get(node.id) ?? [];
     if (children.length === 0) return;
 
@@ -4988,6 +5024,11 @@
     <button class="tb-btn" class:active={timelineEnabled} onclick={() => { timelineEnabled = !timelineEnabled; scheduleRedraw(); }} title="Toggle architecture timeline" type="button" aria-pressed={timelineEnabled}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       Timeline
+    </button>
+
+    <button class="tb-btn" class:active={riskHeatMapActive} onclick={toggleRiskHeatMap} title="Toggle risk heat map overlay (churn × complexity × coverage)" type="button" aria-pressed={riskHeatMapActive}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      Risk
     </button>
 
     {#if anomalies.length > 0 && !anomalyPanelOpen}

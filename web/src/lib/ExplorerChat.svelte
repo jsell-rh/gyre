@@ -42,8 +42,26 @@
     const scopeType = query.scope?.type ?? (typeof query.scope === 'string' ? query.scope : null);
     let scopedNodeIds = new Set();
     if (scopeType === 'focus' && query.scope.node) {
-      // Focus scope: the focal node and its neighbors
-      scopedNodeIds.add(query.scope.node);
+      // Focus scope: the focal node and its BFS neighbors up to depth
+      const depth = query.scope.depth ?? 1;
+      // Find focal node by name or ID
+      const focalNode = graphNodes.find(n => n.name === query.scope.node || n.qualified_name === query.scope.node || n.id === query.scope.node);
+      if (focalNode) {
+        scopedNodeIds.add(focalNode.id);
+        // BFS to depth
+        let frontier = new Set([focalNode.id]);
+        for (let d = 0; d < depth; d++) {
+          const nextFrontier = new Set();
+          for (const e of graphEdges) {
+            if (e.deleted_at) continue;
+            const src = edgeSrc(e), tgt = edgeTgt(e);
+            if (frontier.has(src) && !scopedNodeIds.has(tgt)) { scopedNodeIds.add(tgt); nextFrontier.add(tgt); }
+            if (frontier.has(tgt) && !scopedNodeIds.has(src)) { scopedNodeIds.add(src); nextFrontier.add(src); }
+          }
+          frontier = nextFrontier;
+          if (frontier.size === 0) break;
+        }
+      }
     } else if (scopeType === 'filter' && query.scope.node_types) {
       // Filter scope: all nodes matching the type filter
       for (const n of graphNodes) {
@@ -51,17 +69,41 @@
           scopedNodeIds.add(n.id);
         }
       }
+    } else if (scopeType === 'test_gaps') {
+      // TestGaps scope: untested functions/methods/endpoints
+      for (const n of graphNodes) {
+        if ((n.node_type === 'function' || n.node_type === 'method' || n.node_type === 'endpoint') && !n.test_node && !(n.test_coverage > 0)) {
+          scopedNodeIds.add(n.id);
+        }
+      }
+    } else if (scopeType === 'diff') {
+      // Diff scope: recently modified nodes
+      for (const n of graphNodes) {
+        if (n.last_modified_at || n.last_modified_sha) scopedNodeIds.add(n.id);
+      }
+    } else if (scopeType === 'concept' && query.scope.seed_nodes) {
+      // Concept scope: seed nodes and their expanded neighbors
+      for (const seedName of query.scope.seed_nodes) {
+        const node = graphNodes.find(n => n.name === seedName || n.qualified_name === seedName || n.id === seedName);
+        if (node) scopedNodeIds.add(node.id);
+      }
+      // Expand from seeds
+      const expandDepth = query.scope.expand_depth ?? 1;
+      let frontier = new Set(scopedNodeIds);
+      for (let d = 0; d < expandDepth; d++) {
+        const nextFrontier = new Set();
+        for (const e of graphEdges) {
+          if (e.deleted_at) continue;
+          const src = edgeSrc(e), tgt = edgeTgt(e);
+          if (frontier.has(src) && !scopedNodeIds.has(tgt)) { scopedNodeIds.add(tgt); nextFrontier.add(tgt); }
+          if (frontier.has(tgt) && !scopedNodeIds.has(src)) { scopedNodeIds.add(src); nextFrontier.add(src); }
+        }
+        frontier = nextFrontier;
+        if (frontier.size === 0) break;
+      }
     } else if (scopeType === 'all' || !scopeType) {
       // All scope: every node
       for (const n of graphNodes) scopedNodeIds.add(n.id);
-    }
-    // If focus scope, also include depth-1 neighbors
-    if (scopeType === 'focus' && query.scope.node) {
-      for (const e of graphEdges) {
-        if (e.deleted_at) continue;
-        if (edgeSrc(e) === query.scope.node) scopedNodeIds.add(edgeTgt(e));
-        if (edgeTgt(e) === query.scope.node) scopedNodeIds.add(edgeSrc(e));
-      }
     }
     // Find GovernedBy edges whose source is in scope
     const specPaths = new Set();
