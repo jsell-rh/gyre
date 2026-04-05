@@ -623,7 +623,7 @@
   });
 
   // ── Activity pagination ──────────────────────────────────────
-  let activityLimit = $state(8);
+  let activityLimit = $state(5);
 
   // Collapse activity when there's active work happening
   let activityCollapsed = $derived(wsAgents.some(a => a.status === 'active') || wsTasks.some(t => t.status === 'in_progress'));
@@ -1380,37 +1380,7 @@
             </div>
           </section>
 
-          <!-- Merge Queue (compact, if items queued) -->
-          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
-            <section class="merge-queue-compact" data-testid="section-merge-queue">
-              <div class="mq-compact-header">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
-                <span class="mq-compact-title">Merge Queue</span>
-                <span class="mq-compact-count">{mergeQueueItems.length} queued</span>
-              </div>
-              <div class="mq-compact-items">
-                {#each mergeQueueItems.slice(0, 5) as item, i}
-                  {@const mrId = item.merge_request_id ?? item.mr_id}
-                  <button class="mq-compact-item" onclick={() => nav('mr', mrId, item._mr)}>
-                    <span class="mq-compact-pos">#{i + 1}</span>
-                    <span class="mq-compact-mr-title">{item._title}</span>
-                    {#if item._mr?._gates?.total > 0}
-                      <span class="mq-compact-gates">
-                        {#if item._mr._gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{item._mr._gates.failed}</span>{/if}
-                        {#if item._mr._gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{item._mr._gates.passed}</span>{/if}
-                      </span>
-                    {/if}
-                    {#if item._branch}<span class="mq-compact-branch">{item._branch}</span>{/if}
-                  </button>
-                {/each}
-                {#if mergeQueueItems.length > 5}
-                  <span class="mq-compact-more">+{mergeQueueItems.length - 5} more</span>
-                {/if}
-              </div>
-            </section>
-          {/if}
-
-      <!-- briefing moved to banner above -->
+      <!-- Merge queue items are shown on individual repo cards -->
 
           <!-- Recent Activity (collapsed when there's active work) -->
           <details class="activity-details" open={!activityCollapsed && activityEvents.length > 0} data-testid="section-activity">
@@ -1863,96 +1833,7 @@
     padding: var(--space-2) var(--space-3);
   }
 
-  /* ── Merge queue compact ──────────────────────────────────── */
-  .merge-queue-compact {
-    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, var(--color-border));
-    border-radius: var(--radius);
-    background: color-mix(in srgb, var(--color-warning) 3%, var(--color-surface));
-    overflow: hidden;
-  }
-
-  .mq-compact-header {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text);
-    border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 15%, transparent);
-  }
-
-  .mq-compact-count {
-    font-size: var(--text-xs);
-    color: var(--color-warning);
-    font-weight: 500;
-    margin-left: auto;
-  }
-
-  .mq-compact-items {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .mq-compact-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    width: 100%;
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--color-border);
-    cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-    font-size: var(--text-sm);
-    transition: background var(--transition-fast);
-  }
-
-  .mq-compact-item:last-child { border-bottom: none; }
-  .mq-compact-item:hover { background: var(--color-surface-elevated); }
-
-  .mq-compact-pos {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    font-weight: 700;
-    color: var(--color-warning);
-    min-width: 24px;
-  }
-
-  .mq-compact-mr-title {
-    flex: 1;
-    color: var(--color-text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .mq-compact-gates {
-    display: flex;
-    gap: 3px;
-    flex-shrink: 0;
-  }
-
-  .mq-compact-branch {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-    max-width: 120px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .mq-compact-more {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    padding: var(--space-2) var(--space-3);
-    text-align: center;
-    font-style: italic;
-  }
+  /* merge queue compact section removed — items shown on repo cards */
 
   /* ── Pipeline attention section ──────────────────────────────────── */
   .pipeline-attention {
@@ -2089,8 +1970,8 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
-    padding: var(--space-3) var(--space-5);
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-5);
     max-width: 1200px;
     margin: 0 auto;
     width: 100%;
@@ -2149,7 +2030,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
-    padding-bottom: var(--space-2);
+    padding-bottom: var(--space-1);
     border-bottom: 1px solid var(--color-border);
   }
 
