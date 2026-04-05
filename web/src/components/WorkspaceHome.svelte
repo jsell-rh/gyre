@@ -4813,18 +4813,7 @@
     cursor: default;
   }
 
-  button.repo-stat-clickable {
-    cursor: pointer;
-    transition: border-color var(--transition-fast), background var(--transition-fast);
-  }
-
-  button.repo-stat-clickable:hover {
-    border-color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
-    color: var(--color-text);
-  }
-
-  .repo-stat-empty {
+.repo-stat-empty {
     color: var(--color-text-muted);
     border: none;
     background: none;
