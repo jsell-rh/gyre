@@ -94,6 +94,13 @@
     if (testNodes.length > 0 && testNodes.length < nodes.length / 2) {
       hints.push('Which functions have no test coverage?');
     }
+    // Warn about incomplete call graph when few call edges exist
+    const callEdges = edges.filter(e => (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls');
+    const fnCount = nodes.filter(n => n.node_type === 'function' || n.node_type === 'method' || n.node_type === 'endpoint').length;
+    if (fnCount > 10 && callEdges.length < fnCount * 0.1) {
+      hints.push(`Call graph looks incomplete (${callEdges.length} call edges for ${fnCount} functions) — how do I fix this?`);
+    }
+
     if (hints.length === 0) {
       // Fallback generic suggestions
       hints.push('What are the main boundaries in this architecture?');
@@ -514,6 +521,13 @@
   let insightsCollapsed = $state(true);
   let activeFilters = $state(null);
 
+  // Auto-close filter panel when a view query becomes active (view queries replace filters)
+  $effect(() => {
+    if (activeViewQuery && filterVisible) {
+      filterVisible = false;
+    }
+  });
+
   // Manual view query editor state
   let queryEditorOpen = $state(false);
   let queryEditorText = $state('');
@@ -832,20 +846,22 @@
   // Uses server-side warnings from the API when available, with
   // client-side heuristic fallback (verifier finding #15).
   let missingCallEdgesWarning = $derived.by(() => {
+    if (graphWarningsDismissed) return null;
     // Prefer server-provided warnings (more accurate)
-    if (graphWarnings.length > 0 && !graphWarningsDismissed) {
+    if (graphWarnings.length > 0) {
       return graphWarnings.join(' ');
     }
-    if (!graph?.nodes?.length || !graph?.edges?.length) return null;
-    const funcCount = graph.nodes.filter(n =>
-      (n.node_type === 'function' || n.node_type === 'method') && !n.deleted_at
-    ).length;
-    const callEdgeCount = graph.edges.filter(e =>
+    // Client-side heuristic: detect missing call edges when no server warnings
+    if (!graph?.nodes?.length) return null;
+    const fnNodes = graph.nodes.filter(n =>
+      (n.node_type === 'function' || n.node_type === 'method' || n.node_type === 'endpoint') && !n.deleted_at
+    );
+    const callEdges = (graph.edges ?? []).filter(e =>
       (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls' && !e.deleted_at
-    ).length;
-    // If there are 10+ functions but <3% have call edges, warn
-    if (funcCount >= 10 && callEdgeCount < funcCount * 0.03) {
-      return `Blast radius, test coverage, and coupling analyses may be incomplete. The knowledge graph has ${funcCount} functions but only ${callEdgeCount} call edges (~${Math.round(callEdgeCount / funcCount * 100)}%). Install language toolchains (rust-analyzer, pyright, gopls) to enable complete call graph extraction.`;
+    );
+    // If there are 10+ functions but <10% have call edges, warn
+    if (fnNodes.length > 10 && callEdges.length < fnNodes.length * 0.1) {
+      return `Call graph is incomplete: ${callEdges.length} call edges for ${fnNodes.length} functions. Install language toolchains (rust-analyzer, pyright, gopls) for accurate blast radius and dependency analysis.`;
     }
     return null;
   });
@@ -1045,20 +1061,22 @@
     <!-- Control bar — concept search + filter toggle, always shown when repo is selected -->
     {#if selectedRepoId}
       <div class="concept-search-bar">
-        <!-- Filter toggle -->
-        <button
-          class="ctrl-btn icon-btn"
-          class:active={filterVisible}
-          onclick={() => { filterVisible = !filterVisible; }}
-          title={$t('explorer_view.toggle_filters')}
-          aria-label={$t('explorer_view.toggle_filters')}
-          aria-pressed={filterVisible}
-          type="button"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
-          </svg>
-        </button>
+        <!-- Filter toggle (hidden when view queries are active — filters replaced by view queries per spec) -->
+        {#if !activeViewQuery}
+          <button
+            class="ctrl-btn icon-btn"
+            class:active={filterVisible}
+            onclick={() => { filterVisible = !filterVisible; }}
+            title={$t('explorer_view.toggle_filters')}
+            aria-label={$t('explorer_view.toggle_filters')}
+            aria-pressed={filterVisible}
+            type="button"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+              <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+            </svg>
+          </button>
+        {/if}
 
         <!-- Manual query editor toggle -->
         <button
@@ -1127,7 +1145,10 @@
 
     <!-- Main content -->
     <div class="explorer-body">
-      <ExplorerFilterPanel visible={filterVisible} onfilterchange={onFilterChange} nodes={graph?.nodes ?? []} edges={graph?.edges ?? []} />
+      <!-- Filter panel: hidden when view queries are active (view queries replace filters per spec) -->
+      {#if !activeViewQuery}
+        <ExplorerFilterPanel visible={filterVisible} onfilterchange={onFilterChange} nodes={graph?.nodes ?? []} edges={graph?.edges ?? []} />
+      {/if}
 
       <div class="explorer-body-main">
         {#if !selectedRepoId}
