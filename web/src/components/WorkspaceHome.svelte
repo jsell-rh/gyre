@@ -982,6 +982,30 @@
       <header class="ws-header">
         <div class="ws-header-top-row">
           <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
+          <!-- Compact pipeline counters — one-glance workspace health -->
+          {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && (specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0)}
+            <div class="ws-header-stats">
+              <span class="ws-hstat" class:ws-hstat-warn={pipelineSpecs.pending > 0} title="{specs.length} specs — {pipelineSpecs.pending} pending">
+                <span class="ws-hstat-num">{specs.length}</span> specs
+              </span>
+              <span class="ws-hstat" title="{wsTasks.length} tasks — {pipelineTasks.in_progress} active">
+                <span class="ws-hstat-num">{wsTasks.length}</span> tasks
+              </span>
+              {#if pipelineAgents.active > 0}
+                <span class="ws-hstat ws-hstat-live" title="{pipelineAgents.active} agents running">
+                  <span class="ws-hstat-pulse"></span>
+                  <span class="ws-hstat-num">{pipelineAgents.active}</span> running
+                </span>
+              {:else}
+                <span class="ws-hstat" title="{wsAgents.length} total agents">
+                  <span class="ws-hstat-num">{wsAgents.length}</span> agents
+                </span>
+              {/if}
+              <span class="ws-hstat" class:ws-hstat-danger={pipelineMrs.failed_gates > 0} title="{wsMrs.length} MRs — {pipelineMrs.open} open, {pipelineMrs.merged} merged">
+                <span class="ws-hstat-num">{wsMrs.length}</span> MRs
+              </span>
+            </div>
+          {/if}
           {#if budgetPct !== null}
             <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
               <span class="ws-budget-bar"><span class="ws-budget-fill" style="width: {budgetPct}%"></span></span>
@@ -1747,6 +1771,53 @@
     font-weight: 700;
     color: var(--color-text);
     font-family: var(--font-display);
+  }
+
+  .ws-header-stats {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .ws-hstat {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .ws-hstat-num {
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+  }
+
+  .ws-hstat-warn .ws-hstat-num { color: var(--color-warning); }
+  .ws-hstat-danger .ws-hstat-num { color: var(--color-danger); }
+
+  .ws-hstat-live {
+    color: var(--color-success);
+  }
+
+  .ws-hstat-live .ws-hstat-num {
+    color: var(--color-success);
+  }
+
+  .ws-hstat-pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: hstat-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes hstat-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.7); }
   }
 
   .ws-header-desc {
