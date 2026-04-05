@@ -1015,7 +1015,19 @@
           </div>
         </div>
         {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-          <p class="ws-header-status">{statusSentence}</p>
+          {#if statusItems.length > 0}
+            <div class="ws-header-status-items">
+              {#each statusItems as item}
+                {@const singleRepo = repos.length === 1 ? repos[0] : null}
+                <button class="ws-status-chip ws-status-chip-{item.variant}" onclick={() => { if (singleRepo && item.tab) { onSelectRepo?.(singleRepo, item.tab); } else { wsTab = item.tab; } }}>
+                  <span class="ws-status-icon">{item.icon}</span>
+                  {item.text}
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <p class="ws-header-status">{statusSentence}</p>
+          {/if}
         {/if}
       </header>
 
@@ -2696,6 +2708,46 @@
     max-width: 700px;
     line-height: 1.4;
   }
+
+  .ws-header-status-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .ws-status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    transition: all var(--transition-fast);
+  }
+
+  .ws-status-chip:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .ws-status-icon { font-size: var(--text-sm); }
+
+  .ws-status-chip-danger { color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 30%, var(--color-border)); }
+  .ws-status-chip-danger:hover { border-color: var(--color-danger); }
+  .ws-status-chip-warning { color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 30%, var(--color-border)); }
+  .ws-status-chip-warning:hover { border-color: var(--color-warning); }
+  .ws-status-chip-success { color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 30%, var(--color-border)); }
+  .ws-status-chip-success:hover { border-color: var(--color-success); }
+  .ws-status-chip-info { color: var(--color-info, #1e90ff); border-color: color-mix(in srgb, var(--color-info, #1e90ff) 30%, var(--color-border)); }
+  .ws-status-chip-info:hover { border-color: var(--color-info, #1e90ff); }
+  .ws-status-chip-muted { color: var(--color-text-muted); }
 
   .ws-status-badges {
     display: flex;
