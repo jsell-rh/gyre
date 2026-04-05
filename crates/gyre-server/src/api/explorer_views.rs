@@ -156,6 +156,16 @@ async fn seed_system_views_if_needed(
 // ── ViewSpec validation helper ────────────────────────────────────────────────
 
 fn parse_and_validate(spec_json: &serde_json::Value) -> Result<(), ApiError> {
+    // Accept both ViewQuery (canonical per spec) and ViewSpec (legacy) formats.
+    // Try ViewQuery first since it's the primary grammar defined in view-query-grammar.md.
+    if let Ok(vq) = serde_json::from_value::<gyre_common::view_query::ViewQuery>(spec_json.clone())
+    {
+        let errors = vq.validate();
+        if errors.is_empty() {
+            return Ok(());
+        }
+        // Fall through to try ViewSpec if ViewQuery validation fails
+    }
     let spec: ViewSpec = serde_json::from_value(spec_json.clone())
         .map_err(|e| ApiError::BadRequest(format!("invalid view spec: {e}")))?;
     validate_view_spec(&spec).map_err(ApiError::BadRequest)
