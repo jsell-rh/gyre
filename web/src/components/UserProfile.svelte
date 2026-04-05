@@ -80,11 +80,58 @@
     prefsSaving = false;
   }
 
+  // ── API Tokens ─────────────────────────────────────────────────────────
+  let apiTokens = $state([]);
+  let tokensLoading = $state(false);
+  let newTokenName = $state('');
+  let newTokenScopes = $state('read');
+  let creatingToken = $state(false);
+  let createdTokenValue = $state(null); // shown once after creation
+
+  async function loadTokens() {
+    tokensLoading = true;
+    try {
+      const data = await api.listApiTokens();
+      apiTokens = Array.isArray(data) ? data : [];
+    } catch {
+      apiTokens = [];
+    } finally {
+      tokensLoading = false;
+    }
+  }
+
+  async function createToken() {
+    if (!newTokenName.trim() || creatingToken) return;
+    creatingToken = true;
+    try {
+      const result = await api.createApiToken({ name: newTokenName.trim(), scopes: newTokenScopes.split(',').map(s => s.trim()).filter(Boolean) });
+      createdTokenValue = result?.token ?? result?.value ?? null;
+      newTokenName = '';
+      showToast('API token created', { type: 'success' });
+      await loadTokens();
+    } catch (e) {
+      showToast('Failed to create token: ' + (e?.message ?? e), { type: 'error' });
+    } finally {
+      creatingToken = false;
+    }
+  }
+
+  async function revokeToken(id) {
+    try {
+      await api.deleteApiToken(id);
+      apiTokens = apiTokens.filter(t => t.id !== id);
+      showToast('Token revoked', { type: 'success' });
+    } catch (e) {
+      showToast('Failed to revoke token: ' + (e?.message ?? e), { type: 'error' });
+    }
+  }
+
   const tabs = $derived([
     { id: 'info',        label: $t('user_profile.tabs.info') },
     { id: 'my-agents',   label: `Agents${myAgents.length > 0 ? ` (${myAgents.length})` : ''}` },
     { id: 'my-tasks',    label: `Tasks${myTasks.length > 0 ? ` (${myTasks.length})` : ''}` },
     { id: 'my-mrs',      label: `MRs${myMrs.length > 0 ? ` (${myMrs.length})` : ''}` },
+    { id: 'tokens',      label: 'API Tokens' },
     { id: 'memberships', label: $t('user_profile.tabs.memberships') },
     { id: 'ledger',      label: $t('user_profile.tabs.ledger') },
     { id: 'notif-prefs', label: $t('user_profile.tabs.notif_prefs') },
@@ -92,6 +139,13 @@
   ]);
 
   $effect(() => { loadAll(); });
+
+  // Load API tokens when tab is selected
+  $effect(() => {
+    if (activeTab === 'tokens' && apiTokens.length === 0 && !tokensLoading) {
+      loadTokens();
+    }
+  });
 
   async function loadAll() {
     loading = true;
@@ -357,6 +411,58 @@
         </div>
       {/if}
 
+    {:else if activeTab === 'tokens'}
+      <!-- API Tokens management -->
+      <div class="tokens-section">
+        <p class="tokens-desc">API tokens allow programmatic access to the Gyre API. Tokens are scoped and can be revoked at any time.</p>
+
+        {#if createdTokenValue}
+          <div class="token-created-banner">
+            <p class="token-created-title">Token created — copy it now, it won't be shown again</p>
+            <div class="token-created-value">
+              <code class="token-value mono">{createdTokenValue}</code>
+              <button class="token-copy-btn" onclick={async () => { try { await navigator.clipboard.writeText(createdTokenValue); showToast('Token copied', { type: 'success' }); } catch {} }}>Copy</button>
+            </div>
+            <button class="token-dismiss-btn" onclick={() => { createdTokenValue = null; }}>Dismiss</button>
+          </div>
+        {/if}
+
+        <form class="token-create-form" onsubmit={(e) => { e.preventDefault(); createToken(); }}>
+          <input class="token-input" type="text" placeholder="Token name (e.g. ci-pipeline)" bind:value={newTokenName} required />
+          <select class="token-scope-select" bind:value={newTokenScopes}>
+            <option value="read">Read only</option>
+            <option value="read,write">Read + Write</option>
+            <option value="read,write,admin">Full access</option>
+          </select>
+          <button class="token-create-btn" type="submit" disabled={creatingToken || !newTokenName.trim()}>
+            {creatingToken ? 'Creating...' : 'Create Token'}
+          </button>
+        </form>
+
+        {#if tokensLoading}
+          <Skeleton width="100%" height="2rem" />
+        {:else if apiTokens.length === 0}
+          <p class="tokens-empty">No API tokens. Create one above to get started.</p>
+        {:else}
+          <div class="tokens-list">
+            {#each apiTokens as token}
+              <div class="token-item">
+                <div class="token-item-info">
+                  <span class="token-item-name">{token.name ?? 'Unnamed'}</span>
+                  {#if token.scopes?.length > 0}
+                    <span class="token-item-scopes">{token.scopes.join(', ')}</span>
+                  {/if}
+                  {#if token.created_at}
+                    <span class="token-item-created">Created {shortId(token.id)}</span>
+                  {/if}
+                </div>
+                <button class="token-revoke-btn" onclick={() => revokeToken(token.id)} title="Revoke this token">Revoke</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
     {:else if activeTab === 'memberships'}
       <!-- Workspace memberships with quick-switch -->
       {#if workspaces.length === 0}
@@ -604,6 +710,31 @@
   .info-val { color: var(--color-text); }
 
   /* Workspace memberships */
+  /* ── API Tokens ───────────────────────────────────────────────────────── */
+  .tokens-section { display: flex; flex-direction: column; gap: var(--space-3); }
+  .tokens-desc { margin: 0; font-size: var(--text-sm); color: var(--color-text-muted); }
+  .token-created-banner { background: color-mix(in srgb, var(--color-success) 8%, var(--color-surface)); border: 1px solid color-mix(in srgb, var(--color-success) 30%, var(--color-border)); border-radius: var(--radius); padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
+  .token-created-title { margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--color-success); }
+  .token-created-value { display: flex; gap: var(--space-2); align-items: center; }
+  .token-value { font-size: var(--text-sm); background: var(--color-surface-elevated); padding: var(--space-2); border-radius: var(--radius-sm); overflow-x: auto; flex: 1; user-select: all; word-break: break-all; }
+  .token-copy-btn, .token-dismiss-btn { background: transparent; border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); font-size: var(--text-xs); cursor: pointer; color: var(--color-link); font-family: var(--font-body); }
+  .token-copy-btn:hover, .token-dismiss-btn:hover { border-color: var(--color-primary); }
+  .token-dismiss-btn { align-self: flex-start; color: var(--color-text-muted); }
+  .token-create-form { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
+  .token-input { flex: 1; min-width: 180px; padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); font-family: var(--font-body); font-size: var(--text-sm); }
+  .token-scope-select { padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); font-family: var(--font-body); font-size: var(--text-sm); }
+  .token-create-btn { padding: var(--space-2) var(--space-3); background: var(--color-primary); color: white; border: none; border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: 600; cursor: pointer; font-family: var(--font-body); white-space: nowrap; }
+  .token-create-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .tokens-empty { font-size: var(--text-sm); color: var(--color-text-muted); font-style: italic; text-align: center; padding: var(--space-4) 0; }
+  .tokens-list { display: flex; flex-direction: column; gap: var(--space-1); }
+  .token-item { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); }
+  .token-item-info { display: flex; align-items: center; gap: var(--space-2); flex: 1; min-width: 0; }
+  .token-item-name { font-weight: 600; font-size: var(--text-sm); color: var(--color-text); }
+  .token-item-scopes { font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono); }
+  .token-item-created { font-size: var(--text-xs); color: var(--color-text-muted); }
+  .token-revoke-btn { background: transparent; border: 1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border)); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); font-size: var(--text-xs); cursor: pointer; color: var(--color-danger); font-family: var(--font-body); font-weight: 600; }
+  .token-revoke-btn:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+
   .memberships-list { display: flex; flex-direction: column; gap: var(--space-2); }
   .membership-item {
     display: flex;
