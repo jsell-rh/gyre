@@ -295,6 +295,7 @@
               output: g.output,
               error: g.error,
               command: g.command,
+              duration_ms: (g.started_at && g.finished_at) ? Math.round((g.finished_at - g.started_at) * 1000) : g.duration_ms,
             };
           });
           return { id: mr.id, passed, failed, total: arr.length, details };
@@ -1558,22 +1559,24 @@
                             {/if}
                             <span class="ec-time" title={absTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}>{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</span>
                           </div>
-                          <!-- Row 3: Gate results (only if gates exist) -->
-                          {#if mr._gates?.total > 0}
-                            <div class="entity-card-gates">
-                              {#if mr._gates.failed > 0}
-                                <span class="ec-gate-summary ec-gate-fail">
-                                  <span class="ec-gate-icon">✗</span> {mr._gates.failed} failed
-                                  {#if failedGateDetails.length > 0} — {failedGateDetails.map(g => g.name).join(', ')}{/if}
+                          <!-- Row 3: Gate results with individual names -->
+                          {#if gateDetails.length > 0}
+                            <div class="entity-card-gates" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'gates' }); }}>
+                              {#each gateDetails.slice(0, 4) as g}
+                                <span class="ec-gate-chip ec-gate-{g.status}" title="{g.name}{g.gate_type ? ' (' + g.gate_type.replace(/_/g, ' ') + ')' : ''}{g.required === false ? ' (advisory)' : ''}{g.duration_ms ? ' — ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}">
+                                  <span class="ec-gate-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
+                                  {g.name}
+                                  {#if g.duration_ms}<span class="ec-gate-dur">{g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's'}</span>{/if}
                                 </span>
+                              {/each}
+                              {#if gateDetails.length > 4}
+                                <span class="ec-gate-chip ec-gate-more">+{gateDetails.length - 4}</span>
                               {/if}
-                              {#if mr._gates.passed > 0}
-                                <span class="ec-gate-summary ec-gate-pass"><span class="ec-gate-icon">✓</span> {mr._gates.passed} passed</span>
-                              {/if}
-                              {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}
-                                <span class="ec-gate-summary ec-gate-pending"><span class="ec-gate-icon">○</span> {mr._gates.total - mr._gates.passed - mr._gates.failed} pending</span>
-                              {/if}
-                              <span class="ec-gate-details-link" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'gates' }); }}>View details →</span>
+                            </div>
+                          {:else if mr._gates?.total > 0}
+                            <div class="entity-card-gates" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'gates' }); }}>
+                              {#if mr._gates.passed > 0}<span class="ec-gate-chip ec-gate-pass"><span class="ec-gate-icon">✓</span> {mr._gates.passed} passed</span>{/if}
+                              {#if mr._gates.failed > 0}<span class="ec-gate-chip ec-gate-fail"><span class="ec-gate-icon">✗</span> {mr._gates.failed} failed</span>{/if}
                             </div>
                           {/if}
                         </button>
@@ -3982,38 +3985,34 @@
     font-size: 11px;
   }
 
-  .ec-gate-summary {
+  .ec-gate-chip {
     display: inline-flex;
     align-items: center;
     gap: 3px;
     font-weight: 500;
     white-space: nowrap;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: opacity var(--transition-fast);
   }
+
+  .ec-gate-chip:hover { opacity: 0.8; }
 
   .ec-gate-icon {
     font-size: 12px;
     font-weight: 700;
   }
 
-  .ec-gate-fail { color: var(--color-danger); }
-  .ec-gate-pass { color: var(--color-success); }
-  .ec-gate-pending { color: var(--color-text-muted); }
+  .ec-gate-passed, .ec-gate-pass { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .ec-gate-failed, .ec-gate-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .ec-gate-pending { color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text-muted) 8%, transparent); }
+  .ec-gate-more { color: var(--color-text-muted); font-style: italic; }
 
-  .ec-gate-details-link {
+  .ec-gate-dur {
     font-size: 10px;
     color: var(--color-text-muted);
-    cursor: pointer;
-    margin-left: auto;
-    border: none;
-    background: none;
-    font-family: var(--font-body);
-    padding: 0;
-    transition: color var(--transition-fast);
-  }
-
-  .ec-gate-details-link:hover {
-    color: var(--color-primary);
-    text-decoration: underline;
+    font-family: var(--font-mono);
   }
 
   /* ── Legacy entity tables (kept for compat) ─────────────────────────── */
