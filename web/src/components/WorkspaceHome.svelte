@@ -1302,8 +1302,8 @@
                       {/each}
                     </div>
                     {#if activityEvents.length > activityLimit}
-                      <button class="ws-overview-more-btn" onclick={() => { activityLimit = activityLimit <= 3 ? 30 : 3; }}>
-                        {activityLimit <= 3 ? `Show all ${activityEvents.length} events` : 'Show less'}
+                      <button class="ws-overview-more-btn" onclick={() => { activityLimit = activityLimit <= 5 ? 30 : 5; }}>
+                        {activityLimit <= 5 ? `Show all ${activityEvents.length} events` : 'Show less'}
                       </button>
                     {/if}
                   {/if}
@@ -1418,6 +1418,24 @@
                   {#if wsMrs.length === 0}
                     <p class="ws-overview-empty">No merge requests. MRs are created when agents complete implementation.</p>
                   {:else}
+                    <!-- Merge Queue banner -->
+                    {#if mergeQueueItems.length > 0}
+                      <div class="merge-queue-banner">
+                        <span class="queue-banner-icon">⇉</span>
+                        <span class="queue-banner-text">{mergeQueueItems.length} MR{mergeQueueItems.length !== 1 ? 's' : ''} in merge queue</span>
+                        <div class="queue-banner-items">
+                          {#each mergeQueueItems.slice(0, 5) as item, i}
+                            <button class="queue-banner-item" onclick={() => nav('mr', item.merge_request_id ?? item.mr_id, { repo_id: item._mr?.repository_id ?? item._mr?.repo_id })}>
+                              <span class="queue-banner-pos">#{i + 1}</span>
+                              <span class="queue-banner-title">{item._title}</span>
+                              {#if item._spec_ref}
+                                <span class="queue-banner-spec">for "{item._spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '')}"</span>
+                              {/if}
+                            </button>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
                     {@const openMrs = wsMrs.filter(m => m.status === 'open')}
                     {@const mergedMrs = wsMrs.filter(m => m.status === 'merged')}
                     {@const sortedMrs = [...openMrs, ...mergedMrs, ...wsMrs.filter(m => m.status !== 'open' && m.status !== 'merged')]}
@@ -2475,6 +2493,29 @@
   .task-card-footer { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-muted); font-size: 10px; }
   .task-card-spec { font-style: italic; }
   .task-card-repo { font-weight: 500; }
+
+  /* ── Merge queue banner ─────────────────────────────────── */
+  .merge-queue-banner {
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-warning) 8%, var(--color-surface));
+    border: 1px solid color-mix(in srgb, var(--color-warning) 25%, var(--color-border));
+    border-radius: var(--radius);
+    margin-bottom: var(--space-2);
+  }
+  .queue-banner-icon { font-size: 14px; margin-right: var(--space-1); }
+  .queue-banner-text { font-size: var(--text-xs); font-weight: 600; color: var(--color-warning); }
+  .queue-banner-items { display: flex; flex-direction: column; gap: 2px; margin-top: var(--space-1); }
+  .queue-banner-item {
+    display: flex; align-items: center; gap: var(--space-1);
+    font-size: 11px; color: var(--color-text-secondary);
+    background: transparent; border: none; cursor: pointer;
+    font-family: inherit; text-align: left; padding: 2px 0;
+    transition: color var(--transition-fast);
+  }
+  .queue-banner-item:hover { color: var(--color-text); }
+  .queue-banner-pos { font-weight: 700; color: var(--color-warning); font-family: var(--font-mono); }
+  .queue-banner-title { font-weight: 500; }
+  .queue-banner-spec { color: var(--color-text-muted); font-style: italic; }
 
   /* ── Spec cards (workspace overview) ─────────────────────── */
   .specs-list { display: flex; flex-direction: column; gap: var(--space-1); }
