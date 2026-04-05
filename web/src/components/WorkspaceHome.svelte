@@ -994,18 +994,25 @@
   });
 
   let statusSentence = $derived.by(() => {
-    if (statusItems.length === 0) {
-      const s = provenanceSummary;
-      if (specs.length === 0 && repos.length === 0) return 'Get started by creating a repo and pushing specs.';
-      if (specs.length === 0 && repos.length > 0) return `${repos.length} repo${repos.length !== 1 ? 's' : ''} ready. Push specs to start the autonomous pipeline.`;
-      if (s.approved > 0 && s.totalTasks === 0) return `${s.approved} spec${s.approved !== 1 ? 's' : ''} approved — tasks will be created automatically.`;
-      if (s.mergedMrs > 0 && s.activeAgentCount === 0 && s.openMrs === 0 && s.pending === 0) {
-        return `All clear: ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with signed attestations across ${repos.length} repo${repos.length !== 1 ? 's' : ''}.`;
-      }
-      if (s.totalTasks > 0 && s.activeAgentCount === 0) return `${s.totalTasks} task${s.totalTasks !== 1 ? 's' : ''} tracked. No agents running.`;
-      return `${repos.length} repo${repos.length !== 1 ? 's' : ''}. No active work.`;
+    const s = provenanceSummary;
+    // Build a natural sentence summarizing the workspace state
+    if (specs.length === 0 && repos.length === 0) return 'Get started by creating a repo and pushing specs.';
+    if (specs.length === 0 && repos.length > 0) return `${repos.length} repo${repos.length !== 1 ? 's' : ''} ready. Push specs to start the autonomous pipeline.`;
+
+    const parts = [];
+    if (s.failedGates > 0) parts.push(`${s.failedGates} MR${s.failedGates !== 1 ? 's have' : ' has'} failed gates`);
+    if (s.pending > 0) parts.push(`${s.pending} spec${s.pending !== 1 ? 's' : ''} awaiting approval`);
+    if (s.activeAgentCount > 0) parts.push(`${s.activeAgentCount} agent${s.activeAgentCount !== 1 ? 's' : ''} running`);
+    if (s.openMrs > 0 && s.failedGates === 0) parts.push(`${s.openMrs} open MR${s.openMrs !== 1 ? 's' : ''}`);
+
+    if (parts.length > 0) return parts.join(' · ') + '.';
+
+    if (s.mergedMrs > 0 && s.activeAgentCount === 0 && s.openMrs === 0 && s.pending === 0) {
+      return `All clear — ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged across ${repos.length} repo${repos.length !== 1 ? 's' : ''}.`;
     }
-    return statusItems.map(i => i.text).join('. ') + '.';
+    if (s.approved > 0 && s.totalTasks === 0) return `${s.approved} spec${s.approved !== 1 ? 's' : ''} approved — tasks will be created automatically.`;
+    if (s.totalTasks > 0 && s.activeAgentCount === 0) return `${s.totalTasks} task${s.totalTasks !== 1 ? 's' : ''} tracked, no agents running.`;
+    return `${repos.length} repo${repos.length !== 1 ? 's' : ''}, no active work.`;
   });
 
   // ── Budget percentage ──────────────────────────────────────────────────
@@ -1027,24 +1034,18 @@
   ]);
 
   // ── Auto-expand most relevant entity tab ─────────────────────────────────
-  // When data finishes loading, if there are items needing attention and no tab
-  // is already selected, auto-expand the most relevant tab.
+  // Only auto-expand for critical items (gate failures, failed agents).
+  // Pending specs and active agents are visible in the action-needed section
+  // and repo cards — no need to also expand a separate panel for them.
   $effect(() => {
-    // Only auto-expand once, after initial load completes
     if (activeEntityTab !== null) return;
     if (specsLoading || tasksLoading || mrsLoading || agentsLoading) return;
     const hasData = specs.length + wsTasks.length + wsMrs.length + wsAgents.length;
     if (!hasData) return;
-    // Priority: failed gates > pending specs > active agents > open MRs
+    // Only auto-expand for critical failures that need immediate attention
     if (pipelineMrs.failed_gates > 0) {
       activeEntityTab = 'mrs';
       expandedStage = 'mrs';
-    } else if (pipelineSpecs.pending > 0) {
-      activeEntityTab = 'specs';
-      expandedStage = 'specs';
-    } else if (pipelineAgents.active > 0) {
-      activeEntityTab = 'agents';
-      expandedStage = 'agents';
     }
   });
 
@@ -1091,35 +1092,16 @@
       <header class="ws-header">
         <div class="ws-header-top-row">
           <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
-          <div class="ws-header-actions">
-            {#if budgetPct !== null}
-              <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
-                <span class="ws-budget-bar"><span class="ws-budget-fill" style="width: {budgetPct}%"></span></span>
-                <span class="ws-budget-label">{budgetPct}%</span>
-              </span>
-            {/if}
-            <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings (g s)">
-              <Icon name="settings" size={14} /> Settings
-            </button>
-            <button class="ws-header-link" onclick={() => goToAgentRules?.()} title="Agent rules (g a)">
-              <Icon name="spec" size={14} /> Rules
-            </button>
-          </div>
-        </div>
-        <!-- Status indicators — clickable pipeline status chips -->
-        {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-          {#if statusItems.length > 0}
-            <div class="ws-header-status-items">
-              {#each statusItems as item}
-                <button class="ws-status-chip ws-status-chip-{item.variant}" onclick={() => toggleStage(item.tab)} title={item.text}>
-                  <span class="ws-status-chip-icon">{item.icon}</span>
-                  {item.text}
-                </button>
-              {/each}
-            </div>
-          {:else}
-            <p class="ws-header-status">{statusSentence}</p>
+          {#if budgetPct !== null}
+            <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
+              <span class="ws-budget-bar"><span class="ws-budget-fill" style="width: {budgetPct}%"></span></span>
+              <span class="ws-budget-label">{budgetPct}%</span>
+            </span>
           {/if}
+        </div>
+        <!-- Status sentence — concise summary of workspace state -->
+        {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
+          <p class="ws-header-status">{statusSentence}</p>
         {/if}
       </header>
 
@@ -1320,15 +1302,13 @@
 
       <!-- Merge queue items are shown on individual repo cards -->
 
-          <!-- ── Pipeline + Entity Tabs (unified) ─────────────────────── -->
+          <!-- ── Pipeline + Entity Tabs ─────────────────────── -->
           {#if activeEntityTab || specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
             <section class="ws-entity-tabs" data-testid="section-entity-tabs">
-              <div class="ws-pipeline-tabs" role="tablist" aria-label="Autonomous pipeline stages" data-testid="pipeline-hero">
+              <div class="ws-pipeline-tabs" role="tablist" aria-label="Pipeline stages" data-testid="pipeline-hero">
                 {#each pipelineTabsData as tab, i}
                   {#if i > 0 && i < 4}
-                    <span class="pipeline-tab-arrow" aria-hidden="true">
-                      <svg width="14" height="8" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                    </span>
+                    <span class="pipeline-tab-arrow" aria-hidden="true">→</span>
                   {/if}
                   {#if i === 4}
                     <span class="pipeline-tab-spacer"></span>
