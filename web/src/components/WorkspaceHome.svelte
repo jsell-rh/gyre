@@ -44,7 +44,7 @@
   } = $props();
 
   // ── Workspace overview tab state ────────────────────────────────────────
-  let wsTab = $state('activity'); // 'activity' | 'specs' | 'tasks' | 'mrs' | 'agents' | 'budget' | null
+  let wsTab = $state(null); // 'specs' | 'tasks' | 'mrs' | 'agents' | 'budget' | null
 
   // ── Create Workspace form state ───────────────────────────────────────
   let createWsOpen = $state(false);
@@ -1228,11 +1228,60 @@
             </div>
           </section>
 
-          <!-- ── Workspace overview tabs (always visible) ───────── -->
+          <!-- ── Activity feed (always visible, collapsible) ────── -->
+          {#if activityEvents.length > 0}
+            <details class="ws-activity-details" open={activityEvents.length <= 10}>
+              <summary class="ws-activity-summary">
+                <h2 class="section-heading section-heading-inline">Activity</h2>
+                <span class="activity-count-badge">{activityEvents.length}</span>
+              </summary>
+              <div class="activity-timeline">
+                {#each activityEvents.slice(0, activityLimit) as event, i}
+                  {@const variant = activityVariant(event)}
+                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                  <button
+                    class="activity-item activity-item-clickable"
+                    onclick={() => {
+                      if (primaryType && primaryId) {
+                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                        nav(primaryType, primaryId, data);
+                      }
+                    }}
+                  >
+                    <div class="activity-dot activity-dot-{variant}"></div>
+                    {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                    <div class="activity-content">
+                      <div class="activity-main-row">
+                        <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
+                        <span class="activity-label">{activityLabel(event)}</span>
+                        {#if event.repo_id && repoMap[event.repo_id]}<span class="activity-repo-badge">{repoMap[event.repo_id].name}</span>{/if}
+                        {#if event.timestamp ?? event.created_at}
+                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                        {/if}
+                      </div>
+                      {#if event.entity_name ?? event.title}
+                        <p class="activity-entity-name">{event.entity_name ?? event.title}</p>
+                      {/if}
+                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
+                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
+                      {/if}
+                    </div>
+                  </button>
+                {/each}
+              </div>
+              {#if activityEvents.length > activityLimit}
+                <button class="ws-overview-more-btn" onclick={() => { activityLimit = activityLimit <= 5 ? 30 : 5; }}>
+                  {activityLimit <= 5 ? `Show all ${activityEvents.length} events` : 'Show less'}
+                </button>
+              {/if}
+            </details>
+          {/if}
+
+          <!-- ── Workspace overview tabs ───────── -->
           <section class="ws-overview-section" data-testid="section-overview">
             <div class="ws-overview-tabs" role="tablist">
               {#each [
-                { id: 'activity', label: 'Activity', count: activityEvents.length > 0 ? activityEvents.length : null },
                 { id: 'specs', label: 'Specs', count: specs.length },
                 { id: 'tasks', label: 'Tasks', count: wsTasks.length },
                 { id: 'mrs', label: 'Merge Requests', count: wsMrs.length },
@@ -1247,53 +1296,7 @@
 
             {#if wsTab}
               <div class="ws-overview-content">
-                {#if wsTab === 'activity'}
-                  {#if activityEvents.length === 0}
-                    <p class="ws-overview-empty">No recent activity.</p>
-                  {:else}
-                    <div class="activity-timeline">
-                      {#each activityEvents.slice(0, activityLimit) as event, i}
-                        {@const variant = activityVariant(event)}
-                        {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                        {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                        <button
-                          class="activity-item activity-item-clickable"
-                          onclick={() => {
-                            if (primaryType && primaryId) {
-                              const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                              nav(primaryType, primaryId, data);
-                            }
-                          }}
-                        >
-                          <div class="activity-dot activity-dot-{variant}"></div>
-                          {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                          <div class="activity-content">
-                            <div class="activity-main-row">
-                              <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
-                              <span class="activity-label">{activityLabel(event)}</span>
-                              {#if event.repo_id && repoMap[event.repo_id]}<span class="activity-repo-badge">{repoMap[event.repo_id].name}</span>{/if}
-                              {#if event.timestamp ?? event.created_at}
-                                <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                              {/if}
-                            </div>
-                            {#if event.entity_name ?? event.title}
-                              <p class="activity-entity-name">{event.entity_name ?? event.title}</p>
-                            {/if}
-                            {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                              <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
-                            {/if}
-                          </div>
-                        </button>
-                      {/each}
-                    </div>
-                    {#if activityEvents.length > activityLimit}
-                      <button class="ws-overview-more-btn" onclick={() => { activityLimit = activityLimit <= 5 ? 30 : 5; }}>
-                        {activityLimit <= 5 ? `Show all ${activityEvents.length} events` : 'Show less'}
-                      </button>
-                    {/if}
-                  {/if}
-
-                {:else if wsTab === 'specs'}
+                {#if wsTab === 'specs'}
                   {#if specs.length === 0}
                     <p class="ws-overview-empty">No specs yet. Push specs to your repos to start the autonomous pipeline.</p>
                   {:else}
@@ -1653,6 +1656,37 @@
   .ws-activity-section {
     display: flex;
     flex-direction: column;
+  }
+
+  .ws-activity-details {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .ws-activity-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+  }
+
+  .ws-activity-summary::-webkit-details-marker { display: none; }
+
+  .ws-activity-summary::marker { content: ''; }
+
+  .ws-activity-details[open] .ws-activity-summary {
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .ws-activity-details .activity-timeline {
+    padding: var(--space-2) var(--space-3);
+    max-height: 400px;
+    overflow-y: auto;
   }
 
   .activity-details {
