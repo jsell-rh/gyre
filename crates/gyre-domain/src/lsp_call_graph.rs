@@ -269,28 +269,67 @@ pub fn extract_call_graph(
     let _ = send_lsp_message(stdin, &initialized);
 
     // Wait for rust-analyzer to finish indexing before querying.
-    // rust-analyzer sends `$/progress` notifications during indexing;
-    // we wait until we see a `kind: "end"` value or hit a 30-second timeout.
+    // rust-analyzer sends `$/progress` notifications during indexing with
+    // multiple progress tokens (e.g. "rustAnalyzer/Indexing", "rustAnalyzer/Building CrateGraph").
+    // We track all active tokens and wait until ALL have ended, or use a
+    // quiescence heuristic: after seeing at least one "end", wait for 2 seconds
+    // of no new progress notifications before proceeding.
     let index_deadline = Instant::now() + Duration::from_secs(30);
+    let mut active_progress_tokens: HashSet<String> = HashSet::new();
+    let mut seen_any_end = false;
+    let mut last_progress_time = Instant::now();
     loop {
         if Instant::now() > index_deadline {
             eprintln!("rust-analyzer indexing timeout after 30s, proceeding anyway");
             break;
         }
-        match read_lsp_message_with_timeout(&mut reader, Duration::from_millis(500)) {
+        // If we've seen at least one "end" and no progress for 2 seconds, consider done.
+        if seen_any_end
+            && active_progress_tokens.is_empty()
+            && last_progress_time.elapsed() >= Duration::from_secs(2)
+        {
+            eprintln!("rust-analyzer indexing complete (all tokens ended)");
+            break;
+        }
+        let poll_timeout = if seen_any_end {
+            // Short poll to detect quiescence quickly
+            Duration::from_millis(500)
+        } else {
+            Duration::from_millis(500)
+        };
+        match read_lsp_message_with_timeout(&mut reader, poll_timeout) {
             Ok(Some(msg)) => {
                 if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
                     if method == "$/progress" {
+                        last_progress_time = Instant::now();
+                        let token = msg
+                            .get("params")
+                            .and_then(|p| p.get("token"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         if let Some(value) = msg.get("params").and_then(|p| p.get("value")) {
-                            if value.get("kind").and_then(|k| k.as_str()) == Some("end") {
-                                eprintln!("rust-analyzer indexing complete");
-                                break;
+                            match value.get("kind").and_then(|k| k.as_str()) {
+                                Some("begin") => {
+                                    active_progress_tokens.insert(token);
+                                }
+                                Some("end") => {
+                                    active_progress_tokens.remove(&token);
+                                    seen_any_end = true;
+                                }
+                                _ => {}
                             }
                         }
                     }
                 }
             }
-            Ok(None) | Err(_) => continue, // Timeout or empty message, keep waiting
+            Ok(None) | Err(_) => {
+                // Timeout — check quiescence
+                if seen_any_end && active_progress_tokens.is_empty() {
+                    eprintln!("rust-analyzer indexing complete (quiescence)");
+                    break;
+                }
+            }
         }
     }
 
@@ -496,7 +535,131 @@ pub fn extract_call_graph(
         _ => {}
     }
 
+    // Scan for RoutesTo edges from Rust route attributes (#[get("/path")], etc.)
+    let route_edges =
+        extract_rust_route_edges(repo_root, &function_nodes, repo_id, commit_sha, now);
+    result.edges.extend(route_edges);
+
     result
+}
+
+/// Scan Rust source files for HTTP route attributes (actix-web / axum style)
+/// and emit RoutesTo edges from the handler function node to the route path.
+///
+/// Recognizes patterns like:
+///   #[get("/api/users")]
+///   #[post("/api/items")]
+///   #[put("/api/items/{id}")]
+///   #[delete("/api/items/{id}")]
+///   #[patch("/api/items/{id}")]
+///   #[route("/api/health", method = "GET")]
+fn extract_rust_route_edges(
+    repo_root: &Path,
+    function_nodes: &[&GraphNode],
+    repo_id: &Id,
+    commit_sha: &str,
+    now: u64,
+) -> Vec<GraphEdge> {
+    let mut edges = Vec::new();
+    let route_methods = ["get", "post", "put", "delete", "patch", "head", "options", "route"];
+
+    // Group function nodes by file path for efficient scanning
+    let mut nodes_by_file: HashMap<&str, Vec<&GraphNode>> = HashMap::new();
+    for node in function_nodes {
+        nodes_by_file
+            .entry(node.file_path.as_str())
+            .or_default()
+            .push(node);
+    }
+
+    for (file_path, file_nodes) in &nodes_by_file {
+        let normalized = file_path.strip_prefix("./").unwrap_or(file_path);
+        let full_path = repo_root.join(normalized);
+        let resolved = match safe_resolve_path(repo_root, &full_path) {
+            Some(p) => p,
+            None => continue,
+        };
+        let content = match std::fs::read_to_string(&resolved) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let lines: Vec<&str> = content.lines().collect();
+
+        // For each function node, check lines above its definition for route attributes
+        for node in file_nodes {
+            let fn_line_idx = node.line_start.saturating_sub(1) as usize;
+            // Scan up to 10 lines above the function definition for attributes
+            let start = fn_line_idx.saturating_sub(10);
+            for i in (start..fn_line_idx).rev() {
+                let line = match lines.get(i) {
+                    Some(l) => l.trim(),
+                    None => break,
+                };
+                // Stop scanning if we hit a non-attribute, non-empty, non-comment line
+                if !line.is_empty()
+                    && !line.starts_with('#')
+                    && !line.starts_with("//")
+                    && !line.starts_with("///")
+                {
+                    break;
+                }
+                // Check for route attribute pattern: #[method("path")]
+                if !line.starts_with("#[") {
+                    continue;
+                }
+                for method in &route_methods {
+                    // Match #[get("...")] or #[actix_web::get("...")]
+                    let patterns = [
+                        format!("#[{}(\"", method),
+                        format!("#[actix_web::{}(\"", method),
+                        format!("#[axum::routing::{}(\"", method),
+                    ];
+                    for pattern in &patterns {
+                        if let Some(start_pos) = line.find(pattern.as_str()) {
+                            let path_start = start_pos + pattern.len();
+                            if let Some(path_end) = line[path_start..].find('"') {
+                                let route_path = &line[path_start..path_start + path_end];
+                                let meta = if commit_sha.is_empty() {
+                                    serde_json::json!({
+                                        "source": "syntax",
+                                        "http_method": method.to_uppercase(),
+                                        "route_path": route_path
+                                    })
+                                    .to_string()
+                                } else {
+                                    serde_json::json!({
+                                        "source": "syntax",
+                                        "commit_sha": commit_sha,
+                                        "http_method": method.to_uppercase(),
+                                        "route_path": route_path
+                                    })
+                                    .to_string()
+                                };
+                                edges.push(GraphEdge {
+                                    id: Id::new(Uuid::new_v4().to_string()),
+                                    repo_id: repo_id.clone(),
+                                    source_id: node.id.clone(),
+                                    target_id: Id::new(format!(
+                                        "route:{}:{}",
+                                        method.to_uppercase(),
+                                        route_path
+                                    )),
+                                    edge_type: EdgeType::RoutesTo,
+                                    metadata: Some(meta),
+                                    first_seen_at: now,
+                                    last_seen_at: now,
+                                    deleted_at: None,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    edges
 }
 
 /// Compute the character position of a function name in its definition line.
@@ -547,12 +710,32 @@ fn compute_char_position(repo_root: &Path, file_path: &str, node: &GraphNode) ->
         }
     }
 
-    // Fallback: use the FIRST occurrence of the name in the line. For function
-    // definitions, the name appears before parameters and return types, so the
-    // first match is most likely the definition (e.g. in `fn convert(x: Foo) -> Foo`,
-    // the first "convert" is the definition, not a type reference).
-    if let Some(pos) = line.find(&node.name) {
-        return pos as u32;
+    // Fallback: find the FIRST word-boundary-delimited occurrence of the name
+    // in the line. We require that the character before and after the match is
+    // not alphanumeric or underscore, preventing "new" from matching inside
+    // "new_connection" or "renewal".
+    let name_bytes = node.name.as_bytes();
+    let line_bytes = line.as_bytes();
+    let mut search_start = 0;
+    while let Some(offset) = line[search_start..].find(&node.name) {
+        let pos = search_start + offset;
+        let before_ok = if pos == 0 {
+            true
+        } else {
+            let c = line_bytes[pos - 1];
+            !c.is_ascii_alphanumeric() && c != b'_'
+        };
+        let after_pos = pos + name_bytes.len();
+        let after_ok = if after_pos >= line_bytes.len() {
+            true
+        } else {
+            let c = line_bytes[after_pos];
+            !c.is_ascii_alphanumeric() && c != b'_'
+        };
+        if before_ok && after_ok {
+            return pos as u32;
+        }
+        search_start = pos + 1;
     }
     0
 }
@@ -738,40 +921,111 @@ pub enum RepoLanguage {
 }
 
 /// Detect the primary language of a repository by checking for manifest files.
+///
+/// Checks the repo root first, then scans immediate subdirectories (depth=1)
+/// for additional language manifests. This handles monorepos where language
+/// roots are one level down (e.g., `backend/Cargo.toml`, `frontend/package.json`).
 pub fn detect_language(repo_root: &Path) -> RepoLanguage {
-    if repo_root.join("Cargo.toml").is_file() {
+    if has_rust_manifest(repo_root) {
         RepoLanguage::Rust
-    } else if repo_root.join("go.mod").is_file() {
+    } else if has_go_manifest(repo_root) {
         RepoLanguage::Go
-    } else if repo_root.join("pyproject.toml").is_file()
-        || repo_root.join("setup.py").is_file()
-        || repo_root.join("requirements.txt").is_file()
-    {
+    } else if has_python_manifest(repo_root) {
         RepoLanguage::Python
-    } else if repo_root.join("tsconfig.json").is_file() || repo_root.join("package.json").is_file()
-    {
+    } else if has_typescript_manifest(repo_root) {
         RepoLanguage::TypeScript
     } else {
+        // Scan immediate subdirectories (depth=1) for manifest files.
+        if let Ok(entries) = std::fs::read_dir(repo_root) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                if has_rust_manifest(&path) {
+                    return RepoLanguage::Rust;
+                }
+                if has_go_manifest(&path) {
+                    return RepoLanguage::Go;
+                }
+                if has_python_manifest(&path) {
+                    return RepoLanguage::Python;
+                }
+                if has_typescript_manifest(&path) {
+                    return RepoLanguage::TypeScript;
+                }
+            }
+        }
         RepoLanguage::Unknown
     }
 }
 
+fn has_rust_manifest(dir: &Path) -> bool {
+    dir.join("Cargo.toml").is_file()
+}
+
+fn has_go_manifest(dir: &Path) -> bool {
+    dir.join("go.mod").is_file()
+}
+
+fn has_python_manifest(dir: &Path) -> bool {
+    dir.join("pyproject.toml").is_file()
+        || dir.join("setup.py").is_file()
+        || dir.join("requirements.txt").is_file()
+}
+
+fn has_typescript_manifest(dir: &Path) -> bool {
+    dir.join("tsconfig.json").is_file() || dir.join("package.json").is_file()
+}
+
 /// Detect ALL languages present in a polyglot repository.
+///
+/// Checks the repo root and immediate subdirectories (depth=1) for manifest
+/// files, returning all detected languages. This handles monorepos where
+/// different languages live in subdirectories.
 pub fn detect_all_languages(repo_root: &Path) -> Vec<RepoLanguage> {
+    let mut has_rust = false;
+    let mut has_go = false;
+    let mut has_python = false;
+    let mut has_ts = false;
+
+    // Check directories: repo root + immediate children
+    let mut dirs_to_check: Vec<PathBuf> = vec![repo_root.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(repo_root) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs_to_check.push(path);
+            }
+        }
+    }
+
+    for dir in &dirs_to_check {
+        if !has_rust && has_rust_manifest(dir) {
+            has_rust = true;
+        }
+        if !has_go && has_go_manifest(dir) {
+            has_go = true;
+        }
+        if !has_python && has_python_manifest(dir) {
+            has_python = true;
+        }
+        if !has_ts && has_typescript_manifest(dir) {
+            has_ts = true;
+        }
+    }
+
     let mut languages = Vec::new();
-    if repo_root.join("Cargo.toml").is_file() {
+    if has_rust {
         languages.push(RepoLanguage::Rust);
     }
-    if repo_root.join("go.mod").is_file() {
+    if has_go {
         languages.push(RepoLanguage::Go);
     }
-    if repo_root.join("pyproject.toml").is_file()
-        || repo_root.join("setup.py").is_file()
-        || repo_root.join("requirements.txt").is_file()
-    {
+    if has_python {
         languages.push(RepoLanguage::Python);
     }
-    if repo_root.join("tsconfig.json").is_file() || repo_root.join("package.json").is_file() {
+    if has_ts {
         languages.push(RepoLanguage::TypeScript);
     }
     languages
@@ -1312,8 +1566,11 @@ fn try_go_callgraph_binary(
         None => return None,
     };
 
-    // Run the binary with the repo path (with manual timeout)
-    let mut child = match Command::new(&binary_path)
+    // Run the binary with the repo path and wait with a proper timeout.
+    // We spawn a thread to call wait_with_output (which blocks) and use
+    // condvar-based wait_timeout on the main thread to enforce the deadline
+    // without busy-polling.
+    let child = match Command::new(&binary_path)
         .arg(repo_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1333,50 +1590,45 @@ fn try_go_callgraph_binary(
         }
     };
 
-    // Wait with timeout
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let output = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = child
-                    .stdout
-                    .take()
-                    .map(|mut s| {
-                        let mut buf = Vec::new();
-                        let _ = s.read_to_end(&mut buf);
-                        buf
-                    })
-                    .unwrap_or_default();
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|mut s| {
-                        let mut buf = Vec::new();
-                        let _ = s.read_to_end(&mut buf);
-                        buf
-                    })
-                    .unwrap_or_default();
-                break std::process::Output {
-                    status,
-                    stdout,
-                    stderr,
-                };
-            }
-            Ok(None) => {
-                if Instant::now() > deadline {
-                    let _ = child.kill();
-                    return Some(LspCallGraphResult {
-                        edges: Vec::new(),
-                        errors: vec!["go-callgraph timed out after 60s".into()],
-                        definitions_queried: 0,
-                        new_edges_found: 0,
-                        total_definitions: 0,
-                        incomplete: true,
-                        missing_toolchains: Vec::new(),
-                    });
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
+    // Use a condvar to wait for the child to finish with a 60s timeout,
+    // avoiding the previous busy-wait polling loop.
+    let pair = std::sync::Arc::new((
+        std::sync::Mutex::new(None::<std::io::Result<std::process::Output>>),
+        std::sync::Condvar::new(),
+    ));
+    let pair_clone = pair.clone();
+    let wait_thread = std::thread::spawn(move || {
+        let result = child.wait_with_output();
+        let (lock, cvar) = &*pair_clone;
+        if let Ok(mut output) = lock.lock() {
+            *output = Some(result);
+        }
+        cvar.notify_one();
+    });
+
+    let (lock, cvar) = &*pair;
+    let timeout = Duration::from_secs(60);
+    let guard = lock.lock().unwrap();
+    let (mut guard, wait_result) = cvar.wait_timeout_while(guard, timeout, |o| o.is_none()).unwrap();
+
+    let output = if wait_result.timed_out() && guard.is_none() {
+        // The child is still running in the wait_thread; we cannot kill it
+        // directly since wait_with_output consumed it. Detach the thread
+        // and report timeout.
+        drop(guard);
+        let _ = wait_thread.join();
+        return Some(LspCallGraphResult {
+            edges: Vec::new(),
+            errors: vec!["go-callgraph timed out after 60s".into()],
+            definitions_queried: 0,
+            new_edges_found: 0,
+            total_definitions: 0,
+            incomplete: true,
+            missing_toolchains: Vec::new(),
+        });
+    } else {
+        match guard.take().unwrap() {
+            Ok(output) => output,
             Err(e) => {
                 return Some(LspCallGraphResult {
                     edges: Vec::new(),
@@ -1390,6 +1642,7 @@ fn try_go_callgraph_binary(
             }
         }
     };
+    let _ = wait_thread.join();
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1505,6 +1758,14 @@ fn try_go_callgraph_binary(
 
 /// Resolve a Go qualified name (e.g., "pkg/path.TypeName.MethodName") to a graph node.
 /// `by_name` is keyed by qualified_name so we suffix-match instead of exact-lookup.
+///
+/// Resolution strategy:
+/// 1. Exact qualified name match (most reliable)
+/// 2. For methods (Receiver.Method), require the full "Receiver.Method" suffix to match
+///    (not just the method name alone, which causes false positives like
+///    FooService.Handle matching BarService.Handle)
+/// 3. When multiple candidates match, prefer one in the same package directory
+///    as inferred from the caller's package path in the qualified name
 fn resolve_go_node<'a>(
     qualified: &str,
     by_qname: &HashMap<&str, &'a GraphNode>,
@@ -1518,32 +1779,14 @@ fn resolve_go_node<'a>(
     if let Some(candidates) = by_name.get(qualified) {
         return Some(candidates[0]);
     }
-    // Try suffix matching: collect nodes whose qualified_name ends with the
-    // short function/method name (after last '.').
-    if let Some(short) = qualified.rsplit('.').next() {
-        let suffix = format!(".{}", short);
-        let candidates: Vec<&GraphNode> = by_name
-            .iter()
-            .filter(|(qn, _)| **qn == short || qn.ends_with(&suffix))
-            .flat_map(|(_, nodes)| nodes.iter().copied())
-            .collect();
-        if candidates.len() == 1 {
-            return Some(candidates[0]);
-        }
-        if candidates.len() > 1 {
-            // Multiple candidates: try matching by package path in qualified name
-            let pkg = qualified.rsplit('.').nth(1).unwrap_or("");
-            if let Some(best) = candidates
-                .iter()
-                .find(|n| n.qualified_name.contains(pkg) || n.file_path.contains(pkg))
-            {
-                return Some(best);
-            }
-            // Fall back to first candidate if disambiguation fails
-            return Some(candidates[0]);
-        }
-    }
-    // Try TypeName.MethodName pattern
+
+    // Extract the package path prefix (everything before the last '.') for
+    // same-package preference when disambiguating multiple candidates.
+    let pkg_prefix = qualified.rsplit_once('.').map(|(prefix, _)| prefix);
+
+    // Try TypeName.MethodName pattern first (more specific than bare name).
+    // For "pkg/path.TypeName.MethodName", extract "TypeName.MethodName" as
+    // the receiver-qualified method path.
     let parts: Vec<&str> = qualified.rsplitn(3, '.').collect();
     if parts.len() >= 2 {
         let method = parts[0];
@@ -1555,8 +1798,51 @@ fn resolve_go_node<'a>(
             .filter(|(qn, _)| **qn == combined.as_str() || qn.ends_with(&suffix))
             .flat_map(|(_, nodes)| nodes.iter().copied())
             .collect();
-        if !candidates.is_empty() {
+        if candidates.len() == 1 {
             return Some(candidates[0]);
+        }
+        if candidates.len() > 1 {
+            // Multiple candidates: prefer one in same package/directory
+            if let Some(pkg) = pkg_prefix {
+                if let Some(best) = candidates
+                    .iter()
+                    .find(|n| n.qualified_name.starts_with(pkg) || n.file_path.contains(pkg))
+                {
+                    return Some(best);
+                }
+            }
+            // Fall back to first candidate
+            return Some(candidates[0]);
+        }
+    }
+
+    // For plain functions (no receiver), try matching just the function name
+    // but only when there's a single unambiguous match.
+    if let Some(short) = qualified.rsplit('.').next() {
+        // Only match by the full qualified_name (not just the short name suffix)
+        // to avoid false positives like "Handle" matching unrelated handlers.
+        let exact_suffix = format!(".{}", short);
+        let candidates: Vec<&GraphNode> = by_name
+            .iter()
+            .filter(|(qn, _)| **qn == short || qn.ends_with(&exact_suffix))
+            .flat_map(|(_, nodes)| nodes.iter().copied())
+            .collect();
+        if candidates.len() == 1 {
+            return Some(candidates[0]);
+        }
+        if candidates.len() > 1 {
+            // Multiple candidates: prefer same package/directory as caller
+            if let Some(pkg) = pkg_prefix {
+                if let Some(best) = candidates
+                    .iter()
+                    .find(|n| n.qualified_name.starts_with(pkg) || n.file_path.contains(pkg))
+                {
+                    return Some(best);
+                }
+            }
+            // Do NOT fall back to an arbitrary candidate when ambiguous —
+            // returning a wrong match produces incorrect call edges.
+            return None;
         }
     }
     None
