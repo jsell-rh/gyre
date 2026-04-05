@@ -9,7 +9,6 @@
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
   import WorkspaceCards from './WorkspaceCards.svelte';
-  import ExplorerFilterPanel from './ExplorerFilterPanel.svelte';
   import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
 
   const navigate = getContext('navigate');
@@ -516,17 +515,7 @@
   // Workspace-scope: track when a repo has been selected to show graph canvas
   let showingRepoGraph = $state(false);
 
-  // Filter panel state
-  let filterVisible = $state(false);
   let insightsCollapsed = $state(true);
-  let activeFilters = $state(null);
-
-  // Auto-close filter panel when a view query becomes active (view queries replace filters)
-  $effect(() => {
-    if (activeViewQuery && filterVisible) {
-      filterVisible = false;
-    }
-  });
 
   // Manual view query editor state
   let queryEditorOpen = $state(false);
@@ -598,9 +587,6 @@
     queryEditorError = '';
   }
 
-  function onFilterChange(filters) {
-    activeFilters = filters;
-  }
 
   // Concept search state
   let conceptQuery = $state('');
@@ -1061,23 +1047,6 @@
     <!-- Control bar — concept search + filter toggle, always shown when repo is selected -->
     {#if selectedRepoId}
       <div class="concept-search-bar">
-        <!-- Filter toggle (hidden when view queries are active — filters replaced by view queries per spec) -->
-        {#if !activeViewQuery}
-          <button
-            class="ctrl-btn icon-btn"
-            class:active={filterVisible}
-            onclick={() => { filterVisible = !filterVisible; }}
-            title={$t('explorer_view.toggle_filters')}
-            aria-label={$t('explorer_view.toggle_filters')}
-            aria-pressed={filterVisible}
-            type="button"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-              <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
-            </svg>
-          </button>
-        {/if}
-
         <!-- Manual query editor toggle -->
         <button
           class="ctrl-btn icon-btn"
@@ -1145,11 +1114,6 @@
 
     <!-- Main content -->
     <div class="explorer-body">
-      <!-- Filter panel: hidden when view queries are active (view queries replace filters per spec) -->
-      {#if !activeViewQuery}
-        <ExplorerFilterPanel visible={filterVisible} onfilterchange={onFilterChange} nodes={graph?.nodes ?? []} edges={graph?.edges ?? []} />
-      {/if}
-
       <div class="explorer-body-main">
         {#if !selectedRepoId}
           <div class="empty-state-wrap">
@@ -1199,7 +1163,7 @@
                 activeQuery={activeViewQuery}
                 filter={explorerFilter}
                 lens={explorerLens}
-                filters={activeFilters}
+                filters={null}
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => {
                   detailNode = n;
