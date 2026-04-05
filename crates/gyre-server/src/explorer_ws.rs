@@ -2819,7 +2819,7 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 ### Scope Types
 - `all`: Show everything
 - `focus`: BFS from a node. Fields: node (name or "$clicked"), edges (array), direction ("outgoing"/"incoming"/"both"), depth (number)
-  **IMPORTANT:** Focus scope defaults to direction="both" and depth=5. For blast radius queries, set direction="incoming" and depth=10. For dependency/trace queries, set direction="outgoing".
+  **IMPORTANT:** Focus scope defaults to direction="incoming" and depth=5. For blast radius, the default direction is correct; increase depth to 10 for thorough analysis. For dependency/trace queries, set direction="outgoing" explicitly.
 - `filter`: Filter by node_types (array), computed (expression), or name_pattern
 - `test_gaps`: Functions not reachable from any test
 - `diff`: Changed nodes between commits. Fields: from_commit, to_commit (SHA prefixes, min 4 chars). For temporal diff, prefix with ~ and use epoch seconds: "~1711929600"
