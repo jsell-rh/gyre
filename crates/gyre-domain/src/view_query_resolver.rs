@@ -719,7 +719,7 @@ fn resolve_scope_with_adjacency(
                 // For accurate range queries, prefer temporal diff with epoch
                 // prefixes (e.g., Scope::Diff { from: "~1712000000", to: "~1712100000" }).
                 warnings.push(
-                    "SHA-based diff is approximate: only nodes whose last_modified_sha \
+                    "[info] SHA-based diff is approximate: only nodes whose last_modified_sha \
                      or created_sha matches the target commit are included. Intermediate \
                      commits are not visible. Use temporal diff (~epoch) for full range \
                      accuracy."
@@ -1000,7 +1000,8 @@ fn resolve_computed_expression_inner(
                             }
                         }
                         // Trace-based metrics require OTLP runtime data; return 0.0 placeholder
-                        "span_duration" | "span_count" | "error_rate" => Some(0.0),
+                        // Trace-based metrics require OTLP runtime data; exclude from static analysis
+                        "span_duration" | "span_count" | "error_rate" => None,
                         _ => None,
                     };
                     match (node_val, op) {
@@ -1244,9 +1245,7 @@ fn resolve_computed_expression_inner(
         // First find spec nodes (or any node whose spec_path matches exactly)
         let spec_node_ids: HashSet<String> = active_nodes
             .iter()
-            .filter(|n| {
-                n.spec_path.as_ref().map_or(false, |sp| spec_matches(sp))
-            })
+            .filter(|n| n.spec_path.as_ref().map_or(false, |sp| spec_matches(sp)))
             .map(|n| n.id.to_string())
             .collect();
 
@@ -1905,7 +1904,7 @@ pub fn dry_run(
         match heat.metric.as_str() {
             "span_duration" | "span_count" | "error_rate" => {
                 warnings.push(format!(
-                    "Heat metric '{}' requires trace data; dry-run returns placeholder values",
+                    "[info] Heat metric '{}' requires OTLP trace data which is not available in the graph model",
                     heat.metric
                 ));
             }
@@ -1948,7 +1947,8 @@ pub fn dry_run(
                         })
                     }
                     // Trace-based metrics require OTLP runtime data; return 0.0 placeholder
-                    "span_duration" | "span_count" | "error_rate" => Some(0.0),
+                    // Trace-based metrics require OTLP runtime data; exclude from static analysis
+                    "span_duration" | "span_count" | "error_rate" => None,
                     _ => {
                         if !heat.metric.is_empty() {
                             // Log unrecognized metric once via warning (already validated)
@@ -4799,14 +4799,8 @@ mod tests {
             &incoming,
             None,
         );
-        assert!(
-            result.contains("n1"),
-            "AuthService governed by auth.md"
-        );
-        assert!(
-            result.contains("n3"),
-            "auth spec node itself"
-        );
+        assert!(result.contains("n1"), "AuthService governed by auth.md");
+        assert!(result.contains("n3"), "auth spec node itself");
         assert!(
             !result.contains("n2"),
             "AuthzService should NOT match auth.md (exact matching)"
