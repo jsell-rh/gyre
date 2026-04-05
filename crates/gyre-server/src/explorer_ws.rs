@@ -347,12 +347,21 @@ async fn handle_explorer_session(
                 }
             }
             Ok(None) => {
-                // Agent record not found — possibly a legacy UUID token.
-                // Allow access since tenant-level auth was verified.
+                // Agent record not found — deny access. Without a workspace
+                // binding we cannot verify cross-workspace isolation.
                 warn!(
                     agent_id = %auth.agent_id,
-                    "Agent record not found for workspace check; allowing tenant-scoped access"
+                    "Agent record not found for workspace check; denying access"
                 );
+                let err = ExplorerServerMessage::Error {
+                    message: "Access denied: agent record not found".to_string(),
+                };
+                let _ = sender
+                    .send(Message::Text(
+                        serialize_msg(&err).unwrap_or_default().into(),
+                    ))
+                    .await;
+                return;
             }
             Err(e) => {
                 warn!(
@@ -409,9 +418,19 @@ async fn handle_explorer_session(
     // Graph data cache with TTL (30s). Re-fetch when stale, not on every message.
     let mut cached_nodes: Option<Vec<gyre_common::graph::GraphNode>> = None;
     let mut cached_edges: Option<Vec<gyre_common::graph::GraphEdge>> = None;
+    // Cached graph_summary: computed from cached_nodes/cached_edges, invalidated
+    // whenever the graph cache is invalidated.
+    let mut cached_graph_summary: Option<String> = None;
     let mut cache_time = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(60))
         .unwrap_or_else(std::time::Instant::now);
+
+    // Buffer for messages received during agent execution that should be
+    // processed after the agent completes (SaveView, DeleteView, LoadView, ListViews).
+    let mut queued_messages: Vec<ExplorerClientMessage> = Vec::new();
+    // Replay buffer: queued messages are moved here after agent completes,
+    // then drained at the top of the main loop before reading from the WebSocket.
+    let mut replay_buffer: std::collections::VecDeque<ExplorerClientMessage> = std::collections::VecDeque::new();
 
     // Ping/pong keepalive: keeps connections alive through proxies/load balancers.
     // Track last pong to detect dead connections (2 missed pongs = dead).
@@ -422,67 +441,57 @@ async fn handle_explorer_session(
     let pong_timeout = std::time::Duration::from_secs(WS_PING_INTERVAL_SECS * 2 + 5);
 
     loop {
-        let msg = tokio::select! {
-            incoming = receiver.next() => {
-                match incoming {
-                    Some(Ok(Message::Text(text))) => text,
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Pong(_))) => {
-                        *last_pong.lock().unwrap() = std::time::Instant::now();
-                        continue;
+        // First, drain any messages queued during agent execution.
+        let client_msg: ExplorerClientMessage = if let Some(replayed) = replay_buffer.pop_front() {
+            replayed
+        } else {
+            // No queued messages — read from WebSocket.
+            let msg = tokio::select! {
+                incoming = receiver.next() => {
+                    match incoming {
+                        Some(Ok(Message::Text(text))) => text,
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Ok(Message::Pong(_))) => {
+                            *last_pong.lock().unwrap() = std::time::Instant::now();
+                            continue;
+                        }
+                        Some(Ok(_)) => continue,
+                        Some(Err(e)) => {
+                            warn!("WebSocket error: {e}");
+                            break;
+                        }
                     }
-                    Some(Ok(_)) => continue,
-                    Some(Err(e)) => {
-                        warn!("WebSocket error: {e}");
+                }
+                _ = ping_interval.tick() => {
+                    // Check for dead connection (no pong received within timeout)
+                    if last_pong.lock().unwrap().elapsed() > pong_timeout {
+                        warn!(user = %auth.agent_id, "Explorer WS: no pong received in {:?}, closing dead connection", pong_timeout);
                         break;
                     }
+                    if sender.send(Message::Ping(vec![].into())).await.is_err() {
+                        break; // Client disconnected
+                    }
+                    continue;
                 }
-            }
-            _ = ping_interval.tick() => {
-                // Check for dead connection (no pong received within timeout)
-                if last_pong.lock().unwrap().elapsed() > pong_timeout {
-                    warn!(user = %auth.agent_id, "Explorer WS: no pong received in {:?}, closing dead connection", pong_timeout);
-                    break;
-                }
-                if sender.send(Message::Ping(vec![].into())).await.is_err() {
-                    break; // Client disconnected
-                }
-                continue;
-            }
-        };
-
-        // Check raw frame length BEFORE deserialization to prevent CPU exhaustion
-        // from deeply nested JSON structures. Two thresholds:
-        // 1. MAX_USER_MESSAGE_LENGTH + envelope: tighter limit that catches oversized
-        //    user text before spending CPU on JSON parsing.
-        // 2. MAX_RAW_FRAME_SIZE: hard upper bound for any message type.
-        //
-        // The user's text field is embedded in the JSON envelope along with
-        // canvas_state, so we allow 4x the user message limit as headroom for the
-        // JSON structure (canvas_state, type tag, etc.).
-        const MAX_RAW_FRAME_SIZE: usize = MAX_USER_MESSAGE_LENGTH * 4;
-        if msg.len() > MAX_RAW_FRAME_SIZE {
-            let err = ExplorerServerMessage::Error {
-                message: format!(
-                    "Message too large ({} bytes). Maximum frame size is {} bytes.",
-                    msg.len(),
-                    MAX_RAW_FRAME_SIZE
-                ),
             };
-            let _ = sender
-                .send(Message::Text(
-                    serialize_msg(&err).unwrap_or_default().into(),
-                ))
-                .await;
-            continue;
-        }
 
-        let client_msg: ExplorerClientMessage = match serde_json::from_str(&msg) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!(error = ?e, "Invalid explorer WebSocket message");
+            // Check raw frame length BEFORE deserialization to prevent CPU exhaustion
+            // from deeply nested JSON structures. Two thresholds:
+            // 1. MAX_USER_MESSAGE_LENGTH + envelope: tighter limit that catches oversized
+            //    user text before spending CPU on JSON parsing.
+            // 2. MAX_RAW_FRAME_SIZE: hard upper bound for any message type.
+            //
+            // The user's text field is embedded in the JSON envelope along with
+            // canvas_state, so we allow 4x the user message limit as headroom for the
+            // JSON structure (canvas_state, type tag, etc.).
+            const MAX_RAW_FRAME_SIZE: usize = MAX_USER_MESSAGE_LENGTH * 4 + 32768;
+            if msg.len() > MAX_RAW_FRAME_SIZE {
                 let err = ExplorerServerMessage::Error {
-                    message: "Invalid message format".to_string(),
+                    message: format!(
+                        "Message too large ({} bytes). Maximum frame size is {} bytes.",
+                        msg.len(),
+                        MAX_RAW_FRAME_SIZE
+                    ),
                 };
                 let _ = sender
                     .send(Message::Text(
@@ -490,6 +499,22 @@ async fn handle_explorer_session(
                     ))
                     .await;
                 continue;
+            }
+
+            match serde_json::from_str(&msg) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(error = ?e, "Invalid explorer WebSocket message");
+                    let err = ExplorerServerMessage::Error {
+                        message: "Invalid message format".to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(
+                            serialize_msg(&err).unwrap_or_default().into(),
+                        ))
+                        .await;
+                    continue;
+                }
             }
         };
 
@@ -532,10 +557,12 @@ async fn handle_explorer_session(
                 message_count += 1;
 
                 // Invalidate graph cache if older than 30 seconds (balance freshness vs cost).
+                // Do NOT reset cache_time here — let the actual reload (in run_explorer_agent)
+                // set it when fresh data is fetched. Otherwise we'd mark stale data as fresh.
                 if cache_time.elapsed() > std::time::Duration::from_secs(30) {
                     cached_nodes = None;
                     cached_edges = None;
-                    cache_time = std::time::Instant::now();
+                    cached_graph_summary = None;
                 }
                 // Heuristic cache invalidation: if the user's message suggests they
                 // expect fresh data (e.g. after a push), force-invalidate regardless
@@ -623,7 +650,7 @@ async fn handle_explorer_session(
                     if strong_match || stale_entity_match {
                         cached_nodes = None;
                         cached_edges = None;
-                        cache_time = std::time::Instant::now();
+                        cached_graph_summary = None;
                     }
                 }
                 if message_count > max_session_messages() {
@@ -663,6 +690,7 @@ async fn handle_explorer_session(
                         &mut conversation_history,
                         &mut cached_nodes,
                         &mut cached_edges,
+                        &mut cached_graph_summary,
                         &auth,
                         &repo_workspace_id,
                         &mut ping_interval,
@@ -671,7 +699,8 @@ async fn handle_explorer_session(
                     ) => result,
                     _ = async {
                         // Listen for Cancel messages while the agent is running.
-                        // Non-Cancel messages are dropped (the user can re-send after cancel).
+                        // View CRUD messages (SaveView, DeleteView, LoadView, ListViews)
+                        // are queued and processed after the agent completes.
                         loop {
                             match receiver.next().await {
                                 Some(Ok(Message::Text(raw))) => {
@@ -681,8 +710,20 @@ async fn handle_explorer_session(
                                             let _ = cancel_tx.send(true);
                                             break;
                                         }
+                                        // Queue view CRUD messages for processing after agent completes.
+                                        match &client_msg {
+                                            ExplorerClientMessage::SaveView { .. }
+                                            | ExplorerClientMessage::DeleteView { .. }
+                                            | ExplorerClientMessage::LoadView { .. }
+                                            | ExplorerClientMessage::ListViews => {
+                                                debug!(user = %auth.agent_id, "Queuing message during agent run");
+                                                queued_messages.push(client_msg);
+                                            }
+                                            _ => {
+                                                // Message type (e.g. another Message) ignored during agent run
+                                            }
+                                        }
                                     }
-                                    // Non-cancel messages are ignored during agent execution
                                 }
                                 Some(Ok(Message::Close(_))) | None => break,
                                 Some(Ok(Message::Pong(_))) => {
@@ -697,6 +738,11 @@ async fn handle_explorer_session(
                     }
                 };
 
+                // If the agent loaded fresh graph data, reset cache_time now.
+                if cached_nodes.is_some() && cache_time.elapsed() > std::time::Duration::from_secs(30) {
+                    cache_time = std::time::Instant::now();
+                }
+
                 match agent_result {
                     Ok(()) => {}
                     Err(e) => {
@@ -709,6 +755,18 @@ async fn handle_explorer_session(
                                 serialize_msg(&err).unwrap_or_default().into(),
                             ))
                             .await;
+                    }
+                }
+
+                // Re-queue messages that were buffered during agent execution
+                // so they get processed on subsequent loop iterations.
+                if !queued_messages.is_empty() {
+                    debug!(
+                        count = queued_messages.len(),
+                        "Replaying messages queued during agent run"
+                    );
+                    for queued_msg in queued_messages.drain(..) {
+                        replay_buffer.push_back(queued_msg);
                     }
                 }
 
@@ -1226,12 +1284,23 @@ async fn handle_explorer_session(
             ExplorerClientMessage::ListViews => {
                 // ListViews is read-only — not rate-limited (unlike SaveView/DeleteView).
                 let tenant_id = Id::new(&auth.tenant_id);
-                match state
-                    .saved_views
-                    .list_by_repo_and_tenant(&rid, &tenant_id)
-                    .await
-                {
-                    Ok(views) => {
+                // Query repo-scoped views AND workspace-scoped views (repo_id="__workspace__")
+                // then merge them, deduplicating by ID.
+                let workspace_view_id = Id::new("__workspace__");
+                let (repo_views, ws_views) = tokio::join!(
+                    state.saved_views.list_by_repo_and_tenant(&rid, &tenant_id),
+                    state.saved_views.list_by_repo_and_tenant(&workspace_view_id, &tenant_id),
+                );
+                match repo_views {
+                    Ok(mut views) => {
+                        // Merge workspace-scoped views, filtering to same workspace.
+                        if let Ok(ws) = ws_views {
+                            for v in ws {
+                                if v.workspace_id == repo_workspace_id {
+                                    views.push(v);
+                                }
+                            }
+                        }
                         // Views are already filtered by tenant_id at the SQL level.
                         let mut summaries: Vec<SavedViewSummary> = views
                             .into_iter()
@@ -1244,22 +1313,19 @@ async fn handle_explorer_session(
                             })
                             .collect();
 
-                        // Seed system default views on first access when no system views exist.
-                        // Check for system views specifically (not all views) to prevent
-                        // re-seeding when a user deletes all personal views.
-                        // Deduplication: check by name+is_system to prevent races between
-                        // concurrent sessions both seeing empty and creating duplicates.
+                        // Seed any missing system default views. Check each expected
+                        // view by name individually so that partially-seeded sets get
+                        // completed (e.g. if a new system view is added in a release).
                         let existing_system_names: std::collections::HashSet<String> = summaries
                             .iter()
                             .filter(|s| s.is_system)
                             .map(|s| s.name.clone())
                             .collect();
-                        if existing_system_names.is_empty() {
+                        {
                             let now = crate::api::now_secs();
                             let defaults = system_default_views();
                             for (name, description, query_json) in &defaults {
                                 // Skip if a system view with this name already exists
-                                // (handles concurrent seeding from another session)
                                 if existing_system_names.contains(*name) {
                                     continue;
                                 }
@@ -2175,6 +2241,7 @@ async fn run_explorer_agent(
     conversation_history: &mut Vec<ConversationMessage>,
     cached_nodes: &mut Option<Vec<gyre_common::graph::GraphNode>>,
     cached_edges: &mut Option<Vec<gyre_common::graph::GraphEdge>>,
+    cached_graph_summary: &mut Option<String>,
     auth: &AuthenticatedAgent,
     workspace_id: &Id,
     ping_interval: &mut tokio::time::Interval,
@@ -2352,6 +2419,7 @@ async fn run_explorer_agent(
                             *cached_nodes =
                                 Some(sorted_nodes.into_iter().take(kept_count).collect());
                             *cached_edges = Some(kept_edges);
+                            *cached_graph_summary = None;
                             // Warn the user via WebSocket (Vision Principle 2: "Right context, not more context")
                             // Explicitly note that computed metrics are affected — silent truncation
                             // makes test coverage gaps, blast radius, and risk scores unsound.
@@ -2367,6 +2435,7 @@ async fn run_explorer_agent(
                         } else {
                             *cached_nodes = Some(n);
                             *cached_edges = Some(e);
+                            *cached_graph_summary = None;
                         }
                     }
                     Err(e) => {
@@ -2975,7 +3044,18 @@ async fn run_explorer_agent(
         // Execute each tool call and collect results
         let mut result_blocks = Vec::new();
         for tc in &response.tool_calls {
-            let result = execute_tool(tc, repo_id, &nodes, &edges, selected_node_id, state).await;
+            // Use cached graph_summary when available to avoid recomputing on every call.
+            let result = if tc.name == "graph_summary" {
+                if let Some(ref cached) = cached_graph_summary {
+                    cached.clone()
+                } else {
+                    let computed = execute_tool(tc, repo_id, nodes, edges, selected_node_id, state).await;
+                    *cached_graph_summary = Some(computed.clone());
+                    computed
+                }
+            } else {
+                execute_tool(tc, repo_id, nodes, edges, selected_node_id, state).await
+            };
             result_blocks.push(ContentBlock::ToolResult {
                 tool_use_id: tc.id.clone(),
                 content: result,
