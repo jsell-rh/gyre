@@ -149,6 +149,10 @@ pub struct KnowledgeGraphResponse {
     pub repo_id: String,
     pub nodes: Vec<GraphNodeResponse>,
     pub edges: Vec<GraphEdgeResponse>,
+    /// Warnings about data quality — e.g., missing LSP toolchains that make
+    /// call graphs incomplete. The frontend should surface these prominently.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -387,10 +391,31 @@ pub async fn get_repo_graph(
         all_edges
     };
 
+    // Heuristic toolchain warnings: detect when code nodes exist but call
+    // graph edges are missing — indicates LSP toolchain was unavailable.
+    use gyre_common::graph::{EdgeType, NodeType};
+    let mut warnings = Vec::new();
+    let has_function_nodes = nodes.iter().any(|n| {
+        matches!(
+            n.node_type,
+            NodeType::Function | NodeType::Method | NodeType::Endpoint
+        )
+    });
+    let has_calls_edges = edges.iter().any(|e| e.edge_type == EdgeType::Calls);
+    if has_function_nodes && !has_calls_edges {
+        warnings.push(
+            "No call graph edges detected. LSP toolchains may not be installed \
+             (rust-analyzer, pyright, gopls, typescript-language-server). \
+             Blast radius, test coverage, and coupling analyses will be incomplete."
+                .to_string(),
+        );
+    }
+
     Ok(Json(KnowledgeGraphResponse {
         repo_id: id,
         nodes: nodes.into_iter().map(Into::into).collect(),
         edges: edges.into_iter().map(Into::into).collect(),
+        warnings,
     }))
 }
 
@@ -430,6 +455,7 @@ pub async fn get_graph_types(
         repo_id: id,
         nodes: nodes.into_iter().map(Into::into).collect(),
         edges: edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
     }))
 }
 
@@ -469,6 +495,7 @@ pub async fn get_graph_modules(
         repo_id: id,
         nodes: nodes.into_iter().map(Into::into).collect(),
         edges: edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
     }))
 }
 
@@ -540,6 +567,7 @@ pub async fn get_graph_by_spec(
         repo_id: id,
         nodes: nodes.into_iter().map(Into::into).collect(),
         edges: edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
     }))
 }
 
@@ -590,6 +618,7 @@ pub async fn get_graph_concept(
         repo_id: id,
         nodes: nodes.into_iter().map(Into::into).collect(),
         edges: edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
     }))
 }
 
@@ -730,6 +759,7 @@ pub async fn get_workspace_graph(
         repo_id: id,
         nodes: all_nodes.into_iter().map(Into::into).collect(),
         edges: all_edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
     }))
 }
 
@@ -1115,6 +1145,7 @@ pub async fn get_workspace_graph_concept(
         repo_id: id,
         nodes: matched_nodes.into_iter().map(Into::into).collect(),
         edges: matched_edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
     }))
 }
 

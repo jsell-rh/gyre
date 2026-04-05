@@ -95,19 +95,16 @@ describe('ExplorerCanvas', () => {
     expect(stats?.textContent).toContain('7 nodes');
   });
 
-  it('renders toolbar with filter presets', () => {
+  it('renders toolbar with lens toggle (filter presets removed per spec)', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const buttons = container.querySelectorAll('.tb-btn');
-    // 5 filter presets + 3 lens buttons
-    expect(buttons.length).toBeGreaterThanOrEqual(5);
-    const labels = Array.from(buttons).map(b => b.textContent);
-    expect(labels).toContain('All');
-    expect(labels).toContain('Endpoints');
-    expect(labels).toContain('Types');
-    expect(labels).toContain('Calls');
-    expect(labels).toContain('Dependencies');
+    // 3 lens buttons (Structural, Evaluative, Observable)
+    expect(buttons.length).toBeGreaterThanOrEqual(3);
+    const labels = Array.from(buttons).map(b => b.textContent.trim());
+    expect(labels.some(l => l.includes('Structural'))).toBe(true);
+    expect(labels.some(l => l.includes('Evaluative'))).toBe(true);
   });
 
   it('renders lens toggle with structural active', () => {
@@ -1398,9 +1395,8 @@ describe('ExplorerCanvas — accessibility', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const filterGroup = container.querySelector('[role="group"][aria-label="Filter presets"]');
+    // Filter presets removed per spec — only lens toggle group remains
     const lensGroup = container.querySelector('[role="group"][aria-label="Lens toggle"]');
-    expect(filterGroup).toBeTruthy();
     expect(lensGroup).toBeTruthy();
   });
 

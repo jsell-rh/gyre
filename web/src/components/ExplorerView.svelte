@@ -38,6 +38,10 @@
 
   // Explorer always shows architecture view (tabs removed per spec: "one canvas, one conversation, one understanding").
 
+  // Graph data quality warnings (e.g., missing LSP toolchains)
+  let graphWarnings = $state([]);
+  let graphWarningsDismissed = $state(false);
+
   // New explorer state
   let explorerCanvasState = $state({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] });
   let activeViewQuery = $state(null);
@@ -604,8 +608,14 @@
     graphError = null;
     selectedNode = null;
     traceData = null;
+    graphWarnings = [];
+    graphWarningsDismissed = false;
     try {
       graph = await api.repoGraph(repoId);
+      // Surface data quality warnings from the API (e.g., missing LSP toolchains)
+      if (graph?.warnings?.length) {
+        graphWarnings = graph.warnings;
+      }
       // Restore breadcrumb from URL hash if present (deep-link support)
       restoreBreadcrumbFromHash(graph);
       // Load trace data for evaluative lens (best-effort, non-blocking)
@@ -761,9 +771,13 @@
   });
 
   // ── Toolchain warning: detect missing call edges ──────────────────
-  // If the graph has many function nodes but zero Calls edges, the LSP
-  // toolchains are likely not installed (verifier finding #15).
+  // Uses server-side warnings from the API when available, with
+  // client-side heuristic fallback (verifier finding #15).
   let missingCallEdgesWarning = $derived.by(() => {
+    // Prefer server-provided warnings (more accurate)
+    if (graphWarnings.length > 0 && !graphWarningsDismissed) {
+      return graphWarnings.join(' ');
+    }
     if (!graph?.nodes?.length || !graph?.edges?.length) return null;
     const funcCount = graph.nodes.filter(n =>
       (n.node_type === 'function' || n.node_type === 'method') && !n.deleted_at
@@ -1094,6 +1108,9 @@
                 <div class="toolchain-warning" role="alert">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                   <span>{missingCallEdgesWarning}</span>
+                  <button class="toolchain-warning-dismiss" onclick={() => { graphWarningsDismissed = true; }} title="Dismiss" type="button" aria-label="Dismiss warning">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                  </button>
                 </div>
               {/if}
               <ExplorerCanvas
@@ -2468,6 +2485,13 @@
     border-radius: 8px; font-size: 11px; color: #fbbf24; max-width: 600px;
     backdrop-filter: blur(12px);
   }
+  .toolchain-warning-dismiss {
+    display: flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; background: transparent; border: none;
+    border-radius: 4px; color: #fbbf24; cursor: pointer; flex-shrink: 0;
+    opacity: 0.6;
+  }
+  .toolchain-warning-dismiss:hover { opacity: 1; background: rgba(245, 158, 11, 0.2); }
 
   .explorer-detail-area {
     width: 320px;

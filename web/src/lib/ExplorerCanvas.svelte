@@ -4907,16 +4907,8 @@
     </div>
   {/if}
 
-  <!-- Toolbar -->
+  <!-- Toolbar — filter presets removed per spec: use ExplorerFilterPanel or view queries for filtering -->
   <div class="treemap-toolbar">
-    <div class="filter-group" role="group" aria-label="Filter presets">
-      {#each [['all', 'All'], ['endpoints', 'Endpoints'], ['types', 'Types'], ['calls', 'Calls'], ['dependencies', 'Dependencies']] as [key, label]}
-        <button class="tb-btn" class:active={filter === key} onclick={() => { filter = key; syncCanvasState(); scheduleRedraw(); }} aria-pressed={filter === key} type="button">{label}</button>
-      {/each}
-    </div>
-
-    <div class="tb-sep"></div>
-
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
