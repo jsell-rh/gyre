@@ -381,7 +381,11 @@ pub async fn update_explorer_view(
 
     let updated = SavedView {
         name: req.name.unwrap_or(existing.name),
-        description: req.description.or(existing.description),
+        description: match req.description {
+            Some(d) if d.is_empty() => None,
+            Some(d) => Some(d),
+            None => existing.description,
+        },
         query_json,
         updated_at: now_secs(),
         ..existing

@@ -143,8 +143,10 @@
           .finally(() => { assertionsLoading = false; });
       }
       // Auto-highlight governed code on canvas (spec→code navigation, Vision §3)
+      // Sanitize specPath to prevent query injection via single quotes
+      const sanitizedPath = specPath.replace(/'/g, '');
       activeViewQuery = {
-        scope: { type: 'filter', computed: `$governed_by('${specPath}')` },
+        scope: { type: 'filter', computed: `$governed_by('${sanitizedPath}')` },
         emphasis: {
           highlight: { matched: { color: '#22c55e', label: 'Governed' } },
           dim_unmatched: 0.15,
@@ -386,26 +388,40 @@
   }
 
   // Poll for graph changes after spec publish (Execute→Observe step).
-  // Checks up to `maxAttempts` times with `intervalMs` delay.
+  // Uses content-based comparison (node IDs + names hash) to detect any change,
+  // not just count changes. Polls up to 12 attempts over 2 minutes.
   let publishPolling = $state(false);
-  async function pollForGraphUpdate(repoId, maxAttempts, intervalMs) {
+
+  function graphFingerprint(g) {
+    if (!g?.nodes?.length) return '';
+    // Sort node IDs for deterministic comparison, include names for rename detection
+    const entries = g.nodes.map(n => `${n.id}:${n.name ?? ''}`).sort();
+    return entries.join('|');
+  }
+
+  async function pollForGraphUpdate(repoId, maxAttempts = 12, intervalMs = 10000) {
     if (!repoId) return;
     publishPolling = true;
-    const baselineCount = graph?.nodes?.length ?? 0;
+    const baseline = graphFingerprint(graph);
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise(r => setTimeout(r, intervalMs));
       if (selectedRepoId !== repoId) break; // User navigated away
       try {
         const newGraph = await api.repoGraph(repoId);
-        const newCount = newGraph?.nodes?.length ?? 0;
-        if (newCount !== baselineCount) {
+        if (graphFingerprint(newGraph) !== baseline) {
           // Graph changed — transition ghosts to real nodes
           graph = newGraph;
           ghostOverlays = [];
           showToast('Architecture updated — agents implemented the spec changes.', { type: 'success' });
-          break;
+          publishPolling = false;
+          return;
         }
       } catch { /* graph fetch failed, keep polling */ }
+    }
+    // Polling exhausted — clear ghosts and notify
+    if (ghostOverlays.length > 0) {
+      ghostOverlays = [];
+      showToast('Prediction timeout — architecture may still be updating.', { type: 'warning' });
     }
     publishPolling = false;
   }
@@ -435,9 +451,32 @@
   let queryEditorError = $state('');
 
   const queryPresets = [
-    { label: 'Blast Radius', query: { type: 'blast_radius', from_node: null, depth: 3 } },
-    { label: 'Test Gaps', query: { type: 'test_gaps', min_complexity: 5 } },
-    { label: 'Hot Paths', query: { type: 'hot_paths', metric: 'churn', top_n: 10 } },
+    {
+      label: 'Blast Radius',
+      query: {
+        scope: { type: 'focus', node: '$clicked', edges: ['calls', 'implements'], direction: 'incoming', depth: 10 },
+        emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#94a3b8'], dim_unmatched: 0.12 },
+        edges: { filter: ['calls', 'implements'] },
+        zoom: 'fit',
+        annotation: { title: 'Blast radius: $name', description: '{{count}} transitive callers/implementors' },
+      },
+    },
+    {
+      label: 'Test Gaps',
+      query: {
+        scope: { type: 'test_gaps' },
+        emphasis: { highlight: { matched: { color: '#ef4444', label: 'Untested' } }, dim_unmatched: 0.3 },
+        annotation: { title: 'Test coverage gaps', description: '{{count}} functions not reachable from any test' },
+      },
+    },
+    {
+      label: 'Hot Paths',
+      query: {
+        scope: { type: 'all' },
+        emphasis: { heat: { metric: 'incoming_calls', palette: 'blue-red' } },
+        annotation: { title: 'Hot paths', description: 'Nodes colored by incoming call frequency' },
+      },
+    },
   ];
 
   function runManualQuery() {
@@ -556,6 +595,8 @@
     traceData = null;
     try {
       graph = await api.repoGraph(repoId);
+      // Restore breadcrumb from URL hash if present (deep-link support)
+      restoreBreadcrumbFromHash(graph);
       // Load trace data for evaluative lens (best-effort, non-blocking)
       loadTraceData(repoId);
     } catch (e) {
@@ -564,6 +605,39 @@
       graph = { nodes: [], edges: [] };
     } finally {
       loading = false;
+    }
+  }
+
+  /** Restore breadcrumb drill-down state from URL hash (#drill=name1/name2/name3) */
+  function restoreBreadcrumbFromHash(graphData) {
+    if (!graphData?.nodes?.length) return;
+    const hash = window.location.hash;
+    if (!hash.startsWith('#drill=')) return;
+    const encoded = hash.slice(7);
+    if (!encoded) return;
+    const segments = encoded.split('/').map(decodeURIComponent);
+    const breadcrumb = [];
+    for (const seg of segments) {
+      let nodeId, nodeName;
+      if (seg.includes(':')) {
+        const colonIdx = seg.indexOf(':');
+        nodeId = seg.slice(0, colonIdx);
+        nodeName = seg.slice(colonIdx + 1);
+      } else {
+        nodeName = seg;
+      }
+      const node = graphData.nodes.find(n => {
+        if (nodeId) return n.id === nodeId;
+        return n.name === nodeName;
+      });
+      if (node) {
+        breadcrumb.push({ id: node.id, name: node.name });
+      } else {
+        break; // Stop at first unresolvable segment
+      }
+    }
+    if (breadcrumb.length > 0) {
+      explorerCanvasState = { ...explorerCanvasState, breadcrumb };
     }
   }
 
@@ -1462,7 +1536,7 @@
                   <textarea
                     class="query-editor-textarea"
                     bind:value={queryEditorText}
-                    placeholder={'{"type": "blast_radius", "from_node": "...", "depth": 3}'}
+                    placeholder={'{"scope":{"type":"focus","node":"$clicked","edges":["calls"],"depth":5},"zoom":"fit"}'}
                     spellcheck="false"
                     aria-label="View query JSON"
                   ></textarea>

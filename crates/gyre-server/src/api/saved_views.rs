@@ -396,7 +396,11 @@ pub async fn update_view(
 
     let updated = SavedView {
         name: req.name.unwrap_or(existing.name),
-        description: req.description.or(existing.description),
+        description: match req.description {
+            Some(d) if d.is_empty() => None, // Explicit empty string clears description
+            Some(d) => Some(d),
+            None => existing.description, // Field absent: preserve existing
+        },
         query_json,
         updated_at: now_secs(),
         ..existing

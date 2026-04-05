@@ -321,8 +321,13 @@
     saveViewInputOpen = false;
     saveViewInputValue = '';
     if (!name || !ws || ws.readyState !== WebSocket.OPEN) return;
-    // Find the last view query from conversation
-    const lastViewQuery = [...messages].reverse().find(m => m.viewQuery)?.viewQuery ?? {};
+    // Find the last view query from conversation, or fall back to the active canvas query
+    const lastViewQuery = [...messages].reverse().find(m => m.viewQuery)?.viewQuery
+      ?? canvasState?.active_query
+      ?? null;
+    if (!lastViewQuery || (typeof lastViewQuery === 'object' && Object.keys(lastViewQuery).length === 0)) {
+      return; // Nothing to save
+    }
     ws.send(JSON.stringify({
       type: 'save_view',
       name: name,
