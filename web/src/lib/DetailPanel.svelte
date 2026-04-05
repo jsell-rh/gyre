@@ -3738,7 +3738,7 @@
                   {@const fileStatusLower = (file.status ?? 'modified').toLowerCase()}
                   {@const fileAdds = file.insertions ?? (file.hunks ? file.hunks.reduce((sum, h) => sum + h.lines.filter(l => l.type === 'add').length, 0) : null)}
                   {@const fileDels = file.deletions ?? (file.hunks ? file.hunks.reduce((sum, h) => sum + h.lines.filter(l => l.type === 'delete').length, 0) : null)}
-                  <details class="diff-file" id="diff-file-{idx}" open={mrDiff.files.length <= 10}>
+                  <details class="diff-file" id="diff-file-{idx}" open={mrDiff.files.length <= 10 || (fileAdds + fileDels) < 50}>
                     <summary class="diff-file-header">
                       <Badge value={fileStatusLower} variant={fileStatusLower === 'added' ? 'success' : fileStatusLower === 'deleted' ? 'danger' : 'info'} />
                       <span class="diff-file-path mono">{file.path}</span>
@@ -6127,6 +6127,11 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     margin-bottom: var(--space-2);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    max-height: 200px;
+    overflow-y: auto;
   }
 
   .diff-tree-actions {
