@@ -1361,13 +1361,15 @@ describe('ExplorerCanvas — semantic zoom levels', () => {
     expect(metricGroup).toBeTruthy();
   });
 
-  it('observable button is clickable and not disabled', () => {
+  it('observable button is visually disabled with tooltip', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const obsBtn = container.querySelector('.tb-btn-observable');
     expect(obsBtn).toBeTruthy();
-    expect(obsBtn.disabled).toBe(false);
+    expect(obsBtn.disabled).toBe(true);
+    expect(obsBtn.getAttribute('aria-disabled')).toBe('true');
+    expect(obsBtn.title).toMatch(/disabled.*pending production/i);
   });
 });
 

@@ -3252,7 +3252,11 @@
       const badges = activeQuery?.emphasis?.badges;
       if (badges?.metric && n) {
         let badgeValue = 0;
-        if (badges.metric === 'incoming_calls') {
+        // Prefer server-provided node_metrics from dry-run queryResult
+        const serverMetrics = queryResult?.node_metrics;
+        if (serverMetrics && typeof serverMetrics === 'object' && n.id in serverMetrics) {
+          badgeValue = serverMetrics[n.id] ?? 0;
+        } else if (badges.metric === 'incoming_calls') {
           badgeValue = incomingCallCounts.get(n.id) ?? 0;
         } else if (badges.metric === 'complexity') badgeValue = n.complexity ?? 0;
         else if (badges.metric === 'churn') badgeValue = n.churn_count_30d ?? 0;
@@ -4960,7 +4964,7 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" type="button" title="Observable lens — requires production OpenTelemetry collector integration" onclick={() => { observableBannerVisible = !observableBannerVisible; }} aria-disabled="true">Observable <span class="observable-coming-soon">(coming soon)</span></button>
+      <button class="tb-btn tb-btn-observable" type="button" disabled title="Observable lens is disabled — pending production OpenTelemetry collector integration" onclick={() => { observableBannerVisible = !observableBannerVisible; }} aria-disabled="true">Observable <span class="observable-coming-soon">(coming soon)</span></button>
     </div>
 
     {#if lens === 'evaluative'}

@@ -752,10 +752,11 @@ fn resolve_scope_with_adjacency(
                 // For accurate range queries, prefer temporal diff with epoch
                 // prefixes (e.g., Scope::Diff { from: "~1712000000", to: "~1712100000" }).
                 warnings.push(
-                    "[info] SHA-based diff is approximate: only nodes whose last_modified_sha \
-                     or created_sha matches the target commit are included. Intermediate \
-                     commits are not visible. Use temporal diff (~epoch) for full range \
-                     accuracy."
+                    "[info] SHA-based diff shows an approximate result. Each node only \
+                     records the commit that created it and the commit that last modified it, \
+                     so changes made by commits between the two boundary commits may not \
+                     appear. For a complete range, use a temporal diff with epoch timestamps \
+                     (e.g., Scope::Diff { from: \"~1712000000\", to: \"~1712100000\" })."
                         .to_string(),
                 );
                 let sha_matches = |sha: &str, target: &str| -> bool {
@@ -813,8 +814,11 @@ fn resolve_scope_with_adjacency(
             let mut result = HashSet::new();
             let mut all_depths = HashMap::new();
 
+            let total_seeds = seed_nodes.len();
+            let mut resolved_seeds = 0usize;
             for seed_name in seed_nodes {
                 if let Some(seed) = find_node_by_name(&active_nodes, seed_name) {
+                    resolved_seeds += 1;
                     let depth_map = bfs_traverse_with_depths(
                         &seed.id.to_string(),
                         &edge_types,
@@ -836,6 +840,14 @@ fn resolve_scope_with_adjacency(
                         seed_name
                     ));
                 }
+            }
+            // Warn when only some seed nodes resolved — the view may look
+            // complete but is silently missing part of the intended concept.
+            if resolved_seeds > 0 && resolved_seeds < total_seeds {
+                warnings.push(format!(
+                    "Concept scope partially resolved: {} of {} seed nodes found — results may be incomplete",
+                    resolved_seeds, total_seeds
+                ));
             }
             (result, all_depths)
         }
@@ -3370,6 +3382,43 @@ mod tests {
         assert!(result.contains("n1"), "Seed A");
         assert!(result.contains("n2"), "B via outgoing");
         assert!(result.contains("n3"), "C via incoming (both direction)");
+    }
+
+    #[test]
+    fn test_concept_partial_seed_resolution_warns() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+        ];
+        let edges = vec![make_edge("e1", "n1", "n2", EdgeType::Calls)];
+        let result = resolve_scope_with_depths(
+            &Scope::Concept {
+                seed_nodes: vec!["A".to_string(), "B".to_string(), "NoSuchNode".to_string()],
+                expand_edges: vec!["calls".to_string()],
+                expand_depth: 2,
+                expand_direction: "both".to_string(),
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        // Should contain per-node warning for the missing seed
+        assert!(
+            result.warnings.iter().any(|w| w.contains("NoSuchNode")),
+            "Expected a warning about the missing seed node"
+        );
+        // Should also contain a summary partial-resolution warning
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("partially resolved") && w.contains("2 of 3")),
+            "Expected a partial resolution warning, got: {:?}",
+            result.warnings
+        );
+        // The resolved seeds should still produce results
+        assert!(result.matched.contains("n1"));
+        assert!(result.matched.contains("n2"));
     }
 
     // ── dry_run warns on computed expression errors ─────────────────────────
