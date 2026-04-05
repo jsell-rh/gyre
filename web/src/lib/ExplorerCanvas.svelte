@@ -226,7 +226,11 @@
   let prevTraceDataLen = $state(0);
   $effect(() => {
     const curLen = traceData?.spans?.length ?? 0;
-    if (curLen > 0 && prevTraceDataLen === 0 && !userExplicitlySelectedMetric) {
+    // Only auto-select span_duration when: (1) first trace data arrives,
+    // (2) user hasn't explicitly chosen a metric, AND (3) user is on the
+    // evaluative lens. This prevents overriding the user's context when
+    // they are working in structural lens and trace data happens to arrive.
+    if (curLen > 0 && prevTraceDataLen === 0 && !userExplicitlySelectedMetric && lens === 'evaluative') {
       evaluativeMetric = 'span_duration';
     }
     prevTraceDataLen = curLen;
@@ -4861,7 +4865,7 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" type="button" title="Observable lens — requires production OpenTelemetry collector integration" onclick={() => { observableBannerVisible = !observableBannerVisible; }} aria-disabled="true">Observable</button>
+      <button class="tb-btn tb-btn-observable" type="button" title="Observable lens — requires production OpenTelemetry collector integration" onclick={() => { observableBannerVisible = !observableBannerVisible; }} aria-disabled="true">Observable <span class="observable-coming-soon">(coming soon)</span></button>
     </div>
 
     {#if lens === 'evaluative'}
@@ -5350,9 +5354,10 @@
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .tb-btn-disabled { opacity: 0.35; cursor: not-allowed; }
-  .tb-btn-observable { opacity: 0.35; font-style: italic; cursor: not-allowed; text-decoration: line-through; }
+  .tb-btn-observable { opacity: 0.35; font-style: italic; cursor: not-allowed; }
   .tb-btn-observable:hover { opacity: 0.5; }
   .tb-btn-observable::after { content: '🔒'; font-size: 8px; margin-left: 4px; vertical-align: middle; text-decoration: none; display: inline-block; }
+  .observable-coming-soon { font-size: 9px; opacity: 0.7; font-style: italic; }
   /* Styles for eval-metric, observable-banner, trace-playback moved to extracted components */
 
   .tb-sep { width: 1px; height: 20px; background: #334155; margin: 0 4px; }
