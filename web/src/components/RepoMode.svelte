@@ -499,18 +499,18 @@
         {/if}
       {/if}
 
-      <!-- Clone URL -->
+      <!-- Clone URL (compact — just copy icon) -->
       {#if cloneUrl}
         <span class="meta-sep" aria-hidden="true">·</span>
         <button
-          class="clone-btn"
+          class="clone-btn-compact"
           onclick={copyCloneUrl}
           aria-label={cloneCopied ? $t('repo_mode.clone_url_copied') : $t('repo_mode.copy_clone_url')}
           title={cloneUrl}
           data-testid="clone-url-btn"
         >
-          <span class="clone-url-text">{cloneUrl}</span>
-          <span class="clone-icon" aria-hidden="true">{cloneCopied ? '✓' : 'copy'}</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          {cloneCopied ? 'Copied!' : 'Clone'}
         </button>
       {/if}
     </div>
@@ -1077,43 +1077,30 @@
     white-space: nowrap;
   }
 
-  /* Clone URL button */
-  .clone-btn {
+  /* Clone URL button (compact) */
+  .clone-btn-compact {
     display: flex;
     align-items: center;
     gap: var(--space-1);
     background: transparent;
     border: none;
-    padding: 0;
+    padding: 2px var(--space-2);
     cursor: pointer;
-    font-family: var(--font-mono);
+    font-family: var(--font-body);
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     transition: color var(--transition-fast);
-    max-width: 280px;
-    overflow: hidden;
-  }
-
-  .clone-btn:hover {
-    color: var(--color-text-secondary);
-  }
-
-  .clone-btn:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: 2px;
     border-radius: var(--radius-sm);
   }
 
-  .clone-url-text {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 240px;
+  .clone-btn-compact:hover {
+    color: var(--color-text-secondary);
+    background: var(--color-surface-elevated);
   }
 
-  .clone-icon {
-    flex-shrink: 0;
-    font-style: normal;
+  .clone-btn-compact:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
   }
 
   /* ── Tab bar ────────────────────────────────────────────────────────── */
