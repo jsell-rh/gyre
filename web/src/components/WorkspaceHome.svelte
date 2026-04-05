@@ -44,7 +44,7 @@
   } = $props();
 
   // ── Workspace overview tab state ────────────────────────────────────────
-  let wsTab = $state(null); // null = collapsed, 'specs' | 'tasks' | 'mrs' | 'agents' | 'budget'
+  let wsTab = $state('activity'); // 'activity' | 'specs' | 'tasks' | 'mrs' | 'agents' | 'budget' | null
 
   // ── Create Workspace form state ───────────────────────────────────────
   let createWsOpen = $state(false);
@@ -1138,88 +1138,6 @@
             </section>
           {/if}
 
-          <!-- Merge Queue (if items exist) -->
-          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
-            <section class="ws-merge-queue-section" data-testid="section-merge-queue">
-              <div class="section-header-row">
-                <h2 class="section-heading">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="13" height="13" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
-                  Merge Queue ({mergeQueueItems.length})
-                </h2>
-              </div>
-              <div class="merge-queue-list">
-                {#each mergeQueueItems as item, i}
-                  {@const mrStatus = item._status ?? item.status ?? 'pending'}
-                  {@const gates = item._mr?._gates ?? null}
-                  <button class="merge-queue-entry" onclick={() => nav('mr', item.merge_request_id ?? item.mr_id, item._mr ?? {})} title="View merge request">
-                    <span class="mq-position">#{i + 1}</span>
-                    <div class="mq-content">
-                      <span class="mq-title">{item._title ?? 'Untitled'}</span>
-                      <span class="mq-meta">
-                        {#if item._branch}<span class="mq-branch">{item._branch}</span>{/if}
-                        {#if item._agent}<span class="mq-agent">{entityName('agent', item._agent)}</span>{/if}
-                        {#if item._spec_ref}<span class="mq-spec">{item._spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '')}</span>{/if}
-                      </span>
-                    </div>
-                    <div class="mq-status">
-                      {#if gates?.details?.length > 0}
-                        <span class="gate-names-ws">
-                          {#each gates.details.slice(0, 2) as g}
-                            <span class="gate-badge-ws gate-badge-ws-{g.status}">
-                              <span class="gate-badge-ws-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
-                              <span class="gate-badge-ws-name">{g.name}</span>
-                            </span>
-                          {/each}
-                        </span>
-                      {/if}
-                      {#if item._deps?.length > 0}
-                        <span class="mq-deps" title="Depends on {item._deps.length} other MR{item._deps.length !== 1 ? 's' : ''}">⤵ {item._deps.length} dep{item._deps.length !== 1 ? 's' : ''}</span>
-                      {/if}
-                      <span class="mq-status-badge mq-status-{mrStatus}">{mrStatus}</span>
-                    </div>
-                  </button>
-                {/each}
-              </div>
-            </section>
-          {/if}
-
-          <!-- Active Agents (prominent when work is happening) -->
-          {#if !agentsLoading}
-            {@const activeAgentList = wsAgents.filter(a => a.status === 'active' || a.status === 'running')}
-            {#if activeAgentList.length > 0}
-              <section class="ws-active-agents" data-testid="section-active-agents">
-                <div class="section-header-row">
-                  <h2 class="section-heading">
-                    <span class="live-dot"></span>
-                    {activeAgentList.length} Agent{activeAgentList.length !== 1 ? 's' : ''} Working
-                  </h2>
-                </div>
-                <div class="active-agents-grid">
-                  {#each activeAgentList as agent}
-                    {@const elapsedSec = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
-                    {@const specName = agent.spec_path?.split('/').pop()?.replace(/\.md$/, '')}
-                    <button class="active-agent-card" onclick={() => nav('agent', agent.id, agent)}>
-                      <div class="active-agent-header">
-                        <span class="active-agent-name">{agent.name ?? formatId('agent', agent.id)}</span>
-                        {#if elapsedSec != null}
-                          <span class="active-agent-time">{elapsedSec < 60 ? `${elapsedSec}s` : elapsedSec < 3600 ? `${Math.round(elapsedSec / 60)}m` : `${Math.round(elapsedSec / 3600)}h`}</span>
-                        {/if}
-                      </div>
-                      <div class="active-agent-context">
-                        {#if specName}<span class="active-agent-spec" title={agent.spec_path}>{specName}</span>{/if}
-                        {#if agent.task_id ?? agent.current_task_id}<span class="active-agent-task">{entityName('task', agent.task_id ?? agent.current_task_id)}</span>{/if}
-                      </div>
-                      <div class="active-agent-actions">
-                        {#if agent.repo_id && repoMap[agent.repo_id]}<span class="active-agent-repo">{repoMap[agent.repo_id].name}</span>{/if}
-                        <span class="active-agent-view">View →</span>
-                      </div>
-                    </button>
-                  {/each}
-                </div>
-              </section>
-            {/if}
-          {/if}
-
           <!-- Repos (primary content) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
@@ -1325,25 +1243,72 @@
             </div>
           </section>
 
-          <!-- ── Workspace overview tabs ────────────────────────── -->
-          {#if wsTab}
-            <section class="ws-overview-section" data-testid="section-overview">
-              <div class="ws-overview-tabs" role="tablist">
-                {#each [
-                  { id: 'specs', label: 'Specs', count: specs.length },
-                  { id: 'tasks', label: 'Tasks', count: wsTasks.length },
-                  { id: 'mrs', label: 'Merge Requests', count: wsMrs.length },
-                  { id: 'agents', label: 'Agents', count: wsAgents.length },
-                  { id: 'budget', label: 'Budget', count: null },
-                ] as tab}
-                  <button class="ws-overview-tab" class:ws-overview-tab-active={wsTab === tab.id} role="tab" aria-selected={wsTab === tab.id} onclick={() => { wsTab = wsTab === tab.id ? null : tab.id; }}>
-                    {tab.label}{#if tab.count != null} <span class="ws-overview-tab-count">{tab.count}</span>{/if}
-                  </button>
-                {/each}
-              </div>
+          <!-- ── Workspace overview tabs (always visible) ───────── -->
+          <section class="ws-overview-section" data-testid="section-overview">
+            <div class="ws-overview-tabs" role="tablist">
+              {#each [
+                { id: 'activity', label: 'Activity', count: activityEvents.length > 0 ? activityEvents.length : null },
+                { id: 'specs', label: 'Specs', count: specs.length },
+                { id: 'tasks', label: 'Tasks', count: wsTasks.length },
+                { id: 'mrs', label: 'Merge Requests', count: wsMrs.length },
+                { id: 'agents', label: 'Agents', count: wsAgents.length },
+                { id: 'budget', label: 'Budget', count: null },
+              ] as tab}
+                <button class="ws-overview-tab" class:ws-overview-tab-active={wsTab === tab.id} role="tab" aria-selected={wsTab === tab.id} onclick={() => { wsTab = wsTab === tab.id ? null : tab.id; }}>
+                  {tab.label}{#if tab.count != null} <span class="ws-overview-tab-count">{tab.count}</span>{/if}
+                </button>
+              {/each}
+            </div>
 
+            {#if wsTab}
               <div class="ws-overview-content">
-                {#if wsTab === 'specs'}
+                {#if wsTab === 'activity'}
+                  {#if activityEvents.length === 0}
+                    <p class="ws-overview-empty">No recent activity.</p>
+                  {:else}
+                    <div class="activity-timeline">
+                      {#each activityEvents.slice(0, activityLimit) as event, i}
+                        {@const variant = activityVariant(event)}
+                        {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                        {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                        <button
+                          class="activity-item activity-item-clickable"
+                          onclick={() => {
+                            if (primaryType && primaryId) {
+                              const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                              nav(primaryType, primaryId, data);
+                            }
+                          }}
+                        >
+                          <div class="activity-dot activity-dot-{variant}"></div>
+                          {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                          <div class="activity-content">
+                            <div class="activity-main-row">
+                              <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
+                              <span class="activity-label">{activityLabel(event)}</span>
+                              {#if event.repo_id && repoMap[event.repo_id]}<span class="activity-repo-badge">{repoMap[event.repo_id].name}</span>{/if}
+                              {#if event.timestamp ?? event.created_at}
+                                <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                              {/if}
+                            </div>
+                            {#if event.entity_name ?? event.title}
+                              <p class="activity-entity-name">{event.entity_name ?? event.title}</p>
+                            {/if}
+                            {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
+                              <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
+                            {/if}
+                          </div>
+                        </button>
+                      {/each}
+                    </div>
+                    {#if activityEvents.length > activityLimit}
+                      <button class="ws-overview-more-btn" onclick={() => { activityLimit = activityLimit <= 3 ? 30 : 3; }}>
+                        {activityLimit <= 3 ? `Show all ${activityEvents.length} events` : 'Show less'}
+                      </button>
+                    {/if}
+                  {/if}
+
+                {:else if wsTab === 'specs'}
                   {#if specs.length === 0}
                     <p class="ws-overview-empty">No specs yet. Push specs to your repos to start the autonomous pipeline.</p>
                   {:else}
@@ -1500,57 +1465,8 @@
                   </div>
                 {/if}
               </div>
-            </section>
-          {/if}
-
-          <!-- ── Recent Activity ─────────────────────────────── -->
-          {#if !activityLoading && activityEvents.length > 0}
-            <section class="ws-activity-section" data-testid="section-activity">
-              <div class="section-header-row">
-                <h2 class="section-heading">Recent Activity</h2>
-                {#if activityEvents.length > 3}
-                  <button class="section-btn section-btn-compact" onclick={() => { activityLimit = activityLimit <= 3 ? 15 : 3; }}>
-                    {activityLimit <= 3 ? `Show all (${activityEvents.length})` : 'Show less'}
-                  </button>
-                {/if}
-              </div>
-              <div class="activity-timeline">
-                {#each activityEvents.slice(0, activityLimit) as event, i}
-                  {@const variant = activityVariant(event)}
-                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                  <button
-                    class="activity-item activity-item-clickable"
-                    onclick={() => {
-                      if (primaryType && primaryId) {
-                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                        nav(primaryType, primaryId, data);
-                      }
-                    }}
-                  >
-                    <div class="activity-dot activity-dot-{variant}"></div>
-                    {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                    <div class="activity-content">
-                      <div class="activity-main-row">
-                        <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
-                        <span class="activity-label">{activityLabel(event)}</span>
-                        {#if event.repo_id && repoMap[event.repo_id]}<span class="activity-repo-badge">{repoMap[event.repo_id].name}</span>{/if}
-                        {#if event.timestamp ?? event.created_at}
-                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                        {/if}
-                      </div>
-                      {#if event.entity_name ?? event.title}
-                        <p class="activity-entity-name">{event.entity_name ?? event.title}</p>
-                      {/if}
-                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
-                      {/if}
-                    </div>
-                  </button>
-                {/each}
-              </div>
-            </section>
-          {/if}
+            {/if}
+          </section>
 
       </div><!-- .ws-main-content -->
 
@@ -2147,6 +2063,23 @@
     max-height: 400px;
     overflow-y: auto;
   }
+
+  .ws-overview-more-btn {
+    display: block;
+    width: 100%;
+    padding: var(--space-2);
+    background: transparent;
+    border: none;
+    border-top: 1px solid var(--color-border);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    font-weight: 500;
+    transition: background var(--transition-fast);
+  }
+
+  .ws-overview-more-btn:hover { background: var(--color-surface-elevated); }
 
   .ws-overview-empty {
     text-align: center;
