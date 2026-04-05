@@ -94,13 +94,16 @@
     {:else if latestMr}
       <div class="repo-card-activity">
         <button class="repo-activity-link repo-activity-{latestMr.status === 'merged' ? 'success' : 'info'}" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', latestMr.id, { repo_id: repo.id, title: latestMr.title }); }}>
-          {latestMr.status === 'merged' ? 'Last merged' : 'Latest MR'}: {latestMr.title ?? 'Untitled'}
+          {latestMr.status === 'merged' ? 'Merged' : 'Latest'}: {latestMr.title ?? 'Untitled'}
         </button>
         {#if latestMr.diff_stats}
-          <span class="repo-activity-diff">
+          <button class="repo-activity-diff" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', latestMr.id, { repo_id: repo.id, title: latestMr.title, _openTab: 'diff' }); }} title="View diff">
             <span class="diff-ins-tiny">+{latestMr.diff_stats.insertions ?? 0}</span>
             <span class="diff-del-tiny">-{latestMr.diff_stats.deletions ?? 0}</span>
-          </span>
+          </button>
+        {/if}
+        {#if latestMr.merge_commit_sha}
+          <span class="repo-merge-sha" title="Merge commit: {latestMr.merge_commit_sha}">{latestMr.merge_commit_sha.slice(0, 7)}</span>
         {/if}
         {#if latestMr._gates?.details?.length > 0}
           <span class="repo-mr-gates">
@@ -315,10 +318,27 @@
     gap: 3px;
     font-family: var(--font-mono);
     font-size: 10px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 0 3px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
   }
+
+  .repo-activity-diff:hover { background: var(--color-surface-elevated); border-color: var(--color-border); }
 
   .diff-ins-tiny { color: var(--color-success); font-weight: 600; }
   .diff-del-tiny { color: var(--color-danger); font-weight: 600; }
+
+  .repo-merge-sha {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+  }
 
   .repo-mr-gates {
     display: inline-flex;
