@@ -633,13 +633,18 @@
   let activeEntityTab = $state(null); // null | 'specs' | 'tasks' | 'agents' | 'mrs' | 'activity'
 
   function toggleStage(stageId) {
-    // Pipeline hero stages now navigate directly to entity tabs
+    // Pipeline hero stages navigate directly to entity tabs
     if (activeEntityTab === stageId) {
       activeEntityTab = null;
       expandedStage = null;
     } else {
       activeEntityTab = stageId;
       expandedStage = stageId;
+      // Scroll entity tabs into view
+      queueMicrotask(() => {
+        const el = document.querySelector('[data-testid="section-entity-tabs"]');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
     }
   }
 
@@ -1009,6 +1014,28 @@
     if (!maxTokens) return null;
     const used = budgetData.tokens_used_today ?? 0;
     return Math.min(100, Math.round((used / maxTokens) * 100));
+  });
+
+  // ── Auto-expand most relevant entity tab ─────────────────────────────────
+  // When data finishes loading, if there are items needing attention and no tab
+  // is already selected, auto-expand the most relevant tab.
+  $effect(() => {
+    // Only auto-expand once, after initial load completes
+    if (activeEntityTab !== null) return;
+    if (specsLoading || tasksLoading || mrsLoading || agentsLoading) return;
+    const hasData = specs.length + wsTasks.length + wsMrs.length + wsAgents.length;
+    if (!hasData) return;
+    // Priority: failed gates > pending specs > active agents > open MRs
+    if (pipelineMrs.failed_gates > 0) {
+      activeEntityTab = 'mrs';
+      expandedStage = 'mrs';
+    } else if (pipelineSpecs.pending > 0) {
+      activeEntityTab = 'specs';
+      expandedStage = 'specs';
+    } else if (pipelineAgents.active > 0) {
+      activeEntityTab = 'agents';
+      expandedStage = 'agents';
+    }
   });
 
   // ── Load all data when workspace changes ───────────────────────────────
