@@ -768,7 +768,7 @@ describe('ExplorerCanvas — lens switching', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative', traceData },
     });
-    expect(container.querySelector('.eval-playback')).toBeTruthy();
+    expect(container.querySelector('.trace-playback-bar')).toBeTruthy();
   });
 
   it('structural lens shows spec coverage legend', () => {
@@ -982,7 +982,7 @@ describe('ExplorerCanvas — evaluative lens', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative', traceData },
     });
-    expect(container.querySelector('.eval-playback')).toBeTruthy();
+    expect(container.querySelector('.trace-playback-bar')).toBeTruthy();
   });
 
   it('shows no-trace message when evaluative lens lacks trace data', () => {
