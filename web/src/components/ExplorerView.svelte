@@ -760,6 +760,24 @@
     ghostOverlays = [];
   });
 
+  // ── Toolchain warning: detect missing call edges ──────────────────
+  // If the graph has many function nodes but zero Calls edges, the LSP
+  // toolchains are likely not installed (verifier finding #15).
+  let missingCallEdgesWarning = $derived.by(() => {
+    if (!graph?.nodes?.length || !graph?.edges?.length) return null;
+    const funcCount = graph.nodes.filter(n =>
+      (n.node_type === 'function' || n.node_type === 'method') && !n.deleted_at
+    ).length;
+    const callEdgeCount = graph.edges.filter(e =>
+      (e.edge_type ?? e.type ?? '').toLowerCase() === 'calls' && !e.deleted_at
+    ).length;
+    // If there are 10+ functions but <3% have call edges, warn
+    if (funcCount >= 10 && callEdgeCount < funcCount * 0.03) {
+      return `Blast radius, test coverage, and coupling analyses may be incomplete. The knowledge graph has ${funcCount} functions but only ${callEdgeCount} call edges (~${Math.round(callEdgeCount / funcCount * 100)}%). Install language toolchains (rust-analyzer, pyright, gopls) to enable complete call graph extraction.`;
+    }
+    return null;
+  });
+
   // ── Repo dependencies & risk metrics ────────────────────────────────
   let repoDeps = $state(null);
   let repoDepsLoading = $state(false);
@@ -1072,6 +1090,12 @@
         {:else if graph}
           <div class="explorer-split">
             <div class="explorer-canvas-area">
+              {#if missingCallEdgesWarning}
+                <div class="toolchain-warning" role="alert">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                  <span>{missingCallEdgesWarning}</span>
+                </div>
+              {/if}
               <ExplorerCanvas
                 repoId={selectedRepoId}
                 nodes={effectiveGraph.nodes ?? []}
@@ -2435,6 +2459,14 @@
     overflow: hidden;
     min-width: 0;
     position: relative;
+  }
+
+  .toolchain-warning {
+    position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 45;
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 14px; background: rgba(120, 53, 15, 0.85); border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 8px; font-size: 11px; color: #fbbf24; max-width: 600px;
+    backdrop-filter: blur(12px);
   }
 
   .explorer-detail-area {
