@@ -5475,6 +5475,7 @@
     text-align: left;
   }
   .ctx-item:hover { background: #1e293b; color: #f1f5f9; }
+  .ctx-item-subtle { color: #64748b; font-style: italic; }
   .ctx-item svg { flex-shrink: 0; color: #64748b; }
   .ctx-item:hover svg { color: #94a3b8; }
 

@@ -1459,45 +1459,6 @@ fn resolve_computed_expression_inner(
         return HashSet::new();
     }
 
-    // $reachable(node, edge_types, direction, depth) — use find_balanced_comma for parsing
-    if trimmed.starts_with("$reachable(") && trimmed.ends_with(')') {
-        let inner = &trimmed[11..trimmed.len() - 1];
-        // Parse using balanced comma finding for proper array handling
-        let parts = split_balanced_args(inner);
-        if parts.len() >= 2 {
-            let node_name = parts[0].trim().trim_matches('\'').trim_matches('"');
-            let edge_types_str = parts.get(1).unwrap_or(&"");
-            let direction = parts
-                .get(2)
-                .map(|s| s.trim().trim_matches('\'').trim_matches('"'))
-                .unwrap_or("outgoing");
-            let depth: u32 = parts
-                .get(3)
-                .and_then(|d| d.trim().parse().ok())
-                .unwrap_or(10);
-
-            let edge_types: Vec<EdgeType> = edge_types_str
-                .trim()
-                .trim_matches(|c: char| c == '[' || c == ']')
-                .split(',')
-                .filter_map(|s| parse_edge_type(s.trim().trim_matches('\'').trim_matches('"')))
-                .collect();
-
-            let resolved_name = resolve_node_ref(node_name, selected_node_id);
-            if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
-                return bfs_traverse(
-                    &found.id.to_string(),
-                    &edge_types,
-                    direction,
-                    depth,
-                    outgoing,
-                    incoming,
-                );
-            }
-        }
-        return HashSet::new();
-    }
-
     // Fallback: unrecognized expression — return empty set.
     // validate_computed_expression() should be called before resolution to catch these.
     #[cfg(debug_assertions)]
