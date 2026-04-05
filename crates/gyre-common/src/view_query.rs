@@ -1042,6 +1042,8 @@ pub enum ExplorerClientMessage {
     DeleteView { view_id: String },
     /// List saved views for this repo.
     ListViews,
+    /// Cancel the currently running agent query.
+    Cancel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1056,8 +1058,12 @@ pub enum ExplorerServerMessage {
     },
     /// List of saved views.
     Views { views: Vec<SavedViewSummary> },
-    /// Status update.
-    Status { status: String },
+    /// Status update (with optional agent_path: "sdk" or "native").
+    Status {
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_path: Option<String>,
+    },
     /// Error.
     Error { message: String },
 }

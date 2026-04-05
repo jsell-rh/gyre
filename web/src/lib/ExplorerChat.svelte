@@ -54,6 +54,7 @@
 
   let inputText = $state('');
   let status = $state('connecting'); // 'connecting' | 'ready' | 'thinking' | 'refining' | 'error' | 'disconnected'
+  let agentPath = $state(null); // 'sdk' | 'native' | null — which agent path is active
   let ws = $state(null);
   let reconnectCount = $state(0);
   let reconnectTimer = null;
@@ -256,7 +257,9 @@
       case 'status': {
         if (msg.status === 'thinking') status = 'thinking';
         else if (msg.status === 'refining') status = 'refining';
-        else if (msg.status === 'ready') status = 'ready';
+        else if (msg.status === 'ready') { status = 'ready'; agentPath = null; }
+        // Capture agent_path indicator (sent with first "thinking" status)
+        if (msg.agent_path) agentPath = msg.agent_path;
         break;
       }
       case 'views': {
@@ -399,6 +402,17 @@
     onSavedViewsUpdate(savedViews.filter(v => v.id !== view.id));
   }
 
+  // ── Cancel ───────────────────────────────────────────────────────────────
+  function cancelQuery() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (status !== 'thinking' && status !== 'refining') return;
+    try {
+      ws.send(JSON.stringify({ type: 'cancel' }));
+    } catch (err) {
+      console.error('[ExplorerChat] Cancel send failed:', err);
+    }
+  }
+
   // ── Keyboard ─────────────────────────────────────────────────────────────
   function onInputKeydown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -527,6 +541,9 @@
       <span class="chat-status" style="--status-color: {statusColor}">
         <span class="status-dot" aria-hidden="true"></span>
         {statusLabel}
+        {#if agentPath && (status === 'thinking' || status === 'refining')}
+          <span class="agent-path-indicator">via {agentPath === 'sdk' ? 'Claude SDK' : 'native'}</span>
+        {/if}
       </span>
     </div>
     <div class="chat-header-right">
@@ -703,7 +720,7 @@
     {/if}
 
     <!-- Status indicator while thinking -->
-    {#if status === 'thinking' && !streamingText}
+    {#if (status === 'thinking' || status === 'refining') && !streamingText}
       <div class="thinking-indicator" role="status">
         <span class="thinking-dots">
           <span class="dot"></span>
@@ -711,6 +728,12 @@
           <span class="dot"></span>
         </span>
         <span class="thinking-label">{statusLabel}</span>
+        <button class="cancel-btn" onclick={cancelQuery} type="button" aria-label="Cancel query" title="Cancel query">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+          Cancel
+        </button>
       </div>
     {/if}
   </div>
@@ -1312,6 +1335,35 @@
 
   .thinking-label {
     font-size: var(--text-xs);
+  }
+
+  .cancel-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px var(--space-2);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    font-family: var(--font-body);
+    cursor: pointer;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+    margin-left: var(--space-2);
+  }
+
+  .cancel-btn:hover {
+    color: var(--color-danger);
+    border-color: var(--color-danger);
+  }
+
+  .agent-path-indicator {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    opacity: 0.7;
+    font-style: italic;
+    margin-left: 2px;
   }
 
   /* ── Input area ──────────────────────────────────────────────────── */

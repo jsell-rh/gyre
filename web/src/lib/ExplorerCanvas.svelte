@@ -550,23 +550,26 @@
   // Canvas-scoped search state
   let searchOpen = $state(false);
   let searchQuery = $state('');
-  let searchResults = $derived.by(() => {
-    if (!searchQuery.trim()) return [];
+  let searchResultData = $derived.by(() => {
+    if (!searchQuery.trim()) return { results: [], totalCount: 0 };
     const q = searchQuery.toLowerCase();
     const results = [];
+    let totalCount = 0;
     for (const n of nodes) {
-      if (results.length >= 20) break; // Early exit once we have enough matches
       if (
         n.name?.toLowerCase().includes(q) ||
         n.qualified_name?.toLowerCase().includes(q) ||
         n.node_type?.toLowerCase().includes(q) ||
         n.spec_path?.toLowerCase().includes(q)
       ) {
-        results.push(n);
+        totalCount++;
+        if (results.length < 20) results.push(n);
       }
     }
-    return results;
+    return { results, totalCount };
   });
+  let searchResults = $derived(searchResultData.results);
+  let searchTotalCount = $derived(searchResultData.totalCount);
   let searchHighlightIds = $derived(new Set(searchResults.map(n => n.id)));
   let searchInputEl = $state(null);
   let searchSelectedIdx = $state(0); // Index into searchResults for keyboard navigation
@@ -5233,8 +5236,10 @@
         }}
         aria-label="Search entities"
       />
-      {#if searchResults.length > 0}
-        <span class="canvas-search-count">{searchResults.length} matches</span>
+      {#if searchTotalCount > 0}
+        <span class="canvas-search-count">
+          {#if searchTotalCount > 20}showing {searchResults.length} of {searchTotalCount}{:else}{searchTotalCount}{/if} matches
+        </span>
       {/if}
       <button class="canvas-search-close" onclick={() => { searchOpen = false; searchQuery = ''; scheduleRedraw(); }} aria-label="Close search" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>

@@ -346,6 +346,9 @@ async fn handle_explorer_session(
 
     info!(repo_id = %repo_id, user = %auth.agent_id, "Explorer WebSocket session started");
 
+    // Cancellation channel: set to true to cancel the running agent query.
+    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+
     // Maintain conversation history across messages within a session.
     let mut conversation_history: Vec<ConversationMessage> = Vec::new();
     let mut message_count: usize = 0;
@@ -527,22 +530,55 @@ async fn handle_explorer_session(
                 // Send thinking status
                 send_status(&mut sender, "thinking").await;
 
-                // Run the agent loop with conversation history
-                match run_explorer_agent(
-                    &state,
-                    &repo_id,
-                    &text,
-                    &canvas_state,
-                    &mut sender,
-                    &mut receiver,
-                    &mut conversation_history,
-                    &mut cached_nodes,
-                    &mut cached_edges,
-                    &auth,
-                    &repo_workspace_id,
-                )
-                .await
-                {
+                // Reset cancel signal for this run
+                let _ = cancel_tx.send(false);
+
+                // Run the agent loop with conversation history, while
+                // concurrently listening for Cancel messages on the WebSocket.
+                // This allows the user to cancel a slow query mid-flight.
+                let agent_result = tokio::select! {
+                    result = run_explorer_agent(
+                        &state,
+                        &repo_id,
+                        &text,
+                        &canvas_state,
+                        &mut sender,
+                        &mut cancel_rx,
+                        &mut conversation_history,
+                        &mut cached_nodes,
+                        &mut cached_edges,
+                        &auth,
+                        &repo_workspace_id,
+                    ) => result,
+                    _ = async {
+                        // Listen for Cancel messages while the agent is running.
+                        // Non-Cancel messages are dropped (the user can re-send after cancel).
+                        loop {
+                            match receiver.next().await {
+                                Some(Ok(Message::Text(raw))) => {
+                                    if let Ok(client_msg) = serde_json::from_str::<ExplorerClientMessage>(&raw) {
+                                        if matches!(client_msg, ExplorerClientMessage::Cancel) {
+                                            info!(user = %auth.agent_id, "Cancel received during agent run");
+                                            let _ = cancel_tx.send(true);
+                                            break;
+                                        }
+                                    }
+                                    // Non-cancel messages are ignored during agent execution
+                                }
+                                Some(Ok(Message::Close(_))) | None => break,
+                                Some(Ok(Message::Pong(_))) => {
+                                    last_pong = std::time::Instant::now();
+                                }
+                                _ => {}
+                            }
+                        }
+                    } => {
+                        // Agent was cancelled or connection closed during execution
+                        Ok(())
+                    }
+                };
+
+                match agent_result {
                     Ok(()) => {}
                     Err(e) => {
                         warn!(repo_id = %repo_id, error = ?e, "Explorer query failed");
@@ -766,7 +802,7 @@ async fn handle_explorer_session(
                         if let Ok(vq) = serde_json::from_value::<gyre_common::view_query::ViewQuery>(
                             query.clone(),
                         ) {
-                            // Collect node names to verify
+                            // Collect node names to verify from all view query sections
                             let mut nodes_to_check: Vec<String> = Vec::new();
                             match &vq.scope {
                                 gyre_common::view_query::Scope::Focus { ref node, .. } => {
@@ -783,7 +819,35 @@ async fn handle_explorer_session(
                                         }
                                     }
                                 }
+                                gyre_common::view_query::Scope::Filter {
+                                    computed: Some(ref expr),
+                                    ..
+                                } => {
+                                    // Extract node names from computed expressions
+                                    // e.g. "$governed_by('deleted-spec.md')" -> "deleted-spec.md"
+                                    extract_computed_node_refs(expr, &mut nodes_to_check);
+                                }
                                 _ => {}
+                            }
+                            // Check group node names for staleness
+                            for group in &vq.groups {
+                                for gn in &group.nodes {
+                                    if !gn.starts_with('$') {
+                                        nodes_to_check.push(gn.clone());
+                                    }
+                                }
+                            }
+                            // Check callout node names for staleness
+                            for callout in &vq.callouts {
+                                if !callout.node.starts_with('$') {
+                                    nodes_to_check.push(callout.node.clone());
+                                }
+                            }
+                            // Check narrative step node names for staleness
+                            for step in &vq.narrative {
+                                if !step.node.starts_with('$') {
+                                    nodes_to_check.push(step.node.clone());
+                                }
                             }
                             if !nodes_to_check.is_empty() {
                                 // Refresh graph cache if needed
@@ -1018,6 +1082,14 @@ async fn handle_explorer_session(
                 }
             }
 
+            ExplorerClientMessage::Cancel => {
+                // Cancel signal: set the watch channel to true.
+                // The running agent loop checks this at each turn boundary.
+                // If no agent is running, this is a no-op (the signal resets on next Message).
+                debug!(user = %auth.agent_id, "Cancel requested by user");
+                let _ = cancel_tx.send(true);
+            }
+
             ExplorerClientMessage::ListViews => {
                 // ListViews is read-only — not rate-limited (unlike SaveView/DeleteView).
                 let tenant_id = Id::new(&auth.tenant_id);
@@ -1128,8 +1200,17 @@ async fn send_status(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     status: &str,
 ) -> bool {
+    send_status_with_path(sender, status, None).await
+}
+
+async fn send_status_with_path(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    status: &str,
+    agent_path: Option<&str>,
+) -> bool {
     let msg = ExplorerServerMessage::Status {
         status: status.to_string(),
+        agent_path: agent_path.map(|s| s.to_string()),
     };
     sender
         .send(Message::Text(
@@ -1847,7 +1928,7 @@ async fn run_explorer_agent(
     user_question: &str,
     canvas_state: &gyre_common::view_query::CanvasState,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    _receiver: &mut futures_util::stream::SplitStream<WebSocket>,
+    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
     conversation_history: &mut Vec<ConversationMessage>,
     cached_nodes: &mut Option<Vec<gyre_common::graph::GraphNode>>,
     cached_edges: &mut Option<Vec<gyre_common::graph::GraphEdge>>,
@@ -1912,6 +1993,7 @@ async fn run_explorer_agent(
                 "Non-admin attempted SDK explorer path — falling through to native LLM"
             );
         } else {
+            send_status_with_path(sender, "thinking", Some("sdk")).await;
             return run_explorer_agent_sdk(
                 state,
                 repo_id,
@@ -1924,6 +2006,9 @@ async fn run_explorer_agent(
             .await;
         }
     }
+
+    // Send agent path indicator for native LLM path
+    send_status_with_path(sender, "thinking", Some("native")).await;
 
     let llm = match &state.llm {
         Some(llm) => llm.clone(),
@@ -2291,6 +2376,13 @@ async fn run_explorer_agent(
     let mut view_query_sent = false;
     let max_total_turns = MAX_TOOL_TURNS + MAX_REFINEMENT_TURNS;
     for _turn in 0..max_total_turns {
+        // Check for cancellation at the top of each turn
+        if *cancel_rx.borrow() {
+            info!("Explorer agent cancelled by user");
+            stream_text(sender, "*Query cancelled.*", true).await;
+            return Ok(());
+        }
+
         // Send a status update so the user sees feedback during LLM inference
         // (which can take 3-15 seconds). Without this the UI appears frozen.
         let status_text = if tool_turn_count > 0 {
@@ -2300,6 +2392,7 @@ async fn run_explorer_agent(
         };
         let status_msg = ExplorerServerMessage::Status {
             status: status_text.to_string(),
+            agent_path: None,
         };
         let _ = sender
             .send(Message::Text(
@@ -2608,6 +2701,7 @@ async fn run_explorer_agent(
             // Notify the user that we're synthesizing the final answer
             let status_msg = ExplorerServerMessage::Status {
                 status: "Synthesizing answer...".to_string(),
+                agent_path: None,
             };
             let _ = sender
                 .send(Message::Text(
@@ -3070,6 +3164,49 @@ fn system_default_views() -> Vec<(&'static str, &'static str, serde_json::Value)
             (name, desc, query)
         })
         .collect()
+}
+
+/// Extract node name references from computed expressions.
+/// E.g. `$governed_by('my-spec.md')` yields `"my-spec.md"`;
+/// `$intersect($callers(FooService), $governed_by('bar.md'))` yields
+/// `"FooService"` and `"bar.md"`.
+fn extract_computed_node_refs(expr: &str, out: &mut Vec<String>) {
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'(' {
+            i += 1;
+            let start = i;
+            let mut depth = 1u32;
+            while i < bytes.len() && depth > 0 {
+                match bytes[i] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                if depth > 0 {
+                    i += 1;
+                }
+            }
+            let inner = &expr[start..i];
+            for arg in inner.split(',') {
+                let arg = arg.trim();
+                if arg.starts_with('$') {
+                    extract_computed_node_refs(arg, out);
+                } else if !arg.is_empty() {
+                    let cleaned = arg
+                        .trim_start_matches('\'')
+                        .trim_end_matches('\'')
+                        .trim_start_matches('"')
+                        .trim_end_matches('"');
+                    if !cleaned.is_empty() {
+                        out.push(cleaned.to_string());
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
 }
 
 #[cfg(test)]
