@@ -26,18 +26,42 @@
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
   } = $props();
 
-  // ── Interactive $clicked mode ──────────────────────────────────────────
+  // ── Interactive $clicked / $selected modes ─────────────────────────────
   // When a view query uses "$clicked" as scope.node, we store the template
   // and re-evaluate on each subsequent click, substituting the clicked node.
+  // When "$selected" is used, we re-evaluate whenever selectedNodeId changes.
   let interactiveQueryTemplate = $state(null);
+  let selectedQueryTemplate = $state(null);
 
   $effect(() => {
     if (activeQuery?.scope?.node === '$clicked') {
       // Store template (use JSON round-trip to avoid Svelte 5 $state proxy issues)
       interactiveQueryTemplate = JSON.parse(JSON.stringify(activeQuery));
+    } else if (activeQuery?.scope?.node === '$selected') {
+      selectedQueryTemplate = JSON.parse(JSON.stringify(activeQuery));
     } else if (!activeQuery) {
       interactiveQueryTemplate = null;
+      selectedQueryTemplate = null;
     }
+  });
+
+  // Re-evaluate $selected query whenever selectedNodeId changes
+  $effect(() => {
+    const nodeId = selectedNodeId;
+    if (!selectedQueryTemplate) return;
+    if (!nodeId) return;
+    // Find the node to get its name/qualified_name
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    const q = JSON.parse(JSON.stringify(selectedQueryTemplate));
+    q.scope.node = node.qualified_name || node.name || node.id;
+    if (q.annotation?.title) {
+      q.annotation.title = q.annotation.title.replace(/\$name/g, node.name ?? '');
+    }
+    if (q.annotation?.description) {
+      q.annotation.description = q.annotation.description.replace(/\$name/g, node.name ?? '');
+    }
+    onInteractiveQuery(q);
   });
 
   // ── Color palette (depth-based HSL for tree groups) ──────────────────
@@ -165,6 +189,8 @@
   let panCamStart = { x: 0, y: 0 };
 
   let selectedNodeId = $state(null);
+  let selectedEdgeId = $state(null); // "srcId->tgtId" key of clicked edge
+  let hoveredEdgeId = $state(null); // "srcId->tgtId" key of hovered edge
   let multiSelectedIds = $state(new Set()); // Shift+Click multi-select for concept creation
   let hoveredNodeId = $state(null);
   let breadcrumb = $state([]);
@@ -173,6 +199,11 @@
   // Drill-down fade transition: dim unrelated nodes during zoom
   let drillFadeAlpha = $state(1.0); // 1.0 = fully visible, fading to 0.15
   let drillFadeTarget = $state(null); // nodeId being drilled into (or null)
+
+  // Drill transition lock: prevents interaction during the ~300ms zoom transition
+  let drillTransitioning = $state(false);
+  let drillTransitionStart = 0;
+  const DRILL_TRANSITION_MS = 300;
 
   // Recent interaction trail for conversational context (sent with messages)
   let recentInteractions = $state([]);
@@ -3406,6 +3437,17 @@
         }
       }
 
+      // Selected/hovered edge highlight
+      const edgeKey = `${srcId}->${tgtId}`;
+      if (edgeKey === selectedEdgeId) {
+        color = '#f59e0b';
+        edgeAlpha = 1.0;
+        lineWidth = 3;
+      } else if (edgeKey === hoveredEdgeId) {
+        color = '#fbbf24';
+        edgeAlpha = 0.9;
+        lineWidth = 2.5;
+      }
       drawArrow(ctx, ss.x, ss.y, ts.x, ts.y, color, edgeAlpha, lineWidth);
       count++;
 
@@ -3630,9 +3672,22 @@
   // ── Camera animation loop ──────────────────────────────────────────
 
   function lerpCam() {
-    cam.x += (targetCam.x - cam.x) * LERP_SPEED;
-    cam.y += (targetCam.y - cam.y) * LERP_SPEED;
-    cam.zoom += (targetCam.zoom - cam.zoom) * LERP_SPEED;
+    if (drillTransitioning) {
+      // Ease-out cubic for smooth drill zoom: fast start, gentle arrival
+      const elapsed = performance.now() - drillTransitionStart;
+      const t = Math.min(elapsed / DRILL_TRANSITION_MS, 1);
+      const eased = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      cam.x = cam._drillStartX + (targetCam.x - cam._drillStartX) * eased;
+      cam.y = cam._drillStartY + (targetCam.y - cam._drillStartY) * eased;
+      cam.zoom = cam._drillStartZoom + (targetCam.zoom - cam._drillStartZoom) * eased;
+      if (t >= 1) {
+        drillTransitioning = false;
+      }
+    } else {
+      cam.x += (targetCam.x - cam.x) * LERP_SPEED;
+      cam.y += (targetCam.y - cam.y) * LERP_SPEED;
+      cam.zoom += (targetCam.zoom - cam.zoom) * LERP_SPEED;
+    }
     if (Math.abs(cam.zoom - targetCam.zoom) < 0.0005) cam.zoom = targetCam.zoom;
     // Clamp zoom to prevent NaN/Infinity in screenToWorld calculations
     cam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, cam.zoom));
@@ -3681,7 +3736,7 @@
     const ghostNeedsAnim = hasGhosts && ghostAnimCycles < 3;
     const particlesPlaying = lens === 'evaluative' && evalPlaying;
     const fading = drillFadeTarget || drillFadeAlpha < 1.0;
-    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying || fading) {
+    if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying || fading || drillTransitioning) {
       needsAnim = false;
       animFrame = requestAnimationFrame(animLoop);
     } else {
@@ -3734,7 +3789,7 @@
   }
 
   function onMouseDown(e) {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || drillTransitioning) return;
     isPanning = true;
     panStart = { x: e.clientX, y: e.clientY };
     panCamStart = { x: targetCam.x, y: targetCam.y };
@@ -3758,8 +3813,21 @@
       tooltipPos = { x: e.clientX, y: e.clientY };
     }
 
+    // Edge hover detection (only when no node is hovered)
+    if (!hit && !isPanning) {
+      const edgeHover = edgeHitTest(e.clientX, e.clientY);
+      const newEdgeHover = edgeHover ? `${edgeSrc(edgeHover.edge)}->${edgeTgt(edgeHover.edge)}` : null;
+      if (newEdgeHover !== hoveredEdgeId) {
+        hoveredEdgeId = newEdgeHover;
+        scheduleRedraw();
+      }
+    } else if (hoveredEdgeId) {
+      hoveredEdgeId = null;
+      scheduleRedraw();
+    }
+
     if (canvasEl) {
-      canvasEl.style.cursor = isPanning ? 'grabbing' : hit ? 'pointer' : 'grab';
+      canvasEl.style.cursor = isPanning ? 'grabbing' : (hit || hoveredEdgeId) ? 'pointer' : 'grab';
     }
 
     if (isPanning) {
@@ -3787,6 +3855,7 @@
 
   function onWheel(e) {
     e.preventDefault();
+    if (drillTransitioning) return;
 
     // Accumulate velocity for inertial zoom
     const impulse = e.deltaY > 0 ? -0.08 : 0.08;
@@ -3894,6 +3963,7 @@
   }
 
   function onClick(e) {
+    if (drillTransitioning) return;
     if (Math.abs(e.clientX - panStart.x) > 4 || Math.abs(e.clientY - panStart.y) > 4) return;
 
     const hit = hitTest(e.clientX, e.clientY);
@@ -3914,6 +3984,7 @@
       if (multiSelectedIds.size > 0) {
         multiSelectedIds = new Set();
       }
+      selectedEdgeId = null;
       selectedNodeId = hit.id;
       trackInteraction(`click:${hit.node.name ?? hit.node.id}(${hit.node.node_type})`);
       canvasState = {
@@ -3990,7 +4061,9 @@
           doc_comment: `${edgeHit.edgeType.replace('_', ' ')} relationship from ${edgeHit.source?.qualified_name ?? edgeHit.source?.name ?? '?'} to ${edgeHit.target?.qualified_name ?? edgeHit.target?.name ?? '?'}`,
         };
         onNodeDetail(edgeInfo);
+        selectedEdgeId = `${edgeSrc(edgeHit.edge)}->${edgeTgt(edgeHit.edge)}`;
       } else {
+        selectedEdgeId = null;
         selectedNodeId = null;
         canvasState = { ...canvasState, selectedNode: null };
         onNodeDetail(null);
@@ -4024,15 +4097,22 @@
     onNodeDetail(null);
 
     // Smooth spatial zoom: target camera to center on this node and fit it
+    // Store start positions for ease-out cubic interpolation
+    cam._drillStartX = cam.x;
+    cam._drillStartY = cam.y;
+    cam._drillStartZoom = cam.zoom;
     targetCam.x = wx;
     targetCam.y = wy;
     const fitZoom = Math.min(W / (ww + 60), H / (wh + 60), 4) * 0.85;
     targetCam.zoom = Math.max(fitZoom, cam.zoom * 1.5);
+    drillTransitioning = true;
+    drillTransitionStart = performance.now();
     needsAnim = true;
     scheduleRedraw();
   }
 
   function onDblClick(e) {
+    if (drillTransitioning) return;
     const hit = hitTest(e.clientX, e.clientY);
     if (!hit) return;
 
@@ -4196,7 +4276,10 @@
     canvasState = { ...canvasState, selectedNode: null, breadcrumb: breadcrumb.map(b => ({ id: b.id, name: b.name })), recent_interactions: recentInteractions };
     onNodeDetail(null);
 
-    // Smooth zoom-out: animate camera to the target parent node or fit all.
+    // Smooth zoom-out: animate camera with ease-out cubic to the target parent node or fit all.
+    cam._drillStartX = cam.x;
+    cam._drillStartY = cam.y;
+    cam._drillStartZoom = cam.zoom;
     if (breadcrumb.length === 0) {
       // Going to root: fit the entire tree
       const allBounds = computeAllNodesBounds();
@@ -4215,6 +4298,8 @@
         targetCam.zoom = Math.min(W / (ln.w + 60), H / (ln.h + 60), 4) * 0.85;
       }
     }
+    drillTransitioning = true;
+    drillTransitionStart = performance.now();
     needsAnim = true;
     scheduleRedraw();
   }
@@ -4261,6 +4346,7 @@
       }
       if (breadcrumb.length > 0) {
         breadcrumb = [];
+        selectedEdgeId = null;
         selectedNodeId = null;
         canvasState = { ...canvasState, selectedNode: null, breadcrumb: [] };
         onNodeDetail(null);

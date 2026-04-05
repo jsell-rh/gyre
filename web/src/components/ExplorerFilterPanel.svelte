@@ -8,41 +8,126 @@
     edges = [],
   } = $props();
 
-  // ── Structural index derived from graph data ───────────────────────
+  // ── Node type classification ──────────────────────────────────────
   const BOUNDARY_TYPES = new Set(['module', 'package', 'crate', 'namespace']);
-  const INTERFACE_TYPES = new Set(['trait', 'interface', 'protocol', 'abstract_class']);
-  const DATA_TYPES = new Set(['struct', 'enum', 'type', 'table', 'model', 'class', 'union']);
+  const INTERFACE_TYPES = new Set(['trait', 'interface', 'protocol', 'abstract_class', 'endpoint', 'handler']);
+  const DATA_TYPES = new Set(['struct', 'enum', 'type', 'table', 'model', 'class', 'union', 'field']);
+  const SPEC_TYPES = new Set(['spec']);
 
-  // Single-pass categorization of nodes for O(N) instead of O(N*3)
+  // Sub-type grouping labels for each section
+  const INTERFACE_GROUPS = {
+    traits: new Set(['trait', 'interface', 'protocol', 'abstract_class']),
+    endpoints: new Set(['endpoint', 'handler']),
+  };
+  const DATA_GROUPS = {
+    types: new Set(['struct', 'enum', 'type', 'class', 'union']),
+    tables: new Set(['table', 'model']),
+    fields: new Set(['field']),
+  };
+
+  // ── Single-pass categorization ────────────────────────────────────
   let categorized = $derived.by(() => {
     const boundaries = [];
-    const interfaces = [];
-    const data = [];
-    const paths = new Set();
-    for (const n of nodes) {
-      const nt = (n.node_type ?? '').toLowerCase();
-      if (BOUNDARY_TYPES.has(nt)) boundaries.push(n);
-      if (INTERFACE_TYPES.has(nt)) interfaces.push(n);
-      if (DATA_TYPES.has(nt)) data.push(n);
-      if (n.spec_path) paths.add(n.spec_path);
-    }
-    // Also check governed_by edges for spec targets
+    const interfaces = { traits: [], endpoints: [] };
+    const data = { types: [], tables: [], fields: [] };
+    const specNodes = [];
+    const specPaths = new Set();
+
+    // Build governed-by map: nodeId -> set of spec paths
+    const governedBy = new Map();
     const nodeById = new Map(nodes.map(n => [n.id, n]));
+
     for (const e of edges) {
       const et = (e.edge_type ?? e.type ?? '').toLowerCase();
       if (et === 'governed_by') {
+        const sourceId = e.source_id ?? e.from_node_id ?? e.from;
         const targetId = e.target_id ?? e.to_node_id ?? e.to;
         const targetNode = nodeById.get(targetId);
-        if (targetNode?.spec_path) paths.add(targetNode.spec_path);
-        if (targetNode?.name && !targetNode?.spec_path) paths.add(targetNode.name);
+        const specPath = targetNode?.spec_path ?? targetNode?.name;
+        if (specPath) {
+          if (!governedBy.has(sourceId)) governedBy.set(sourceId, new Set());
+          governedBy.get(sourceId).add(specPath);
+        }
       }
     }
-    return { boundaries, interfaces, data, specPaths: [...paths].sort() };
+
+    for (const n of nodes) {
+      const nt = (n.node_type ?? '').toLowerCase();
+
+      if (BOUNDARY_TYPES.has(nt)) {
+        boundaries.push(n);
+      }
+
+      if (INTERFACE_TYPES.has(nt)) {
+        if (INTERFACE_GROUPS.endpoints.has(nt)) {
+          interfaces.endpoints.push(n);
+        } else {
+          interfaces.traits.push(n);
+        }
+      }
+
+      if (DATA_TYPES.has(nt)) {
+        if (DATA_GROUPS.tables.has(nt)) {
+          data.tables.push(n);
+        } else if (DATA_GROUPS.fields.has(nt)) {
+          data.fields.push(n);
+        } else {
+          data.types.push(n);
+        }
+      }
+
+      if (SPEC_TYPES.has(nt)) {
+        specNodes.push(n);
+      }
+
+      if (n.spec_path) specPaths.add(n.spec_path);
+    }
+
+    // If no explicit spec nodes, derive from governed_by edges
+    if (specNodes.length === 0) {
+      for (const e of edges) {
+        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
+        if (et === 'governed_by') {
+          const targetId = e.target_id ?? e.to_node_id ?? e.to;
+          const targetNode = nodeById.get(targetId);
+          if (targetNode && !specNodes.some(s => s.id === targetNode.id)) {
+            specNodes.push(targetNode);
+          }
+        }
+      }
+    }
+
+    // Collect all spec paths for fallback display
+    for (const sp of specPaths) {
+      if (!specNodes.some(s => (s.spec_path ?? s.name) === sp)) {
+        specNodes.push({ id: `spec:${sp}`, name: sp.split('/').pop(), spec_path: sp, node_type: 'spec' });
+      }
+    }
+
+    // Count governance stats
+    const governedCount = governedBy.size;
+    const totalNonSpec = nodes.filter(n => !SPEC_TYPES.has((n.node_type ?? '').toLowerCase())).length;
+
+    return {
+      boundaries,
+      interfaces,
+      data,
+      specNodes: specNodes.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')),
+      governedBy,
+      governedCount,
+      totalNonSpec,
+    };
   });
+
   let boundaryNodes = $derived(categorized.boundaries);
-  let interfaceNodes = $derived(categorized.interfaces);
-  let dataNodes = $derived(categorized.data);
-  let specPathList = $derived(categorized.specPaths);
+  let interfaceGroups = $derived(categorized.interfaces);
+  let dataGroups = $derived(categorized.data);
+  let specNodes = $derived(categorized.specNodes);
+  let governedBy = $derived(categorized.governedBy);
+
+  // Total counts for badges
+  let interfaceCount = $derived(interfaceGroups.traits.length + interfaceGroups.endpoints.length);
+  let dataCount = $derived(dataGroups.types.length + dataGroups.tables.length + dataGroups.fields.length);
 
   // ── Collapsible section state ──────────────────────────────────────
   let boundariesOpen = $state(true);
@@ -99,7 +184,6 @@
 
   // ── Item click handlers ────────────────────────────────────────────
   function selectBoundary(node) {
-    // Filter to show only this module/package and its children
     emitFilter({ focus_node: node.id, focus_type: 'boundary' });
   }
 
@@ -111,8 +195,34 @@
     emitFilter({ focus_node: node.id, focus_type: 'data' });
   }
 
-  function selectSpec(specPath) {
-    emitFilter({ focus_spec: specPath, focus_type: 'spec' });
+  function selectSpec(node) {
+    const specPath = node.spec_path ?? node.name;
+    emitFilter({ focus_node: node.id, focus_spec: specPath, focus_type: 'spec' });
+  }
+
+  // ── Governance helpers ─────────────────────────────────────────────
+  function getGovernanceStatus(node) {
+    if (governedBy.has(node.id)) return 'governed';
+    if (node.spec_path) return 'governed';
+    return 'ungoverned';
+  }
+
+  function getNodeTypeIcon(nt) {
+    const t = (nt ?? '').toLowerCase();
+    if (t === 'module' || t === 'package') return 'M';
+    if (t === 'crate') return 'C';
+    if (t === 'namespace') return 'N';
+    if (t === 'trait' || t === 'interface' || t === 'protocol') return 'T';
+    if (t === 'abstract_class') return 'A';
+    if (t === 'endpoint' || t === 'handler') return 'E';
+    if (t === 'struct') return 'S';
+    if (t === 'enum') return 'E';
+    if (t === 'table' || t === 'model') return 'T';
+    if (t === 'field') return 'F';
+    if (t === 'class') return 'C';
+    if (t === 'union' || t === 'type') return 'U';
+    if (t === 'spec') return 'S';
+    return '?';
   }
 </script>
 
@@ -120,9 +230,14 @@
   <div class="filter-panel" role="complementary" aria-label={$t('explorer_filter.title')}>
     <div class="filter-header">
       <span class="filter-title">{$t('explorer_filter.title')}</span>
+      {#if categorized.totalNonSpec > 0}
+        <span class="governance-summary" title="{categorized.governedCount}/{categorized.totalNonSpec} nodes governed by specs">
+          {Math.round((categorized.governedCount / categorized.totalNonSpec) * 100)}%
+        </span>
+      {/if}
     </div>
 
-    <!-- Boundaries section -->
+    <!-- ═══ Boundaries ═══ -->
     <section class="struct-section">
       <button
         class="section-toggle"
@@ -147,8 +262,9 @@
                   title={node.qualified_name ?? node.name}
                   type="button"
                 >
-                  <span class="item-icon boundary-icon">M</span>
+                  <span class="item-icon boundary-icon">{getNodeTypeIcon(node.node_type)}</span>
                   <span class="item-name">{node.name ?? node.qualified_name}</span>
+                  <span class="gov-dot" class:governed={getGovernanceStatus(node) === 'governed'}></span>
                 </button>
               </li>
             {/each}
@@ -157,7 +273,7 @@
       {/if}
     </section>
 
-    <!-- Interfaces section -->
+    <!-- ═══ Interfaces ═══ -->
     <section class="struct-section">
       <button
         class="section-toggle"
@@ -167,14 +283,13 @@
       >
         <span class="toggle-icon" class:open={interfacesOpen}>&#9654;</span>
         <span class="section-label">Interfaces</span>
-        <span class="section-badge">{interfaceNodes.length}</span>
+        <span class="section-badge">{interfaceCount}</span>
       </button>
       {#if interfacesOpen}
-        <ul class="struct-list">
-          {#if interfaceNodes.length === 0}
-            <li class="struct-empty">No traits/interfaces found</li>
-          {:else}
-            {#each interfaceNodes as node (node.id)}
+        {#if interfaceGroups.traits.length > 0}
+          <div class="subgroup-label">Traits</div>
+          <ul class="struct-list">
+            {#each interfaceGroups.traits as node (node.id)}
               <li>
                 <button
                   class="struct-item"
@@ -182,17 +297,42 @@
                   title={node.qualified_name ?? node.name}
                   type="button"
                 >
-                  <span class="item-icon interface-icon">I</span>
+                  <span class="item-icon interface-icon">{getNodeTypeIcon(node.node_type)}</span>
                   <span class="item-name">{node.name ?? node.qualified_name}</span>
+                  <span class="gov-dot" class:governed={getGovernanceStatus(node) === 'governed'}></span>
                 </button>
               </li>
             {/each}
-          {/if}
-        </ul>
+          </ul>
+        {/if}
+        {#if interfaceGroups.endpoints.length > 0}
+          <div class="subgroup-label">Endpoints</div>
+          <ul class="struct-list">
+            {#each interfaceGroups.endpoints as node (node.id)}
+              <li>
+                <button
+                  class="struct-item"
+                  onclick={() => selectInterface(node)}
+                  title={node.qualified_name ?? node.name}
+                  type="button"
+                >
+                  <span class="item-icon endpoint-icon">{getNodeTypeIcon(node.node_type)}</span>
+                  <span class="item-name">{node.name ?? node.qualified_name}</span>
+                  <span class="gov-dot" class:governed={getGovernanceStatus(node) === 'governed'}></span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if interfaceCount === 0}
+          <ul class="struct-list">
+            <li class="struct-empty">No traits or endpoints found</li>
+          </ul>
+        {/if}
       {/if}
     </section>
 
-    <!-- Data section -->
+    <!-- ═══ Data ═══ -->
     <section class="struct-section">
       <button
         class="section-toggle"
@@ -202,14 +342,13 @@
       >
         <span class="toggle-icon" class:open={dataOpen}>&#9654;</span>
         <span class="section-label">Data</span>
-        <span class="section-badge">{dataNodes.length}</span>
+        <span class="section-badge">{dataCount}</span>
       </button>
       {#if dataOpen}
-        <ul class="struct-list">
-          {#if dataNodes.length === 0}
-            <li class="struct-empty">No types/tables found</li>
-          {:else}
-            {#each dataNodes as node (node.id)}
+        {#if dataGroups.types.length > 0}
+          <div class="subgroup-label">Types</div>
+          <ul class="struct-list">
+            {#each dataGroups.types as node (node.id)}
               <li>
                 <button
                   class="struct-item"
@@ -217,17 +356,61 @@
                   title={node.qualified_name ?? node.name}
                   type="button"
                 >
-                  <span class="item-icon data-icon">D</span>
+                  <span class="item-icon data-icon">{getNodeTypeIcon(node.node_type)}</span>
                   <span class="item-name">{node.name ?? node.qualified_name}</span>
+                  <span class="gov-dot" class:governed={getGovernanceStatus(node) === 'governed'}></span>
                 </button>
               </li>
             {/each}
-          {/if}
-        </ul>
+          </ul>
+        {/if}
+        {#if dataGroups.tables.length > 0}
+          <div class="subgroup-label">Tables</div>
+          <ul class="struct-list">
+            {#each dataGroups.tables as node (node.id)}
+              <li>
+                <button
+                  class="struct-item"
+                  onclick={() => selectDataNode(node)}
+                  title={node.qualified_name ?? node.name}
+                  type="button"
+                >
+                  <span class="item-icon table-icon">{getNodeTypeIcon(node.node_type)}</span>
+                  <span class="item-name">{node.name ?? node.qualified_name}</span>
+                  <span class="gov-dot" class:governed={getGovernanceStatus(node) === 'governed'}></span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if dataGroups.fields.length > 0}
+          <div class="subgroup-label">Fields</div>
+          <ul class="struct-list">
+            {#each dataGroups.fields as node (node.id)}
+              <li>
+                <button
+                  class="struct-item"
+                  onclick={() => selectDataNode(node)}
+                  title={node.qualified_name ?? node.name}
+                  type="button"
+                >
+                  <span class="item-icon field-icon">{getNodeTypeIcon(node.node_type)}</span>
+                  <span class="item-name">{node.name ?? node.qualified_name}</span>
+                  <span class="gov-dot" class:governed={getGovernanceStatus(node) === 'governed'}></span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if dataCount === 0}
+          <ul class="struct-list">
+            <li class="struct-empty">No types or tables found</li>
+          </ul>
+        {/if}
       {/if}
     </section>
 
-    <!-- Specs section -->
+    <!-- ═══ Specs ═══ -->
     <section class="struct-section">
       <button
         class="section-toggle"
@@ -237,23 +420,28 @@
       >
         <span class="toggle-icon" class:open={specsOpen}>&#9654;</span>
         <span class="section-label">Specs</span>
-        <span class="section-badge">{specPathList.length}</span>
+        <span class="section-badge">{specNodes.length}</span>
       </button>
       {#if specsOpen}
         <ul class="struct-list">
-          {#if specPathList.length === 0}
-            <li class="struct-empty">No spec paths found</li>
+          {#if specNodes.length === 0}
+            <li class="struct-empty">No specs found</li>
           {:else}
-            {#each specPathList as sp}
+            {#each specNodes as node (node.id)}
+              {@const specPath = node.spec_path ?? node.name}
+              {@const govCount = [...(categorized.governedBy.entries())].filter(([, paths]) => paths.has(specPath)).length}
               <li>
                 <button
-                  class="struct-item"
-                  onclick={() => selectSpec(sp)}
-                  title={sp}
+                  class="struct-item spec-item"
+                  onclick={() => selectSpec(node)}
+                  title="{specPath} ({govCount} governed node{govCount !== 1 ? 's' : ''})"
                   type="button"
                 >
                   <span class="item-icon spec-icon">S</span>
-                  <span class="item-name">{sp.split('/').pop()}</span>
+                  <span class="item-name">{(node.name ?? specPath).split('/').pop()}</span>
+                  {#if govCount > 0}
+                    <span class="gov-count" title="{govCount} nodes governed">{govCount}</span>
+                  {/if}
                 </button>
               </li>
             {/each}
@@ -262,7 +450,7 @@
       {/if}
     </section>
 
-    <!-- Advanced Filters (legacy) -->
+    <!-- ═══ Advanced Filters ═══ -->
     <section class="struct-section advanced-section">
       <button
         class="section-toggle"
@@ -331,13 +519,14 @@
   .filter-panel {
     width: 220px;
     flex-shrink: 0;
-    background: var(--color-surface-elevated);
-    border-right: 1px solid var(--color-border);
+    background: rgba(15, 15, 26, 0.95);
+    border-right: 1px solid #334155;
     display: flex;
     flex-direction: column;
     overflow-y: auto;
     padding: var(--space-3);
     gap: var(--space-1);
+    color: #e2e8f0;
   }
 
   .filter-header {
@@ -350,7 +539,18 @@
   .filter-title {
     font-size: var(--text-sm);
     font-weight: 600;
-    color: var(--color-text);
+    color: #e2e8f0;
+  }
+
+  .governance-summary {
+    font-size: 10px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: #10b981;
+    background: color-mix(in srgb, #10b981 12%, transparent);
+    padding: 1px 6px;
+    border-radius: var(--radius-full);
+    line-height: 16px;
   }
 
   /* ── Structural sections ──────────────────────────────────────────── */
@@ -369,14 +569,14 @@
     border-radius: var(--radius-sm);
     cursor: pointer;
     font-family: var(--font-body);
-    color: var(--color-text);
+    color: #e2e8f0;
     width: 100%;
     text-align: left;
     transition: background var(--transition-fast);
   }
 
   .section-toggle:hover {
-    background: color-mix(in srgb, var(--color-text) 6%, transparent);
+    background: rgba(255, 255, 255, 0.06);
   }
 
   .section-toggle:focus-visible {
@@ -388,7 +588,7 @@
     display: inline-block;
     font-size: 8px;
     transition: transform 0.15s ease;
-    color: var(--color-text-muted);
+    color: #94a3b8;
     width: 10px;
     text-align: center;
     flex-shrink: 0;
@@ -403,7 +603,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--color-text-muted);
+    color: #94a3b8;
     flex: 1;
   }
 
@@ -411,13 +611,23 @@
     font-size: 10px;
     font-weight: 600;
     font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+    color: #94a3b8;
+    background: rgba(148, 163, 184, 0.12);
     padding: 0 var(--space-1);
     border-radius: var(--radius-full);
     min-width: 18px;
     text-align: center;
     line-height: 18px;
+  }
+
+  .subgroup-label {
+    font-size: 10px;
+    font-weight: 500;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: var(--space-1) 0 2px var(--space-4);
+    margin-top: 2px;
   }
 
   .struct-list {
@@ -432,7 +642,7 @@
 
   .struct-empty {
     font-size: var(--text-xs);
-    color: var(--color-text-muted);
+    color: #64748b;
     font-style: italic;
     padding: var(--space-1) 0;
   }
@@ -448,15 +658,15 @@
     cursor: pointer;
     font-family: var(--font-body);
     font-size: var(--text-xs);
-    color: var(--color-text);
+    color: #e2e8f0;
     width: 100%;
     text-align: left;
     transition: background var(--transition-fast);
   }
 
   .struct-item:hover {
-    background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-    color: var(--color-primary);
+    background: rgba(99, 102, 241, 0.1);
+    color: #a5b4fc;
   }
 
   .struct-item:focus-visible {
@@ -478,22 +688,37 @@
   }
 
   .boundary-icon {
-    background: color-mix(in srgb, #3b82f6 15%, transparent);
+    background: rgba(59, 130, 246, 0.15);
     color: #3b82f6;
   }
 
   .interface-icon {
-    background: color-mix(in srgb, #a855f7 15%, transparent);
+    background: rgba(168, 85, 247, 0.15);
     color: #a855f7;
   }
 
+  .endpoint-icon {
+    background: rgba(236, 72, 153, 0.15);
+    color: #ec4899;
+  }
+
   .data-icon {
-    background: color-mix(in srgb, #f59e0b 15%, transparent);
+    background: rgba(245, 158, 11, 0.15);
     color: #f59e0b;
   }
 
+  .table-icon {
+    background: rgba(234, 179, 8, 0.15);
+    color: #eab308;
+  }
+
+  .field-icon {
+    background: rgba(251, 191, 36, 0.12);
+    color: #fbbf24;
+  }
+
   .spec-icon {
-    background: color-mix(in srgb, #10b981 15%, transparent);
+    background: rgba(16, 185, 129, 0.15);
     color: #10b981;
   }
 
@@ -502,14 +727,42 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+    flex: 1;
     font-family: var(--font-mono);
+  }
+
+  /* ── Governance indicators ───────────────────────────────────────── */
+  .gov-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #ef4444;
+    opacity: 0.6;
+  }
+
+  .gov-dot.governed {
+    background: #10b981;
+    opacity: 0.8;
+  }
+
+  .gov-count {
+    font-size: 9px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: #94a3b8;
+    background: rgba(148, 163, 184, 0.1);
+    padding: 0 4px;
+    border-radius: var(--radius-full);
+    line-height: 14px;
+    flex-shrink: 0;
   }
 
   /* ── Advanced filters section ─────────────────────────────────────── */
   .advanced-section {
     margin-top: var(--space-2);
     padding-top: var(--space-2);
-    border-top: 1px solid var(--color-border);
+    border-top: 1px solid #334155;
   }
 
   .advanced-body {
@@ -528,7 +781,7 @@
   .group-heading {
     font-size: var(--text-xs);
     font-weight: 600;
-    color: var(--color-text-muted);
+    color: #94a3b8;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     margin: 0 0 var(--space-1);
@@ -540,13 +793,13 @@
     align-items: center;
     gap: var(--space-2);
     font-size: var(--text-xs);
-    color: var(--color-text);
+    color: #e2e8f0;
     cursor: pointer;
   }
 
   .filter-checkbox input,
   .filter-radio input {
-    accent-color: var(--color-primary);
+    accent-color: #6366f1;
   }
 
   .churn-wrap {
@@ -557,13 +810,13 @@
 
   .churn-slider {
     flex: 1;
-    accent-color: var(--color-primary);
+    accent-color: #6366f1;
   }
 
   .churn-val {
     font-size: var(--text-xs);
     font-family: var(--font-mono);
-    color: var(--color-text-muted);
+    color: #94a3b8;
     min-width: 20px;
     text-align: right;
   }
