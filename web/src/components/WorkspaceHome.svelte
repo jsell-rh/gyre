@@ -1016,6 +1016,15 @@
     return Math.min(100, Math.round((used / maxTokens) * 100));
   });
 
+  // ── Pipeline tabs data (unified pipeline + entity tab bar) ───────────────
+  let pipelineTabsData = $derived([
+    { id: 'specs', label: 'Specs', count: specs.length, attention: pipelineSpecs.pending > 0, done: pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0, badge: pipelineSpecs.pending > 0 ? `${pipelineSpecs.pending} pending` : pipelineSpecs.approved > 0 ? `${pipelineSpecs.approved} approved` : null, badgeVariant: pipelineSpecs.pending > 0 ? 'warn' : 'ok' },
+    { id: 'tasks', label: 'Tasks', count: wsTasks.length, attention: pipelineTasks.blocked > 0, active: pipelineTasks.in_progress > 0, badge: pipelineTasks.blocked > 0 ? `${pipelineTasks.blocked} blocked` : pipelineTasks.in_progress > 0 ? `${pipelineTasks.in_progress} active` : null, badgeVariant: pipelineTasks.blocked > 0 ? 'danger' : 'ok' },
+    { id: 'agents', label: 'Agents', count: wsAgents.length, active: pipelineAgents.active > 0, badge: pipelineAgents.active > 0 ? `${pipelineAgents.active} running` : null, badgeVariant: 'ok', pulse: pipelineAgents.active > 0 },
+    { id: 'mrs', label: 'MRs', count: wsMrs.length, attention: pipelineMrs.failed_gates > 0, badge: pipelineMrs.failed_gates > 0 ? `${pipelineMrs.failed_gates} failed` : pipelineMrs.open > 0 ? `${pipelineMrs.open} open` : null, badgeVariant: pipelineMrs.failed_gates > 0 ? 'danger' : 'ok' },
+    { id: 'activity', label: 'Activity', count: activityEvents.length, isMeta: true },
+  ]);
+
   // ── Auto-expand most relevant entity tab ─────────────────────────────────
   // When data finishes loading, if there are items needing attention and no tab
   // is already selected, auto-expand the most relevant tab.
@@ -1293,14 +1302,7 @@
           {#if activeEntityTab || specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
             <section class="ws-entity-tabs" data-testid="section-entity-tabs">
               <div class="ws-pipeline-tabs" role="tablist" aria-label="Autonomous pipeline stages" data-testid="pipeline-hero">
-                {@const pipelineTabs = [
-                  { id: 'specs', label: 'Specs', count: specs.length, attention: pipelineSpecs.pending > 0, done: pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0, badge: pipelineSpecs.pending > 0 ? `${pipelineSpecs.pending} pending` : pipelineSpecs.approved > 0 ? `${pipelineSpecs.approved} approved` : null, badgeVariant: pipelineSpecs.pending > 0 ? 'warn' : 'ok' },
-                  { id: 'tasks', label: 'Tasks', count: wsTasks.length, attention: pipelineTasks.blocked > 0, active: pipelineTasks.in_progress > 0, badge: pipelineTasks.blocked > 0 ? `${pipelineTasks.blocked} blocked` : pipelineTasks.in_progress > 0 ? `${pipelineTasks.in_progress} active` : null, badgeVariant: pipelineTasks.blocked > 0 ? 'danger' : 'ok' },
-                  { id: 'agents', label: 'Agents', count: wsAgents.length, active: pipelineAgents.active > 0, badge: pipelineAgents.active > 0 ? `${pipelineAgents.active} running` : null, badgeVariant: 'ok', pulse: pipelineAgents.active > 0 },
-                  { id: 'mrs', label: 'MRs', count: wsMrs.length, attention: pipelineMrs.failed_gates > 0, badge: pipelineMrs.failed_gates > 0 ? `${pipelineMrs.failed_gates} failed` : pipelineMrs.open > 0 ? `${pipelineMrs.open} open` : null, badgeVariant: pipelineMrs.failed_gates > 0 ? 'danger' : 'ok' },
-                  { id: 'activity', label: 'Activity', count: activityEvents.length, isMeta: true },
-                ]}
-                {#each pipelineTabs as tab, i}
+                {#each pipelineTabsData as tab, i}
                   {#if i > 0 && i < 4}
                     <span class="pipeline-tab-arrow" aria-hidden="true">
                       <svg width="14" height="8" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
