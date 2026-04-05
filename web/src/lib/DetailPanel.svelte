@@ -3949,10 +3949,23 @@
                     </div>
                   </div>
                   {#if gate.command}
-                    <div class="gate-cmd-row">
-                      <span class="gate-cmd-label">$</span>
-                      <code class="gate-cmd mono">{gate.command}</code>
-                    </div>
+                    {@const isJsonCmd = gate.command.trim().startsWith('{')}
+                    {@const parsedCmd = isJsonCmd ? (() => { try { return JSON.parse(gate.command); } catch { return null; } })() : null}
+                    {#if parsedCmd}
+                      <div class="gate-cmd-row gate-cmd-configured">
+                        <span class="gate-cmd-label gate-cmd-hint">Configuration</span>
+                        <span class="gate-config-items">
+                          {#each Object.entries(parsedCmd).filter(([k]) => k !== 'test_command') as [key, val]}
+                            <span class="gate-config-item"><span class="gate-config-key">{key.replace(/_/g, ' ')}</span> {val}</span>
+                          {/each}
+                        </span>
+                      </div>
+                    {:else}
+                      <div class="gate-cmd-row">
+                        <span class="gate-cmd-label">$</span>
+                        <code class="gate-cmd mono">{gate.command}</code>
+                      </div>
+                    {/if}
                   {:else}
                     <div class="gate-cmd-row gate-cmd-configured">
                       <span class="gate-cmd-label gate-cmd-hint">Configured in repo settings</span>
@@ -6485,6 +6498,28 @@
     font-style: italic;
     color: var(--color-text-muted);
     font-size: var(--text-xs);
+  }
+
+  .gate-config-items {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-left: var(--space-2);
+  }
+
+  .gate-config-item {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    background: color-mix(in srgb, var(--color-border) 30%, transparent);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+  }
+
+  .gate-config-key {
+    font-weight: 600;
+    color: var(--color-text-muted);
+    margin-right: 2px;
+    text-transform: capitalize;
   }
 
   .gate-structured-output {
