@@ -1122,60 +1122,6 @@
       <!-- ── Main content: single-column layout ──────────────────── -->
       <div class="ws-main-content">
 
-          <!-- Active agents (most interesting when work is happening) -->
-          {#if !agentsLoading}
-            {@const runningAgents = wsAgents.filter(a => a.status === 'active' || a.status === 'running')}
-            {#if runningAgents.length > 0}
-              <section class="ws-live-agents">
-                <div class="live-agents-header">
-                  <span class="live-agents-dot"></span>
-                  <span class="live-agents-title">{runningAgents.length} agent{runningAgents.length !== 1 ? 's' : ''} working</span>
-                </div>
-                <div class="live-agents-list">
-                  {#each runningAgents.slice(0, 4) as agent (agent.id)}
-                    {@const elapsed = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
-                    {@const specName = agent.spec_path ? agent.spec_path.split('/').pop()?.replace(/\.md$/, '') : null}
-                    {@const repoName = (agent.repo_id && repoMap[agent.repo_id]) ? repoMap[agent.repo_id].name : null}
-                    <button class="live-agent-chip" onclick={() => nav('agent', agent.id, agent)} title="{agent.name ?? formatId('agent', agent.id)} — {specName ? 'implementing ' + specName : 'working'}{repoName ? ' in ' + repoName : ''}">
-                      <span class="live-chip-pulse"></span>
-                      <span class="live-chip-name">{agent.name ?? formatId('agent', agent.id)}</span>
-                      {#if specName}<span class="live-chip-spec">{specName}</span>{/if}
-                      {#if elapsed != null}<span class="live-chip-time">{formatDuration(elapsed)}</span>{/if}
-                      {#if repoName}<span class="live-chip-repo">{repoName}</span>{/if}
-                    </button>
-                  {/each}
-                  {#if runningAgents.length > 4}
-                    <span class="live-agents-more">+{runningAgents.length - 4} more</span>
-                  {/if}
-                </div>
-              </section>
-            {/if}
-          {/if}
-
-          <!-- Merge queue (when items are in queue) -->
-          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
-            <section class="ws-merge-queue-compact">
-              <div class="mq-compact-header">
-                <span class="mq-compact-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12"><path d="M16 3h5v5M4 20L21 3"/></svg>
-                </span>
-                <span class="mq-compact-title">{mergeQueueItems.length} in merge queue</span>
-              </div>
-              <div class="mq-compact-list">
-                {#each mergeQueueItems.slice(0, 3) as item, i (item.merge_request_id ?? item.mr_id ?? i)}
-                  <button class="mq-compact-item" onclick={() => nav('mr', item.merge_request_id ?? item.mr_id, item._mr ?? {})}>
-                    <span class="mq-pos">#{i + 1}</span>
-                    <span class="mq-title">{item._title ?? entityName('mr', item.merge_request_id ?? item.mr_id)}</span>
-                    {#if item._status}<span class="mq-status">{item._status}</span>{/if}
-                  </button>
-                {/each}
-                {#if mergeQueueItems.length > 3}
-                  <span class="mq-compact-more">+{mergeQueueItems.length - 3} more</span>
-                {/if}
-              </div>
-            </section>
-          {/if}
-
           <!-- Action Needed (compact, dismissible) -->
           {#if !decisionsLoading && actionableNotifications.length > 0}
             {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
