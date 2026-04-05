@@ -1017,7 +1017,7 @@
 
       <!-- ── Pipeline flow bar (compact) ──────────────────────────── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
-        <nav class="pipeline-bar" aria-label="Pipeline status">
+        <nav class="pipeline-bar" class:pipeline-bar-expanded={wsTab != null} aria-label="Pipeline status">
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} class:pipeline-stage-selected={wsTab === 'specs'} onclick={() => { wsTab = wsTab === 'specs' ? null : 'specs'; }} title="{pipelineSpecs.approved}/{pipelineSpecs.total} specs approved{pipelineSpecs.pending > 0 ? `, ${pipelineSpecs.pending} need approval` : ''}">
             <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
             <span class="pipeline-stage-label">Specs</span>
@@ -2124,12 +2124,22 @@
   .mq-status-open { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent); }
   .mq-status-completed, .mq-status-merged { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 12%, transparent); }
 
+  /* When pipeline detail is open, connect pipeline bar to detail panel */
+  .pipeline-bar-expanded {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    border-bottom-color: transparent;
+    margin-bottom: 0;
+  }
+
   /* ── Pipeline detail panel (expands below pipeline bar) ──────── */
   .pipeline-detail {
     border: 1px solid var(--color-border);
-    border-radius: var(--radius);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
     background: var(--color-surface);
     overflow: hidden;
+    margin-top: -1px;
     animation: pipeline-detail-in 0.15s ease-out;
   }
 
