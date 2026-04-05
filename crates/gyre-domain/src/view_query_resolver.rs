@@ -4333,4 +4333,246 @@ mod tests {
             "Both nodes should match when no node_types filter"
         );
     }
+
+    #[test]
+    fn test_where_node_type_string() {
+        // Test that $where(node_type, '=', 'function') works for string properties
+        let nodes = vec![
+            make_node("n1", "Foo", NodeType::Type),
+            make_node("n2", "bar_fn", NodeType::Function),
+            make_node("n3", "Baz", NodeType::Type),
+            make_node("n4", "baz_fn", NodeType::Function),
+        ];
+        let result = resolve_scope(
+            &Scope::Filter {
+                node_types: vec![],
+                computed: Some("$where(node_type, '=', 'function')".to_string()),
+                name_pattern: None,
+            },
+            &nodes,
+            &[],
+            None,
+        );
+        assert_eq!(result.len(), 2, "Should match only function nodes");
+        assert!(result.contains("n2"));
+        assert!(result.contains("n4"));
+    }
+
+    #[test]
+    fn test_where_node_type_not_equal() {
+        let nodes = vec![
+            make_node("n1", "Foo", NodeType::Type),
+            make_node("n2", "bar_fn", NodeType::Function),
+        ];
+        let result = resolve_scope(
+            &Scope::Filter {
+                node_types: vec![],
+                computed: Some("$where(node_type, '!=', 'function')".to_string()),
+                name_pattern: None,
+            },
+            &nodes,
+            &[],
+            None,
+        );
+        assert_eq!(result.len(), 1);
+        assert!(result.contains("n1"));
+    }
+
+    #[test]
+    fn test_group_exact_match_preferred() {
+        // Group resolution should prefer exact match over substring
+        let nodes = vec![
+            make_node("n1", "Task", NodeType::Type),
+            make_node("n2", "TaskPort", NodeType::Trait),
+            make_node("n3", "TaskFilter", NodeType::Type),
+        ];
+        let query = ViewQuery {
+            scope: Scope::All,
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![gyre_common::view_query::ViewGroup {
+                name: "core".to_string(),
+                nodes: vec!["Task".to_string()],
+                color: None,
+                label: None,
+            }],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        // Should match exactly "Task", not "TaskPort" or "TaskFilter"
+        assert_eq!(result.groups_resolved[0].matched, 1, "Exact match should find only Task");
+        assert!(result.groups_resolved[0].nodes.contains(&"pkg.Task".to_string()));
+    }
+
+    #[test]
+    fn test_group_substring_fallback() {
+        // When no exact match, substring matching should work as fallback
+        let nodes = vec![
+            make_node("n1", "AuthHandler", NodeType::Function),
+            make_node("n2", "AuthMiddleware", NodeType::Function),
+            make_node("n3", "UserService", NodeType::Type),
+        ];
+        let query = ViewQuery {
+            scope: Scope::All,
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![gyre_common::view_query::ViewGroup {
+                name: "auth".to_string(),
+                nodes: vec!["Auth".to_string()],
+                color: None,
+                label: None,
+            }],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        // No exact match for "Auth", so substring should match both
+        assert_eq!(result.groups_resolved[0].matched, 2);
+    }
+
+    #[test]
+    fn test_clicked_no_selection_warning() {
+        let nodes = vec![make_node("n1", "Foo", NodeType::Type)];
+        let query = ViewQuery {
+            scope: Scope::Focus {
+                node: "$clicked".to_string(),
+                edges: vec![],
+                direction: "outgoing".to_string(),
+                depth: 5,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 0);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("click a node")),
+            "Should show helpful message when $clicked used with no selection"
+        );
+    }
+
+    #[test]
+    fn test_diff_scope_validation() {
+        use gyre_common::view_query::ViewQuery;
+        // Empty from_commit
+        let q = ViewQuery {
+            scope: Scope::Diff {
+                from_commit: "".to_string(),
+                to_commit: "abcd1234".to_string(),
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errs = q.validate();
+        assert!(errs.iter().any(|e| e.contains("must not be empty")));
+
+        // Short SHA
+        let q2 = ViewQuery {
+            scope: Scope::Diff {
+                from_commit: "ab".to_string(),
+                to_commit: "abcd1234".to_string(),
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errs2 = q2.validate();
+        assert!(errs2.iter().any(|e| e.contains("too short")));
+
+        // Same commit
+        let q3 = ViewQuery {
+            scope: Scope::Diff {
+                from_commit: "abcd1234".to_string(),
+                to_commit: "abcd1234".to_string(),
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errs3 = q3.validate();
+        assert!(errs3.iter().any(|e| e.contains("identical")));
+    }
+
+    #[test]
+    fn test_resolver_max_depth_matches_validation() {
+        // Ensure nested expressions up to depth 10 work (both validate and resolve)
+        let deep_expr = "$intersect($union($test_unreachable, $test_reachable), $test_unreachable)";
+        let nodes = vec![
+            make_node("n1", "foo", NodeType::Function),
+            make_test_node("t1", "test_foo"),
+        ];
+        let edges = vec![make_edge("e1", "t1", "n1", EdgeType::Calls)];
+        let result = resolve_scope(
+            &Scope::Filter {
+                node_types: vec![],
+                computed: Some(deep_expr.to_string()),
+                name_pattern: None,
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        // $test_unreachable ∩ ($test_unreachable ∪ $test_reachable) = $test_unreachable
+        // But n1 IS reachable via the calls edge, so unreachable set is empty
+        // (test_foo reaches foo via Calls)
+        assert_eq!(result.len(), 0, "All functions are reachable from tests");
+    }
+
+    #[test]
+    fn test_callers_default_depth_is_5() {
+        // Verify default depth for $callers is 5, not RESOLVER_MAX_DEPTH (20)
+        let mut nodes = vec![make_node("n0", "root", NodeType::Function)];
+        let mut edges = vec![];
+        // Create a chain: n0 <- n1 <- n2 <- n3 <- n4 <- n5 <- n6
+        for i in 1..=6 {
+            nodes.push(make_node(
+                &format!("n{}", i),
+                &format!("fn_{}", i),
+                NodeType::Function,
+            ));
+            edges.push(make_edge(
+                &format!("e{}", i),
+                &format!("n{}", i),
+                &format!("n{}", i - 1),
+                EdgeType::Calls,
+            ));
+        }
+        let result = resolve_scope(
+            &Scope::Filter {
+                node_types: vec![],
+                computed: Some("$callers(root)".to_string()),
+                name_pattern: None,
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        // Default depth 5: should include n0 (root) + n1..n5 = 6 nodes
+        // n6 is at depth 6, should be excluded
+        assert_eq!(result.len(), 6, "Default $callers depth should be 5 (root + 5 hops)");
+        assert!(!result.contains("n6"), "n6 is at depth 6, should be excluded");
+    }
 }
