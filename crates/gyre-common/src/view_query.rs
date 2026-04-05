@@ -548,10 +548,17 @@ impl ViewQuery {
             return;
         }
 
-        if !Self::KNOWN_COMPUTED_PREFIXES
-            .iter()
-            .any(|p| expr.starts_with(p))
-        {
+        // Standalone keywords must match exactly; parenthesized expressions match as prefix
+        let is_known = Self::KNOWN_COMPUTED_PREFIXES.iter().any(|p| {
+            if p.ends_with('(') {
+                // Prefix match for function-style expressions like "$where("
+                expr.starts_with(p)
+            } else {
+                // Exact match for standalone keywords like "$ungoverned"
+                expr == *p
+            }
+        });
+        if !is_known {
             errors.push(format!("Unknown computed expression: '{}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $ungoverned, $intersect, $union, $diff", expr));
             return;
         }

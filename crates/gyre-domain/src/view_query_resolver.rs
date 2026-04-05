@@ -1226,7 +1226,7 @@ fn resolve_computed_expression_inner(
         return HashSet::new();
     }
 
-    // $governed_by(spec_path) — use GovernedBy edge traversal, not spec_path substring
+    // $governed_by(spec_path) — use GovernedBy edge traversal with exact path matching
     if trimmed.starts_with("$governed_by(") && trimmed.ends_with(')') {
         let spec_path = trimmed[13..trimmed.len() - 1]
             .trim()
@@ -1234,13 +1234,18 @@ fn resolve_computed_expression_inner(
             .trim_matches('"');
         let lower = spec_path.to_lowercase();
 
-        // First find spec nodes (or any node whose spec_path matches)
+        // Exact match helper: spec_path matches if it equals the query exactly
+        // or ends with the query (e.g. query "auth.md" matches "specs/system/auth.md")
+        let spec_matches = |sp: &str| -> bool {
+            let sp_lower = sp.to_lowercase();
+            sp_lower == lower || sp_lower.ends_with(&format!("/{lower}"))
+        };
+
+        // First find spec nodes (or any node whose spec_path matches exactly)
         let spec_node_ids: HashSet<String> = active_nodes
             .iter()
             .filter(|n| {
-                n.spec_path
-                    .as_ref()
-                    .map_or(false, |sp| sp.to_lowercase().contains(&lower))
+                n.spec_path.as_ref().map_or(false, |sp| spec_matches(sp))
             })
             .map(|n| n.id.to_string())
             .collect();
@@ -1262,14 +1267,12 @@ fn resolve_computed_expression_inner(
             return governed;
         }
 
-        // Fallback: find code nodes with matching spec_path (backwards compatibility)
+        // Fallback: find code nodes with matching spec_path (exact match)
         // but do NOT return the spec nodes themselves — only code nodes governed by them.
         let code_nodes: HashSet<String> = active_nodes
             .iter()
             .filter(|n| {
-                n.spec_path
-                    .as_ref()
-                    .map_or(false, |sp| sp.to_lowercase().contains(&lower))
+                n.spec_path.as_ref().map_or(false, |sp| spec_matches(sp))
                     && n.node_type != NodeType::Spec
             })
             .map(|n| n.id.to_string())
@@ -1415,7 +1418,15 @@ pub fn validate_computed_expression(expr: &str) -> Option<String> {
         "$reachable(",
     ];
 
-    if !known_prefixes.iter().any(|p| trimmed.starts_with(p)) {
+    // Standalone keywords must match exactly; parenthesized expressions match as prefix
+    let is_known = known_prefixes.iter().any(|p| {
+        if p.ends_with('(') {
+            trimmed.starts_with(p)
+        } else {
+            trimmed == *p
+        }
+    });
+    if !is_known {
         return Some(format!(
             "Unrecognized expression: '{trimmed}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $intersect, $union, $diff, $test_unreachable, $test_reachable, $ungoverned, $clicked, $selected"
         ));
@@ -4733,5 +4744,76 @@ mod tests {
             "$intersect($where(complexity, '>', 10), $ungoverned)"
         )
         .is_none());
+    }
+
+    #[test]
+    fn test_validate_standalone_keywords_exact_match() {
+        // Standalone keywords must match exactly, not as prefixes
+        assert!(
+            validate_computed_expression("$ungoverned_extra").is_some(),
+            "$ungoverned_extra should be rejected"
+        );
+        assert!(
+            validate_computed_expression("$clicked_thing").is_some(),
+            "$clicked_thing should be rejected"
+        );
+        assert!(
+            validate_computed_expression("$selected_nodes").is_some(),
+            "$selected_nodes should be rejected"
+        );
+        assert!(
+            validate_computed_expression("$test_unreachable_stuff").is_some(),
+            "$test_unreachable_stuff should be rejected"
+        );
+        // But valid standalone keywords pass
+        assert!(validate_computed_expression("$clicked").is_none());
+        assert!(validate_computed_expression("$selected").is_none());
+        assert!(validate_computed_expression("$test_unreachable").is_none());
+        assert!(validate_computed_expression("$test_reachable").is_none());
+    }
+
+    #[test]
+    fn test_governed_by_exact_matching() {
+        // Exact path matching: $governed_by('auth.md') should NOT match 'authorization.md'
+        let mut nodes = vec![
+            make_node("n1", "AuthService", NodeType::Type),
+            make_node("n2", "AuthzService", NodeType::Type),
+            make_node("n3", "auth_spec", NodeType::Spec),
+            make_node("n4", "authz_spec", NodeType::Spec),
+        ];
+        nodes[2].spec_path = Some("specs/system/auth.md".to_string());
+        nodes[3].spec_path = Some("specs/system/authorization.md".to_string());
+        let edges = vec![
+            make_edge("e1", "n1", "n3", EdgeType::GovernedBy),
+            make_edge("e2", "n2", "n4", EdgeType::GovernedBy),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+
+        // Query for 'auth.md' should only match the auth spec, not authorization
+        let result = resolve_computed_expression(
+            "$governed_by('auth.md')",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(
+            result.contains("n1"),
+            "AuthService governed by auth.md"
+        );
+        assert!(
+            result.contains("n3"),
+            "auth spec node itself"
+        );
+        assert!(
+            !result.contains("n2"),
+            "AuthzService should NOT match auth.md (exact matching)"
+        );
+        assert!(
+            !result.contains("n4"),
+            "authz spec should NOT match auth.md (exact matching)"
+        );
     }
 }
