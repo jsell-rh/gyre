@@ -3885,8 +3885,22 @@
                 }}>Re-run gates</button>
               {/if}
             </div>
+            <!-- Group gates: required first, then advisory -->
+            {@const sortedGates = [...mrGates].sort((a, b) => {
+              // Failed required first, then failed advisory, then passed, then pending
+              const statusOrder = { failed: 0, Failed: 0, running: 1, Running: 1, pending: 2, Pending: 2, passed: 3, Passed: 3 };
+              const reqOrder = (g) => g.required === false ? 1 : 0;
+              const aScore = reqOrder(a) * 10 + (statusOrder[a.status] ?? 2);
+              const bScore = reqOrder(b) * 10 + (statusOrder[b.status] ?? 2);
+              return aScore - bScore;
+            })}
+            {@const reqGates = sortedGates.filter(g => g.required !== false)}
+            {@const advGates = sortedGates.filter(g => g.required === false)}
+            {#if reqGates.length > 0 && advGates.length > 0}
+              <h4 class="gates-group-heading">Required <span class="gates-group-count">{reqGates.length}</span></h4>
+            {/if}
             <ul class="gates-list">
-              {#each mrGates as gate}
+              {#each reqGates.length > 0 && advGates.length > 0 ? reqGates : sortedGates as gate}
                 {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
                 {@const gateTypeLabel = gate.gate_type ? gate.gate_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : ''}
                 {@const gateName = gate.gate_name ?? gate.name ?? (gateTypeLabel || (gate.command ? gate.command.split(' ')[0].split('/').pop() : '') || 'Quality Gate')}
@@ -3901,34 +3915,37 @@
                   security_scan: 'Scans for known security vulnerabilities',
                   coverage_check: 'Checks test coverage meets threshold',
                 })[gate.gate_type] ?? null}
-                <li class="gate-item gate-item-{gateStatus}" class:gate-item-required={gate.required !== false}>
+                <li class="gate-card gate-card-{gateStatus}" class:gate-card-required={gate.required !== false}>
+                  {#if gateStatus === 'failed' && gate.required !== false}
+                    <div class="gate-error-banner">Merge blocked — this required gate failed</div>
+                  {/if}
                   <div class="gate-row">
-                    <span class="gate-status-icon">{gateStatus === 'passed' ? '✓' : gateStatus === 'failed' ? '✗' : gateStatus === 'running' ? '⟳' : '○'}</span>
+                    <span class="gate-status-icon gate-status-icon-{gateStatus}">{gateStatus === 'passed' ? '✓' : gateStatus === 'failed' ? '✗' : gateStatus === 'running' ? '⟳' : '○'}</span>
                     <div class="gate-name-block">
                       <span class="gate-name" title={gate.gate_id ?? ''}>{gateName}</span>
+                      {#if gateTypeLabel}
+                        <span class="gate-type-tag">{gateTypeLabel}</span>
+                      {/if}
                       {#if gateDesc}
                         <span class="gate-description">{gateDesc}</span>
                       {/if}
                     </div>
-                    <span class="gate-status-badge gate-status-badge-{gateStatus}">
-                      {#if gateStatus === 'passed'}
-                        Passed
-                      {:else if gateStatus === 'failed'}
-                        Failed
-                      {:else if gateStatus === 'running'}
-                        Running
-                      {:else}
-                        <span class="gate-pending-pulse"></span>Waiting...
+                    <div class="gate-meta">
+                      {#if gate.required !== undefined}
+                        <span class="gate-required-badge" class:advisory={!gate.required}>
+                          {gate.required ? 'Required' : 'Advisory'}
+                        </span>
                       {/if}
-                    </span>
-                    {#if gate.required !== undefined}
-                      <span class="gate-required-badge" class:advisory={!gate.required}>
-                        {gate.required ? 'Required' : 'Advisory'}
+                      {#if duration}
+                        <span class="gate-duration-pill">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                          {duration < 1000 ? duration + 'ms' : (duration / 1000).toFixed(1) + 's'}
+                        </span>
+                      {/if}
+                      <span class="gate-status-badge gate-status-badge-{gateStatus}">
+                        {#if gateStatus === 'passed'}Passed{:else if gateStatus === 'failed'}Failed{:else if gateStatus === 'running'}Running{:else}<span class="gate-pending-pulse"></span>Pending{/if}
                       </span>
-                    {/if}
-                    {#if duration}
-                      <span class="gate-duration">{duration < 1000 ? duration + 'ms' : (duration / 1000).toFixed(1) + 's'}</span>
-                    {/if}
+                    </div>
                   </div>
                   {#if gate.command}
                     <div class="gate-cmd-row">
@@ -3988,6 +4005,50 @@
                 </li>
               {/each}
             </ul>
+            {#if reqGates.length > 0 && advGates.length > 0}
+              <h4 class="gates-group-heading gates-group-advisory">Advisory <span class="gates-group-count">{advGates.length}</span></h4>
+              <ul class="gates-list">
+                {#each advGates as gate}
+                  {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
+                  {@const gateTypeLabel = gate.gate_type ? gate.gate_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : ''}
+                  {@const gateName = gate.gate_name ?? gate.name ?? (gateTypeLabel || (gate.command ? gate.command.split(' ')[0].split('/').pop() : '') || 'Quality Gate')}
+                  {@const gateStatus = (gate.status === 'Passed' || gate.status === 'passed') ? 'passed' : (gate.status === 'Failed' || gate.status === 'failed') ? 'failed' : (gate.status === 'Running' || gate.status === 'running') ? 'running' : gate.status ?? 'pending'}
+                  <li class="gate-card gate-card-{gateStatus} gate-card-advisory">
+                    <div class="gate-row">
+                      <span class="gate-status-icon gate-status-icon-{gateStatus}">{gateStatus === 'passed' ? '✓' : gateStatus === 'failed' ? '✗' : gateStatus === 'running' ? '⟳' : '○'}</span>
+                      <div class="gate-name-block">
+                        <span class="gate-name">{gateName}</span>
+                        {#if gateTypeLabel}<span class="gate-type-tag">{gateTypeLabel}</span>{/if}
+                      </div>
+                      <div class="gate-meta">
+                        <span class="gate-required-badge advisory">Advisory</span>
+                        {#if duration}
+                          <span class="gate-duration-pill">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            {duration < 1000 ? duration + 'ms' : (duration / 1000).toFixed(1) + 's'}
+                          </span>
+                        {/if}
+                        <span class="gate-status-badge gate-status-badge-{gateStatus}">
+                          {#if gateStatus === 'passed'}Passed{:else if gateStatus === 'failed'}Failed{:else}Pending{/if}
+                        </span>
+                      </div>
+                    </div>
+                    {#if gate.command}
+                      <div class="gate-cmd-row"><span class="gate-cmd-label">$</span><code class="gate-cmd mono">{gate.command}</code></div>
+                    {/if}
+                    {#if gate.output}
+                      <details class="gate-output-details" open={gateStatus === 'failed'}>
+                        <summary class="gate-output-label">Output <button class="gate-copy-btn" onclick={(e) => { e.stopPropagation(); e.preventDefault(); navigator.clipboard.writeText(gate.output); e.target.textContent = 'Copied!'; setTimeout(() => { e.target.textContent = 'Copy'; }, 1500); }}>Copy</button></summary>
+                        <pre class="gate-output gate-terminal">{gate.output}</pre>
+                      </details>
+                    {/if}
+                    {#if gate.error}
+                      <details class="gate-output-details" open><summary class="gate-output-label gate-error-label">Error</summary><pre class="gate-output gate-terminal gate-error">{gate.error}</pre></details>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
           {:else}
             <p class="no-data">No gate results for this merge request. Quality gates (tests, lint, traces) are configured per-repository in Settings and run automatically when an MR is enqueued.</p>
           {/if}
@@ -6393,6 +6454,101 @@
   .gate-metric-success { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
   .gate-metric-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
   .gate-metric-warn { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
+
+  /* Gate card styles (enhanced from gate-item) */
+  .gate-card {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    border-left: 3px solid var(--color-border);
+  }
+
+  .gate-card-passed { border-left-color: var(--color-success); }
+  .gate-card-failed { border-left-color: var(--color-danger); }
+  .gate-card-running { border-left-color: var(--color-warning); }
+
+  .gate-card-required.gate-card-failed {
+    border-left-width: 4px;
+    background: color-mix(in srgb, var(--color-danger) 3%, var(--color-surface-elevated));
+  }
+
+  .gate-card-advisory {
+    opacity: 0.85;
+  }
+
+  .gate-error-banner {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    margin-bottom: var(--space-1);
+  }
+
+  .gate-status-icon-passed { color: var(--color-success); }
+  .gate-status-icon-failed { color: var(--color-danger); }
+  .gate-status-icon-running { color: var(--color-warning); }
+  .gate-status-icon-pending { color: var(--color-text-muted); }
+
+  .gate-type-tag {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .gate-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .gate-duration-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+  }
+
+  .gates-group-heading {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: var(--space-3) 0 var(--space-1) 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .gates-group-advisory {
+    margin-top: var(--space-4);
+    color: var(--color-text-muted);
+  }
+
+  .gates-group-count {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+  }
 
   .gate-duration {
     font-size: var(--text-xs);
