@@ -197,4 +197,22 @@ impl SavedViewRepository for SqliteStorage {
         })
         .await?
     }
+
+    async fn delete_scoped(&self, id: &Id, tenant_id: &Id) -> Result<bool> {
+        let pool = Arc::clone(&self.pool);
+        let id = id.clone();
+        let tenant_id = tenant_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<bool> {
+            let mut conn = pool.get().context("get db connection")?;
+            let deleted = diesel::delete(
+                saved_views::table
+                    .find(id.as_str())
+                    .filter(saved_views::tenant_id.eq(tenant_id.as_str())),
+            )
+            .execute(&mut *conn)
+            .context("delete saved view scoped")?;
+            Ok(deleted > 0)
+        })
+        .await?
+    }
 }

@@ -44,4 +44,16 @@ pub trait SavedViewRepository: Send + Sync {
     }
     async fn update(&self, view: SavedView) -> Result<SavedView>;
     async fn delete(&self, id: &Id) -> Result<()>;
+    /// Delete a view with tenant_id guard for defense-in-depth.
+    /// Returns true if a row was deleted, false if no matching row found.
+    async fn delete_scoped(&self, id: &Id, tenant_id: &Id) -> Result<bool> {
+        // Default: verify tenant before deleting (backwards compat)
+        if let Some(view) = self.get(id).await? {
+            if view.tenant_id != *tenant_id {
+                return Ok(false);
+            }
+        }
+        self.delete(id).await?;
+        Ok(true)
+    }
 }

@@ -352,6 +352,25 @@ async fn handle_explorer_session(
             }
         };
 
+        // Check raw frame length BEFORE deserialization to prevent CPU exhaustion
+        // from deeply nested JSON structures.
+        const MAX_RAW_FRAME_SIZE: usize = 128 * 1024; // 128 KiB
+        if msg.len() > MAX_RAW_FRAME_SIZE {
+            let err = ExplorerServerMessage::Error {
+                message: format!(
+                    "Message too large ({} bytes). Maximum frame size is {} bytes.",
+                    msg.len(),
+                    MAX_RAW_FRAME_SIZE
+                ),
+            };
+            let _ = sender
+                .send(Message::Text(
+                    serialize_msg(&err).unwrap_or_default().into(),
+                ))
+                .await;
+            continue;
+        }
+
         let client_msg: ExplorerClientMessage = match serde_json::from_str(&msg) {
             Ok(m) => m,
             Err(e) => {
@@ -879,7 +898,9 @@ async fn handle_explorer_session(
                                 .await;
                             continue;
                         }
-                        match state.saved_views.delete(&vid).await {
+                        // Use delete_scoped for defense-in-depth tenant isolation.
+                        let tid = Id::new(&auth.tenant_id);
+                        match state.saved_views.delete_scoped(&vid, &tid).await {
                             Ok(_) => {
                                 // Return updated view list
                                 let tenant_id = Id::new(&auth.tenant_id);
