@@ -160,26 +160,32 @@
       </div>
     {/if}
 
-    <!-- Compact stats footer — clickable counts, no arrows -->
-    {#if stats.specs > 0 || stats.tasks > 0 || stats.mrs > 0}
-      <div class="repo-card-stats-footer">
-        {#if stats.specs > 0}
-          <button class="repo-stat-chip" onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending)` : ''}">
-            <span class="repo-stat-num">{stats.specs}</span> specs
-          </button>
-        {/if}
-        {#if stats.tasks > 0}
-          <button class="repo-stat-chip" onclick={(e) => handleStatClick('tasks', e)} title="{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}">
-            <span class="repo-stat-num">{stats.tasks}</span> tasks
-          </button>
-        {/if}
-        {#if stats.mrs > 0}
-          <button class="repo-stat-chip" class:repo-stat-danger={stats.failedGates > 0} onclick={(e) => handleStatClick('mrs', e)} title="{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{stats.failedGates > 0 ? ` — ${stats.failedGates} gate failures` : ''}">
-            <span class="repo-stat-num">{stats.mrs}</span> MRs
-          </button>
-        {/if}
-      </div>
-    {/if}
+    <!-- Compact stats footer — clickable counts for quick navigation -->
+    <div class="repo-card-stats-footer">
+      {#if stats.specs > 0}
+        <button class="repo-stat-chip" onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending)` : ''}">
+          <span class="repo-stat-num">{stats.specs}</span> specs
+        </button>
+      {/if}
+      {#if stats.tasks > 0}
+        <button class="repo-stat-chip" onclick={(e) => handleStatClick('tasks', e)} title="{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}">
+          <span class="repo-stat-num">{stats.tasks}</span> tasks
+        </button>
+      {/if}
+      {#if stats.mrs > 0}
+        <button class="repo-stat-chip" class:repo-stat-danger={stats.failedGates > 0} onclick={(e) => handleStatClick('mrs', e)} title="{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{stats.failedGates > 0 ? ` — ${stats.failedGates} gate failures` : ''}">
+          <span class="repo-stat-num">{stats.mrs}</span> MRs
+        </button>
+      {/if}
+      {#if stats.agents > 0}
+        <button class="repo-stat-chip repo-stat-live" onclick={(e) => handleStatClick('agents', e)} title="{stats.agents} active agent{stats.agents !== 1 ? 's' : ''}">
+          <span class="repo-stat-num">{stats.agents}</span> agents
+        </button>
+      {/if}
+      <button class="repo-stat-chip repo-stat-code" onclick={(e) => handleStatClick('code', e)} title="Browse code and agent provenance">
+        code
+      </button>
+    </div>
   </div>
 {/if}
 
@@ -508,4 +514,7 @@
 
   .repo-stat-danger { color: var(--color-danger); }
   .repo-stat-danger .repo-stat-num { color: var(--color-danger); }
+  .repo-stat-live { color: var(--color-success); }
+  .repo-stat-live .repo-stat-num { color: var(--color-success); }
+  .repo-stat-code { color: var(--color-text-muted); font-style: italic; }
 </style>
