@@ -4063,6 +4063,45 @@
           {:else if mrAttestation}
             {@const att = mrAttestation.attestation ?? mrAttestation}
             <div class="attestation-block">
+              <!-- Provenance chain visual -->
+              {#if att.spec_ref || att.author_agent_id || att.task_id}
+                <div class="provenance-chain-visual">
+                  {#if att.spec_ref}
+                    {@const pSpecPath = att.spec_ref.split('@')[0]}
+                    <button class="prov-node prov-node-spec" onclick={() => navigateTo('spec', pSpecPath, { path: pSpecPath })}>
+                      <span class="prov-node-icon">S</span>
+                      <span class="prov-node-label">{pSpecPath.split('/').pop()?.replace(/\.md$/, '')}</span>
+                    </button>
+                    <span class="prov-arrow">→</span>
+                  {/if}
+                  {#if att.task_id}
+                    <button class="prov-node prov-node-task" onclick={() => navigateTo('task', att.task_id)}>
+                      <span class="prov-node-icon">T</span>
+                      <span class="prov-node-label">{entityName('task', att.task_id)}</span>
+                    </button>
+                    <span class="prov-arrow">→</span>
+                  {/if}
+                  {#if att.author_agent_id}
+                    <button class="prov-node prov-node-agent" onclick={() => navigateTo('agent', att.author_agent_id)}>
+                      <span class="prov-node-icon">A</span>
+                      <span class="prov-node-label">{entityName('agent', att.author_agent_id)}</span>
+                    </button>
+                    <span class="prov-arrow">→</span>
+                  {/if}
+                  <span class="prov-node prov-node-mr prov-node-current">
+                    <span class="prov-node-icon">MR</span>
+                    <span class="prov-node-label">{entity?.data?.title ?? entityName('mr', entity?.id)}</span>
+                  </span>
+                  {#if att.merge_commit_sha}
+                    <span class="prov-arrow">→</span>
+                    <span class="prov-node prov-node-merged">
+                      <span class="prov-node-icon">✓</span>
+                      <span class="prov-node-label">Merged</span>
+                    </span>
+                  {/if}
+                </div>
+              {/if}
+
               <!-- Verified badge banner -->
               <div class="att-verified-banner" class:att-verified={!!mrAttestation.signature}>
                 <div class="att-verified-icon">
@@ -4119,9 +4158,10 @@
                 {#if att.conversation_sha}
                   <dt>Conversation</dt>
                   <dd>
-                    <button class="entity-link mono" title="View agent reasoning for this merge" onclick={() => { activeTab = 'ask-why'; }}>
+                    <button class="att-reasoning-btn" title="View the agent's reasoning and tool calls that produced this code" onclick={() => { activeTab = 'ask-why'; }}>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                      View agent reasoning
                       <code class="sha-badge mono">{att.conversation_sha.slice(0, 7)}</code>
-                      <span class="att-conv-arrow">View reasoning</span>
                     </button>
                   </dd>
                 {/if}
@@ -6803,6 +6843,98 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+  }
+
+  /* Provenance chain visual */
+  .provenance-chain-visual {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-2);
+    overflow-x: auto;
+    flex-wrap: wrap;
+  }
+
+  .prov-node {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+    max-width: 160px;
+  }
+
+  .prov-node:hover {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface));
+  }
+
+  .prov-node-icon {
+    font-weight: 700;
+    font-size: 9px;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .prov-node-spec .prov-node-icon { background: color-mix(in srgb, var(--color-info) 15%, transparent); color: var(--color-info); }
+  .prov-node-task .prov-node-icon { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
+  .prov-node-agent .prov-node-icon { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
+  .prov-node-mr .prov-node-icon { background: color-mix(in srgb, var(--color-primary) 15%, transparent); color: var(--color-primary); }
+  .prov-node-merged .prov-node-icon { background: var(--color-success); color: white; }
+
+  .prov-node-current {
+    border-color: var(--color-primary);
+    font-weight: 600;
+  }
+
+  .prov-node-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .prov-arrow {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    opacity: 0.5;
+    flex-shrink: 0;
+  }
+
+  .att-reasoning-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--color-primary);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    font-family: var(--font-body);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .att-reasoning-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border-color: var(--color-primary);
   }
 
   .att-verified-banner {
