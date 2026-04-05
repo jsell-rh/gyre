@@ -1138,6 +1138,51 @@
             </section>
           {/if}
 
+          <!-- Merge Queue (if items exist) -->
+          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
+            <section class="ws-merge-queue-section" data-testid="section-merge-queue">
+              <div class="section-header-row">
+                <h2 class="section-heading">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="13" height="13" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+                  Merge Queue ({mergeQueueItems.length})
+                </h2>
+              </div>
+              <div class="merge-queue-list">
+                {#each mergeQueueItems as item, i}
+                  {@const mrStatus = item._status ?? item.status ?? 'pending'}
+                  {@const gates = item._mr?._gates ?? null}
+                  <button class="merge-queue-entry" onclick={() => nav('mr', item.merge_request_id ?? item.mr_id, item._mr ?? {})} title="View merge request">
+                    <span class="mq-position">#{i + 1}</span>
+                    <div class="mq-content">
+                      <span class="mq-title">{item._title ?? 'Untitled'}</span>
+                      <span class="mq-meta">
+                        {#if item._branch}<span class="mq-branch">{item._branch}</span>{/if}
+                        {#if item._agent}<span class="mq-agent">{entityName('agent', item._agent)}</span>{/if}
+                        {#if item._spec_ref}<span class="mq-spec">{item._spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '')}</span>{/if}
+                      </span>
+                    </div>
+                    <div class="mq-status">
+                      {#if gates?.details?.length > 0}
+                        <span class="gate-names-ws">
+                          {#each gates.details.slice(0, 2) as g}
+                            <span class="gate-badge-ws gate-badge-ws-{g.status}">
+                              <span class="gate-badge-ws-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
+                              <span class="gate-badge-ws-name">{g.name}</span>
+                            </span>
+                          {/each}
+                        </span>
+                      {/if}
+                      {#if item._deps?.length > 0}
+                        <span class="mq-deps" title="Depends on {item._deps.length} other MR{item._deps.length !== 1 ? 's' : ''}">⤵ {item._deps.length} dep{item._deps.length !== 1 ? 's' : ''}</span>
+                      {/if}
+                      <span class="mq-status-badge mq-status-{mrStatus}">{mrStatus}</span>
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            </section>
+          {/if}
+
           <!-- Repos (primary content) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
@@ -1763,6 +1808,101 @@
     margin: 0;
     font-style: italic;
   }
+
+  /* ── Merge queue section ────────────────────────────────────── */
+  .ws-merge-queue-section {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .merge-queue-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-border);
+    overflow: hidden;
+  }
+
+  .merge-queue-entry {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+    width: 100%;
+  }
+
+  .merge-queue-entry:hover { background: var(--color-surface-elevated); }
+
+  .mq-position {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: var(--text-sm);
+    color: var(--color-warning);
+    flex-shrink: 0;
+    width: 28px;
+    text-align: center;
+  }
+
+  .mq-content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .mq-title {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mq-meta {
+    display: flex;
+    gap: var(--space-2);
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .mq-branch { font-family: var(--font-mono); }
+  .mq-agent { font-family: var(--font-mono); }
+  .mq-spec { font-style: italic; }
+
+  .mq-status {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+
+  .mq-deps {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .mq-status-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+  }
+
+  .mq-status-pending { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 12%, transparent); }
+  .mq-status-processing { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent); }
+  .mq-status-open { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent); }
+  .mq-status-completed, .mq-status-merged { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 12%, transparent); }
 
   /* ── Pipeline flow bar ───────────────────────────────────────── */
   .pipeline-bar {
