@@ -60,7 +60,8 @@
 </script>
 
 {#if repo}
-  <button class="repo-card" class:repo-card-active={health === 'healthy'} class:repo-card-alert={health === 'gate' || health === 'gate_failure'} onclick={onclick} data-testid="repo-card" title={statusSummary ? `${statusSummary.text}\n${statusSummary.why}` : h.label}>
+  <!-- Use a div with role="button" to avoid nested-button a11y violations -->
+  <div class="repo-card" class:repo-card-active={health === 'healthy'} class:repo-card-alert={health === 'gate' || health === 'gate_failure'} onclick={onclick} data-testid="repo-card" title={statusSummary ? `${statusSummary.text}\n${statusSummary.why}` : h.label} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onclick?.(); } }}>
     <div class="repo-card-header">
       <span class="repo-card-health" style="color: {h.color}" aria-label={h.label}>{h.dot}</span>
       <span class="repo-card-name">{repo.name}</span>
@@ -126,34 +127,34 @@
     <!-- Pipeline mini-flow — shows where work is in the spec→task→agent→MR pipeline -->
     {#if stats.specs > 0 || stats.tasks > 0 || stats.agents > 0 || stats.mrs > 0}
       <div class="repo-card-pipeline">
-        <button class="repo-pipeline-stage" class:repo-pipeline-active={specBreakdown?.pending > 0} onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending)` : ''}">
+        <span class="repo-pipeline-stage" class:repo-pipeline-active={specBreakdown?.pending > 0} onclick={(e) => handleStatClick('specs', e)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('specs', e); }} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending)` : ''}">
           <span class="repo-pipeline-count">{stats.specs}</span>
           <span class="repo-pipeline-label">specs</span>
-        </button>
+        </span>
         {#if stats.tasks > 0}
           <span class="repo-pipeline-arrow">→</span>
-          <button class="repo-pipeline-stage" onclick={(e) => handleStatClick('tasks', e)} title="{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}">
+          <span class="repo-pipeline-stage" onclick={(e) => handleStatClick('tasks', e)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('tasks', e); }} title="{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}">
             <span class="repo-pipeline-count">{stats.tasks}</span>
             <span class="repo-pipeline-label">tasks</span>
-          </button>
+          </span>
         {/if}
         {#if stats.agents > 0}
           <span class="repo-pipeline-arrow">→</span>
-          <button class="repo-pipeline-stage" class:repo-pipeline-live={stats.agents > 0} onclick={(e) => handleStatClick('agents', e)} title="{stats.agents} agent{stats.agents !== 1 ? 's' : ''}">
+          <span class="repo-pipeline-stage" class:repo-pipeline-live={stats.agents > 0} onclick={(e) => handleStatClick('agents', e)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('agents', e); }} title="{stats.agents} agent{stats.agents !== 1 ? 's' : ''}">
             <span class="repo-pipeline-count">{stats.agents}</span>
             <span class="repo-pipeline-label">agents</span>
-          </button>
+          </span>
         {/if}
         {#if stats.mrs > 0}
           <span class="repo-pipeline-arrow">→</span>
-          <button class="repo-pipeline-stage" class:repo-pipeline-danger={stats.failedGates > 0} class:repo-pipeline-done={stats.failedGates === 0} onclick={(e) => handleStatClick('mrs', e)} title="{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{stats.failedGates > 0 ? ` — ${stats.failedGates} gate failures` : ''}">
+          <span class="repo-pipeline-stage" class:repo-pipeline-danger={stats.failedGates > 0} class:repo-pipeline-done={stats.failedGates === 0} onclick={(e) => handleStatClick('mrs', e)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') handleStatClick('mrs', e); }} title="{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{stats.failedGates > 0 ? ` — ${stats.failedGates} gate failures` : ''}">
             <span class="repo-pipeline-count">{stats.mrs}</span>
             <span class="repo-pipeline-label">MRs</span>
-          </button>
+          </span>
         {/if}
       </div>
     {/if}
-  </button>
+  </div>
 {/if}
 
 <style>
@@ -371,7 +372,7 @@
   }
 
   .repo-pipeline-stage {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 2px;
     padding: 1px 4px;
