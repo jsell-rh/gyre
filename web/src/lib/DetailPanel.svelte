@@ -2945,7 +2945,7 @@
                 <dt>{$t('detail_panel.created')}</dt><dd>{fmtDate(entity.data.created_at)}</dd>
               {/if}
               {#if entity.data?.spec_path}
-                <dt>{$t('detail_panel.spec')}</dt><dd class="mono">{entity.data.spec_path}</dd>
+                <dt>{$t('detail_panel.spec')}</dt><dd><button class="entity-link mono" onclick={() => navigateTo('spec', entity.data.spec_path, { path: entity.data.spec_path, repo_id: entity.data?.repo_id })} title={entity.data.spec_path}>{entity.data.spec_path.split('/').pop()?.replace(/\.md$/, '') ?? entity.data.spec_path}</button></dd>
               {/if}
             </dl>
           {/if}
@@ -3100,7 +3100,7 @@
                 <dt>Drift</dt><dd><Badge value={sd.drift_status} variant={sd.drift_status === 'drifted' ? 'warning' : 'muted'} /></dd>
               {/if}
               {#if sd.repo_id}
-                <dt>Repo</dt><dd class="mono">{entityName('repo', sd.repo_id)}</dd>
+                <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {sd.repo_id}" onclick={() => copyId(sd.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sd.repo_id); }}>{entityName('repo', sd.repo_id)}</dd>
               {/if}
               {#if sd.updated_at}
                 <dt>{$t('detail_panel.updated')}</dt><dd>{fmtDate(sd.updated_at)}</dd>

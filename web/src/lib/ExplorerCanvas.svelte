@@ -1149,7 +1149,7 @@
             {:else}
               <div class="spec-path-row">
                 <span class="spec-path-label">{$t('detail_panel.path')}</span>
-                <span class="spec-path-val mono">{specPanelNode.spec_path}</span>
+                <button class="spec-path-val mono spec-path-link" onclick={() => { if (goToEntityDetail) goToEntityDetail('spec', specPanelNode.spec_path, { path: specPanelNode.spec_path }); }} title="View spec details">{specPanelNode.spec_path.split('/').pop()?.replace(/\.md$/, '') ?? specPanelNode.spec_path}</button>
               </div>
 
               {#if specLoading}
@@ -1501,6 +1501,8 @@
   .spec-path-row { display: flex; align-items: flex-start; gap: var(--space-2); }
   .spec-path-label { font-size: var(--text-xs); color: var(--color-text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; min-width: 40px; }
   .spec-path-val { font-size: var(--text-xs); color: var(--color-text-secondary); font-family: var(--font-mono); word-break: break-all; }
+  .spec-path-link { background: none; border: none; cursor: pointer; padding: 0; text-align: left; color: var(--color-link, var(--color-primary)); }
+  .spec-path-link:hover { text-decoration: underline; }
   .spec-loading { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; }
   .spec-no-content { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; margin: 0; }
   .spec-editor-textarea {
