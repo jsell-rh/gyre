@@ -1477,10 +1477,21 @@
                             <td class="cell-mono">{#if mr.spec_ref}{@const specPath = mr.spec_ref.split('@')[0]}<button class="entity-link-btn" onclick={(e) => { e.stopPropagation(); nav('spec', specPath, { path: specPath, repo_id: repoId }); }}>{specPath.split('/').pop()?.replace(/\.md$/, '')}</button>{/if}</td>
                             <td>
                               {#if mr._gates?.total > 0}
-                                <span class="gate-summary">
-                                  {#if mr._gates.failed > 0}<span class="gate-mini gate-mini-fail">✗{mr._gates.failed}</span>{/if}
-                                  {#if mr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{mr._gates.passed}</span>{/if}
-                                  {#if mr._gates.total - mr._gates.passed - mr._gates.failed > 0}<span class="gate-mini gate-mini-pending">○{mr._gates.total - mr._gates.passed - mr._gates.failed}</span>{/if}
+                                {@const gateDetails = mr._gates.details ?? []}
+                                {@const sortedGateDetails = [...gateDetails].sort((a, b) => {
+                                  const order = { failed: 0, pending: 1, running: 1, passed: 2 };
+                                  return (order[a.status] ?? 1) - (order[b.status] ?? 1);
+                                })}
+                                <span class="gate-names-ws">
+                                  {#each sortedGateDetails.slice(0, 3) as g}
+                                    <button class="gate-badge-ws gate-badge-ws-{g.status}" title="{g.name}{g.required === false ? ' (advisory)' : ''}{g.gate_type ? ' — ' + g.gate_type.replace(/_/g, ' ') : ''}" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'gates' }); }}>
+                                      <span class="gate-badge-ws-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
+                                      <span class="gate-badge-ws-name">{g.name}</span>
+                                    </button>
+                                  {/each}
+                                  {#if sortedGateDetails.length > 3}
+                                    <button class="gate-badge-ws gate-badge-ws-more" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'gates' }); }}>+{sortedGateDetails.length - 3}</button>
+                                  {/if}
                                 </span>
                               {/if}
                             </td>
@@ -2230,6 +2241,31 @@
     display: inline-flex;
     gap: 2px;
   }
+
+  /* Workspace gate badges (named, clickable) */
+  .gate-names-ws { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+  .gate-badge-ws {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    line-height: 1.5;
+    border: 1px solid transparent;
+    background: none;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+  }
+  .gate-badge-ws:hover { border-color: var(--color-border); }
+  .gate-badge-ws-icon { font-weight: 700; }
+  .gate-badge-ws-name { font-weight: 500; max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
+  .gate-badge-ws-passed { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .gate-badge-ws-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .gate-badge-ws-pending, .gate-badge-ws-running { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+  .gate-badge-ws-more { color: var(--color-text-muted); background: var(--color-surface-elevated); font-size: 10px; font-weight: 600; }
 
   .activity-timeline-full {
     padding: var(--space-2) 0;
