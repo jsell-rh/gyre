@@ -73,7 +73,13 @@ static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, usi
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Maximum concurrent explorer sessions per user.
-const MAX_SESSIONS_PER_USER: usize = 3;
+/// Override with GYRE_EXPLORER_MAX_SESSIONS env var.
+fn max_sessions_per_user() -> usize {
+    std::env::var("GYRE_EXPLORER_MAX_SESSIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+}
 
 /// Max tool-use turns (LLM calls for graph exploration before generating a view query).
 /// This is separate from the refinement budget so they don't compete.
@@ -86,7 +92,13 @@ const MAX_REFINEMENT_TURNS: usize = 3;
 
 /// Max messages per session before requiring reconnect (prevents unbounded history).
 /// Set high enough for deep conversational exploration (100 back-and-forth turns).
-const MAX_SESSION_MESSAGES: usize = 200;
+/// Override with GYRE_EXPLORER_MAX_MESSAGES env var.
+fn max_session_messages() -> usize {
+    std::env::var("GYRE_EXPLORER_MAX_MESSAGES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200)
+}
 
 /// Max conversation history entries before summarization window.
 const MAX_CONVERSATION_HISTORY: usize = 20;
@@ -97,7 +109,13 @@ const MAX_USER_MESSAGE_LENGTH: usize = 10_000;
 /// Minimum interval between LLM-triggering user messages (rate limiting), in milliseconds.
 /// Applies to `Message` type. SaveView/DeleteView have a separate rate limit
 /// (max 10 per 60s). LoadView/ListViews are not rate-limited (read-only DB queries).
-const MIN_MESSAGE_INTERVAL_MS: u64 = 1000;
+/// Override with GYRE_EXPLORER_MSG_INTERVAL_MS env var.
+fn min_message_interval_ms() -> u64 {
+    std::env::var("GYRE_EXPLORER_MSG_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000)
+}
 
 /// WebSocket ping interval in seconds (keeps connections alive through proxies).
 const WS_PING_INTERVAL_SECS: u64 = 30;
@@ -142,7 +160,7 @@ async fn handle_explorer_session(
     let session_allowed = {
         let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
         let count = sessions.entry(session_user.clone()).or_default();
-        if *count >= MAX_SESSIONS_PER_USER {
+        if *count >= max_sessions_per_user() {
             false
         } else {
             *count += 1;
@@ -152,7 +170,8 @@ async fn handle_explorer_session(
     if !session_allowed {
         let err = ExplorerServerMessage::Error {
             message: format!(
-                "Too many concurrent explorer sessions (max {MAX_SESSIONS_PER_USER}). Close an existing session first."
+                "Too many concurrent explorer sessions (max {}). Close an existing session first.",
+                max_sessions_per_user()
             ),
         };
         let _ = sender
@@ -371,7 +390,7 @@ async fn handle_explorer_session(
                 // Rate limiting: enforce minimum interval between messages.
                 let now = std::time::Instant::now();
                 let elapsed = now.duration_since(last_message_time).as_millis() as u64;
-                if elapsed < MIN_MESSAGE_INTERVAL_MS {
+                if elapsed < min_message_interval_ms() {
                     let err = ExplorerServerMessage::Error {
                         message: "Please wait before sending another message.".to_string(),
                     };
@@ -415,7 +434,7 @@ async fn handle_explorer_session(
                         cache_time = std::time::Instant::now();
                     }
                 }
-                if message_count > MAX_SESSION_MESSAGES {
+                if message_count > max_session_messages() {
                     let err = ExplorerServerMessage::Error {
                         message:
                             "Session message limit reached. Please reconnect for a fresh session."
@@ -2241,6 +2260,16 @@ async fn run_explorer_agent(
                             // refinement. These are inherent to the data model and cannot
                             // be fixed by query changes (e.g., "SHA-based diff is approximate").
                             if w.starts_with("[info]") {
+                                return false;
+                            }
+                            // Unfixable warnings: inherent to the data source, not
+                            // resolvable by query refinement. Skip to avoid wasting
+                            // a self-check turn.
+                            const UNFIXABLE_PREFIXES: &[&str] = &[
+                                "SHA-based diff is approximate",
+                                "Graph data truncated",
+                            ];
+                            if UNFIXABLE_PREFIXES.iter().any(|p| w.starts_with(p)) {
                                 return false;
                             }
                             // Validation errors are always actionable
