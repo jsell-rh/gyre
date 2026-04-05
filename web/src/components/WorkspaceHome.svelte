@@ -576,7 +576,7 @@
   });
 
   // ── Activity pagination ──────────────────────────────────────
-  let activityLimit = $state(3);  // compact by default, expandable
+  let activityLimit = $state(5);  // show enough activity to be useful
 
   // ── Repo card data ────────────────────────────────────────────────────
   // repoHealth(repo) function already defined above (line ~265)
@@ -1339,95 +1339,154 @@
                   {#if wsTasks.length === 0}
                     <p class="ws-overview-empty">No tasks. Tasks are auto-created when specs are approved.</p>
                   {:else}
-                    <table class="ws-overview-table">
-                      <thead><tr><th>Status</th><th>Title</th><th>Priority</th><th>Spec</th><th>Agent</th><th>Repo</th><th>Updated</th></tr></thead>
-                      <tbody>
-                        {#each wsTasks.slice(0, 20) as task}
-                          {@const statusLabel = task.status === 'in_progress' ? 'in progress' : task.status?.replace(/_/g, ' ') ?? ''}
-                          {@const statusWhy = task.status === 'blocked' ? 'Blocked — waiting on dependency' : task.status === 'done' ? 'Completed' : task.status === 'in_progress' ? 'Agent is implementing' : task.status === 'review' ? 'Implementation complete, under review' : ''}
-                          <tr class="ws-overview-row" onclick={() => nav('task', task.id, task)} tabindex="0" role="button" title={statusWhy}>
-                            <td><span class="ws-status-dot ws-status-{task.status}">{task.status === 'done' ? '✓' : task.status === 'in_progress' ? '◉' : task.status === 'blocked' ? '✗' : task.status === 'review' ? '⊘' : '○'}</span> {statusLabel}</td>
-                            <td class="cell-title">{task.title ?? 'Untitled'}</td>
-                            <td><span class="priority-pill priority-{task.priority ?? 'low'}">{task.priority ?? ''}</span></td>
-                            <td class="cell-mono">{#if task.spec_path}{task.spec_path.split('/').pop()?.replace(/\.md$/, '')}{/if}</td>
-                            <td class="cell-mono">{#if task.assigned_to}{entityName('agent', task.assigned_to)}{/if}</td>
-                            <td class="cell-mono">{#if task.repo_id && repoMap[task.repo_id]}{repoMap[task.repo_id].name}{/if}</td>
-                            <td class="cell-time">{relTime(task.updated_at ?? task.created_at)}</td>
-                          </tr>
-                        {/each}
-                      </tbody>
-                    </table>
+                    {@const inProgressTasks = wsTasks.filter(t => t.status === 'in_progress')}
+                    {@const blockedTasks = wsTasks.filter(t => t.status === 'blocked')}
+                    {@const pendingTasks = wsTasks.filter(t => t.status === 'created' || t.status === 'pending')}
+                    {@const doneTasks = wsTasks.filter(t => t.status === 'done')}
+                    {@const otherTasks = wsTasks.filter(t => !['in_progress', 'blocked', 'created', 'pending', 'done'].includes(t.status))}
+                    {@const sortedTasks = [...blockedTasks, ...inProgressTasks, ...pendingTasks, ...otherTasks, ...doneTasks]}
+                    <div class="tasks-list">
+                      {#each sortedTasks.slice(0, 20) as task (task.id)}
+                        {@const specName = task.spec_path ? task.spec_path.split('/').pop()?.replace(/\.md$/, '') : null}
+                        {@const repoName = (task.repo_id && repoMap[task.repo_id]) ? repoMap[task.repo_id].name : null}
+                        {@const statusWhy = task.status === 'blocked' ? 'Waiting on dependency' : task.status === 'done' ? 'Implementation complete' : task.status === 'in_progress' ? 'Agent is implementing' : task.status === 'review' ? 'Under review' : 'Awaiting agent assignment'}
+                        <button class="task-card-ws task-card-ws-{task.status}" onclick={() => nav('task', task.id, task)} tabindex="0" title={statusWhy}>
+                          <div class="task-card-header">
+                            <span class="task-card-status task-card-status-{task.status}">
+                              {task.status === 'done' ? '✓' : task.status === 'in_progress' ? '◉' : task.status === 'blocked' ? '✗' : task.status === 'review' ? '⊘' : '○'}
+                            </span>
+                            <span class="task-card-title">{task.title ?? 'Untitled'}</span>
+                            {#if task.priority && task.priority !== 'low'}
+                              <span class="priority-pill priority-{task.priority}">{task.priority}</span>
+                            {/if}
+                          </div>
+                          <div class="task-card-meta">
+                            <span class="task-card-why">{statusWhy}</span>
+                            {#if task.assigned_to}
+                              <span class="task-card-agent">by {entityName('agent', task.assigned_to)}</span>
+                            {/if}
+                          </div>
+                          <div class="task-card-footer">
+                            {#if specName}<span class="task-card-spec">from "{specName}"</span>{/if}
+                            {#if repoName}<span class="task-card-repo">{repoName}</span>{/if}
+                            <span class="task-card-time">{relTime(task.updated_at ?? task.created_at)}</span>
+                          </div>
+                        </button>
+                      {/each}
+                    </div>
+                    {#if wsTasks.length > 20}<p class="ws-overview-more">{wsTasks.length - 20} more tasks not shown</p>{/if}
                   {/if}
 
                 {:else if wsTab === 'mrs'}
                   {#if wsMrs.length === 0}
                     <p class="ws-overview-empty">No merge requests. MRs are created when agents complete implementation.</p>
                   {:else}
-                    <table class="ws-overview-table">
-                      <thead><tr><th>Status</th><th>Title</th><th>Changes</th><th>Gates</th><th>Repo</th><th>Agent</th><th>Created</th></tr></thead>
-                      <tbody>
-                        {#each wsMrs.slice(0, 20) as mr}
-                          {@const mrStatus = mr.status ?? 'open'}
-                          {@const ds = mr.diff_stats}
-                          <tr class="ws-overview-row" onclick={() => nav('mr', mr.id, { ...mr, repo_id: mr.repository_id ?? mr.repo_id })} tabindex="0" role="button">
-                            <td><span class="ws-status-dot ws-status-{mrStatus}">{mrStatus === 'merged' ? '✓' : mrStatus === 'closed' ? '✗' : '○'}</span> {mrStatus}</td>
-                            <td class="cell-title">{mr.title ?? 'Untitled'}</td>
-                            <td class="cell-diff">
-                              {#if ds}
-                                <button class="diff-stat-clickable" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, repo_id: mr.repository_id ?? mr.repo_id, _openTab: 'diff' }); }} title="View code diff">
-                                  <span class="diff-ins-tiny">+{ds.insertions ?? 0}</span>
-                                  <span class="diff-del-tiny">-{ds.deletions ?? 0}</span>
-                                  <span class="diff-files-tiny">{ds.files_changed ?? 0}f</span>
-                                </button>
-                              {/if}
-                            </td>
-                            <td>
-                              {#if mr._gates?.details?.length > 0}
-                                <span class="gate-names-ws">
-                                  {#each mr._gates.details.slice(0, 3) as g}
-                                    <button class="gate-badge-ws gate-badge-ws-{g.status}" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }} title="{g.name}: {g.status}{g.gate_type ? ' (' + g.gate_type.replace(/_/g, ' ') + ')' : ''}{g.output ? '\n' + g.output.split('\n')[0]?.slice(0, 80) : ''}">
-                                      <span class="gate-badge-ws-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
-                                      <span class="gate-badge-ws-name">{g.name}</span>
-                                    </button>
-                                  {/each}
-                                </span>
-                              {:else if mr._gates}
-                                <span class="gate-summary">
-                                  {#if mr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{mr._gates.passed}</span>{/if}
-                                  {#if mr._gates.failed > 0}<span class="gate-mini gate-mini-fail">✗{mr._gates.failed}</span>{/if}
-                                </span>
-                              {/if}
-                            </td>
-                            <td class="cell-mono">{#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}{repoMap[mr.repository_id ?? mr.repo_id].name}{/if}</td>
-                            <td class="cell-mono">{#if mr.author_agent_id}{entityName('agent', mr.author_agent_id)}{/if}</td>
-                            <td class="cell-time">{relTime(mr.created_at)}</td>
-                          </tr>
-                        {/each}
-                      </tbody>
-                    </table>
+                    {@const openMrs = wsMrs.filter(m => m.status === 'open')}
+                    {@const mergedMrs = wsMrs.filter(m => m.status === 'merged')}
+                    {@const sortedMrs = [...openMrs, ...mergedMrs, ...wsMrs.filter(m => m.status !== 'open' && m.status !== 'merged')]}
+                    <div class="mrs-list">
+                      {#each sortedMrs.slice(0, 20) as mr (mr.id)}
+                        {@const mrStatus = mr.status ?? 'open'}
+                        {@const ds = mr.diff_stats}
+                        {@const repoId = mr.repository_id ?? mr.repo_id}
+                        {@const repoName = (repoId && repoMap[repoId]) ? repoMap[repoId].name : null}
+                        {@const queueItem = mergeQueueItems.find(q => (q.merge_request_id ?? q.mr_id) === mr.id)}
+                        {@const specName = mr.spec_ref ? mr.spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '') : null}
+                        <button class="mr-card-ws mr-card-ws-{mrStatus}" onclick={() => nav('mr', mr.id, { ...mr, repo_id: repoId })} tabindex="0">
+                          <div class="mr-card-header">
+                            <span class="mr-card-status mr-card-status-{mrStatus}">
+                              {mrStatus === 'merged' ? '✓' : mrStatus === 'closed' ? '✗' : '○'}
+                            </span>
+                            <span class="mr-card-title">{mr.title ?? 'Untitled'}</span>
+                            {#if ds}
+                              <button class="diff-stat-inline" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, repo_id: repoId, _openTab: 'diff' }); }} title="View code diff">
+                                <span class="diff-ins-tiny">+{ds.insertions ?? 0}</span>
+                                <span class="diff-del-tiny">-{ds.deletions ?? 0}</span>
+                              </button>
+                            {/if}
+                          </div>
+                          <div class="mr-card-meta">
+                            {#if repoName}<span class="mr-card-repo">{repoName}</span>{/if}
+                            {#if mr.author_agent_id}<span class="mr-card-author">by {entityName('agent', mr.author_agent_id)}</span>{/if}
+                            {#if specName}<span class="mr-card-spec">for "{specName}"</span>{/if}
+                            <span class="mr-card-time">{relTime(mr.created_at)}</span>
+                          </div>
+                          <div class="mr-card-footer">
+                            {#if mr._gates?.details?.length > 0}
+                              <span class="gate-names-ws">
+                                {#each mr._gates.details.slice(0, 4) as g}
+                                  <button class="gate-badge-ws gate-badge-ws-{g.status}" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }} title="{g.name}: {g.status}{g.gate_type ? ' (' + g.gate_type.replace(/_/g, ' ') + ')' : ''}{g.output ? '\n' + g.output.split('\n')[0]?.slice(0, 80) : ''}">
+                                    <span class="gate-badge-ws-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
+                                    <span class="gate-badge-ws-name">{g.name}</span>
+                                  </button>
+                                {/each}
+                              </span>
+                            {:else if mr._gates}
+                              <span class="gate-summary">
+                                {#if mr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{mr._gates.passed}</span>{/if}
+                                {#if mr._gates.failed > 0}<span class="gate-mini gate-mini-fail">✗{mr._gates.failed}</span>{/if}
+                              </span>
+                            {/if}
+                            {#if queueItem}
+                              <span class="mr-card-queue">Queue #{(queueItem.position ?? 0) + 1}</span>
+                            {/if}
+                            {#if mrStatus === 'merged' && mr.merge_commit_sha}
+                              <span class="mr-card-sha mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</span>
+                            {/if}
+                          </div>
+                        </button>
+                      {/each}
+                    </div>
+                    {#if wsMrs.length > 20}<p class="ws-overview-more">{wsMrs.length - 20} more MRs not shown</p>{/if}
                   {/if}
 
                 {:else if wsTab === 'agents'}
                   {#if wsAgents.length === 0}
                     <p class="ws-overview-empty">No agents. Agents are spawned when tasks are assigned.</p>
                   {:else}
-                    <table class="ws-overview-table">
-                      <thead><tr><th>Status</th><th>Name</th><th>Task</th><th>Spec</th><th>Repo</th><th>Duration</th></tr></thead>
-                      <tbody>
-                        {#each wsAgents.slice(0, 20) as agent}
-                          {@const agentStatus = agent.status ?? 'unknown'}
-                          {@const elapsed = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
-                          <tr class="ws-overview-row" onclick={() => nav('agent', agent.id, agent)} tabindex="0" role="button">
-                            <td><span class="ws-status-dot ws-status-{agentStatus}">{agentStatus === 'active' || agentStatus === 'running' ? '◉' : agentStatus === 'completed' || agentStatus === 'idle' ? '✓' : agentStatus === 'failed' || agentStatus === 'dead' ? '✗' : '○'}</span> {agentStatus}</td>
-                            <td class="cell-title">{agent.name ?? formatId('agent', agent.id)}</td>
-                            <td class="cell-mono">{#if agent.task_id ?? agent.current_task_id}{entityName('task', agent.task_id ?? agent.current_task_id)}{/if}</td>
-                            <td class="cell-mono">{#if agent.spec_path}{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}{/if}</td>
-                            <td class="cell-mono">{#if agent.repo_id && repoMap[agent.repo_id]}{repoMap[agent.repo_id].name}{/if}</td>
-                            <td class="cell-time" title={absTime(agent.created_at ?? agent.spawned_at)}>{elapsed != null ? formatDuration(elapsed) : relTime(agent.created_at ?? agent.spawned_at)}</td>
-                          </tr>
-                        {/each}
-                      </tbody>
-                    </table>
+                    {@const activeAgents = wsAgents.filter(a => a.status === 'active' || a.status === 'running')}
+                    {@const completedAgents = wsAgents.filter(a => a.status === 'completed' || a.status === 'idle')}
+                    {@const failedAgents = wsAgents.filter(a => a.status === 'failed' || a.status === 'dead')}
+                    {@const sortedAgents = [...activeAgents, ...failedAgents, ...completedAgents]}
+                    <div class="agents-list">
+                      {#each sortedAgents.slice(0, 20) as agent (agent.id)}
+                        {@const agentStatus = agent.status ?? 'unknown'}
+                        {@const isActive = agentStatus === 'active' || agentStatus === 'running'}
+                        {@const isFailed = agentStatus === 'failed' || agentStatus === 'dead'}
+                        {@const elapsed = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
+                        {@const specName = agent.spec_path ? agent.spec_path.split('/').pop()?.replace(/\.md$/, '') : null}
+                        {@const repoName = (agent.repo_id && repoMap[agent.repo_id]) ? repoMap[agent.repo_id].name : null}
+                        {@const taskId = agent.task_id ?? agent.current_task_id}
+                        <button class="agent-card-ws agent-card-ws-{agentStatus}" onclick={() => nav('agent', agent.id, agent)} tabindex="0">
+                          <div class="agent-card-header">
+                            <span class="agent-card-status agent-card-status-{agentStatus}">
+                              {#if isActive}<span class="agent-pulse"></span>{/if}
+                              {isActive ? '◉' : isFailed ? '✗' : agentStatus === 'completed' || agentStatus === 'idle' ? '✓' : '○'}
+                            </span>
+                            <span class="agent-card-name">{agent.name ?? formatId('agent', agent.id)}</span>
+                            {#if elapsed != null}
+                              <span class="agent-card-elapsed" title={absTime(agent.created_at ?? agent.spawned_at)}>{formatDuration(elapsed)}</span>
+                            {/if}
+                          </div>
+                          <div class="agent-card-context">
+                            {#if specName}
+                              <span class="agent-card-spec" title={agent.spec_path}>implementing "{specName}"</span>
+                            {:else if taskId}
+                              <span class="agent-card-spec">working on {entityName('task', taskId)}</span>
+                            {/if}
+                            {#if repoName}
+                              <span class="agent-card-repo">in {repoName}</span>
+                            {/if}
+                          </div>
+                          {#if isFailed}
+                            <div class="agent-card-error">Check logs for failure details</div>
+                          {:else if isActive}
+                            <div class="agent-card-hint">Click to view logs and conversation</div>
+                          {/if}
+                        </button>
+                      {/each}
+                    </div>
+                    {#if wsAgents.length > 20}<p class="ws-overview-more">{wsAgents.length - 20} more agents not shown</p>{/if}
                   {/if}
 
                 {:else if wsTab === 'budget'}
@@ -2249,6 +2308,136 @@
   .gate-badge-ws-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
   .gate-badge-ws-pending, .gate-badge-ws-running { color: var(--color-text-muted); background: var(--color-surface-elevated); }
   .gate-badge-ws-more { color: var(--color-text-muted); background: var(--color-surface-elevated); font-size: 10px; font-weight: 600; }
+
+  /* ── Agent cards (workspace overview) ────────────────────── */
+  .agents-list { display: flex; flex-direction: column; gap: var(--space-1); }
+  .agent-card-ws {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+    width: 100%;
+  }
+  .agent-card-ws:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
+  .agent-card-ws-active, .agent-card-ws-running { border-left: 3px solid var(--color-success); }
+  .agent-card-ws-failed, .agent-card-ws-dead { border-left: 3px solid var(--color-danger); }
+  .agent-card-ws-completed, .agent-card-ws-idle { border-left: 3px solid var(--color-text-muted); }
+  .agent-card-header { display: flex; align-items: center; gap: var(--space-2); }
+  .agent-card-status { font-size: 11px; flex-shrink: 0; }
+  .agent-card-status-active, .agent-card-status-running { color: var(--color-success); }
+  .agent-card-status-completed, .agent-card-status-idle { color: var(--color-text-muted); }
+  .agent-card-status-failed, .agent-card-status-dead { color: var(--color-danger); }
+  .agent-card-name { font-weight: 600; color: var(--color-text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-card-elapsed { font-family: var(--font-mono); font-size: 10px; color: var(--color-text-muted); flex-shrink: 0; }
+  .agent-card-context { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-secondary); font-size: 11px; }
+  .agent-card-spec { font-style: italic; }
+  .agent-card-repo { color: var(--color-text-muted); }
+  .agent-card-error { color: var(--color-danger); font-size: 10px; font-weight: 500; margin-top: 2px; }
+  .agent-card-hint { color: var(--color-text-muted); font-size: 10px; font-style: italic; margin-top: 2px; }
+  .agent-pulse {
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: agent-pulse-anim 2s ease-in-out infinite;
+    margin-right: 2px;
+    vertical-align: middle;
+  }
+  @keyframes agent-pulse-anim {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* ── MR cards (workspace overview) ──────────────────────── */
+  .mrs-list { display: flex; flex-direction: column; gap: var(--space-1); }
+  .mr-card-ws {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+    width: 100%;
+  }
+  .mr-card-ws:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
+  .mr-card-ws-merged { border-left: 3px solid var(--color-success); }
+  .mr-card-ws-open { border-left: 3px solid var(--color-warning); }
+  .mr-card-ws-closed { border-left: 3px solid var(--color-danger); }
+  .mr-card-header { display: flex; align-items: center; gap: var(--space-2); }
+  .mr-card-status { font-size: 11px; flex-shrink: 0; }
+  .mr-card-status-merged { color: var(--color-success); }
+  .mr-card-status-open { color: var(--color-warning); }
+  .mr-card-status-closed { color: var(--color-danger); }
+  .mr-card-title { font-weight: 600; color: var(--color-text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .diff-stat-inline {
+    display: inline-flex; align-items: center; gap: 2px;
+    background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm);
+    padding: 0 4px; cursor: pointer; font-family: var(--font-mono); font-size: 10px;
+    transition: all var(--transition-fast); flex-shrink: 0;
+  }
+  .diff-stat-inline:hover { background: var(--color-surface-elevated); border-color: var(--color-border); }
+  .mr-card-meta { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-muted); font-size: 11px; }
+  .mr-card-repo { font-weight: 500; color: var(--color-text-secondary); }
+  .mr-card-author { font-style: italic; }
+  .mr-card-spec { color: var(--color-text-secondary); }
+  .mr-card-time { flex-shrink: 0; }
+  .mr-card-footer { display: flex; flex-wrap: wrap; gap: var(--space-1); align-items: center; margin-top: 2px; }
+  .mr-card-queue {
+    font-size: 10px; font-weight: 600; padding: 1px 5px;
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+    color: var(--color-warning); border-radius: var(--radius-sm);
+  }
+  .mr-card-sha { font-size: 10px; color: var(--color-text-muted); }
+
+  /* ── Task cards (workspace overview) ────────────────────── */
+  .tasks-list { display: flex; flex-direction: column; gap: var(--space-1); }
+  .task-card-ws {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+    width: 100%;
+  }
+  .task-card-ws:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
+  .task-card-ws-in_progress { border-left: 3px solid var(--color-warning); }
+  .task-card-ws-blocked { border-left: 3px solid var(--color-danger); }
+  .task-card-ws-done { border-left: 3px solid var(--color-success); }
+  .task-card-ws-review { border-left: 3px solid var(--color-info); }
+  .task-card-header { display: flex; align-items: center; gap: var(--space-2); }
+  .task-card-status { font-size: 11px; flex-shrink: 0; }
+  .task-card-status-done { color: var(--color-success); }
+  .task-card-status-in_progress { color: var(--color-warning); }
+  .task-card-status-blocked { color: var(--color-danger); }
+  .task-card-status-review { color: var(--color-info); }
+  .task-card-title { font-weight: 600; color: var(--color-text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-card-meta { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-secondary); font-size: 11px; }
+  .task-card-why { font-style: italic; color: var(--color-text-muted); }
+  .task-card-agent { font-weight: 500; }
+  .task-card-footer { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-muted); font-size: 10px; }
+  .task-card-spec { font-style: italic; }
+  .task-card-repo { font-weight: 500; }
 
   .activity-timeline-full {
     padding: var(--space-2) 0;
