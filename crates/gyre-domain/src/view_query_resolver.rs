@@ -1315,10 +1315,18 @@ fn resolve_computed_expression_inner(
         }
 
         if args.len() >= 2 {
-            let node_ref = args[0].trim().trim_matches('\'').trim_matches('"').to_string();
+            let node_ref = args[0]
+                .trim()
+                .trim_matches('\'')
+                .trim_matches('"')
+                .to_string();
             let edge_types_str = &args[1];
             let direction = if args.len() > 2 {
-                args[2].trim().trim_matches('\'').trim_matches('"').to_string()
+                args[2]
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"')
+                    .to_string()
             } else {
                 "outgoing".to_string()
             };

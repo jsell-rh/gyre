@@ -1443,30 +1443,31 @@ async fn handle_node_provenance(state: &AppState, args: &Value) -> Value {
     let rid = Id::new(&repo_id);
 
     // Find nodes by ID or name pattern
-    let target_nodes: Vec<gyre_common::graph::GraphNode> = if let Some(node_id) = get_str(args, "node_id") {
-        let nid = Id::new(node_id);
-        match state.graph_store.get_node(&nid).await {
-            Ok(Some(n)) => vec![n],
-            Ok(None) => return tool_error(format!("Node not found: {node_id}")),
-            Err(e) => return tool_error(format!("Failed: {e}")),
-        }
-    } else if let Some(pattern) = get_str(args, "name_pattern") {
-        let pat_lower = pattern.to_lowercase();
-        match state.graph_store.list_nodes(&rid, None).await {
-            Ok(nodes) => nodes
-                .into_iter()
-                .filter(|n| {
-                    n.deleted_at.is_none()
-                        && (n.name.to_lowercase().contains(&pat_lower)
-                            || n.qualified_name.to_lowercase().contains(&pat_lower))
-                })
-                .take(10)
-                .collect(),
-            Err(e) => return tool_error(format!("Failed: {e}")),
-        }
-    } else {
-        return tool_error("Provide either node_id or name_pattern");
-    };
+    let target_nodes: Vec<gyre_common::graph::GraphNode> =
+        if let Some(node_id) = get_str(args, "node_id") {
+            let nid = Id::new(node_id);
+            match state.graph_store.get_node(&nid).await {
+                Ok(Some(n)) => vec![n],
+                Ok(None) => return tool_error(format!("Node not found: {node_id}")),
+                Err(e) => return tool_error(format!("Failed: {e}")),
+            }
+        } else if let Some(pattern) = get_str(args, "name_pattern") {
+            let pat_lower = pattern.to_lowercase();
+            match state.graph_store.list_nodes(&rid, None).await {
+                Ok(nodes) => nodes
+                    .into_iter()
+                    .filter(|n| {
+                        n.deleted_at.is_none()
+                            && (n.name.to_lowercase().contains(&pat_lower)
+                                || n.qualified_name.to_lowercase().contains(&pat_lower))
+                    })
+                    .take(10)
+                    .collect(),
+                Err(e) => return tool_error(format!("Failed: {e}")),
+            }
+        } else {
+            return tool_error("Provide either node_id or name_pattern");
+        };
 
     let items: Vec<Value> = target_nodes
         .iter()
