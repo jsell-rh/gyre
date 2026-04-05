@@ -138,10 +138,6 @@
   let budgetData = $state(null); // { config, usage }
   let costData = $state(null);   // cost summary
 
-  // ── Briefing state ─────────────────────────────────────────────────────
-  let briefingLoading = $state(true);
-  let briefingData = $state(null);
-
   // ── Repo lookup map (id → repo) ────────────────────────────────────────
   let repoMap = $state({});
 
@@ -350,19 +346,6 @@
       wsAgents = [];
     } finally {
       agentsLoading = false;
-    }
-  }
-
-  // ── Briefing: load ─────────────────────────────────────────────────────
-  async function loadBriefing() {
-    if (!workspace?.id) return;
-    briefingLoading = true;
-    try {
-      briefingData = await api.getWorkspaceBriefing(workspace.id);
-    } catch {
-      briefingData = null;
-    } finally {
-      briefingLoading = false;
     }
   }
 
@@ -629,36 +612,6 @@
 
   // Collapse activity when there's active work happening
   let activityCollapsed = $derived(wsAgents.some(a => a.status === 'active') || wsTasks.some(t => t.status === 'in_progress'));
-
-  // ── Pipeline hero stage click → navigate to entity tab ──────────────
-  let expandedStage = $state(null); // null | 'specs' | 'tasks' | 'agents' | 'mrs'
-  let activeEntityTab = $state(null); // null | 'specs' | 'tasks' | 'agents' | 'mrs' | 'activity'
-
-  function toggleStage(stageId) {
-    // Pipeline hero stages navigate directly to entity tabs
-    if (activeEntityTab === stageId) {
-      activeEntityTab = null;
-      expandedStage = null;
-    } else {
-      activeEntityTab = stageId;
-      expandedStage = stageId;
-      // Scroll entity tabs into view
-      queueMicrotask(() => {
-        const el = document.querySelector('[data-testid="section-entity-tabs"]');
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      });
-    }
-  }
-
-  /** Get the top items needing attention for a pipeline stage */
-  let stageItems = $derived.by(() => {
-    return {
-      specs: specs.filter(s => (s.approval_status ?? s.status) === 'pending').slice(0, 5),
-      tasks: wsTasks.filter(t => t.status === 'in_progress' || t.status === 'blocked').slice(0, 5),
-      agents: wsAgents.filter(a => a.status === 'active' || a.status === 'failed').slice(0, 5),
-      mrs: wsMrs.filter(m => m.status === 'open' || m._gates?.failed > 0).slice(0, 5),
-    };
-  });
 
   // ── Repo card data ────────────────────────────────────────────────────
   // repoHealth(repo) function already defined above (line ~265)
@@ -1025,18 +978,6 @@
     return Math.min(100, Math.round((used / maxTokens) * 100));
   });
 
-  // ── Pipeline tabs data (unified pipeline + entity tab bar) ───────────────
-  let pipelineTabsData = $derived([
-    { id: 'specs', label: 'Specs', count: specs.length, attention: pipelineSpecs.pending > 0, done: pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0, badge: pipelineSpecs.pending > 0 ? `${pipelineSpecs.pending} pending` : pipelineSpecs.approved > 0 ? `${pipelineSpecs.approved} approved` : null, badgeVariant: pipelineSpecs.pending > 0 ? 'warn' : 'ok' },
-    { id: 'tasks', label: 'Tasks', count: wsTasks.length, attention: pipelineTasks.blocked > 0, active: pipelineTasks.in_progress > 0, badge: pipelineTasks.blocked > 0 ? `${pipelineTasks.blocked} blocked` : pipelineTasks.in_progress > 0 ? `${pipelineTasks.in_progress} active` : null, badgeVariant: pipelineTasks.blocked > 0 ? 'danger' : 'ok' },
-    { id: 'agents', label: 'Agents', count: wsAgents.length, active: pipelineAgents.active > 0, badge: pipelineAgents.active > 0 ? `${pipelineAgents.active} running` : null, badgeVariant: 'ok', pulse: pipelineAgents.active > 0 },
-    { id: 'mrs', label: 'MRs', count: wsMrs.length, attention: pipelineMrs.failed_gates > 0, badge: pipelineMrs.failed_gates > 0 ? `${pipelineMrs.failed_gates} failed` : pipelineMrs.open > 0 ? `${pipelineMrs.open} open` : null, badgeVariant: pipelineMrs.failed_gates > 0 ? 'danger' : 'ok' },
-    { id: 'activity', label: 'Activity', count: activityEvents.length, isMeta: true },
-  ]);
-
-  // No auto-expand — let the user click summary stats to drill down.
-  // Action items in the decisions banner already highlight critical issues.
-
   // ── Load all data when workspace changes ───────────────────────────────
   $effect(() => {
     void workspace?.id;
@@ -1048,7 +989,6 @@
     loadAgents();
     loadActivity();
     loadBudget();
-    loadBriefing();
     loadMergeQueue();
   });
 </script>
@@ -1095,16 +1035,6 @@
 
       <!-- ── Main content: single-column layout ──────────────────── -->
       <div class="ws-main-content">
-
-          <!-- Workspace briefing (AI-generated summary of recent activity) -->
-          {#if !briefingLoading && briefingData?.summary}
-            <div class="ws-briefing" data-testid="section-briefing">
-              <div class="ws-briefing-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
-              </div>
-              <p class="ws-briefing-text">{briefingData.summary}</p>
-            </div>
-          {/if}
 
           <!-- Action Needed (compact, dismissible) -->
           {#if !decisionsLoading && actionableNotifications.length > 0}
@@ -1291,297 +1221,51 @@
             </div>
           </section>
 
-          <!-- ── Workspace summary strip ─────────────────────── -->
-          {#if specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
-            <div class="ws-summary-strip" data-testid="ws-summary-strip">
-              <button class="ws-summary-stat" onclick={() => { activeEntityTab = activeEntityTab === 'specs' ? null : 'specs'; }} class:ws-summary-active={activeEntityTab === 'specs'} class:ws-summary-attention={pipelineSpecs.pending > 0} title="{specs.length} specs — {pipelineSpecs.pending} pending approval">
-                <span class="ws-summary-count">{specs.length}</span>
-                <span class="ws-summary-label">Specs</span>
-                {#if pipelineSpecs.pending > 0}<span class="ws-summary-badge ws-summary-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
-              </button>
-              <span class="ws-summary-arrow">→</span>
-              <button class="ws-summary-stat" onclick={() => { activeEntityTab = activeEntityTab === 'tasks' ? null : 'tasks'; }} class:ws-summary-active={activeEntityTab === 'tasks'} class:ws-summary-attention={pipelineTasks.blocked > 0} title="{wsTasks.length} tasks — {pipelineTasks.in_progress} in progress">
-                <span class="ws-summary-count">{wsTasks.length}</span>
-                <span class="ws-summary-label">Tasks</span>
-                {#if pipelineTasks.blocked > 0}<span class="ws-summary-badge ws-summary-badge-danger">{pipelineTasks.blocked} blocked</span>
-                {:else if pipelineTasks.in_progress > 0}<span class="ws-summary-badge ws-summary-badge-ok">{pipelineTasks.in_progress} active</span>{/if}
-              </button>
-              <span class="ws-summary-arrow">→</span>
-              <button class="ws-summary-stat" onclick={() => { activeEntityTab = activeEntityTab === 'agents' ? null : 'agents'; }} class:ws-summary-active={activeEntityTab === 'agents'} title="{wsAgents.length} agents — {pipelineAgents.active} running">
-                <span class="ws-summary-count">{wsAgents.length}</span>
-                <span class="ws-summary-label">Agents</span>
-                {#if pipelineAgents.active > 0}<span class="ws-summary-badge ws-summary-badge-ok"><span class="ws-summary-pulse"></span>{pipelineAgents.active} running</span>{/if}
-              </button>
-              <span class="ws-summary-arrow">→</span>
-              <button class="ws-summary-stat" onclick={() => { activeEntityTab = activeEntityTab === 'mrs' ? null : 'mrs'; }} class:ws-summary-active={activeEntityTab === 'mrs'} class:ws-summary-attention={pipelineMrs.failed_gates > 0} title="{wsMrs.length} MRs — {pipelineMrs.open} open, {pipelineMrs.merged} merged">
-                <span class="ws-summary-count">{wsMrs.length}</span>
-                <span class="ws-summary-label">MRs</span>
-                {#if pipelineMrs.failed_gates > 0}<span class="ws-summary-badge ws-summary-badge-danger">{pipelineMrs.failed_gates} failed</span>
-                {:else if pipelineMrs.merged > 0}<span class="ws-summary-badge ws-summary-badge-ok">{pipelineMrs.merged} merged</span>{/if}
-              </button>
-            </div>
-
-            <!-- Entity detail panels (shown when a summary stat is clicked) -->
-              {#if activeEntityTab === 'specs'}
-                <div class="ws-entity-panel" data-testid="entity-panel-specs">
-                  {#if specsLoading}
-                    <p class="list-loading">Loading specs...</p>
-                  {:else if specs.length === 0}
-                    <p class="entity-panel-empty">No specs registered. Push a specs/manifest.yaml to get started.</p>
-                  {:else}
-                    <div class="entity-card-list">
-                      {#each specs.slice(0, 8) as spec}
-                        {@const status = spec.approval_status ?? spec.status ?? 'pending'}
-                        {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
-                        <button class="entity-card entity-card-spec" onclick={() => navigateToSpec(spec)}>
-                          <div class="entity-card-primary">
-                            <span class="status-pill status-pill-{status}" title={specStatusTooltip(spec)}>{SPEC_STATUS_ICONS[status] ?? '?'} {status}</span>
-                            <span class="ec-title">{specName}</span>
-                            <span class="ec-actions" onclick={(e) => e.stopPropagation()}>
-                              {#if status === 'pending'}
-                                <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'}>Approve</button>
-                                <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'}>Reject</button>
-                              {:else if specActionStates[spec.path] === 'approved'}
-                                <span class="decision-done">Approved</span>
-                              {:else if specActionStates[spec.path] === 'rejected'}
-                                <span class="decision-done">Rejected</span>
-                              {/if}
-                            </span>
-                          </div>
-                          <div class="entity-card-meta">
-                            {#if spec.repo_id && repoMap[spec.repo_id]}
-                              <span class="ec-chip" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[spec.repo_id], 'specs'); }}>{repoMap[spec.repo_id].name}</span>
-                            {/if}
-                            {#if spec.kind}
-                              <span class="ec-chip">{spec.kind}</span>
-                            {/if}
-                            {#if spec.owner}
-                              <span class="ec-chip ec-chip-muted">{spec.owner}</span>
-                            {/if}
-                            {#if spec.path}
-                              <span class="ec-path">{spec.path}</span>
-                            {/if}
-                          </div>
-                        </button>
-                      {/each}
-                      {#if specs.length > 8}
-                        <p class="entity-panel-overflow">{specs.length - 8} more — open a repo to see all specs</p>
-                      {/if}
+          <!-- ── Merge Queue (workspace-wide) ────────────────── -->
+          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
+            <section class="ws-merge-queue" data-testid="section-merge-queue">
+              <div class="section-header-row">
+                <h2 class="section-heading">Merge Queue</h2>
+                <span class="section-count">{mergeQueueItems.length} item{mergeQueueItems.length !== 1 ? 's' : ''}</span>
+              </div>
+              <div class="merge-queue-list">
+                {#each mergeQueueItems.slice(0, 5) as item, i}
+                  {@const mrId = item.merge_request_id ?? item.mr_id}
+                  {@const mr = item._mr ?? {}}
+                  {@const repoId = mr.repository_id ?? mr.repo_id}
+                  {@const gateDetails = mr._gates?.details ?? []}
+                  <button class="queue-entry" onclick={() => nav('mr', mrId, { repo_id: repoId, title: mr.title })}>
+                    <span class="queue-position">#{i + 1}</span>
+                    <div class="queue-entry-info">
+                      <span class="queue-entry-title">{item._title ?? 'Untitled MR'}</span>
+                      <span class="queue-entry-meta">
+                        {#if repoId && repoMap[repoId]}<span class="ec-chip">{repoMap[repoId].name}</span>{/if}
+                        {#if item._branch}<span class="ec-chip ec-chip-mono">{item._branch}</span>{/if}
+                        {#if item._spec_ref}
+                          {@const specPath = item._spec_ref.split('@')[0]}
+                          <span class="ec-chip ec-chip-spec">{specPath.split('/').pop()?.replace(/\.md$/, '')}</span>
+                        {/if}
+                      </span>
                     </div>
-                  {/if}
-                </div>
-              {:else if activeEntityTab === 'tasks'}
-                <div class="ws-entity-panel" data-testid="entity-panel-tasks">
-                  {#if tasksLoading}
-                    <p class="list-loading">Loading tasks...</p>
-                  {:else if wsTasks.length === 0}
-                    <p class="entity-panel-empty">No tasks yet. Tasks are auto-created when you approve a spec.</p>
-                  {:else}
-                    <div class="entity-card-list">
-                      {#each wsTasks.slice().sort((a, b) => {
-                        const order = { blocked: 0, in_progress: 1, review: 2, backlog: 3, done: 4 };
-                        return (order[a.status] ?? 9) - (order[b.status] ?? 9);
-                      }).slice(0, 8) as task}
-                        <button class="entity-card entity-card-task" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })}>
-                          <div class="entity-card-primary">
-                            <span class="status-pill status-pill-{task.status}" title={taskStatusTooltip(task)}>{task.status ?? 'backlog'}</span>
-                            <span class="ec-title">{task.title ?? 'Untitled'}</span>
-                            {#if task.priority}
-                              <span class="priority-pill priority-{task.priority}">{task.priority}</span>
-                            {/if}
-                          </div>
-                          <div class="entity-card-meta">
-                            {#if task.repo_id && repoMap[task.repo_id]}
-                              <span class="ec-chip" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[task.repo_id], 'tasks'); }}>{repoMap[task.repo_id].name}</span>
-                            {/if}
-                            {#if task.spec_path}
-                              <span class="ec-chip ec-chip-spec" onclick={(e) => { e.stopPropagation(); nav('spec', task.spec_path, { path: task.spec_path, repo_id: task.repo_id }); }}>
-                                <Icon name="spec" size={10} /> {task.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                              </span>
-                            {/if}
-                            {#if task.assigned_to}
-                              <span class="ec-chip ec-chip-agent" onclick={(e) => { e.stopPropagation(); nav('agent', task.assigned_to, { repo_id: task.repo_id }); }}>
-                                <Icon name="agent" size={10} /> {entityName('agent', task.assigned_to)}
-                              </span>
-                            {:else if task.status === 'in_progress'}
-                              <span class="ec-context ec-context-warn">No agent assigned</span>
-                            {:else if task.status === 'blocked'}
-                              <span class="ec-context ec-context-danger">Blocked — waiting for dependency</span>
-                            {/if}
-                            <span class="ec-time" title={absTime(task.updated_at ?? task.created_at)}>{relTime(task.updated_at ?? task.created_at)}</span>
-                          </div>
-                        </button>
-                      {/each}
-                      {#if wsTasks.length > 8}
-                        <p class="entity-panel-overflow">{wsTasks.length - 8} more — open a repo to see all tasks</p>
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
-              {:else if activeEntityTab === 'agents'}
-                <div class="ws-entity-panel" data-testid="entity-panel-agents">
-                  {#if agentsLoading}
-                    <p class="list-loading">Loading agents...</p>
-                  {:else if wsAgents.length === 0}
-                    <p class="entity-panel-empty">No agents yet. Agents are spawned to implement tasks after specs are approved.</p>
-                  {:else}
-                    <div class="entity-card-list">
-                      {#each wsAgents.slice().sort((a, b) => {
-                        const order = { active: 0, failed: 1, completed: 2, idle: 2, dead: 3, cancelled: 4 };
-                        return (order[a.status] ?? 9) - (order[b.status] ?? 9);
-                      }).slice(0, 8) as agent}
-                        {@const taskId = agent.task_id ?? agent.current_task_id}
-                        {@const elapsed = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
-                        {@const completed = (agent.completed_at && agent.created_at) ? Math.round(agent.completed_at - agent.created_at) : null}
-                        <button class="entity-card entity-card-agent" class:entity-card-active={agent.status === 'active'} class:entity-card-danger={agent.status === 'failed' || agent.status === 'dead'} onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
-                          <div class="entity-card-primary">
-                            <span class="status-pill status-pill-{agent.status}" title={agentStatusTooltip(agent)}>
-                              {#if agent.status === 'active'}<span class="status-pulse-tiny"></span>{/if}
-                              {agent.status ?? 'active'}
-                            </span>
-                            <span class="ec-title">{agent.name ?? entityName('agent', agent.id)}</span>
-                            {#if agent.status === 'active' && elapsed != null}
-                              <span class="ec-duration ec-duration-live">
-                                {elapsed < 60 ? `${elapsed}s` : elapsed < 3600 ? `${Math.floor(elapsed/60)}m` : `${Math.floor(elapsed/3600)}h`}
-                              </span>
-                            {:else if (agent.status === 'completed' || agent.status === 'idle') && completed != null}
-                              <span class="ec-duration">
-                                {completed < 60 ? `${completed}s` : `${Math.floor(completed/60)}m`}
-                              </span>
-                            {/if}
-                          </div>
-                          <div class="entity-card-meta">
-                            {#if agent.repo_id && repoMap[agent.repo_id]}
-                              <span class="ec-chip" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[agent.repo_id], 'agents'); }}>{repoMap[agent.repo_id].name}</span>
-                            {/if}
-                            {#if agent.spec_path}
-                              <span class="ec-chip ec-chip-spec" onclick={(e) => { e.stopPropagation(); nav('spec', agent.spec_path, { path: agent.spec_path, repo_id: agent.repo_id }); }}>
-                                <Icon name="spec" size={10} /> {agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                              </span>
-                            {/if}
-                            {#if taskId}
-                              <span class="ec-chip" onclick={(e) => { e.stopPropagation(); nav('task', taskId, { repo_id: agent.repo_id }); }}>
-                                <Icon name="task" size={10} /> {entityName('task', taskId)}
-                              </span>
-                            {/if}
-                            {#if agent.mr_id}
-                              <span class="ec-chip ec-chip-merged" onclick={(e) => { e.stopPropagation(); nav('mr', agent.mr_id, { repo_id: agent.repo_id }); }}>
-                                <Icon name="git-merge" size={10} /> {entityName('mr', agent.mr_id)}
-                              </span>
-                            {/if}
-                            {#if agent.status === 'failed'}
-                              <span class="ec-context ec-context-danger">Failed — view logs for details</span>
-                            {/if}
-                            <span class="ec-time" title={absTime(agent.created_at)}>{relTime(agent.created_at)}</span>
-                          </div>
-                        </button>
-                      {/each}
-                      {#if wsAgents.length > 8}
-                        <p class="entity-panel-overflow">{wsAgents.length - 8} more — open a repo to see all agents</p>
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
-              {:else if activeEntityTab === 'mrs'}
-                <div class="ws-entity-panel" data-testid="entity-panel-mrs">
-                  {#if mrsLoading}
-                    <p class="list-loading">Loading merge requests...</p>
-                  {:else if wsMrs.length === 0}
-                    <p class="entity-panel-empty">No merge requests yet. MRs are created when agents complete their tasks.</p>
-                  {:else}
-                    <div class="entity-card-list">
-                      {#each wsMrs.slice().sort((a, b) => {
-                        const order = { open: 0, merged: 1, closed: 2 };
-                        return (order[a.status] ?? 9) - (order[b.status] ?? 9);
-                      }).slice(0, 8) as mr}
-                        {@const repoId = mr.repository_id ?? mr.repo_id}
-                        {@const gateDetails = mr._gates?.details ?? []}
-                        {@const failedGateDetails = gateDetails.filter(g => g.status === 'failed')}
-                        <button class="entity-card entity-card-mr" onclick={() => nav('mr', mr.id, { repo_id: repoId, title: mr.title })}>
-                          <!-- Row 1: Status icon + Title + Actions -->
-                          <div class="entity-card-primary">
-                            <span class="ec-status-icon ec-status-{mr.status}" title={mrStatusTooltip(mr)}>
-                              {#if mr.status === 'merged'}
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><path d="M18 21a3 3 0 100-6 3 3 0 000 6zM6 9a3 3 0 100-6 3 3 0 000 6zM6 9v12"/><path d="M6 9a9 9 0 009 9"/></svg>
-                              {:else if mr.status === 'open'}
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 9v12M18 9v6"/></svg>
-                              {:else}
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 9v12"/></svg>
-                              {/if}
-                            </span>
-                            <span class="ec-title">{mr.title ?? 'Untitled MR'}</span>
-                            <span class="ec-actions" onclick={(e) => e.stopPropagation()}>
-                              {#if mr.status === 'open' && mr.queue_position == null}
-                                <button class="inline-action-btn inline-action-approve" onclick={(e) => { e.stopPropagation(); quickEnqueueMr(mr, e); }} disabled={mrEnqueueStates[mr.id] === 'loading'}>Enqueue</button>
-                              {:else if mr.status === 'open' && mr.queue_position != null}
-                                <span class="queue-badge">#{mr.queue_position + 1}</span>
-                              {/if}
-                              {#if mr.diff_stats}
-                                <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'diff' }); }}>Diff</button>
-                              {/if}
-                            </span>
-                          </div>
-                          <!-- Row 2: Metadata chips -->
-                          <div class="entity-card-meta">
-                            {#if repoId && repoMap[repoId]}
-                              <span class="ec-chip" onclick={(e) => { e.stopPropagation(); onSelectRepo?.(repoMap[repoId], 'mrs'); }}>{repoMap[repoId].name}</span>
-                            {/if}
-                            {#if mr.source_branch}
-                              <span class="ec-chip ec-chip-mono">{mr.source_branch}</span>
-                            {/if}
-                            {#if mr.author_agent_id}
-                              <span class="ec-chip ec-chip-agent" onclick={(e) => { e.stopPropagation(); nav('agent', mr.author_agent_id, { repo_id: repoId }); }}>
-                                <Icon name="agent" size={10} /> {entityName('agent', mr.author_agent_id)}
-                              </span>
-                            {/if}
-                            {#if mr.spec_ref}
-                              {@const specPath = mr.spec_ref.split('@')[0]}
-                              <span class="ec-chip ec-chip-spec" onclick={(e) => { e.stopPropagation(); nav('spec', specPath, { path: specPath, repo_id: repoId }); }}>
-                                <Icon name="spec" size={10} /> {specPath.split('/').pop()?.replace(/\.md$/, '')}
-                              </span>
-                            {/if}
-                            {#if mr.diff_stats}
-                              <span class="ec-diff" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'diff' }); }}>
-                                <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
-                                <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
-                              </span>
-                            {/if}
-                            {#if mr.status === 'merged' && mr.merge_commit_sha}
-                              <span onclick={(e) => e.stopPropagation()}>
-                                <CopyableId value={mr.merge_commit_sha} variant="sha" copyLabel="Merge SHA" />
-                              </span>
-                            {/if}
-                            <span class="ec-time" title={absTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}>{relTime(mr.merged_at ?? mr.updated_at ?? mr.created_at)}</span>
-                          </div>
-                          <!-- Row 3: Gate results with individual names -->
-                          {#if gateDetails.length > 0}
-                            <div class="entity-card-gates" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'gates' }); }}>
-                              {#each gateDetails.slice(0, 4) as g}
-                                <span class="ec-gate-chip ec-gate-{g.status}" title="{g.name}{g.gate_type ? ' (' + g.gate_type.replace(/_/g, ' ') + ')' : ''}{g.required === false ? ' (advisory)' : ''}{g.duration_ms ? ' — ' + (g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's') : ''}">
-                                  <span class="ec-gate-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
-                                  {g.name}
-                                  {#if g.duration_ms}<span class="ec-gate-dur">{g.duration_ms < 1000 ? g.duration_ms + 'ms' : (g.duration_ms / 1000).toFixed(1) + 's'}</span>{/if}
-                                </span>
-                              {/each}
-                              {#if gateDetails.length > 4}
-                                <span class="ec-gate-chip ec-gate-more">+{gateDetails.length - 4}</span>
-                              {/if}
-                            </div>
-                          {:else if mr._gates?.total > 0}
-                            <div class="entity-card-gates" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'gates' }); }}>
-                              {#if mr._gates.passed > 0}<span class="ec-gate-chip ec-gate-pass"><span class="ec-gate-icon">✓</span> {mr._gates.passed} passed</span>{/if}
-                              {#if mr._gates.failed > 0}<span class="ec-gate-chip ec-gate-fail"><span class="ec-gate-icon">✗</span> {mr._gates.failed} failed</span>{/if}
-                            </div>
-                          {/if}
-                        </button>
-                      {/each}
-                      {#if wsMrs.length > 8}
-                        <p class="entity-panel-overflow">{wsMrs.length - 8} more — open a repo to see all MRs</p>
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
-              {/if}
+                    {#if gateDetails.length > 0}
+                      <span class="queue-gates">
+                        {#each gateDetails.slice(0, 3) as g}
+                          <span class="ec-gate-chip ec-gate-{g.status}" title="{g.name}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
+                        {/each}
+                      </span>
+                    {/if}
+                    {#if item._deps?.length > 0}
+                      <span class="queue-deps" title="Waiting on {item._deps.length} dependency">
+                        <Icon name="link" size={10} /> {item._deps.length}
+                      </span>
+                    {/if}
+                  </button>
+                {/each}
+                {#if mergeQueueItems.length > 5}
+                  <p class="entity-panel-overflow">{mergeQueueItems.length - 5} more in queue</p>
+                {/if}
+              </div>
+            </section>
           {/if}
 
           <!-- ── Recent Activity ─────────────────────────────── -->
@@ -1672,93 +1356,91 @@
 </Modal>
 
 <style>
-  /* ═══ Workspace summary strip ═══════════════════════════════════════════ */
-  .ws-summary-strip {
+  /* ═══ Merge Queue section ═══════════════════════════════════════════════ */
+  .ws-merge-queue {
+    margin-top: var(--space-1);
+  }
+
+  .merge-queue-list {
     display: flex;
-    align-items: center;
-    gap: 0;
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface);
+    flex-direction: column;
+    gap: 1px;
+    background: var(--color-border);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    overflow-x: auto;
+    overflow: hidden;
   }
 
-  .ws-summary-stat {
+  .queue-entry {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: var(--space-1) var(--space-2);
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--radius);
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: none;
     cursor: pointer;
     font-family: var(--font-body);
-    transition: all var(--transition-fast);
-    white-space: nowrap;
-  }
-
-  .ws-summary-stat:hover {
-    background: var(--color-surface-elevated);
-    border-color: var(--color-border);
-  }
-
-  .ws-summary-active {
-    background: var(--color-surface-elevated);
-    border-color: var(--color-primary);
-    box-shadow: 0 0 0 1px var(--color-primary);
-  }
-
-  .ws-summary-attention .ws-summary-count {
-    color: var(--color-warning);
-  }
-
-  .ws-summary-count {
     font-size: var(--text-sm);
-    font-weight: 800;
+    text-align: left;
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .queue-entry:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .queue-position {
     font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    line-height: 1;
-  }
-
-  .ws-summary-label {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-
-  .ws-summary-arrow {
-    display: flex;
-    align-items: center;
-    color: var(--color-text-muted);
-    opacity: 0.3;
-    flex-shrink: 0;
-    padding: 0 4px;
+    font-weight: 700;
     font-size: var(--text-xs);
+    color: var(--color-warning);
+    width: 24px;
+    text-align: center;
+    flex-shrink: 0;
   }
 
-  .ws-summary-badge {
-    font-size: 10px;
+  .queue-entry-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .queue-entry-title {
     font-weight: 500;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .queue-entry-meta {
+    display: flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .queue-gates {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+
+  .queue-deps {
     display: flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
   }
 
-  .ws-summary-badge-warn { color: var(--color-warning); font-weight: 600; }
-  .ws-summary-badge-danger { color: var(--color-danger); font-weight: 600; }
-  .ws-summary-badge-ok { color: var(--color-success); font-weight: 600; }
-
-  .ws-summary-pulse {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--color-success);
-    animation: pipeline-pulse 2s ease-in-out infinite;
-    flex-shrink: 0;
+  .section-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
   }
 
   /* ═══ Pipeline flow sections ═══════════════════════════════════════════ */
@@ -2362,20 +2044,6 @@
   .pipeline-tab-spacer {
     flex: 1;
     min-width: var(--space-2);
-  }
-
-  .ws-entity-panel {
-    padding: var(--space-2) var(--space-3);
-    max-height: 500px;
-    overflow-y: auto;
-  }
-
-  .entity-panel-empty {
-    font-size: var(--text-sm);
-    color: var(--color-text-muted);
-    text-align: center;
-    padding: var(--space-4) 0;
-    font-style: italic;
   }
 
   .entity-panel-overflow {
