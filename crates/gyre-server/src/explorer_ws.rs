@@ -353,8 +353,15 @@ async fn handle_explorer_session(
         };
 
         // Check raw frame length BEFORE deserialization to prevent CPU exhaustion
-        // from deeply nested JSON structures.
-        const MAX_RAW_FRAME_SIZE: usize = 128 * 1024; // 128 KiB
+        // from deeply nested JSON structures. Two thresholds:
+        // 1. MAX_USER_MESSAGE_LENGTH + envelope: tighter limit that catches oversized
+        //    user text before spending CPU on JSON parsing.
+        // 2. MAX_RAW_FRAME_SIZE: hard upper bound for any message type.
+        //
+        // The user's text field is embedded in the JSON envelope along with
+        // canvas_state, so we allow 4x the user message limit as headroom for the
+        // JSON structure (canvas_state, type tag, etc.).
+        const MAX_RAW_FRAME_SIZE: usize = MAX_USER_MESSAGE_LENGTH * 4;
         if msg.len() > MAX_RAW_FRAME_SIZE {
             let err = ExplorerServerMessage::Error {
                 message: format!(
