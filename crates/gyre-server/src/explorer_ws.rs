@@ -1857,11 +1857,15 @@ async fn run_explorer_agent(
                             *cached_nodes =
                                 Some(sorted_nodes.into_iter().take(kept_count).collect());
                             *cached_edges = Some(kept_edges);
-                            // Warn the user via WebSocket (Vision Principle 2: "surface the signal")
+                            // Warn the user via WebSocket (Vision Principle 2: "Right context, not more context")
+                            // Explicitly note that computed metrics are affected — silent truncation
+                            // makes test coverage gaps, blast radius, and risk scores unsound.
                             let warning_msg = format!(
-                                "Note: This repository has a large graph ({} nodes, {} edges). \
-                                 Showing the {} most important nodes (by connectivity and recency). \
-                                 Some less-connected, older nodes may not appear in queries.",
+                                "**Note:** This repository's graph ({} nodes, {} edges) exceeds \
+                                 the session limit. Showing the {} most important nodes (by \
+                                 connectivity and recency). **Computed metrics (test coverage, \
+                                 blast radius, risk scores) are approximate** because they operate \
+                                 on truncated data. Less-connected or older nodes may be missing.",
                                 original_nodes, original_edges, kept_count
                             );
                             stream_text(sender, &warning_msg, false).await;
