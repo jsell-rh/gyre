@@ -4,7 +4,7 @@
 //! Given a ViewQuery and a set of nodes/edges, produces a resolved result set with
 //! matched nodes, groups, callouts, narrative steps, and warnings.
 
-use gyre_common::graph::{EdgeType, GraphEdge, GraphNode, NodeType};
+use gyre_common::graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence};
 use gyre_common::view_query::{Scope, ViewQuery};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -79,6 +79,19 @@ pub struct GraphSummary {
     pub top_functions_by_calls: Vec<String>,
     pub modules: Vec<String>,
     pub test_coverage: TestCoverageSummary,
+    /// Spec coverage: how many nodes have a governing spec
+    #[serde(default)]
+    pub spec_coverage: SpecCoverageSummary,
+    /// Risk indicators: high-complexity untested code, unspecced hot paths
+    #[serde(default)]
+    pub risk_indicators: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SpecCoverageSummary {
+    pub governed: usize,
+    pub unspecced: usize,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2126,9 +2139,9 @@ pub fn compute_graph_summary(
         .collect();
     func_call_pairs.sort_by(|a, b| b.1.cmp(&a.1));
     let top_functions: Vec<String> = func_call_pairs
-        .into_iter()
+        .iter()
         .take(10)
-        .map(|(s, _)| s)
+        .map(|(s, _)| s.clone())
         .collect();
 
     // Modules
@@ -2151,6 +2164,54 @@ pub fn compute_graph_summary(
         .filter(|n| n.node_type == NodeType::Function && reachable.contains(&n.id.to_string()))
         .count();
 
+    // Spec coverage stats
+    let governed = active_nodes
+        .iter()
+        .filter(|n| n.spec_path.is_some() || n.spec_confidence != SpecConfidence::None)
+        .count();
+    let spec_total = active_nodes.len();
+    let unspecced = spec_total.saturating_sub(governed);
+
+    // Risk indicators — top anomalies the LLM should know about
+    let mut risk_indicators = Vec::new();
+    let high_complexity_untested: Vec<&str> = active_nodes
+        .iter()
+        .filter(|n| {
+            n.complexity.unwrap_or(0) > 20
+                && n.node_type == NodeType::Function
+                && !reachable.contains(&n.id.to_string())
+        })
+        .take(5)
+        .map(|n| n.name.as_str())
+        .collect();
+    if !high_complexity_untested.is_empty() {
+        risk_indicators.push(format!(
+            "High-complexity untested functions: {}",
+            high_complexity_untested.join(", ")
+        ));
+    }
+    // Hot unspecced code: heavily-called functions with no governing spec
+    let hot_unspecced: Vec<String> = func_call_pairs
+        .iter()
+        .take(20)
+        .filter_map(|(label, count)| {
+            if *count < 3 {
+                return None;
+            }
+            // Extract the function name from the label "FuncName (N)"
+            let name = label.split(" (").next()?;
+            let node = active_nodes.iter().find(|n| n.name == name)?;
+            if node.spec_path.is_some() || node.spec_confidence != SpecConfidence::None {
+                return None;
+            }
+            Some(format!("{name} ({count} callers, no spec)"))
+        })
+        .take(5)
+        .collect();
+    if !hot_unspecced.is_empty() {
+        risk_indicators.push(format!("Heavily-called unspecced code: {}", hot_unspecced.join(", ")));
+    }
+
     GraphSummary {
         repo_id: repo_id.to_string(),
         node_counts,
@@ -2163,6 +2224,12 @@ pub fn compute_graph_summary(
             reachable_from_tests: reachable_count,
             unreachable: total_functions.saturating_sub(reachable_count),
         },
+        spec_coverage: SpecCoverageSummary {
+            governed,
+            unspecced,
+            total: spec_total,
+        },
+        risk_indicators,
     }
 }
 

@@ -430,6 +430,14 @@
     results.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
     return results;
   });
+  // Index anomalies by nodeId for O(1) canvas-spatial rendering
+  let anomalyByNodeId = $derived.by(() => {
+    const m = new Map();
+    for (const a of anomalies) {
+      if (!m.has(a.nodeId)) m.set(a.nodeId, a);
+    }
+    return m;
+  });
   let anomalyPanelOpen = $state(true);
 
   // Timeline scrubber state
@@ -3321,6 +3329,32 @@
       }
     }
 
+    // Spatial anomaly indicator — shows warning triangle at node per spec §7
+    // "anomalies AT the modules on the canvas"
+    if (n?.id && anomalyByNodeId.has(n.id) && sw > 35 && sh > 20) {
+      const anom = anomalyByNodeId.get(n.id);
+      const ax = s.x - sw / 2 + 2;
+      const ay = s.y + sh / 2 - 2;
+      const afs = Math.max(6, Math.min(8, sw * 0.06));
+      const sevColor = anom.severity === 'high' ? '#ef4444' : anom.severity === 'medium' ? '#f59e0b' : '#94a3b8';
+      ctx.save();
+      // Warning triangle icon
+      ctx.fillStyle = sevColor;
+      ctx.beginPath();
+      ctx.moveTo(ax + 1, ay - afs - 2);
+      ctx.lineTo(ax + afs + 3, ay);
+      ctx.lineTo(ax - afs + 1, ay);
+      ctx.closePath();
+      ctx.fill();
+      // Exclamation mark
+      ctx.fillStyle = '#0f0f1a';
+      ctx.font = `700 ${afs - 1}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('!', ax + 2, ay - 1);
+      ctx.restore();
+    }
+
     // Hovered state
     if (ln.id === hoveredNodeId) {
       ctx.strokeStyle = '#93c5fd';
@@ -5017,7 +5051,9 @@
         <canvas bind:this={minimapEl} style="width: {MINIMAP_W}px; height: {MINIMAP_H}px" onclick={onMinimapClick} onmousedown={onMinimapMouseDown}></canvas>
       </div>
 
-      <!-- Context menu -->
+      <!-- Context menu — organized per system-explorer.md §1:
+           Primary: View spec, View provenance, View history, Open in code
+           Secondary (collapsible): Trace, Blast radius, Drill into -->
       {#if contextMenu}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="ctx-menu-backdrop" onclick={() => { contextMenu = null; }} oncontextmenu={(e) => { e.preventDefault(); contextMenu = null; }}></div>
@@ -5027,49 +5063,16 @@
             <span class="ctx-node-name">{contextMenu.node.name}</span>
           </div>
           <div class="ctx-sep"></div>
-          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-            Trace from here
-          </button>
-          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('blast')}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-            Blast radius
-          </button>
-          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('callers')}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 004 4h12"/></svg>
-            Show callers
-          </button>
-          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('callees')}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="9 18 15 12 9 6"/></svg>
-            Show callees
-          </button>
-          {#if (treeData.parentToChildren.get(contextMenu.node.id) ?? []).length > 0}
-            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('drill')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>
-              Drill into
-            </button>
-          {/if}
-          <div class="ctx-sep"></div>
+          <!-- Primary actions (spec §1): View spec, provenance, history, code -->
           {#if contextMenu.node.spec_path}
             <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('spec')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               View spec
             </button>
           {:else}
-            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('create_spec')}>
+            <button class="ctx-item ctx-item-subtle" role="menuitem" onclick={() => contextMenuAction('create_spec')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
               Create spec
-            </button>
-          {/if}
-          <div class="ctx-sep"></div>
-          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('detail')}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
-            View details
-          </button>
-          {#if contextMenu.node.file_path}
-            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('open_in_code')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-              Open in code
             </button>
           {/if}
           <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('provenance')}>
@@ -5080,6 +5083,28 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
             View history
           </button>
+          {#if contextMenu.node.file_path}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('open_in_code')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              Open in code
+            </button>
+          {/if}
+          <div class="ctx-sep"></div>
+          <!-- Analysis actions -->
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('blast')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+            Blast radius
+          </button>
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            Trace from here
+          </button>
+          {#if (treeData.parentToChildren.get(contextMenu.node.id) ?? []).length > 0}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('drill')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>
+              Drill into
+            </button>
+          {/if}
         </div>
       {/if}
     {/if}
