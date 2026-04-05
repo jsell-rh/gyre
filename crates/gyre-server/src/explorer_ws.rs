@@ -2265,10 +2265,8 @@ async fn run_explorer_agent(
                             // Unfixable warnings: inherent to the data source, not
                             // resolvable by query refinement. Skip to avoid wasting
                             // a self-check turn.
-                            const UNFIXABLE_PREFIXES: &[&str] = &[
-                                "SHA-based diff is approximate",
-                                "Graph data truncated",
-                            ];
+                            const UNFIXABLE_PREFIXES: &[&str] =
+                                &["SHA-based diff is approximate", "Graph data truncated"];
                             if UNFIXABLE_PREFIXES.iter().any(|p| w.starts_with(p)) {
                                 return false;
                             }
