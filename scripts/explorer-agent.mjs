@@ -53,15 +53,23 @@ if (canvas_state?.active_lens) {
 
 const userMessage = canvasContext ? `[Canvas: ${canvasContext}]\n\n${question}` : question;
 
-// Build the full prompt including history context
-let promptParts = [];
+// Build conversation history context for the system prompt.
+// The SDK's query() prompt parameter is either a plain string or an AsyncIterable
+// (for streaming input), not a structured messages array. To provide multi-turn
+// context, we append the prior conversation turns to the system prompt so the model
+// sees them as grounding context, and pass only the current user question as prompt.
+let historyContext = '';
 if (history?.length) {
-  for (const msg of history) {
-    promptParts.push(`[${msg.role}]: ${msg.content}`);
-  }
+  const turns = history.map(
+    (msg) => `<${msg.role}>${msg.content}</${msg.role}>`
+  );
+  historyContext =
+    '\n\n## Conversation History\n' +
+    'The following is the prior conversation with this user. ' +
+    'Continue naturally from this context.\n\n' +
+    turns.join('\n\n');
 }
-promptParts.push(userMessage);
-const fullPrompt = promptParts.join('\n\n');
+const fullPrompt = userMessage;
 
 console.log(JSON.stringify({ type: 'status', status: 'thinking' }));
 
@@ -82,7 +90,7 @@ const mcpToolNames = [
 
 const options = {
   model: agentModel,
-  systemPrompt: system_prompt,
+  systemPrompt: system_prompt ? system_prompt + historyContext : historyContext || undefined,
   // Disable all built-in tools (Read, Edit, Bash, etc.) — only MCP tools should be available.
   tools: [],
   // MCP connection to the Gyre server for graph exploration tools.
@@ -180,7 +188,60 @@ try {
       if (cleanText) {
         console.log(JSON.stringify({ type: 'text', content: cleanText, done: true }));
       }
-      console.log(JSON.stringify({ type: 'view_query', query: viewQuery }));
+
+      // Self-check: call graph_query_dryrun via MCP HTTP to validate the query.
+      // The SDK agent already had the MCP tool available and may have used it
+      // during its run, but we do a server-mediated check here as a safety net
+      // so warnings surface to the frontend even if the agent skipped dry-run.
+      let warnings = [];
+      try {
+        const dryRunBody = {
+          jsonrpc: '2.0',
+          id: 'selfcheck-1',
+          method: 'tools/call',
+          params: {
+            name: 'graph_query_dryrun',
+            arguments: { repo_id, query: viewQuery },
+          },
+        };
+        const dryRunRes = await fetch(mcpUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(dryRunBody),
+        });
+        if (dryRunRes.ok) {
+          const dryRunJson = await dryRunRes.json();
+          // The MCP response wraps tool output in result.content[].text
+          const resultContent = dryRunJson?.result?.content;
+          if (Array.isArray(resultContent)) {
+            for (const block of resultContent) {
+              if (block.type === 'text' && block.text) {
+                try {
+                  const parsed = JSON.parse(block.text);
+                  if (parsed.warnings?.length) {
+                    warnings = parsed.warnings;
+                  }
+                } catch { /* not JSON, skip */ }
+              }
+            }
+          }
+        }
+      } catch (dryRunErr) {
+        console.error(`[self-check] dry-run failed: ${dryRunErr.message}`);
+      }
+
+      if (warnings.length) {
+        console.error(`[self-check] view_query warnings: ${warnings.join('; ')}`);
+      }
+
+      console.log(JSON.stringify({
+        type: 'view_query',
+        query: viewQuery,
+        ...(warnings.length ? { warnings } : {}),
+      }));
     } catch (_parseErr) {
       // view_query JSON was malformed; send the raw text
       console.log(JSON.stringify({ type: 'text', content: fullText, done: true }));
