@@ -119,9 +119,12 @@ pub struct Emphasis {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EdgeFilter {
-    /// Edge types to show. When result set is active, edges restricted to connections BETWEEN result nodes.
+    /// Edge types to show (inclusion). When result set is active, edges restricted to connections BETWEEN result nodes.
     #[serde(default)]
     pub filter: Vec<String>,
+    /// Edge types to exclude (exclusion). Applied after filter — if both set, filter takes precedence.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 // ── Zoom ─────────────────────────────────────────────────────────────────────
@@ -343,11 +346,11 @@ impl ViewQuery {
                     if s.is_empty() {
                         return; // Caught above
                     }
-                    // Accept: SHA hex prefixes (4+ hex chars), branch names, HEAD, tags
+                    // Accept: SHA hex prefixes (7+ hex chars), branch names, HEAD, tags
                     let is_hex = s.chars().all(|c| c.is_ascii_hexdigit());
-                    if is_hex && s.len() < 4 {
+                    if is_hex && s.len() < 7 {
                         errors.push(format!(
-                            "Diff {} '{}' too short — need at least 4 hex characters for SHA prefix matching",
+                            "Diff {} '{}' too short — need at least 7 hex characters for SHA prefix matching",
                             field, s
                         ));
                         return;
@@ -996,13 +999,24 @@ impl ViewQuery {
             return matches!(hex.len(), 3 | 4 | 6 | 8)
                 && hex.chars().all(|c| c.is_ascii_hexdigit());
         }
-        // CSS functions
+        // CSS functions — validate that arguments are numeric/comma/space/percent/period only
         if s.starts_with("rgb(")
             || s.starts_with("rgba(")
             || s.starts_with("hsl(")
             || s.starts_with("hsla(")
         {
-            return s.ends_with(')');
+            if !s.ends_with(')') {
+                return false;
+            }
+            let paren_start = s.find('(').unwrap_or(0) + 1;
+            let paren_end = s.len() - 1;
+            if paren_start >= paren_end {
+                return false;
+            }
+            let args = &s[paren_start..paren_end];
+            return args
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == ',' || c == ' ' || c == '.' || c == '%' || c == '-' || c == '/');
         }
         // Named CSS colors — only accept known names, not arbitrary strings
         let lower = s.to_ascii_lowercase();

@@ -931,10 +931,17 @@
     // If an active view query specifies edge filters, use those exclusively
     // (this allows queries to show contains/field_of edges when requested).
     const queryEdgeFilter = activeQuery?.edges?.filter;
+    const queryEdgeExclude = activeQuery?.edges?.exclude;
     if (queryEdgeFilter?.length) {
       return edges.filter(e => {
         const et = edgeType(e);
         return queryEdgeFilter.includes(et);
+      });
+    }
+    if (queryEdgeExclude?.length) {
+      return edges.filter(e => {
+        const et = edgeType(e);
+        return !queryEdgeExclude.includes(et) && et !== 'contains' && et !== 'field_of';
       });
     }
     // Default: hide structural hierarchy edges (contains, field_of) as they
