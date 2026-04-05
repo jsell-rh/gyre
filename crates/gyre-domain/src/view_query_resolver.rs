@@ -616,9 +616,7 @@ fn resolve_scope_with_adjacency(
                 if result.is_empty() {
                     // Detect trace-based metrics that always return empty in static analysis
                     let trace_metrics = ["span_duration", "span_count", "error_rate"];
-                    let is_trace_query = trace_metrics
-                        .iter()
-                        .any(|m| expr.contains(m));
+                    let is_trace_query = trace_metrics.iter().any(|m| expr.contains(m));
                     if is_trace_query {
                         warnings.push(format!(
                             "[info] Computed expression '{}' matched 0 nodes — trace-based metrics \
@@ -2200,7 +2198,10 @@ pub fn compute_graph_summary(
         .take(5)
         .collect();
     if !hot_unspecced.is_empty() {
-        risk_indicators.push(format!("Heavily-called unspecced code: {}", hot_unspecced.join(", ")));
+        risk_indicators.push(format!(
+            "Heavily-called unspecced code: {}",
+            hot_unspecced.join(", ")
+        ));
     }
 
     GraphSummary {
