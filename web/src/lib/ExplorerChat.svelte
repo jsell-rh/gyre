@@ -245,6 +245,7 @@
           role: 'assistant',
           content: msg.explanation ?? $t('explorer_chat.view_applied'),
           viewQuery: query,
+          viewExplanation: msg.explanation ?? null,
           timestamp: Date.now(),
         }]);
         status = 'ready';
@@ -362,8 +363,8 @@
     }
     // Use the LLM's explanation as the view description (if available)
     // instead of a generic "Saved from explorer chat" string.
-    const explanation = (lastViewQueryMsg?.content && lastViewQueryMsg.content !== 'View applied')
-      ? lastViewQueryMsg.content.slice(0, 200)
+    const explanation = lastViewQueryMsg?.viewExplanation
+      ? lastViewQueryMsg.viewExplanation.slice(0, 200)
       : lastViewQuery?.annotation?.description
         ?? 'Saved from explorer chat';
     ws.send(JSON.stringify({

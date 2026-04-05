@@ -43,12 +43,22 @@
   let graphWarningsDismissed = $state(false);
 
   // New explorer state
-  let explorerCanvasState = $state({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] });
+  let explorerCanvasState = $state({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [], recent_interactions: [] });
   let activeViewQuery = $state(null);
   let explorerFilter = $state('all');
   let explorerLens = $state('structural');
   let explorerSavedViews = $state([]);
   let detailNode = $state(null);
+
+  // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
+  // ExplorerCanvas tracks canvas-level interactions (click, drill) in
+  // canvasState.recent_interactions.  ExplorerView adds higher-level
+  // interactions (search, load_view) so the LLM has full context.
+  function pushInteraction(label) {
+    const existing = explorerCanvasState?.recent_interactions ?? [];
+    const updated = [...existing, label].slice(-10);
+    explorerCanvasState = { ...explorerCanvasState, recent_interactions: updated };
+  }
 
   // ── Dynamic welcome suggestions (vision.md Principle 6: challenge ceremony) ──
   // Compute context-aware suggestions from the graph so the user doesn't need
@@ -731,6 +741,9 @@
 
   function onSelectNode(node) {
     selectedNode = node;
+    if (node) {
+      pushInteraction(`select:${node.name ?? node.id}(${node.node_type ?? 'unknown'})`);
+    }
   }
 
   function onSearchInput(e) {
@@ -755,6 +768,7 @@
   async function doConceptSearch(q) {
     if (!selectedRepoId) return;
     conceptLoading = true;
+    pushInteraction(`search:${q}`);
     try {
       const result = await api.getGraphConcept(selectedRepoId, q);
       conceptNodes = result.nodes ?? [];
@@ -1670,7 +1684,7 @@
               <ExplorerChat
                 repoId={selectedRepoId}
                 canvasState={explorerCanvasState}
-                onViewQuery={(q) => { activeViewQuery = q; }}
+                onViewQuery={(q) => { activeViewQuery = q; pushInteraction(`view:${q?.scope?.type ?? 'query'}`); }}
                 onOpenSpec={(path) => openSpecEditor(path)}
                 savedViews={explorerSavedViews}
                 onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
