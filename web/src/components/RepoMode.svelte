@@ -831,6 +831,7 @@
                 <th>Duration</th>
                 <th>Cost</th>
                 <th>Spawned</th>
+                <th class="th-action"></th>
               </tr>
             </thead>
             <tbody>
@@ -851,6 +852,13 @@
                   <td class="cell-time">{#if completedDur != null}{humanDuration(completedDur)}{:else if agent.status === 'active' && elapsedSec != null}{humanDuration(elapsedSec)}{/if}</td>
                   <td class="cell-mono">{#if totalTokens > 0}<span class="token-count" title="{totalTokens.toLocaleString()} tokens">{totalTokens > 999999 ? (totalTokens / 1000000).toFixed(1) + 'M' : totalTokens > 999 ? (totalTokens / 1000).toFixed(0) + 'k' : totalTokens}</span>{/if}</td>
                   <td class="cell-time">{relativeTime(agent.created_at)}</td>
+                  <td class="cell-action">
+                    {#if agent.status === 'failed' || agent.status === 'dead'}
+                      <button class="quick-action-btn quick-action-view" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', agent.id, { ...agent, _openTab: 'history' }); }} title="View agent logs">Logs</button>
+                    {:else if agent.status === 'active'}
+                      <button class="quick-action-btn quick-action-view" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', agent.id, { ...agent, _openTab: 'chat' }); }} title="View agent conversation">Chat</button>
+                    {/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>
