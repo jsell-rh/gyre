@@ -252,6 +252,9 @@ pub struct AuthenticatedAgent {
     /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     /// - Global token or API key: `None` — ABAC checks are bypassed for these.
     pub jwt_claims: Option<serde_json::Value>,
+    /// True when auth was performed via the deprecated `?token=` query parameter.
+    /// Used by WebSocket handlers to send a deprecation warning to the client.
+    pub deprecated_token_auth: bool,
 }
 
 // -- JWT claim types ----------------------------------------------------------
@@ -416,18 +419,27 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
 
         // Check Authorization header first, then fall back to ?token= query param.
         // DEPRECATED: ?token= leaks credentials to logs/history. Use ?ticket= instead.
-        let token = parts
+        let header_token = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .or_else(|| {
-                parts.uri.query().and_then(|q| {
-                    q.split('&')
-                        .find(|p| p.starts_with("token="))
-                        .map(|p| &p[6..])
-                })
-            })
+            .and_then(|v| v.strip_prefix("Bearer "));
+        let query_token = parts.uri.query().and_then(|q| {
+            q.split('&')
+                .find(|p| p.starts_with("token="))
+                .map(|p| &p[6..])
+        });
+        let deprecated_token_auth = header_token.is_none() && query_token.is_some();
+        if deprecated_token_auth {
+            tracing::warn!(
+                uri = %parts.uri,
+                "Deprecated ?token= query parameter auth used. \
+                 Migrate to ticket-based auth (POST /api/v1/ws-ticket) \
+                 to avoid token leakage in logs and browser history."
+            );
+        }
+        let token = header_token
+            .or(query_token)
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response())?;
 
         // 1. Global auth token (dev / system usage). Use constant-time compare.
@@ -438,6 +450,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 roles: vec![UserRole::Admin],
                 tenant_id: "default".to_string(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
+                deprecated_token_auth,
             });
         }
 
@@ -475,6 +488,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     roles: vec![UserRole::Agent],
                     tenant_id: "default".to_string(),
                     jwt_claims,
+                    deprecated_token_auth,
                 });
             }
         }
@@ -507,20 +521,23 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     roles: user.roles,
                     tenant_id: "default".to_string(),
                     jwt_claims: None, // API key — no ABAC evaluation.
+                    deprecated_token_auth,
                 });
             }
         }
 
         // 4. JWT validation.
         if let Some(jwt_cfg) = &state.jwt_config {
-            if let Ok(auth) = validate_jwt(token, jwt_cfg, state).await {
+            if let Ok(mut auth) = validate_jwt(token, jwt_cfg, state).await {
+                auth.deprecated_token_auth = deprecated_token_auth;
                 return Ok(auth);
             }
         }
 
         // 5. Federation JWT from a trusted remote Gyre instance (G11).
         if token.starts_with("ey") {
-            if let Some(auth) = validate_federated_jwt(token, state).await {
+            if let Some(mut auth) = validate_federated_jwt(token, state).await {
+                auth.deprecated_token_auth = deprecated_token_auth;
                 return Ok(auth);
             }
         }
@@ -545,6 +562,7 @@ pub async fn authenticate_token(
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            deprecated_token_auth: false,
         });
     }
 
@@ -574,6 +592,7 @@ pub async fn authenticate_token(
                 roles: vec![UserRole::Agent],
                 tenant_id: "default".to_string(),
                 jwt_claims,
+                deprecated_token_auth: false,
             });
         }
     }
@@ -597,6 +616,7 @@ pub async fn authenticate_token(
                 roles: user.roles,
                 tenant_id: "default".to_string(),
                 jwt_claims: None,
+                deprecated_token_auth: false,
             });
         }
     }
@@ -709,6 +729,7 @@ async fn validate_jwt(
         roles: user.roles,
         tenant_id,
         jwt_claims: raw_claims,
+        deprecated_token_auth: false,
     })
 }
 
@@ -918,6 +939,7 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         roles: vec![UserRole::Agent],
         tenant_id: "default".to_string(),
         jwt_claims: fed_claims_json,
+        deprecated_token_auth: false,
     })
 }
 
@@ -2015,6 +2037,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            deprecated_token_auth: false,
         };
         let ticket = store.issue(auth);
         assert!(!ticket.is_empty());
@@ -2043,6 +2066,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            deprecated_token_auth: false,
         };
         let ticket = store.issue(auth);
         // Ticket is a UUID, not a Bearer token or API key

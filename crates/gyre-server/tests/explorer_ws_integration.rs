@@ -111,6 +111,25 @@ impl WsCtx {
             _ => None,
         }
     }
+
+    /// Read next text message, skipping any "warning" messages (e.g. deprecation notices).
+    /// Tests use ?token= auth which triggers a deprecation warning; this helper
+    /// skips those so tests can focus on the actual protocol messages.
+    async fn read_msg_skip_warnings(
+        reader: &mut futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+    ) -> Option<serde_json::Value> {
+        for _ in 0..10 {
+            let msg = Self::read_msg(reader).await?;
+            if msg.get("type").and_then(|t| t.as_str()) != Some("warning") {
+                return Some(msg);
+            }
+        }
+        None
+    }
 }
 
 // ── Session lifecycle ─────────────────────────────────────────────────────────
@@ -130,7 +149,7 @@ async fn explorer_ws_connect_and_list_views() {
         .await
         .unwrap();
 
-    let msg = WsCtx::read_msg(&mut stream).await;
+    let msg = WsCtx::read_msg_skip_warnings(&mut stream).await;
     assert!(msg.is_some(), "Should receive a views response");
     let msg = msg.unwrap();
     assert_eq!(msg["type"], "views", "First response should be views list");
@@ -274,7 +293,7 @@ async fn explorer_ws_invalid_message() {
         .await
         .unwrap();
 
-    let msg = WsCtx::read_msg(&mut stream).await;
+    let msg = WsCtx::read_msg_skip_warnings(&mut stream).await;
     assert!(msg.is_some(), "Should receive an error");
     assert_eq!(msg.unwrap()["type"], "error");
 }
@@ -299,7 +318,7 @@ async fn explorer_ws_message_too_long() {
     .await
     .unwrap();
 
-    let msg = WsCtx::read_msg(&mut stream).await;
+    let msg = WsCtx::read_msg_skip_warnings(&mut stream).await;
     assert!(
         msg.is_some(),
         "Should receive an error for too-long message"
@@ -382,7 +401,7 @@ async fn explorer_ws_save_view_validation() {
     .await
     .unwrap();
 
-    let msg = WsCtx::read_msg(&mut stream).await;
+    let msg = WsCtx::read_msg_skip_warnings(&mut stream).await;
     assert!(msg.is_some());
     let msg = msg.unwrap();
     assert_eq!(msg["type"], "error", "Invalid query should produce error");

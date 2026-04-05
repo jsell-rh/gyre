@@ -1710,6 +1710,8 @@
                 savedViews={explorerSavedViews}
                 onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
                 {graphHints}
+                graphNodes={graph?.nodes ?? []}
+                graphEdges={graph?.edges ?? []}
               />
             </div>
           </div>
