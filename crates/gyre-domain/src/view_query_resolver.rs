@@ -3297,6 +3297,7 @@ mod tests {
             emphasis: Default::default(),
             edges: gyre_common::view_query::EdgeFilter {
                 filter: vec!["calls".to_string()],
+                exclude: vec![],
             },
             zoom: Default::default(),
             annotation: Default::default(),
@@ -3914,6 +3915,7 @@ mod tests {
             emphasis: Default::default(),
             edges: gyre_common::view_query::EdgeFilter {
                 filter: vec!["calls".to_string(), "implements".to_string()],
+                exclude: vec![],
             },
             zoom: Default::default(),
             annotation: Default::default(),
@@ -3946,7 +3948,7 @@ mod tests {
         let query = ViewQuery {
             scope: Scope::All,
             emphasis: Default::default(),
-            edges: gyre_common::view_query::EdgeFilter { filter: vec![] },
+            edges: gyre_common::view_query::EdgeFilter { filter: vec![], exclude: vec![] },
             zoom: Default::default(),
             annotation: Default::default(),
             groups: vec![],

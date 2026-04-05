@@ -319,6 +319,9 @@ async fn handle_explorer_session(
                 return;
             }
         }
+    } else if auth.agent_id == "system" {
+        // System/dev token — admin access, skip workspace scope verification.
+        // The AuthenticatedAgent extractor already verified this is the global auth token.
     } else {
         // No user_id means agent/service token — verify workspace scope.
         // Tenant-level auth was already verified by the AuthenticatedAgent extractor.

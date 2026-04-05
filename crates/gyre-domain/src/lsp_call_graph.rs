@@ -2146,15 +2146,14 @@ mod tests {
 
     #[test]
     fn char_position_does_not_match_prefix() {
-        // "fn foo" should NOT match "fn foo_bar"
+        // "fn foo" should NOT match "fn foo_bar" — word-boundary matching prevents
+        // "foo" from matching inside "foo_bar"
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "fn foo_bar() {}\n").unwrap();
         let node = make_function_node("n1", "foo", "lib.rs", 1, 1);
-        // Should fall through to rfind("foo") which finds position 3
-        // (inside "foo_bar"), but that's the best we can do with rfind.
         let pos = compute_char_position(dir.path(), "lib.rs", &node);
-        // rfind("foo") in "fn foo_bar() {}" finds index 3 (the "foo" in "foo_bar")
-        assert_eq!(pos, 3);
+        // Word-boundary check correctly rejects "foo" inside "foo_bar", returns 0
+        assert_eq!(pos, 0);
     }
 
     #[test]
