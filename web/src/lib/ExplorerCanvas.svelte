@@ -188,13 +188,17 @@
 
   // Evaluative lens metric mode — defaults to trace-based when data exists
   let evaluativeMetric = $state('complexity'); // 'complexity' | 'churn' | 'incoming_calls' | 'test_coverage' | 'span_duration' | 'span_count' | 'error_rate'
-  // Auto-select trace metric when trace data becomes available and user hasn't
-  // explicitly chosen a trace metric (auto-upgrade from any structural metric)
+  let userExplicitlySelectedMetric = $state(false); // Track if user made an explicit choice
+  // Auto-select trace metric ONLY on initial trace data arrival, NEVER override
+  // an explicit user choice (spec: evaluative data is overlaid, not replacing).
   const TRACE_METRICS = new Set(['span_duration', 'span_count', 'error_rate']);
+  let prevTraceDataLen = $state(0);
   $effect(() => {
-    if (traceData?.spans?.length > 0 && !TRACE_METRICS.has(evaluativeMetric)) {
+    const curLen = traceData?.spans?.length ?? 0;
+    if (curLen > 0 && prevTraceDataLen === 0 && !userExplicitlySelectedMetric) {
       evaluativeMetric = 'span_duration';
     }
+    prevTraceDataLen = curLen;
   });
   let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
   let srAnnouncement = $state(''); // Screen reader announcements via ARIA live region
@@ -380,10 +384,11 @@
         severity: 'medium',
       });
     }
-    // Sort by severity (high first), then take top 8
+    // Sort by severity (high first) — show all anomalies, not an arbitrary cap.
+    // The panel scrolls so users can explore the full risk landscape.
     const order = { high: 0, medium: 1, low: 2 };
     results.sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
-    return results.slice(0, 8);
+    return results;
   });
   let anomalyPanelOpen = $state(true);
 
@@ -392,8 +397,10 @@
   let timelineRange = $state([0, 100]); // percentage range [from, to]
   let timelineNodes = $derived.by(() => {
     if (!timelineEnabled || !nodes.length) return null;
-    const allTimes = nodes.filter(n => n.first_seen_at).map(n => n.first_seen_at);
-    if (allTimes.length === 0) return null;
+    const nonDeleted = nodes.filter(n => !n.deleted_at);
+    const allTimes = nonDeleted.filter(n => n.first_seen_at).map(n => n.first_seen_at);
+    const coveragePct = nonDeleted.length > 0 ? Math.round((allTimes.length / nonDeleted.length) * 100) : 0;
+    if (allTimes.length === 0) return { dataGap: true, coveragePct, message: 'No temporal data — nodes lack first_seen_at timestamps' };
     const minT = Math.min(...allTimes);
     const maxT = Math.max(...allTimes);
     if (maxT === minT) return null;
@@ -470,7 +477,7 @@
       }
     }
     const isFullRange = timelineRange[0] === 0 && timelineRange[1] === 100;
-    return { visibleIds, ghostIds, ghostAdded, ghostRemoved, minT, maxT, fromT, toT, totalWithTime, markers: dedupedMarkers.slice(0, 10), delta, isFullRange };
+    return { visibleIds, ghostIds, ghostAdded, ghostRemoved, minT, maxT, fromT, toT, totalWithTime, markers: dedupedMarkers.slice(0, 10), delta, isFullRange, coveragePct, dataGap: coveragePct < 50 };
   });
 
   // Canvas-scoped search state
@@ -4761,14 +4768,14 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" type="button" title="Observable lens — requires production OpenTelemetry collector integration" onclick={() => { observableBannerVisible = true; }}>Observable</button>
+      <button class="tb-btn tb-btn-observable" type="button" title="Observable lens — requires production OpenTelemetry collector integration" onclick={() => { observableBannerVisible = !observableBannerVisible; }} aria-disabled="true">Observable</button>
     </div>
 
     {#if lens === 'evaluative'}
       <EvaluativeOverlay
         {evaluativeMetric}
         {traceData}
-        onMetricChange={(key) => { evaluativeMetric = key; onLensChange('evaluative'); }}
+        onMetricChange={(key) => { evaluativeMetric = key; userExplicitlySelectedMetric = true; onLensChange('evaluative'); }}
       />
       <div class="tb-sep"></div>
     {/if}
@@ -5080,8 +5087,13 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
       <span class="timeline-label">
-        {#if timelineNodes}
+        {#if timelineNodes?.dataGap && !timelineNodes?.visibleIds}
+          <span class="timeline-data-warn">{timelineNodes.message}</span>
+        {:else if timelineNodes?.fromT}
           {new Date(timelineNodes.fromT * 1000).toLocaleDateString()} — {new Date(timelineNodes.toT * 1000).toLocaleDateString()}
+          {#if timelineNodes.dataGap}
+            <span class="timeline-data-warn"> ({timelineNodes.coveragePct}% coverage)</span>
+          {/if}
         {:else}
           Timeline
         {/if}
@@ -5245,9 +5257,9 @@
   .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .tb-btn-sm { font-size: 11px; padding: 4px 8px; }
   .tb-btn-disabled { opacity: 0.35; cursor: not-allowed; }
-  .tb-btn-observable { opacity: 0.5; font-style: italic; }
-  .tb-btn-observable:hover { opacity: 0.8; }
-  .tb-btn-observable::after { content: ''; display: inline-block; width: 6px; height: 6px; background: #475569; border-radius: 50%; margin-left: 4px; vertical-align: middle; }
+  .tb-btn-observable { opacity: 0.35; font-style: italic; cursor: not-allowed; text-decoration: line-through; }
+  .tb-btn-observable:hover { opacity: 0.5; }
+  .tb-btn-observable::after { content: '🔒'; font-size: 8px; margin-left: 4px; vertical-align: middle; text-decoration: none; display: inline-block; }
   /* Styles for eval-metric, observable-banner, trace-playback moved to extracted components */
 
   .tb-sep { width: 1px; height: 20px; background: #334155; margin: 0 4px; }
@@ -5466,6 +5478,7 @@
     font-size: 10px; color: #64748b; font-family: 'SF Mono', Menlo, monospace;
     white-space: nowrap; min-width: 160px; text-align: right;
   }
+  .timeline-data-warn { color: #eab308; font-size: 10px; font-style: italic; }
 
   /* Timeline delta floating panel */
   .timeline-delta-panel {

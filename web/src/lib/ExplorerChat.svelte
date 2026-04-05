@@ -28,6 +28,9 @@
   const RECONNECT_BASE_DELAY = 1000;
   const MAX_RECONNECTS = 5;
   const MAX_CLIENT_MESSAGES = 200;
+  // Align with server MAX_USER_MESSAGE_LENGTH — enforce client-side to avoid
+  // composing a long message only to have it rejected after a round trip.
+  const MAX_USER_MESSAGE_LENGTH = 10000;
   // Align with server MAX_SESSION_MESSAGES — tracks all client-sent messages
   // (not just rendered bubbles) to warn users before hitting the server limit.
   const MAX_SESSION_MESSAGES = 200;
@@ -281,6 +284,16 @@
   // ── Send message ─────────────────────────────────────────────────────────
   function sendMessage() {
     if (!inputText.trim() || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    // Client-side message length enforcement (mirrors server MAX_USER_MESSAGE_LENGTH)
+    if (inputText.length > MAX_USER_MESSAGE_LENGTH) {
+      messages = capMessages([...messages, {
+        id: nextMsgId++, role: 'assistant',
+        content: `*Message too long (${inputText.length.toLocaleString()} / ${MAX_USER_MESSAGE_LENGTH.toLocaleString()} characters). Please shorten your message.*`,
+        timestamp: Date.now(), isError: true,
+      }]);
+      return;
+    }
 
     // Warn before hitting server session limit
     if (sessionMessageCount >= MAX_SESSION_MESSAGES - 5) {
@@ -698,10 +711,15 @@
       rows="1"
       aria-label={$t('explorer_chat.input_placeholder')}
     ></textarea>
+    {#if inputText.length > MAX_USER_MESSAGE_LENGTH * 0.8}
+      <span class="char-counter" class:over-limit={inputText.length > MAX_USER_MESSAGE_LENGTH}>
+        {inputText.length.toLocaleString()} / {MAX_USER_MESSAGE_LENGTH.toLocaleString()}
+      </span>
+    {/if}
     <button
       class="send-btn"
       onclick={sendMessage}
-      disabled={!inputText.trim() || status === 'connecting' || status === 'disconnected' || (ws?.readyState !== WebSocket.OPEN)}
+      disabled={!inputText.trim() || status === 'connecting' || status === 'disconnected' || (ws?.readyState !== WebSocket.OPEN) || inputText.length > MAX_USER_MESSAGE_LENGTH}
       aria-label={$t('explorer_chat.send')}
       type="button"
     >
@@ -1314,6 +1332,14 @@
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
+
+  .char-counter {
+    position: absolute; right: 48px; bottom: 6px;
+    font-size: 10px; color: #64748b;
+    font-family: 'SF Mono', Menlo, monospace;
+    pointer-events: none;
+  }
+  .char-counter.over-limit { color: #ef4444; font-weight: 700; }
 
   /* ── Save view dialog ─────────────────────────────────────────── */
   .save-view-overlay {
