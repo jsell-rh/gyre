@@ -52,9 +52,9 @@ describe('WorkspaceHome', () => {
   it('shows key sections when workspace is provided', () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    // Streamlined layout: Repos, Entity/Activity tabs (PipelineOverview removed for cleaner UX)
+    // Single-column layout: Repos + Activity (collapsed)
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="browse-panel"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="section-activity"]')).toBeTruthy();
   });
 
   it('each section has correct aria-labelledby', () => {
