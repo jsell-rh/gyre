@@ -1511,6 +1511,12 @@
                               {:else if mr.status === 'open' && mr.queue_position != null}
                                 <span class="queue-badge">#{mr.queue_position + 1}</span>
                               {/if}
+                              {#if mr.diff_stats}
+                                <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'diff' }); }} title="View code diff">Diff</button>
+                              {/if}
+                              {#if mr.status === 'merged'}
+                                <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: repoId, _openTab: 'attestation' }); }} title="View signed attestation">Attest</button>
+                              {/if}
                             </td>
                           </tr>
                         {/each}
