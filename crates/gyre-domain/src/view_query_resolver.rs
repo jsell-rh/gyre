@@ -614,7 +614,22 @@ fn resolve_scope_with_adjacency(
                     selected_node_id,
                 );
                 if result.is_empty() {
-                    warnings.push(format!("Computed expression '{}' matched 0 nodes", expr));
+                    // Detect trace-based metrics that always return empty in static analysis
+                    let trace_metrics = ["span_duration", "span_count", "error_rate"];
+                    let is_trace_query = trace_metrics
+                        .iter()
+                        .any(|m| expr.contains(m));
+                    if is_trace_query {
+                        warnings.push(format!(
+                            "[info] Computed expression '{}' matched 0 nodes — trace-based metrics \
+                             (span_duration, span_count, error_rate) require OTLP runtime data and \
+                             are not available in static analysis. Use structural metrics instead: \
+                             complexity, churn, incoming_calls, test_coverage, risk_score.",
+                            expr
+                        ));
+                    } else {
+                        warnings.push(format!("Computed expression '{}' matched 0 nodes", expr));
+                    }
                 }
                 result
             } else {
@@ -1248,11 +1263,26 @@ fn resolve_computed_expression_inner(
             .trim_matches('"');
         let lower = spec_path.to_lowercase();
 
-        // Exact match helper: spec_path matches if it equals the query exactly
-        // or ends with the query (e.g. query "auth.md" matches "specs/system/auth.md")
+        // Match helper: spec_path matches if it equals the query exactly,
+        // ends with /query (directory boundary), or the basename matches exactly.
+        // This prevents "auth.md" from matching "some-auth.md".
         let spec_matches = |sp: &str| -> bool {
             let sp_lower = sp.to_lowercase();
-            sp_lower == lower || sp_lower.ends_with(&format!("/{lower}"))
+            if sp_lower == lower {
+                return true;
+            }
+            // Require directory boundary: "specs/system/auth.md" matches "/auth.md"
+            if sp_lower.ends_with(&format!("/{lower}")) {
+                return true;
+            }
+            // Also match if the query is a full filename and matches the basename
+            if lower.contains('/') {
+                // Query has path separators — must match as suffix with boundary
+                return false;
+            }
+            // Query is just a filename like "auth.md" — match only the basename
+            let basename = sp_lower.rsplit('/').next().unwrap_or(&sp_lower);
+            basename == lower
         };
 
         // First find spec nodes (or any node whose spec_path matches exactly)
