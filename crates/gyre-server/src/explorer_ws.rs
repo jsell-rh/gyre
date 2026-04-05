@@ -66,6 +66,33 @@ fn serialize_msg(msg: &ExplorerServerMessage) -> Option<String> {
     }
 }
 
+/// Send a WebSocket ping if the interval has elapsed (non-blocking check).
+/// Returns `Err(())` if the connection is dead (pong timeout or send failure).
+async fn maybe_send_ping(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    ping_interval: &mut tokio::time::Interval,
+    last_pong: &Arc<std::sync::Mutex<std::time::Instant>>,
+    pong_timeout: std::time::Duration,
+) -> Result<(), ()> {
+    // Poll the interval without blocking: if a tick is ready, consume it and
+    // send a ping; otherwise return immediately.
+    let tick_ready = futures_util::future::poll_fn(|cx| match ping_interval.poll_tick(cx) {
+        std::task::Poll::Ready(_) => std::task::Poll::Ready(true),
+        std::task::Poll::Pending => std::task::Poll::Ready(false),
+    })
+    .await;
+    if tick_ready {
+        if last_pong.lock().unwrap().elapsed() > pong_timeout {
+            warn!("Explorer WS: no pong during agent run, closing dead connection");
+            return Err(());
+        }
+        if sender.send(Message::Ping(vec![].into())).await.is_err() {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
 /// Global per-user concurrent session counter, keyed by (tenant_id, agent_id)
 /// to prevent cross-tenant interference.
 /// Uses std::sync::Mutex for Drop compatibility (Drop cannot be async).
@@ -369,7 +396,7 @@ async fn handle_explorer_session(
     let mut ping_interval =
         tokio::time::interval(std::time::Duration::from_secs(WS_PING_INTERVAL_SECS));
     ping_interval.tick().await; // consume the immediate first tick
-    let mut last_pong = std::time::Instant::now();
+    let last_pong = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let pong_timeout = std::time::Duration::from_secs(WS_PING_INTERVAL_SECS * 2 + 5);
 
     loop {
@@ -379,7 +406,7 @@ async fn handle_explorer_session(
                     Some(Ok(Message::Text(text))) => text,
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Pong(_))) => {
-                        last_pong = std::time::Instant::now();
+                        *last_pong.lock().unwrap() = std::time::Instant::now();
                         continue;
                     }
                     Some(Ok(_)) => continue,
@@ -391,7 +418,7 @@ async fn handle_explorer_session(
             }
             _ = ping_interval.tick() => {
                 // Check for dead connection (no pong received within timeout)
-                if last_pong.elapsed() > pong_timeout {
+                if last_pong.lock().unwrap().elapsed() > pong_timeout {
                     warn!(user = %auth.agent_id, "Explorer WS: no pong received in {:?}, closing dead connection", pong_timeout);
                     break;
                 }
@@ -549,6 +576,9 @@ async fn handle_explorer_session(
                         &mut cached_edges,
                         &auth,
                         &repo_workspace_id,
+                        &mut ping_interval,
+                        last_pong.clone(),
+                        pong_timeout,
                     ) => result,
                     _ = async {
                         // Listen for Cancel messages while the agent is running.
@@ -567,7 +597,7 @@ async fn handle_explorer_session(
                                 }
                                 Some(Ok(Message::Close(_))) | None => break,
                                 Some(Ok(Message::Pong(_))) => {
-                                    last_pong = std::time::Instant::now();
+                                    *last_pong.lock().unwrap() = std::time::Instant::now();
                                 }
                                 _ => {}
                             }
@@ -1436,6 +1466,9 @@ async fn run_explorer_agent_sdk(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     conversation_history: &mut Vec<ConversationMessage>,
     workspace_id: &Id,
+    ping_interval: &mut tokio::time::Interval,
+    last_pong: Arc<std::sync::Mutex<std::time::Instant>>,
+    pong_timeout: std::time::Duration,
 ) -> anyhow::Result<()> {
     let server_url = format!(
         "http://localhost:{}",
@@ -1562,6 +1595,17 @@ async fn run_explorer_agent_sdk(
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         loop {
+            // Send keepalive ping if the interval has elapsed (prevents
+            // proxy/load-balancer from closing the WebSocket during long
+            // SDK subprocess runs).
+            if maybe_send_ping(sender, ping_interval, &last_pong, pong_timeout)
+                .await
+                .is_err()
+            {
+                kill_tree(&child);
+                let _ = child.kill().await;
+                anyhow::bail!("WebSocket connection lost during SDK agent run");
+            }
             let line_result = tokio::time::timeout_at(deadline, lines.next_line()).await;
             match line_result {
                 Err(_) => {
@@ -1730,26 +1774,52 @@ async fn handle_no_llm_fallback(
         let target = if !selected_name.is_empty() {
             selected_name.clone()
         } else {
-            // Try to extract a capitalized name from the original question
-            // (not `q` which is lowercased). Filter out common English words.
-            {
-                const STOP_WORDS: &[&str] = &[
-                    "What", "Would", "Where", "When", "Which", "While", "With", "Will", "Could",
-                    "Should", "About", "After", "Before", "Between", "Does", "From", "Have",
-                    "Here", "Just", "Like", "Make", "Many", "More", "Most", "Much", "Must", "Need",
-                    "Only", "Other", "Over", "Some", "Such", "Take", "Than", "That", "Their",
-                    "Them", "Then", "There", "These", "They", "This", "Those", "Through", "Under",
-                    "Very", "Were", "Your",
-                ];
-                user_question
-                    .split_whitespace()
-                    .find(|w| {
-                        w.len() > 3
-                            && w.chars().next().map_or(false, |c| c.is_uppercase())
-                            && !STOP_WORDS.iter().any(|sw| sw.eq_ignore_ascii_case(w))
-                    })
-                    .unwrap_or("$selected")
-                    .to_string()
+            // Extract candidate node names from the question by filtering out
+            // common English words, then validate against actual graph nodes.
+            const STOP_WORDS: &[&str] = &[
+                "what", "would", "where", "when", "which", "while", "with", "will", "could",
+                "should", "about", "after", "before", "between", "does", "from", "have", "here",
+                "just", "like", "make", "many", "more", "most", "much", "must", "need", "only",
+                "other", "over", "some", "such", "take", "than", "that", "their", "them", "then",
+                "there", "these", "they", "this", "those", "through", "under", "very", "were",
+                "your", "show", "tell", "give", "find", "look", "know", "think", "want", "also",
+                "been", "being", "came", "come", "each", "even", "good", "into", "long", "back",
+                "going", "break", "blast", "impact", "radius", "changes", "affects", "affected",
+            ];
+            let candidates: Vec<&str> = user_question
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .filter(|w| w.len() > 2)
+                .filter(|w| !STOP_WORDS.iter().any(|sw| sw.eq_ignore_ascii_case(w)))
+                .collect();
+            let mut matched = String::new();
+            if let Some(ref nodes) = cached_nodes {
+                let active: Vec<_> = nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
+                for cand in &candidates {
+                    if let Some(n) = active.iter().find(|n| n.name.eq_ignore_ascii_case(cand)) {
+                        matched = n.name.clone();
+                        break;
+                    }
+                }
+                if matched.is_empty() {
+                    let cand_lower: Vec<String> =
+                        candidates.iter().map(|c| c.to_lowercase()).collect();
+                    for kw in &cand_lower {
+                        if let Some(n) = active.iter().find(|n| {
+                            n.name.to_lowercase().contains(kw.as_str())
+                                || n.qualified_name.to_lowercase().contains(kw.as_str())
+                        }) {
+                            matched = n.name.clone();
+                            break;
+                        }
+                    }
+                }
+            }
+            if matched.is_empty() {
+                candidates
+                    .first()
+                    .map_or("$selected".to_string(), |s| s.to_string())
+            } else {
+                matched
             }
         };
         stream_text(sender, &format!("Showing blast radius for **{}**. Click any node to see its impact.\n\n*Note: LLM is not configured — using template query. Set GYRE_VERTEX_PROJECT for conversational exploration.*", target), true).await;
@@ -1827,15 +1897,64 @@ async fn handle_no_llm_fallback(
             ))
             .await;
     } else {
-        // Default: try a search and show results as a focus query if possible
+        // Default: try a search and show results as a focus query if possible.
+        // Extract meaningful keywords from the question, stripping common English
+        // words and short tokens, then match against actual node names in the graph.
+        const FALLBACK_STOP_WORDS: &[&str] = &[
+            "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has",
+            "had", "do", "does", "did", "will", "would", "could", "should", "shall", "may",
+            "might", "can", "must", "need", "dare", "about", "above", "after", "again", "all",
+            "also", "and", "any", "at", "back", "because", "before", "between", "both", "but",
+            "by", "came", "come", "day", "each", "even", "find", "for", "from", "get", "give",
+            "go", "going", "good", "got", "great", "her", "here", "him", "his", "how", "if", "in",
+            "into", "it", "its", "just", "know", "let", "like", "long", "look", "make", "many",
+            "me", "more", "most", "much", "my", "new", "no", "not", "now", "of", "on", "one",
+            "only", "or", "other", "our", "out", "over", "own", "people", "run", "say", "see",
+            "she", "show", "so", "some", "still", "such", "take", "tell", "than", "that", "their",
+            "them", "then", "there", "these", "they", "thing", "think", "this", "those", "through",
+            "to", "too", "under", "up", "us", "use", "very", "want", "way", "we", "well", "what",
+            "when", "where", "which", "while", "who", "why", "with", "work", "you", "your",
+        ];
         let mut found = String::new();
         if let Some(ref nodes) = cached_nodes {
-            for n in nodes.iter().filter(|n| n.deleted_at.is_none()) {
+            let active: Vec<_> = nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
+            // 1. Try exact substring match of full query against node names
+            for n in &active {
                 if n.name.to_lowercase().contains(&q)
                     || n.qualified_name.to_lowercase().contains(&q)
                 {
                     found = n.name.clone();
                     break;
+                }
+            }
+            // 2. If no exact match, extract keywords and try matching each
+            if found.is_empty() {
+                let keywords: Vec<String> = user_question
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .filter(|w| w.len() > 2)
+                    .filter(|w| {
+                        !FALLBACK_STOP_WORDS
+                            .iter()
+                            .any(|sw| sw.eq_ignore_ascii_case(w))
+                    })
+                    .map(|w| w.to_lowercase())
+                    .collect();
+                for kw in &keywords {
+                    if let Some(n) = active.iter().find(|n| n.name.to_lowercase() == *kw) {
+                        found = n.name.clone();
+                        break;
+                    }
+                }
+                if found.is_empty() {
+                    for kw in &keywords {
+                        if let Some(n) = active.iter().find(|n| {
+                            n.name.to_lowercase().contains(kw.as_str())
+                                || n.qualified_name.to_lowercase().contains(kw.as_str())
+                        }) {
+                            found = n.name.clone();
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -1934,6 +2053,9 @@ async fn run_explorer_agent(
     cached_edges: &mut Option<Vec<gyre_common::graph::GraphEdge>>,
     auth: &AuthenticatedAgent,
     workspace_id: &Id,
+    ping_interval: &mut tokio::time::Interval,
+    last_pong: Arc<std::sync::Mutex<std::time::Instant>>,
+    pong_timeout: std::time::Duration,
 ) -> anyhow::Result<()> {
     // Check if SDK-based explorer agent should be used.
     // Per spec: Claude Agent SDK is the default path. The SDK provides the
@@ -2002,6 +2124,9 @@ async fn run_explorer_agent(
                 sender,
                 conversation_history,
                 workspace_id,
+                ping_interval,
+                last_pong.clone(),
+                pong_timeout,
             )
             .await;
         }
@@ -2376,6 +2501,15 @@ async fn run_explorer_agent(
     let mut view_query_sent = false;
     let max_total_turns = MAX_TOOL_TURNS + MAX_REFINEMENT_TURNS;
     for _turn in 0..max_total_turns {
+        // Send keepalive ping if the interval has elapsed (prevents
+        // proxy/load-balancer from closing the WebSocket during long agent runs).
+        if maybe_send_ping(sender, ping_interval, &last_pong, pong_timeout)
+            .await
+            .is_err()
+        {
+            anyhow::bail!("WebSocket connection lost during agent run");
+        }
+
         // Check for cancellation at the top of each turn
         if *cancel_rx.borrow() {
             info!("Explorer agent cancelled by user");

@@ -733,12 +733,16 @@ impl ViewQuery {
         ];
         for fn_prefix in &single_arg_fns {
             if expr.starts_with(fn_prefix) && expr.ends_with(')') {
-                let inner = &expr[fn_prefix.len()..expr.len() - 1].trim();
+                let inner = expr[fn_prefix.len()..expr.len() - 1].trim();
+                let fn_name = &fn_prefix[..fn_prefix.len() - 1];
                 if inner.is_empty() {
-                    errors.push(format!(
-                        "{} requires exactly 1 argument, got 0",
-                        &fn_prefix[..fn_prefix.len() - 1]
-                    ));
+                    errors.push(format!("{} requires exactly 1 argument, got 0", fn_name));
+                } else {
+                    // Check that the argument is non-empty after stripping quotes
+                    let unquoted = inner.trim_matches('\'').trim_matches('"').trim();
+                    if unquoted.is_empty() {
+                        errors.push(format!("{} argument must not be empty", fn_name));
+                    }
                 }
                 return;
             }
