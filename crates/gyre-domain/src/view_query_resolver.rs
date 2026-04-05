@@ -5014,4 +5014,104 @@ mod tests {
             "authz spec should NOT match auth.md (exact matching)"
         );
     }
+
+    #[test]
+    fn test_viewquery_validate_focus_invalid_direction() {
+        let query = ViewQuery {
+            scope: Scope::Focus {
+                node: "A".to_string(),
+                edges: vec![],
+                direction: "sideways".to_string(),
+                depth: 5,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("Invalid direction")),
+            "Should reject invalid Focus direction, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_viewquery_validate_concept_invalid_direction() {
+        let query = ViewQuery {
+            scope: Scope::Concept {
+                seed_nodes: vec!["A".to_string()],
+                expand_edges: vec![],
+                expand_depth: 2,
+                expand_direction: "diagonal".to_string(),
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("Invalid expand_direction")),
+            "Should reject invalid Concept expand_direction, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_viewquery_validate_where_unknown_node_type() {
+        let query = ViewQuery {
+            scope: Scope::Filter {
+                node_types: vec![],
+                computed: Some("$where(node_type, '=', 'func')".to_string()),
+                name_pattern: None,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("not recognized")),
+            "Should warn about unknown node_type value 'func', got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_viewquery_validate_where_valid_node_type() {
+        let query = ViewQuery {
+            scope: Scope::Filter {
+                node_types: vec![],
+                computed: Some("$where(node_type, '=', 'function')".to_string()),
+                name_pattern: None,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = query.validate();
+        assert!(
+            errors.is_empty(),
+            "Valid node_type='function' should pass, got: {:?}",
+            errors
+        );
+    }
 }
