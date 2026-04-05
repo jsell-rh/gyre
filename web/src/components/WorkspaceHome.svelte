@@ -1278,6 +1278,25 @@
             </details>
           {/if}
 
+          <!-- ── Merge Queue (always visible when items queued) ───── -->
+          {#if mergeQueueItems.length > 0}
+            <div class="merge-queue-banner">
+              <span class="queue-banner-icon">⇉</span>
+              <span class="queue-banner-text">{mergeQueueItems.length} MR{mergeQueueItems.length !== 1 ? 's' : ''} in merge queue</span>
+              <div class="queue-banner-items">
+                {#each mergeQueueItems.slice(0, 5) as item, i}
+                  <button class="queue-banner-item" onclick={() => nav('mr', item.merge_request_id ?? item.mr_id, { repo_id: item._mr?.repository_id ?? item._mr?.repo_id })}>
+                    <span class="queue-banner-pos">#{i + 1}</span>
+                    <span class="queue-banner-title">{item._title}</span>
+                    {#if item._spec_ref}
+                      <span class="queue-banner-spec">for "{item._spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '')}"</span>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
           <!-- ── Workspace overview tabs ───────── -->
           <section class="ws-overview-section" data-testid="section-overview">
             <div class="ws-overview-tabs" role="tablist">
@@ -1406,24 +1425,6 @@
                   {#if wsMrs.length === 0}
                     <p class="ws-overview-empty">No merge requests. MRs are created when agents complete implementation.</p>
                   {:else}
-                    <!-- Merge Queue banner -->
-                    {#if mergeQueueItems.length > 0}
-                      <div class="merge-queue-banner">
-                        <span class="queue-banner-icon">⇉</span>
-                        <span class="queue-banner-text">{mergeQueueItems.length} MR{mergeQueueItems.length !== 1 ? 's' : ''} in merge queue</span>
-                        <div class="queue-banner-items">
-                          {#each mergeQueueItems.slice(0, 5) as item, i}
-                            <button class="queue-banner-item" onclick={() => nav('mr', item.merge_request_id ?? item.mr_id, { repo_id: item._mr?.repository_id ?? item._mr?.repo_id })}>
-                              <span class="queue-banner-pos">#{i + 1}</span>
-                              <span class="queue-banner-title">{item._title}</span>
-                              {#if item._spec_ref}
-                                <span class="queue-banner-spec">for "{item._spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '')}"</span>
-                              {/if}
-                            </button>
-                          {/each}
-                        </div>
-                      </div>
-                    {/if}
                     {@const openMrs = wsMrs.filter(m => m.status === 'open')}
                     {@const mergedMrs = wsMrs.filter(m => m.status === 'merged')}
                     {@const sortedMrs = [...openMrs, ...mergedMrs, ...wsMrs.filter(m => m.status !== 'open' && m.status !== 'merged')]}
