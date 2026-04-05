@@ -353,16 +353,23 @@
     saveViewInputValue = '';
     if (!name || !ws || ws.readyState !== WebSocket.OPEN) return;
     // Find the last view query from conversation, or fall back to the active canvas query
-    const lastViewQuery = [...messages].reverse().find(m => m.viewQuery)?.viewQuery
+    const lastViewQueryMsg = [...messages].reverse().find(m => m.viewQuery);
+    const lastViewQuery = lastViewQueryMsg?.viewQuery
       ?? canvasState?.active_query
       ?? null;
     if (!lastViewQuery || (typeof lastViewQuery === 'object' && Object.keys(lastViewQuery).length === 0)) {
       return; // Nothing to save
     }
+    // Use the LLM's explanation as the view description (if available)
+    // instead of a generic "Saved from explorer chat" string.
+    const explanation = (lastViewQueryMsg?.content && lastViewQueryMsg.content !== 'View applied')
+      ? lastViewQueryMsg.content.slice(0, 200)
+      : lastViewQuery?.annotation?.description
+        ?? 'Saved from explorer chat';
     ws.send(JSON.stringify({
       type: 'save_view',
       name: name,
-      description: `Saved from explorer chat`,
+      description: explanation,
       query: lastViewQuery,
     }));
   }
