@@ -96,7 +96,16 @@
             <span class="diff-del-tiny">-{latestMr.diff_stats.deletions ?? 0}</span>
           </span>
         {/if}
-        {#if latestMr._gates}
+        {#if latestMr._gates?.details?.length > 0}
+          <span class="repo-mr-gates">
+            {#each latestMr._gates.details.slice(0, 3) as g}
+              <span class="gate-mini gate-mini-{g.status}" title="{g.name}{g.gate_type ? ' (' + g.gate_type.replace(/_/g, ' ') + ')' : ''}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'} {g.name}</span>
+            {/each}
+            {#if latestMr._gates.details.length > 3}
+              <span class="gate-mini gate-mini-more">+{latestMr._gates.details.length - 3}</span>
+            {/if}
+          </span>
+        {:else if latestMr._gates}
           <span class="repo-mr-gates">
             {#if latestMr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{latestMr._gates.passed}</span>{/if}
             {#if latestMr._gates.failed > 0}<span class="gate-mini gate-mini-fail">✗{latestMr._gates.failed}</span>{/if}
@@ -301,8 +310,10 @@
     font-family: var(--font-mono);
   }
 
-  .gate-mini-pass { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
-  .gate-mini-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .gate-mini-pass, .gate-mini-passed { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .gate-mini-fail, .gate-mini-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .gate-mini-pending { color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text-muted) 8%, transparent); }
+  .gate-mini-more { color: var(--color-text-muted); font-style: italic; }
 
   /* Merge queue strip */
   .repo-queue-strip {
