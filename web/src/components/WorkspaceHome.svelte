@@ -578,6 +578,12 @@
   // ── Activity pagination ──────────────────────────────────────
   let activityLimit = $state(5);  // show enough activity to be useful
 
+  // ── Overview tab list limits (expandable) ───────────────────
+  let specsShowAll = $state(false);
+  let tasksShowAll = $state(false);
+  let mrsShowAll = $state(false);
+  let agentsShowAll = $state(false);
+
   // ── Repo card data ────────────────────────────────────────────────────
   // repoHealth(repo) function already defined above (line ~265)
 
@@ -1324,7 +1330,7 @@
                     {@const otherSpecs = specs.filter(s => !['pending', 'approved'].includes(s.approval_status ?? s.status ?? ''))}
                     {@const sortedSpecs = [...pendingSpecs, ...approvedSpecs, ...otherSpecs]}
                     <div class="specs-list">
-                      {#each sortedSpecs.slice(0, 20) as spec (spec.path)}
+                      {#each sortedSpecs.slice(0, specsShowAll ? Infinity : 20) as spec (spec.path)}
                         {@const status = spec.approval_status ?? spec.status ?? 'pending'}
                         {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
                         {@const repoName = (spec.repo_id && repoMap[spec.repo_id]) ? repoMap[spec.repo_id].name : null}
@@ -1376,7 +1382,11 @@
                         </button>
                       {/each}
                     </div>
-                    {#if specs.length > 20}<p class="ws-overview-more">{specs.length - 20} more specs not shown</p>{/if}
+                    {#if specs.length > 20 && !specsShowAll}
+                      <button class="ws-overview-more-btn" onclick={() => { specsShowAll = true; }}>Show all {specs.length} specs</button>
+                    {:else if specsShowAll && specs.length > 20}
+                      <button class="ws-overview-more-btn" onclick={() => { specsShowAll = false; }}>Show fewer</button>
+                    {/if}
                   {/if}
 
                 {:else if wsTab === 'tasks'}
@@ -1390,7 +1400,7 @@
                     {@const otherTasks = wsTasks.filter(t => !['in_progress', 'blocked', 'created', 'pending', 'done'].includes(t.status))}
                     {@const sortedTasks = [...blockedTasks, ...inProgressTasks, ...pendingTasks, ...otherTasks, ...doneTasks]}
                     <div class="tasks-list">
-                      {#each sortedTasks.slice(0, 20) as task (task.id)}
+                      {#each sortedTasks.slice(0, tasksShowAll ? Infinity : 20) as task (task.id)}
                         {@const specName = task.spec_path ? task.spec_path.split('/').pop()?.replace(/\.md$/, '') : null}
                         {@const repoName = (task.repo_id && repoMap[task.repo_id]) ? repoMap[task.repo_id].name : null}
                         {@const statusWhy = task.status === 'blocked' ? 'Waiting on dependency' : task.status === 'done' ? 'Implementation complete' : task.status === 'in_progress' ? 'Agent is implementing' : task.status === 'review' ? 'Under review' : 'Awaiting agent assignment'}
@@ -1418,7 +1428,11 @@
                         </button>
                       {/each}
                     </div>
-                    {#if wsTasks.length > 20}<p class="ws-overview-more">{wsTasks.length - 20} more tasks not shown</p>{/if}
+                    {#if wsTasks.length > 20 && !tasksShowAll}
+                      <button class="ws-overview-more-btn" onclick={() => { tasksShowAll = true; }}>Show all {wsTasks.length} tasks</button>
+                    {:else if tasksShowAll && wsTasks.length > 20}
+                      <button class="ws-overview-more-btn" onclick={() => { tasksShowAll = false; }}>Show fewer</button>
+                    {/if}
                   {/if}
 
                 {:else if wsTab === 'mrs'}
@@ -1429,7 +1443,7 @@
                     {@const mergedMrs = wsMrs.filter(m => m.status === 'merged')}
                     {@const sortedMrs = [...openMrs, ...mergedMrs, ...wsMrs.filter(m => m.status !== 'open' && m.status !== 'merged')]}
                     <div class="mrs-list">
-                      {#each sortedMrs.slice(0, 20) as mr (mr.id)}
+                      {#each sortedMrs.slice(0, mrsShowAll ? Infinity : 20) as mr (mr.id)}
                         {@const mrStatus = mr.status ?? 'open'}
                         {@const ds = mr.diff_stats}
                         {@const repoId = mr.repository_id ?? mr.repo_id}
@@ -1493,7 +1507,11 @@
                         </button>
                       {/each}
                     </div>
-                    {#if wsMrs.length > 20}<p class="ws-overview-more">{wsMrs.length - 20} more MRs not shown</p>{/if}
+                    {#if wsMrs.length > 20 && !mrsShowAll}
+                      <button class="ws-overview-more-btn" onclick={() => { mrsShowAll = true; }}>Show all {wsMrs.length} MRs</button>
+                    {:else if mrsShowAll && wsMrs.length > 20}
+                      <button class="ws-overview-more-btn" onclick={() => { mrsShowAll = false; }}>Show fewer</button>
+                    {/if}
                   {/if}
 
                 {:else if wsTab === 'agents'}
@@ -1505,7 +1523,7 @@
                     {@const failedAgents = wsAgents.filter(a => a.status === 'failed' || a.status === 'dead')}
                     {@const sortedAgents = [...activeAgents, ...failedAgents, ...completedAgents]}
                     <div class="agents-list">
-                      {#each sortedAgents.slice(0, 20) as agent (agent.id)}
+                      {#each sortedAgents.slice(0, agentsShowAll ? Infinity : 20) as agent (agent.id)}
                         {@const agentStatus = agent.status ?? 'unknown'}
                         {@const isActive = agentStatus === 'active' || agentStatus === 'running'}
                         {@const isFailed = agentStatus === 'failed' || agentStatus === 'dead'}
@@ -1542,7 +1560,11 @@
                         </button>
                       {/each}
                     </div>
-                    {#if wsAgents.length > 20}<p class="ws-overview-more">{wsAgents.length - 20} more agents not shown</p>{/if}
+                    {#if wsAgents.length > 20 && !agentsShowAll}
+                      <button class="ws-overview-more-btn" onclick={() => { agentsShowAll = true; }}>Show all {wsAgents.length} agents</button>
+                    {:else if agentsShowAll && wsAgents.length > 20}
+                      <button class="ws-overview-more-btn" onclick={() => { agentsShowAll = false; }}>Show fewer</button>
+                    {/if}
                   {/if}
 
                 {:else if wsTab === 'budget'}
