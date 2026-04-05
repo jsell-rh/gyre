@@ -54,10 +54,9 @@ pub enum Scope {
 }
 
 fn default_direction() -> String {
-    // Default "both" so queries work for both callers and callees analysis.
-    // LLM prompt documents explicit direction for blast radius (incoming)
-    // and trace-from-here (outgoing), but omitting should give useful results.
-    "both".to_string()
+    // Default "incoming" for blast-radius style queries — the most common use case.
+    // The LLM system prompt documents this default explicitly.
+    "incoming".to_string()
 }
 fn default_depth() -> u32 {
     5
@@ -261,6 +260,10 @@ impl ViewQuery {
                 }
                 if node.is_empty() {
                     errors.push("Focus scope 'node' field must not be empty".to_string());
+                }
+                // Validate computed expressions in Focus.node (e.g. "$callers(Foo)")
+                if node.starts_with('$') && node != "$clicked" && node != "$selected" {
+                    Self::validate_computed_expression(node, &mut errors);
                 }
                 // Validate edge type strings
                 for e in edges {
@@ -649,6 +652,40 @@ impl ViewQuery {
                         errors.push(format!("$where value '{}' is not a number", parts[2]));
                     }
                 }
+            }
+        }
+
+        // Validate single-argument functions: $callers, $callees, $implementors, etc.
+        let single_arg_fns = [
+            "$callers(",
+            "$callees(",
+            "$implementors(",
+            "$fields(",
+            "$descendants(",
+            "$ancestors(",
+            "$governed_by(",
+            "$test_fragility(",
+        ];
+        for fn_prefix in &single_arg_fns {
+            if expr.starts_with(fn_prefix) && expr.ends_with(')') {
+                let inner = &expr[fn_prefix.len()..expr.len() - 1].trim();
+                if inner.is_empty() {
+                    errors.push(format!(
+                        "{} requires exactly 1 argument, got 0",
+                        &fn_prefix[..fn_prefix.len() - 1]
+                    ));
+                }
+                return;
+            }
+        }
+
+        // Validate $reachable(node, [edge_types], direction, depth) — needs at least 2 args
+        if expr.starts_with("$reachable(") && expr.ends_with(')') {
+            let inner = &expr[11..expr.len() - 1].trim();
+            if inner.is_empty() {
+                errors.push(
+                    "$reachable requires at least 2 arguments (node, edge_types)".to_string(),
+                );
             }
         }
     }

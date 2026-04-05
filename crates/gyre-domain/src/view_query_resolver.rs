@@ -1025,9 +1025,10 @@ fn resolve_computed_expression_inner(
                                 None => None, // Exclude unanalyzed nodes from risk calculations
                             }
                         }
-                        // Trace-based metrics require OTLP runtime data; return 0.0 placeholder
-                        // Trace-based metrics require OTLP runtime data; exclude from static analysis
-                        "span_duration" | "span_count" | "error_rate" => None,
+                        // Trace-based metrics require OTLP runtime data.
+                        // Return 0.0 so nodes still appear in results, but warn that
+                        // comparisons are meaningless without live telemetry.
+                        "span_duration" | "span_count" | "error_rate" => Some(0.0),
                         _ => None,
                     };
                     match (node_val, op) {
@@ -1637,8 +1638,10 @@ pub fn resolve_annotation_template(
     } else {
         // Remove unreplaceable $name rather than leaving literal "$name"
         result = result.replace("$name", "");
-        // Clean up artifacts like "Blast radius: " (trailing colon+space after empty replacement)
+        // Clean up artifacts like "Blast radius: " → "Blast radius"
         result = result.replace(":  ", ": ");
+        result = result.trim_end_matches(": ").to_string();
+        result = result.trim_end_matches(':').to_string();
     }
     result = result.replace("{{count}}", &matched_count.to_string());
     result = result.replace("{{group_count}}", &group_count.to_string());
@@ -2028,9 +2031,9 @@ pub fn dry_run(
                             })
                         })
                     }
-                    // Trace-based metrics require OTLP runtime data; return 0.0 placeholder
-                    // Trace-based metrics require OTLP runtime data; exclude from static analysis
-                    "span_duration" | "span_count" | "error_rate" => None,
+                    // Trace-based metrics return 0.0 placeholder so nodes still
+                    // appear in results (warning already emitted above).
+                    "span_duration" | "span_count" | "error_rate" => Some(0.0),
                     _ => {
                         if !heat.metric.is_empty() {
                             // Log unrecognized metric once via warning (already validated)
