@@ -42,7 +42,7 @@ use gyre_ports::{
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{auth::AuthenticatedAgent, AppState};
 
@@ -291,10 +291,57 @@ async fn handle_explorer_session(
             }
         }
     } else {
-        // No user_id means agent/service token — tenant-level auth was already
-        // verified by the AuthenticatedAgent extractor. The repo lookup above
-        // ensures the repo belongs to the authenticated tenant, providing
-        // sufficient access control for agent tokens.
+        // No user_id means agent/service token — verify workspace scope.
+        // Tenant-level auth was already verified by the AuthenticatedAgent extractor.
+        // Additionally, verify the agent's workspace_id matches the repo's workspace
+        // to prevent cross-workspace access within the same tenant.
+        let agent_id = Id::new(&auth.agent_id);
+        match state.agents.find_by_id(&agent_id).await {
+            Ok(Some(agent)) => {
+                if agent.workspace_id != repo_workspace_id {
+                    warn!(
+                        agent_id = %auth.agent_id,
+                        agent_workspace = %agent.workspace_id,
+                        repo_workspace = %repo_workspace_id,
+                        "Agent token workspace mismatch — denying explorer access"
+                    );
+                    let err = ExplorerServerMessage::Error {
+                        message: "Access denied: agent workspace does not match repo workspace"
+                            .to_string(),
+                    };
+                    let _ = sender
+                        .send(Message::Text(
+                            serialize_msg(&err).unwrap_or_default().into(),
+                        ))
+                        .await;
+                    return;
+                }
+            }
+            Ok(None) => {
+                // Agent record not found — possibly a legacy UUID token.
+                // Allow access since tenant-level auth was verified.
+                warn!(
+                    agent_id = %auth.agent_id,
+                    "Agent record not found for workspace check; allowing tenant-scoped access"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    agent_id = %auth.agent_id,
+                    error = ?e,
+                    "Failed to look up agent for workspace check"
+                );
+                let err = ExplorerServerMessage::Error {
+                    message: "Access denied: workspace verification failed".to_string(),
+                };
+                let _ = sender
+                    .send(Message::Text(
+                        serialize_msg(&err).unwrap_or_default().into(),
+                    ))
+                    .await;
+                return;
+            }
+        }
     }
 
     info!(repo_id = %repo_id, user = %auth.agent_id, "Explorer WebSocket session started");
@@ -1035,9 +1082,17 @@ async fn handle_explorer_session(
                                         });
                                     }
                                     Err(e) => {
-                                        // Likely a concurrent insert — not fatal, just skip.
-                                        // The other session's views will appear on next list.
-                                        warn!(error = ?e, "Failed to seed default view (concurrent insert?): {name}");
+                                        // The unique index idx_saved_views_no_dup_system
+                                        // (tenant_id, workspace_id, repo_id, name, is_system)
+                                        // prevents duplicate system views. A UNIQUE constraint
+                                        // error here means another session already seeded this
+                                        // view — safe to ignore. Log other errors at warn level.
+                                        let err_msg = e.to_string();
+                                        if err_msg.contains("UNIQUE constraint") {
+                                            debug!(name = %name, "System view already seeded by concurrent session");
+                                        } else {
+                                            warn!(error = ?e, "Failed to seed default view: {name}");
+                                        }
                                     }
                                 }
                             }
