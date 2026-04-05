@@ -123,51 +123,11 @@
       </div>
     {/if}
 
-    <!-- Pending specs inline — approve/reject without drilling down -->
-    {#if pendingSpecs.length > 0}
-      <div class="repo-pending-specs">
-        {#each pendingSpecs.slice(0, 2) as spec}
-          {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
-          <div class="repo-pending-spec" onclick={(e) => e.stopPropagation()}>
-            <button class="repo-pending-spec-name" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('spec', spec.path, { path: spec.path, repo_id: repo.id }); }} title="View spec: {specName}">
-              {specName}
-            </button>
-            <span class="repo-pending-spec-actions">
-              <button class="repo-spec-action repo-spec-approve" onclick={(e) => { e.stopPropagation(); onApproveSpec?.(spec); }} title="Approve this spec">Approve</button>
-              <button class="repo-spec-action repo-spec-reject" onclick={(e) => { e.stopPropagation(); onRejectSpec?.(spec); }} title="Reject this spec">Reject</button>
-            </span>
-          </div>
-        {/each}
-        {#if pendingSpecs.length > 2}
-          <span class="repo-pending-more">{pendingSpecs.length - 2} more pending</span>
-        {/if}
-      </div>
-    {/if}
-
-    <!-- Merge queue items for this repo -->
-    {#if queueItems.length > 0}
-      <div class="repo-queue-strip">
-        <span class="repo-queue-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><path d="M16 3h5v5M4 20L21 3"/></svg>
-        </span>
-        {#each queueItems.slice(0, 2) as item, i}
-          {@const mrTitle = item._title ?? entityName('mr', item.merge_request_id ?? item.mr_id)}
-          <button class="repo-queue-item" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', item.merge_request_id ?? item.mr_id, item._mr ?? {}); }}>
-            <span class="repo-queue-pos">#{i + 1}</span>
-            <span class="repo-queue-title">{mrTitle}</span>
-          </button>
-        {/each}
-        {#if queueItems.length > 2}
-          <span class="repo-queue-more">+{queueItems.length - 2}</span>
-        {/if}
-      </div>
-    {/if}
-
     <!-- Compact stats footer — clickable counts for quick navigation -->
     <div class="repo-card-stats-footer">
       {#if stats.specs > 0}
-        <button class="repo-stat-chip" onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending)` : ''}">
-          <span class="repo-stat-num">{stats.specs}</span> specs
+        <button class="repo-stat-chip" class:repo-stat-warning={specBreakdown?.pending > 0} onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending approval)` : ''}">
+          <span class="repo-stat-num">{stats.specs}</span> specs{#if specBreakdown?.pending > 0} <span class="repo-stat-badge">{specBreakdown.pending} pending</span>{/if}
         </button>
       {/if}
       {#if stats.tasks > 0}
@@ -534,7 +494,17 @@
 
   .repo-stat-danger { color: var(--color-danger); }
   .repo-stat-danger .repo-stat-num { color: var(--color-danger); }
+  .repo-stat-warning { color: var(--color-warning); }
+  .repo-stat-warning .repo-stat-num { color: var(--color-warning); }
   .repo-stat-live { color: var(--color-success); }
   .repo-stat-live .repo-stat-num { color: var(--color-success); }
   .repo-stat-code { color: var(--color-text-muted); font-style: italic; }
+  .repo-stat-badge {
+    font-size: 9px;
+    font-weight: 600;
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    color: var(--color-warning);
+  }
 </style>
