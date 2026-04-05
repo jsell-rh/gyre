@@ -5736,7 +5736,7 @@
   .concept-hint { font-size: 10px; color: #64748b; font-style: italic; margin-left: auto; }
 
   @media (prefers-reduced-motion: reduce) {
-    .tb-btn, .breadcrumb-item, .treemap-minimap { transition: none; }
+    .tb-btn, .treemap-minimap { transition: none; }
     .preview-pulse-dot { animation: none; opacity: 1; }
   }
 </style>
