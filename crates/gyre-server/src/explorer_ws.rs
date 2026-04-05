@@ -1160,9 +1160,9 @@ async fn stream_text(
         return false;
     }
 
-    // Stream the rest in small chunks with short delays
-    const TARGET_CHUNK: usize = 60;
-    const CHUNK_DELAY_MS: u64 = 30;
+    // Stream the rest in larger chunks with minimal delays for faster display
+    const TARGET_CHUNK: usize = 200;
+    const CHUNK_DELAY_MS: u64 = 15;
     let mut start = first_chunk_end;
     let bytes = text.as_bytes();
     while start < bytes.len() {
@@ -2236,6 +2236,22 @@ async fn run_explorer_agent(
     let mut view_query_sent = false;
     let max_total_turns = MAX_TOOL_TURNS + MAX_REFINEMENT_TURNS;
     for _turn in 0..max_total_turns {
+        // Send a status update so the user sees feedback during LLM inference
+        // (which can take 3-15 seconds). Without this the UI appears frozen.
+        let status_text = if tool_turn_count > 0 {
+            "Analyzing..."
+        } else {
+            "Thinking..."
+        };
+        let status_msg = ExplorerServerMessage::Status {
+            status: status_text.to_string(),
+        };
+        let _ = sender
+            .send(Message::Text(
+                serialize_msg(&status_msg).unwrap_or_default().into(),
+            ))
+            .await;
+
         // Timeout on LLM calls to prevent blocking the session indefinitely.
         // If the client disconnects, subsequent send() calls will fail and break the loop.
         let llm_future =
@@ -2534,6 +2550,15 @@ async fn run_explorer_agent(
         tool_turn_count += 1;
         if tool_turn_count >= MAX_TOOL_TURNS {
             info!("Explorer agent hit max tool turns ({MAX_TOOL_TURNS}), forcing final response");
+            // Notify the user that we're synthesizing the final answer
+            let status_msg = ExplorerServerMessage::Status {
+                status: "Synthesizing answer...".to_string(),
+            };
+            let _ = sender
+                .send(Message::Text(
+                    serialize_msg(&status_msg).unwrap_or_default().into(),
+                ))
+                .await;
             // Force one final response without tools so the LLM synthesizes
             let final_response = llm_port
                 .complete_with_tools(
