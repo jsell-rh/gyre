@@ -4279,6 +4279,13 @@
                 {@const prevTime = i > 0 ? (mrTimeline[i-1].timestamp ?? mrTimeline[i-1].created_at) : null}
                 {@const thisTime = evt.timestamp ?? evt.created_at}
                 {@const elapsed = (prevTime && thisTime) ? Math.round(thisTime - prevTime) : null}
+                {#if elapsed && elapsed >= 60}
+                  <div class="timeline-gap-indicator">
+                    <span class="timeline-gap-line"></span>
+                    <span class="timeline-gap-label">{elapsed < 3600 ? Math.round(elapsed / 60) + 'm' : (elapsed / 3600).toFixed(1) + 'h'} elapsed</span>
+                    <span class="timeline-gap-line"></span>
+                  </div>
+                {/if}
                 <div class="timeline-item">
                   <div class="timeline-connector">
                     <div class="timeline-dot timeline-dot-{timelineEventVariant(evtType, evt)}">
@@ -7720,6 +7727,29 @@
     color: var(--color-text-muted);
     font-family: var(--font-mono);
     opacity: 0.7;
+  }
+
+  .timeline-gap-indicator {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0 var(--space-1) 24px;
+  }
+
+  .timeline-gap-line {
+    flex: 1;
+    height: 1px;
+    background: var(--color-border);
+    background: repeating-linear-gradient(90deg, var(--color-border) 0, var(--color-border) 4px, transparent 4px, transparent 8px);
+  }
+
+  .timeline-gap-label {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    background: var(--color-surface);
+    padding: 0 var(--space-1);
   }
 
   .timeline-actor {
