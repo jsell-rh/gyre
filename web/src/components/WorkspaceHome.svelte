@@ -1361,14 +1361,21 @@
                     <p class="ws-overview-empty">No merge requests. MRs are created when agents complete implementation.</p>
                   {:else}
                     <table class="ws-overview-table">
-                      <thead><tr><th>Status</th><th>Title</th><th>Branch</th><th>Gates</th><th>Repo</th><th>Created</th></tr></thead>
+                      <thead><tr><th>Status</th><th>Title</th><th>Changes</th><th>Gates</th><th>Repo</th><th>Agent</th><th>Created</th></tr></thead>
                       <tbody>
                         {#each wsMrs.slice(0, 20) as mr}
                           {@const mrStatus = mr.status ?? 'open'}
+                          {@const ds = mr.diff_stats}
                           <tr class="ws-overview-row" onclick={() => nav('mr', mr.id, { ...mr, repo_id: mr.repository_id ?? mr.repo_id })} tabindex="0" role="button">
                             <td><span class="ws-status-dot ws-status-{mrStatus}">{mrStatus === 'merged' ? '✓' : mrStatus === 'closed' ? '✗' : '○'}</span> {mrStatus}</td>
                             <td class="cell-title">{mr.title ?? 'Untitled'}</td>
-                            <td class="cell-mono">{mr.source_branch ?? ''}</td>
+                            <td class="cell-diff">
+                              {#if ds}
+                                <span class="diff-ins-tiny">+{ds.insertions ?? 0}</span>
+                                <span class="diff-del-tiny">-{ds.deletions ?? 0}</span>
+                                <span class="diff-files-tiny">{ds.files_changed ?? 0} file{(ds.files_changed ?? 0) !== 1 ? 's' : ''}</span>
+                              {/if}
+                            </td>
                             <td>
                               {#if mr._gates?.details?.length > 0}
                                 <span class="gate-names-ws">
@@ -1387,6 +1394,7 @@
                               {/if}
                             </td>
                             <td class="cell-mono">{#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}{repoMap[mr.repository_id ?? mr.repo_id].name}{/if}</td>
+                            <td class="cell-mono">{#if mr.author_agent_id}{entityName('agent', mr.author_agent_id)}{/if}</td>
                             <td class="cell-time">{relTime(mr.created_at)}</td>
                           </tr>
                         {/each}
@@ -2141,6 +2149,10 @@
   .cell-mono { font-family: var(--font-mono); font-size: 10px; color: var(--color-text-muted); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cell-time { font-size: 10px; color: var(--color-text-muted); white-space: nowrap; }
   .cell-action { white-space: nowrap; }
+  .cell-diff { white-space: nowrap; font-family: var(--font-mono); font-size: 10px; }
+  .diff-ins-tiny { color: var(--color-success); margin-right: 2px; }
+  .diff-del-tiny { color: var(--color-danger); margin-right: 4px; }
+  .diff-files-tiny { color: var(--color-text-muted); }
 
   /* ── Budget panel ──────────────────────────────────────────── */
   .ws-budget-panel { padding: var(--space-2); }
