@@ -1870,6 +1870,37 @@
               </div>
             {:else}
               {@const mr = mrDetail ?? entity.data ?? {}}
+              <!-- Quick action bar — most important actions immediately visible -->
+              <div class="mr-quick-actions">
+                <button class="mr-quick-btn mr-quick-diff" onclick={() => { activeTab = 'diff'; }} title="View code changes">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M12 3v18M3 12h18"/></svg>
+                  Diff{#if mr.diff_stats} <span class="mr-quick-stat">+{mr.diff_stats.insertions ?? 0} -{mr.diff_stats.deletions ?? 0}</span>{/if}
+                </button>
+                <button class="mr-quick-btn mr-quick-gates" onclick={() => { activeTab = 'gates'; }} title="View quality gate results">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 12l2 2 4-4"/></svg>
+                  Gates{#if mr._gateSummary} <span class="mr-quick-stat mr-quick-stat-{mr._gateSummary.failed > 0 ? 'danger' : 'success'}">{mr._gateSummary.passed}/{mr._gateSummary.total}</span>{/if}
+                </button>
+                <button class="mr-quick-btn mr-quick-timeline" onclick={() => { activeTab = 'timeline'; }} title="View SDLC event timeline">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                  Timeline
+                </button>
+                {#if mr.status === 'merged'}
+                  <button class="mr-quick-btn mr-quick-attestation" onclick={() => { activeTab = 'attestation'; }} title="View signed attestation bundle">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    Attestation
+                  </button>
+                {/if}
+                {#if mr.status === 'open' && !mr.queue_position}
+                  <button class="mr-quick-btn mr-quick-enqueue" onclick={async () => {
+                    enqueueing = true;
+                    try { await api.enqueue(entity.id); toastSuccess('MR enqueued — gates will run'); } catch (err) { toastError('Enqueue failed: ' + (err?.message ?? err)); }
+                    finally { enqueueing = false; }
+                  }} disabled={enqueueing} title="Add to merge queue for gate execution">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+                    {enqueueing ? 'Enqueuing...' : 'Enqueue'}
+                  </button>
+                {/if}
+              </div>
               <!-- Prominent status journey block — click steps to see details -->
               {#if mr._statusStory?.length > 0}
                 <div class="mr-status-journey">
@@ -8149,6 +8180,68 @@
   }
 
   /* ── MR status journey (prominent block at top of info tab) ────────── */
+  /* ── MR Quick Action Bar ──────────────────────────────────────── */
+  .mr-quick-actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .mr-quick-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .mr-quick-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface-elevated));
+  }
+
+  .mr-quick-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .mr-quick-stat {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    opacity: 0.8;
+  }
+
+  .mr-quick-stat-danger { color: var(--color-danger); }
+  .mr-quick-stat-success { color: var(--color-success); }
+
+  .mr-quick-enqueue {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: var(--color-text-inverse);
+  }
+
+  .mr-quick-enqueue:hover {
+    background: var(--color-primary-hover);
+    color: var(--color-text-inverse);
+  }
+
+  .mr-quick-enqueue:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
   .mr-status-journey {
     background: var(--color-surface-raised, var(--color-bg-alt));
     border: 1px solid var(--color-border);
