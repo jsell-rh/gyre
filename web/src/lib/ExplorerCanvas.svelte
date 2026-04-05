@@ -4749,17 +4749,21 @@
       return;
     }
 
-    // DFS traversal to assign execution order
+    // BFS traversal to assign execution order — visits all direct calls
+    // of a function before going deeper, better approximating execution
+    // order than DFS (which numbers entire subtrees before siblings).
     const ordered = new Map();
     const traceEdges = [];
     const visited = new Set();
     let step = 0;
 
-    function dfs(nodeId) {
-      if (visited.has(nodeId)) return;
-      visited.add(nodeId);
-      step++;
-      ordered.set(nodeId, step);
+    const queue = [rootId];
+    visited.add(rootId);
+    step++;
+    ordered.set(rootId, step);
+
+    while (queue.length > 0) {
+      const nodeId = queue.shift();
 
       const children = outAdj.get(nodeId) ?? [];
       // Sort children by name for deterministic ordering
@@ -4771,18 +4775,19 @@
 
       for (const child of children) {
         if (!visited.has(child.toId)) {
+          visited.add(child.toId);
+          step++;
+          ordered.set(child.toId, step);
           traceEdges.push({
             fromId: nodeId, toId: child.toId,
             edgeType: child.edgeType,
             fromStep: ordered.get(nodeId),
-            toStep: step + 1
+            toStep: step
           });
-          dfs(child.toId);
+          queue.push(child.toId);
         }
       }
     }
-
-    dfs(rootId);
 
     // Add remaining matched nodes not reachable via DFS (disconnected components)
     for (const nodeId of matchedIds) {

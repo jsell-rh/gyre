@@ -1058,12 +1058,12 @@
     content: '';
     flex: 1;
     height: 1px;
-    background: #334155;
+    background: color-mix(in srgb, #f59e0b 35%, transparent);
   }
 
   .context-divider-text {
     font-size: var(--text-xs);
-    color: #64748b;
+    color: color-mix(in srgb, #f59e0b 60%, #64748b);
     white-space: nowrap;
     font-style: italic;
   }
