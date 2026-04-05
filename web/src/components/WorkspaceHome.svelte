@@ -1077,7 +1077,7 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Workspace header with integrated pipeline ──────── -->
+      <!-- ── Workspace header ──────── -->
       <header class="ws-header">
         <div class="ws-header-top-row">
           <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
@@ -1096,61 +1096,8 @@
             </button>
           </div>
         </div>
-        <!-- Integrated pipeline — compact flow embedded in header -->
-        {#if !specsLoading || !tasksLoading || !mrsLoading || !agentsLoading || specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
-        <div class="pipeline-hero" data-testid="pipeline-hero">
-          <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineSpecs.pending > 0} class:pipeline-hero-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} class:pipeline-hero-selected={expandedStage === 'specs'} onclick={() => toggleStage('specs')}>
-            <span class="pipeline-hero-count">{specs.length}</span>
-            <span class="pipeline-hero-label">Specs</span>
-            {#if pipelineSpecs.pending > 0}
-              <span class="pipeline-hero-badge pipeline-hero-badge-warn">{pipelineSpecs.pending} pending</span>
-            {:else if pipelineSpecs.approved > 0}
-              <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineSpecs.approved} approved</span>
-            {/if}
-          </button>
-          <span class="pipeline-hero-arrow">
-            <svg width="16" height="10" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </span>
-          <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineTasks.in_progress > 0} class:pipeline-hero-warn={pipelineTasks.blocked > 0} class:pipeline-hero-selected={expandedStage === 'tasks'} onclick={() => toggleStage('tasks')}>
-            <span class="pipeline-hero-count">{wsTasks.length}</span>
-            <span class="pipeline-hero-label">Tasks</span>
-            {#if pipelineTasks.in_progress > 0}
-              <span class="pipeline-hero-badge">{pipelineTasks.in_progress} active</span>
-            {:else if pipelineTasks.blocked > 0}
-              <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineTasks.blocked} blocked</span>
-            {/if}
-          </button>
-          <span class="pipeline-hero-arrow">
-            <svg width="16" height="10" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </span>
-          <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineAgents.active > 0} class:pipeline-hero-selected={expandedStage === 'agents'} onclick={() => toggleStage('agents')}>
-            <span class="pipeline-hero-count">{wsAgents.length}</span>
-            <span class="pipeline-hero-label">Agents</span>
-            {#if pipelineAgents.active > 0}
-              <span class="pipeline-hero-badge pipeline-hero-badge-ok"><span class="pipeline-hero-pulse"></span>{pipelineAgents.active} running</span>
-            {/if}
-          </button>
-          <span class="pipeline-hero-arrow">
-            <svg width="16" height="10" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </span>
-          <button class="pipeline-hero-stage" class:pipeline-hero-warn={pipelineMrs.failed_gates > 0} class:pipeline-hero-selected={expandedStage === 'mrs'} onclick={() => toggleStage('mrs')}>
-            <span class="pipeline-hero-count">{pipelineMrs.open + pipelineMrs.failed_gates}</span>
-            <span class="pipeline-hero-label">MRs</span>
-            {#if pipelineMrs.failed_gates > 0}
-              <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineMrs.failed_gates} failed</span>
-            {:else if pipelineMrs.open > 0}
-              <span class="pipeline-hero-badge">{pipelineMrs.open} open</span>
-            {/if}
-          </button>
-          <span class="pipeline-hero-arrow">
-            <svg width="16" height="10" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </span>
-          <button class="pipeline-hero-stage pipeline-hero-done-stage" class:pipeline-hero-done={pipelineMrs.merged > 0} onclick={() => toggleStage('mrs')}>
-            <span class="pipeline-hero-count">{pipelineMrs.merged}</span>
-            <span class="pipeline-hero-label">Merged</span>
-          </button>
-        </div>
-        {:else if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
+        <!-- Status sentence — one line summary of workspace state -->
+        {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
           <p class="ws-header-status">{statusSentence}</p>
         {/if}
       </header>
@@ -1342,28 +1289,45 @@
 
       <!-- Merge queue items are shown on individual repo cards -->
 
-          <!-- ── Workspace Entity Tabs ─────────────────────────────── -->
+          <!-- ── Pipeline + Entity Tabs (unified) ─────────────────────── -->
           {#if activeEntityTab || specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
             <section class="ws-entity-tabs" data-testid="section-entity-tabs">
-              <div class="ws-entity-tab-bar" role="tablist" aria-label="Workspace entities">
-                {#each [
-                  { id: 'specs', label: 'Specs', count: specs.length, active: pipelineSpecs.pending > 0, badge: pipelineSpecs.pending > 0 ? `${pipelineSpecs.pending} pending` : null, badgeVariant: 'warn' },
-                  { id: 'tasks', label: 'Tasks', count: wsTasks.length, active: pipelineTasks.in_progress > 0, badge: pipelineTasks.blocked > 0 ? `${pipelineTasks.blocked} blocked` : null, badgeVariant: 'danger' },
-                  { id: 'agents', label: 'Agents', count: wsAgents.length, active: pipelineAgents.active > 0, badge: pipelineAgents.active > 0 ? `${pipelineAgents.active} running` : null, badgeVariant: 'ok' },
-                  { id: 'mrs', label: 'MRs', count: wsMrs.length, active: pipelineMrs.failed_gates > 0, badge: pipelineMrs.failed_gates > 0 ? `${pipelineMrs.failed_gates} failed` : null, badgeVariant: 'danger' },
-                  { id: 'activity', label: 'Activity', count: activityEvents.length },
-                ] as tab}
+              <div class="ws-pipeline-tabs" role="tablist" aria-label="Autonomous pipeline stages" data-testid="pipeline-hero">
+                {@const pipelineTabs = [
+                  { id: 'specs', label: 'Specs', count: specs.length, attention: pipelineSpecs.pending > 0, done: pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0, badge: pipelineSpecs.pending > 0 ? `${pipelineSpecs.pending} pending` : pipelineSpecs.approved > 0 ? `${pipelineSpecs.approved} approved` : null, badgeVariant: pipelineSpecs.pending > 0 ? 'warn' : 'ok' },
+                  { id: 'tasks', label: 'Tasks', count: wsTasks.length, attention: pipelineTasks.blocked > 0, active: pipelineTasks.in_progress > 0, badge: pipelineTasks.blocked > 0 ? `${pipelineTasks.blocked} blocked` : pipelineTasks.in_progress > 0 ? `${pipelineTasks.in_progress} active` : null, badgeVariant: pipelineTasks.blocked > 0 ? 'danger' : 'ok' },
+                  { id: 'agents', label: 'Agents', count: wsAgents.length, active: pipelineAgents.active > 0, badge: pipelineAgents.active > 0 ? `${pipelineAgents.active} running` : null, badgeVariant: 'ok', pulse: pipelineAgents.active > 0 },
+                  { id: 'mrs', label: 'MRs', count: wsMrs.length, attention: pipelineMrs.failed_gates > 0, badge: pipelineMrs.failed_gates > 0 ? `${pipelineMrs.failed_gates} failed` : pipelineMrs.open > 0 ? `${pipelineMrs.open} open` : null, badgeVariant: pipelineMrs.failed_gates > 0 ? 'danger' : 'ok' },
+                  { id: 'activity', label: 'Activity', count: activityEvents.length, isMeta: true },
+                ]}
+                {#each pipelineTabs as tab, i}
+                  {#if i > 0 && i < 4}
+                    <span class="pipeline-tab-arrow" aria-hidden="true">
+                      <svg width="14" height="8" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </span>
+                  {/if}
+                  {#if i === 4}
+                    <span class="pipeline-tab-spacer"></span>
+                  {/if}
                   <button
-                    class="ws-entity-tab"
-                    class:ws-entity-tab-active={activeEntityTab === tab.id}
-                    class:ws-entity-tab-attention={tab.active}
+                    class="pipeline-tab"
+                    class:pipeline-tab-active={activeEntityTab === tab.id}
+                    class:pipeline-tab-attention={tab.attention}
+                    class:pipeline-tab-running={tab.active && !tab.attention}
+                    class:pipeline-tab-done={tab.done && !tab.attention && !tab.active}
                     role="tab"
                     aria-selected={activeEntityTab === tab.id}
                     onclick={() => { activeEntityTab = activeEntityTab === tab.id ? null : tab.id; expandedStage = activeEntityTab; }}
+                    title={tab.badge ? `${tab.count} ${tab.label.toLowerCase()} — ${tab.badge}` : `${tab.count} ${tab.label.toLowerCase()}`}
                   >
-                    <span class="ws-entity-tab-label">{tab.label}</span>
-                    {#if tab.count > 0}<span class="ws-entity-tab-count">{tab.count}</span>{/if}
-                    {#if tab.badge}<span class="ws-entity-tab-badge ws-entity-tab-badge-{tab.badgeVariant}">{tab.badge}</span>{/if}
+                    <span class="pipeline-tab-count">{tab.count}</span>
+                    <span class="pipeline-tab-label">{tab.label}</span>
+                    {#if tab.badge}
+                      <span class="pipeline-tab-badge pipeline-tab-badge-{tab.badgeVariant}">
+                        {#if tab.pulse}<span class="pipeline-tab-pulse"></span>{/if}
+                        {tab.badge}
+                      </span>
+                    {/if}
                   </button>
                 {/each}
               </div>
@@ -2132,7 +2096,7 @@
     min-width: 0;
   }
 
-  /* ── Workspace entity tabs ─────────────────────────────────── */
+  /* ── Unified pipeline tabs (replaces separate pipeline hero + entity tab bar) ── */
   .ws-entity-tabs {
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
@@ -2140,67 +2104,102 @@
     overflow: hidden;
   }
 
-  .ws-entity-tab-bar {
+  .ws-pipeline-tabs {
     display: flex;
+    align-items: center;
     border-bottom: 1px solid var(--color-border);
     overflow-x: auto;
     background: var(--color-surface-elevated);
+    padding: 0 var(--space-2);
   }
 
-  .ws-entity-tab {
+  .pipeline-tab {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 5px;
     padding: var(--space-2) var(--space-3);
     background: transparent;
     border: none;
     border-bottom: 2px solid transparent;
     cursor: pointer;
     font-family: var(--font-body);
-    font-size: var(--text-sm);
-    font-weight: 500;
-    color: var(--color-text-muted);
     white-space: nowrap;
     transition: all var(--transition-fast);
+    margin-bottom: -1px;
   }
 
-  .ws-entity-tab:hover {
-    color: var(--color-text);
+  .pipeline-tab:hover {
     background: color-mix(in srgb, var(--color-primary) 4%, transparent);
   }
 
-  .ws-entity-tab-active {
-    color: var(--color-primary);
-    border-bottom-color: var(--color-primary);
-    font-weight: 600;
-  }
-
-  .ws-entity-tab-attention {
-    color: var(--color-warning);
-  }
-
-  .ws-entity-tab-attention.ws-entity-tab-active {
-    color: var(--color-primary);
-  }
-
-  .ws-entity-tab-count {
-    font-size: var(--text-xs);
+  .pipeline-tab-count {
+    font-size: var(--text-sm);
+    font-weight: 800;
     font-family: var(--font-mono);
-    color: inherit;
-    opacity: 0.7;
+    color: var(--color-text-muted);
+    line-height: 1;
   }
 
-  .ws-entity-tab-badge {
+  .pipeline-tab-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .pipeline-tab-badge {
     font-size: 10px;
     font-weight: 600;
-    padding: 0 4px;
+    padding: 1px 6px;
     border-radius: var(--radius-sm);
     white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 3px;
   }
 
-  .ws-entity-tab-badge-warn { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
-  .ws-entity-tab-badge-danger { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
-  .ws-entity-tab-badge-ok { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
+  .pipeline-tab-badge-warn { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
+  .pipeline-tab-badge-danger { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
+  .pipeline-tab-badge-ok { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
+
+  .pipeline-tab-pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: pipeline-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  .pipeline-tab-active {
+    border-bottom-color: var(--color-primary);
+  }
+
+  .pipeline-tab-active .pipeline-tab-count,
+  .pipeline-tab-active .pipeline-tab-label {
+    color: var(--color-primary);
+  }
+
+  .pipeline-tab-attention .pipeline-tab-count { color: var(--color-danger); }
+  .pipeline-tab-attention .pipeline-tab-label { color: var(--color-danger); }
+  .pipeline-tab-running .pipeline-tab-count { color: var(--color-success); }
+  .pipeline-tab-running .pipeline-tab-label { color: var(--color-success); }
+  .pipeline-tab-done .pipeline-tab-count { color: var(--color-success); }
+  .pipeline-tab-done .pipeline-tab-label { color: var(--color-text-muted); }
+
+  .pipeline-tab-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--color-text-muted);
+    opacity: 0.25;
+    flex-shrink: 0;
+  }
+
+  .pipeline-tab-spacer {
+    flex: 1;
+    min-width: var(--space-2);
+  }
 
   .ws-entity-panel {
     padding: var(--space-2) var(--space-3);
