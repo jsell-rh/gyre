@@ -1345,7 +1345,7 @@
                     <p class="entity-panel-empty">No specs registered. Push a specs/manifest.yaml to get started.</p>
                   {:else}
                     <div class="entity-card-list">
-                      {#each specs as spec}
+                      {#each specs.slice(0, 8) as spec}
                         {@const status = spec.approval_status ?? spec.status ?? 'pending'}
                         {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
                         <button class="entity-card entity-card-spec" onclick={() => navigateToSpec(spec)}>
@@ -1379,6 +1379,9 @@
                           </div>
                         </button>
                       {/each}
+                      {#if specs.length > 8}
+                        <p class="entity-panel-overflow">{specs.length - 8} more — open a repo to see all specs</p>
+                      {/if}
                     </div>
                   {/if}
                 </div>
@@ -1393,7 +1396,7 @@
                       {#each wsTasks.slice().sort((a, b) => {
                         const order = { blocked: 0, in_progress: 1, review: 2, backlog: 3, done: 4 };
                         return (order[a.status] ?? 9) - (order[b.status] ?? 9);
-                      }) as task}
+                      }).slice(0, 8) as task}
                         <button class="entity-card entity-card-task" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })}>
                           <div class="entity-card-primary">
                             <span class="status-pill status-pill-{task.status}" title={taskStatusTooltip(task)}>{task.status ?? 'backlog'}</span>
@@ -1424,6 +1427,9 @@
                           </div>
                         </button>
                       {/each}
+                      {#if wsTasks.length > 8}
+                        <p class="entity-panel-overflow">{wsTasks.length - 8} more — open a repo to see all tasks</p>
+                      {/if}
                     </div>
                   {/if}
                 </div>
@@ -1438,7 +1444,7 @@
                       {#each wsAgents.slice().sort((a, b) => {
                         const order = { active: 0, failed: 1, completed: 2, idle: 2, dead: 3, cancelled: 4 };
                         return (order[a.status] ?? 9) - (order[b.status] ?? 9);
-                      }) as agent}
+                      }).slice(0, 8) as agent}
                         {@const taskId = agent.task_id ?? agent.current_task_id}
                         {@const elapsed = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
                         {@const completed = (agent.completed_at && agent.created_at) ? Math.round(agent.completed_at - agent.created_at) : null}
@@ -1485,6 +1491,9 @@
                           </div>
                         </button>
                       {/each}
+                      {#if wsAgents.length > 8}
+                        <p class="entity-panel-overflow">{wsAgents.length - 8} more — open a repo to see all agents</p>
+                      {/if}
                     </div>
                   {/if}
                 </div>
@@ -1499,7 +1508,7 @@
                       {#each wsMrs.slice().sort((a, b) => {
                         const order = { open: 0, merged: 1, closed: 2 };
                         return (order[a.status] ?? 9) - (order[b.status] ?? 9);
-                      }) as mr}
+                      }).slice(0, 8) as mr}
                         {@const repoId = mr.repository_id ?? mr.repo_id}
                         {@const gateDetails = mr._gates?.details ?? []}
                         {@const failedGateDetails = gateDetails.filter(g => g.status === 'failed')}
@@ -1581,6 +1590,9 @@
                           {/if}
                         </button>
                       {/each}
+                      {#if wsMrs.length > 8}
+                        <p class="entity-panel-overflow">{wsMrs.length - 8} more — open a repo to see all MRs</p>
+                      {/if}
                     </div>
                   {/if}
                 </div>
@@ -2289,6 +2301,15 @@
     color: var(--color-text-muted);
     text-align: center;
     padding: var(--space-4) 0;
+    font-style: italic;
+  }
+
+  .entity-panel-overflow {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-align: center;
+    padding: var(--space-2) 0;
+    margin: 0;
     font-style: italic;
   }
 
