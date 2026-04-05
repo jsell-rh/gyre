@@ -1106,9 +1106,20 @@
             </button>
           </div>
         </div>
-        <!-- Status sentence — one line summary of workspace state -->
+        <!-- Status indicators — clickable pipeline status chips -->
         {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-          <p class="ws-header-status">{statusSentence}</p>
+          {#if statusItems.length > 0}
+            <div class="ws-header-status-items">
+              {#each statusItems as item}
+                <button class="ws-status-chip ws-status-chip-{item.variant}" onclick={() => toggleStage(item.tab)} title={item.text}>
+                  <span class="ws-status-chip-icon">{item.icon}</span>
+                  {item.text}
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <p class="ws-header-status">{statusSentence}</p>
+          {/if}
         {/if}
       </header>
 
@@ -2403,7 +2414,13 @@
     line-height: 1.4;
   }
 
-  /* Status chips CSS removed — workspace home uses status sentence instead */
+  .ws-header-status-items {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-top: var(--space-1);
+  }
 
   /* ── Compact provenance flow in header ── */
   .ws-header-flow {
