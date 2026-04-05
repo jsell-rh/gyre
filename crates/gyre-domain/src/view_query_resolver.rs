@@ -1585,6 +1585,7 @@ fn find_node_by_ref<'a>(nodes: &[&'a GraphNode], reference: &str) -> Option<&'a 
 }
 
 /// Split a string by commas, respecting balanced brackets and parentheses.
+#[cfg(test)]
 fn split_balanced_args(s: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth_paren = 0;
