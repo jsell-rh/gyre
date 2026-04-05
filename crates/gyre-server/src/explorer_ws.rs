@@ -1230,7 +1230,7 @@ async fn run_explorer_agent_sdk(
                             }
                             ContentBlock::ToolResult { content, .. } => {
                                 // Truncate large tool results to keep context manageable
-                                let truncated: String = content.chars().take(500).collect();
+                                let truncated: String = content.chars().take(800).collect();
                                 parts.push(format!("[Tool result: {}]", truncated));
                             }
                         }
@@ -2048,11 +2048,11 @@ async fn run_explorer_agent(
                                 // Include a longer snippet of tool results to preserve
                                 // grounding data (node counts, names, warnings) that the
                                 // LLM needs for accurate claims in later turns.
-                                let snippet: String = content.chars().take(300).collect();
+                                let snippet: String = content.chars().take(800).collect();
                                 parts.push(format!(
                                     "[tool result: {}{}]",
                                     snippet.replace('\n', " "),
-                                    if content.len() > 300 { "..." } else { "" }
+                                    if content.len() > 800 { "..." } else { "" }
                                 ));
                             }
                         }
@@ -2060,9 +2060,9 @@ async fn run_explorer_agent(
                     parts.join(" ")
                 }
             };
-            // Extract first 80 chars of each message as a topic hint
+            // Extract first 200 chars of each message as a topic hint
             if msg.role == "user" && !text.is_empty() {
-                let snippet: String = text.chars().take(80).collect();
+                let snippet: String = text.chars().take(200).collect();
                 let snippet = snippet.replace('\n', " ");
                 topics.push(snippet);
             }
@@ -2221,6 +2221,12 @@ async fn run_explorer_agent(
                         .warnings
                         .iter()
                         .filter(|w| {
+                            // [info] prefixed warnings are informational — never trigger
+                            // refinement. These are inherent to the data model and cannot
+                            // be fixed by query changes (e.g., "SHA-based diff is approximate").
+                            if w.starts_with("[info]") {
+                                return false;
+                            }
                             // Validation errors are always actionable
                             if w.starts_with("Validation:")
                                 || w.starts_with("Computed expression error:")
