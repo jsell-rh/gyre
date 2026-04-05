@@ -1114,6 +1114,60 @@
       <!-- ── Main content: single-column layout ──────────────────── -->
       <div class="ws-main-content">
 
+          <!-- Active agents (most interesting when work is happening) -->
+          {#if !agentsLoading}
+            {@const runningAgents = wsAgents.filter(a => a.status === 'active' || a.status === 'running')}
+            {#if runningAgents.length > 0}
+              <section class="ws-live-agents">
+                <div class="live-agents-header">
+                  <span class="live-agents-dot"></span>
+                  <span class="live-agents-title">{runningAgents.length} agent{runningAgents.length !== 1 ? 's' : ''} working</span>
+                </div>
+                <div class="live-agents-list">
+                  {#each runningAgents.slice(0, 4) as agent (agent.id)}
+                    {@const elapsed = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
+                    {@const specName = agent.spec_path ? agent.spec_path.split('/').pop()?.replace(/\.md$/, '') : null}
+                    {@const repoName = (agent.repo_id && repoMap[agent.repo_id]) ? repoMap[agent.repo_id].name : null}
+                    <button class="live-agent-chip" onclick={() => nav('agent', agent.id, agent)} title="{agent.name ?? formatId('agent', agent.id)} — {specName ? 'implementing ' + specName : 'working'}{repoName ? ' in ' + repoName : ''}">
+                      <span class="live-chip-pulse"></span>
+                      <span class="live-chip-name">{agent.name ?? formatId('agent', agent.id)}</span>
+                      {#if specName}<span class="live-chip-spec">{specName}</span>{/if}
+                      {#if elapsed != null}<span class="live-chip-time">{formatDuration(elapsed)}</span>{/if}
+                      {#if repoName}<span class="live-chip-repo">{repoName}</span>{/if}
+                    </button>
+                  {/each}
+                  {#if runningAgents.length > 4}
+                    <span class="live-agents-more">+{runningAgents.length - 4} more</span>
+                  {/if}
+                </div>
+              </section>
+            {/if}
+          {/if}
+
+          <!-- Merge queue (when items are in queue) -->
+          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
+            <section class="ws-merge-queue-compact">
+              <div class="mq-compact-header">
+                <span class="mq-compact-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12"><path d="M16 3h5v5M4 20L21 3"/></svg>
+                </span>
+                <span class="mq-compact-title">{mergeQueueItems.length} in merge queue</span>
+              </div>
+              <div class="mq-compact-list">
+                {#each mergeQueueItems.slice(0, 3) as item, i (item.merge_request_id ?? item.mr_id ?? i)}
+                  <button class="mq-compact-item" onclick={() => nav('mr', item.merge_request_id ?? item.mr_id, item._mr ?? {})}>
+                    <span class="mq-pos">#{i + 1}</span>
+                    <span class="mq-title">{item._title ?? entityName('mr', item.merge_request_id ?? item.mr_id)}</span>
+                    {#if item._status}<span class="mq-status">{item._status}</span>{/if}
+                  </button>
+                {/each}
+                {#if mergeQueueItems.length > 3}
+                  <span class="mq-compact-more">+{mergeQueueItems.length - 3} more</span>
+                {/if}
+              </div>
+            </section>
+          {/if}
+
           <!-- Action Needed (compact, dismissible) -->
           {#if !decisionsLoading && actionableNotifications.length > 0}
             {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
@@ -4709,6 +4763,124 @@
   }
 
   /* ── Decisions / Action Needed section ────────────────────────────── */
+  /* ── Active agents strip ────────────────────────────────────── */
+  .ws-live-agents {
+    border: 1px solid color-mix(in srgb, var(--color-success) 25%, var(--color-border));
+    border-left: 3px solid var(--color-success);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--color-success) 3%, var(--color-surface));
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .live-agents-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-1);
+  }
+
+  .live-agents-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: hstat-pulse 2s ease-in-out infinite;
+  }
+
+  .live-agents-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-success);
+  }
+
+  .live-agents-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .live-agent-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: color-mix(in srgb, var(--color-success) 6%, var(--color-surface));
+    border: 1px solid color-mix(in srgb, var(--color-success) 15%, transparent);
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    transition: all var(--transition-fast);
+  }
+
+  .live-agent-chip:hover {
+    border-color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 10%, var(--color-surface));
+  }
+
+  .live-chip-pulse {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: hstat-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  .live-chip-name { font-weight: 600; color: var(--color-text); }
+  .live-chip-spec { color: var(--color-text-muted); font-style: italic; }
+  .live-chip-time { font-family: var(--font-mono); color: var(--color-success); font-weight: 600; }
+  .live-chip-repo { color: var(--color-text-muted); font-size: 10px; }
+  .live-agents-more { font-size: var(--text-xs); color: var(--color-text-muted); align-self: center; }
+
+  /* ── Merge queue compact ──────────────────────────────────── */
+  .ws-merge-queue-compact {
+    border: 1px solid color-mix(in srgb, var(--color-warning) 25%, var(--color-border));
+    border-left: 3px solid var(--color-warning);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--color-warning) 3%, var(--color-surface));
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .mq-compact-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-bottom: var(--space-1);
+  }
+
+  .mq-compact-icon { color: var(--color-warning); display: flex; align-items: center; }
+
+  .mq-compact-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-warning);
+  }
+
+  .mq-compact-list { display: flex; flex-direction: column; gap: 2px; }
+
+  .mq-compact-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    text-align: left;
+    transition: background var(--transition-fast);
+  }
+
+  .mq-compact-item:hover { background: color-mix(in srgb, var(--color-warning) 8%, transparent); }
+
+  .mq-pos { font-family: var(--font-mono); font-weight: 700; color: var(--color-warning); flex-shrink: 0; }
+  .mq-title { color: var(--color-text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  .mq-status { color: var(--color-text-muted); font-size: 10px; flex-shrink: 0; }
+  .mq-compact-more { font-size: 10px; color: var(--color-text-muted); padding-left: var(--space-2); }
+
   .ws-decisions-section {
     border: 1px solid var(--color-warning);
     border-left: 3px solid var(--color-warning);
