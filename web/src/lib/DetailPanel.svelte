@@ -2297,6 +2297,35 @@
               </div>
             {:else}
               {@const ag = agentDetail ?? entity.data ?? {}}
+              <!-- Quick action bar for agents -->
+              <div class="mr-quick-actions">
+                {#if ag.status === 'active'}
+                  <button class="mr-quick-btn mr-quick-diff" onclick={() => { activeTab = 'chat'; }} title="View live agent conversation">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                    Live Chat
+                  </button>
+                {/if}
+                <button class="mr-quick-btn" onclick={() => { activeTab = 'history'; }} title="View agent log output">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 7h10M7 12h10M7 17h6"/></svg>
+                  Logs
+                </button>
+                <button class="mr-quick-btn" onclick={() => { activeTab = 'trace'; }} title="View execution trace spans">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                  Trace
+                </button>
+                {#if ag.conversation_sha}
+                  <button class="mr-quick-btn" onclick={() => { activeTab = 'ask-why'; }} title="View full agent reasoning transcript">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+                    Why?
+                  </button>
+                {/if}
+                {#if ag.mr_id}
+                  <button class="mr-quick-btn" onclick={() => navigateTo('mr', ag.mr_id)} title="View the MR this agent created">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M5 3v6a4 4 0 004 4h2M5 3L3 5M5 3l2 2M15 7v6a4 4 0 01-4 4h-2"/></svg>
+                    View MR
+                  </button>
+                {/if}
+              </div>
               {#if ag.status && ag.status !== 'pending'}
                 {@const phases = (() => {
                   const p = [{ label: 'Spawned', variant: 'info', time: ag.created_at }];
@@ -2677,6 +2706,27 @@
               </div>
             {:else}
               {@const tk = taskDetail ?? entity.data ?? {}}
+              <!-- Quick navigation to linked entities -->
+              <div class="mr-quick-actions">
+                {#if tk.spec_path}
+                  <button class="mr-quick-btn" onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })} title="View the specification this task implements">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    Spec
+                  </button>
+                {/if}
+                {#if tk.assigned_to}
+                  <button class="mr-quick-btn" onclick={() => navigateTo('agent', tk.assigned_to)} title="View the agent working on this task">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+                    Agent
+                  </button>
+                {/if}
+                {#if tk.mr_id}
+                  <button class="mr-quick-btn" onclick={() => navigateTo('mr', tk.mr_id)} title="View the merge request created for this task">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M5 3v6a4 4 0 004 4h2M5 3L3 5M5 3l2 2M15 7v6a4 4 0 01-4 4h-2"/></svg>
+                    MR
+                  </button>
+                {/if}
+              </div>
               <!-- Status journey visualization -->
               {#if tk.status && tk.status !== 'backlog'}
                 {@const taskPhases = (() => {
