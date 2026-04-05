@@ -659,4 +659,23 @@ mod tests {
         let response = ViewResponse::from(view);
         assert!(response.is_system, "System flag should be preserved");
     }
+
+    #[test]
+    fn test_system_default_views_all_pass_validation() {
+        // All system default views must parse as valid ViewQuery structs
+        // and pass validation. This catches issues like $where(node_type, '=', 'function')
+        // failing validation because node_type isn't a recognized metric.
+        let defaults = system_default_views();
+        for (name, _desc, query_json) in &defaults {
+            let parsed: gyre_common::view_query::ViewQuery = serde_json::from_str(query_json)
+                .unwrap_or_else(|e| panic!("System view '{}' failed to parse as ViewQuery: {}", name, e));
+            let errors = parsed.validate();
+            assert!(
+                errors.is_empty(),
+                "System view '{}' has validation errors: {:?}",
+                name,
+                errors
+            );
+        }
+    }
 }
