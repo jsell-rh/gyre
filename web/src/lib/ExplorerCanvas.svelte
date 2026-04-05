@@ -3090,8 +3090,11 @@
     }
 
     // Border — colored by spec confidence, width scaled by churn
+    // Spec: "border thickness reflects churn" — discrete buckets:
+    //   0 → 1px (stable), 1-5 → 2px, 6-15 → 3px, 16+ → 4px (hot)
     let borderColor = ln.id === selectedNodeId ? '#ef4444' : isMultiSelected ? '#a78bfa' : specBorderColor(n);
-    const churnWidth = 1 + Math.min((n?.churn_count_30d ?? 0) / 3, 4);
+    const churn = n?.churn_count_30d ?? 0;
+    const churnWidth = churn === 0 ? 1 : churn <= 5 ? 2 : churn <= 15 ? 3 : 4;
     let borderWidth = ln.id === selectedNodeId ? 2 : churnWidth;
     if (qColor && ln.id !== selectedNodeId) {
       if (isHeatMap) {

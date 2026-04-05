@@ -34,6 +34,9 @@
   // Align with server MAX_SESSION_MESSAGES — tracks all client-sent messages
   // (not just rendered bubbles) to warn users before hitting the server limit.
   const MAX_SESSION_MESSAGES = 200;
+  // Server keeps MAX_CONVERSATION_HISTORY=20 messages (20 user + 20 assistant = 40 total)
+  // in the LLM's context window. Older messages are summarized (lossy).
+  const CONTEXT_WINDOW_SIZE = 40;
 
   // ── State ────────────────────────────────────────────────────────────────
   let messages = $state([]); // [{ id: number, role: 'user'|'assistant', content: string, viewQuery?: object, timestamp: number }]
@@ -431,6 +434,10 @@
   }
 
   // ── Status display ───────────────────────────────────────────────────────
+  // Index of the first message that is still in the LLM's context window.
+  // Messages before this index are "out of context" (summarized server-side).
+  let contextCutoffIndex = $derived(Math.max(0, messages.length - CONTEXT_WINDOW_SIZE));
+
   let statusLabel = $derived.by(() => {
     switch (status) {
       case 'connecting':   return $t('explorer_chat.status_connecting');
@@ -610,7 +617,15 @@
       </div>
     {:else}
       {#each messages as msg, i (msg.id ?? msg.timestamp + '-' + i)}
-        <div class="chat-message {msg.role}" class:error={msg.isError}>
+        {#if contextCutoffIndex > 0 && i === contextCutoffIndex}
+          <div class="context-divider" role="separator">
+            <span class="context-divider-text">Messages above this line are summarized in the AI's memory</span>
+          </div>
+        {/if}
+        <div class="chat-message {msg.role}" class:error={msg.isError} class:out-of-context={i < contextCutoffIndex}>
+          {#if i < contextCutoffIndex}
+            <span class="out-of-context-label">out of context</span>
+          {/if}
           <div class="message-meta">
             <span class="message-role">{msg.role === 'user' ? $t('explorer_chat.you') : $t('explorer_chat.assistant')}</span>
             <span class="message-time">{formatTime(msg.timestamp)}</span>
@@ -1019,6 +1034,48 @@
   .suggestion-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  /* ── Context window divider ──────────────────────────────────────── */
+  .context-divider {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+  }
+
+  .context-divider::before,
+  .context-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: #334155;
+  }
+
+  .context-divider-text {
+    font-size: var(--text-xs);
+    color: #64748b;
+    white-space: nowrap;
+    font-style: italic;
+  }
+
+  /* ── Out-of-context messages ────────────────────────────────────── */
+  .chat-message.out-of-context {
+    opacity: 0.5;
+    position: relative;
+  }
+
+  .out-of-context-label {
+    font-size: 10px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    align-self: flex-start;
+    padding: 0 var(--space-1);
+  }
+
+  .chat-message.user.out-of-context .out-of-context-label {
+    align-self: flex-end;
   }
 
   /* ── Message bubbles ─────────────────────────────────────────────── */
