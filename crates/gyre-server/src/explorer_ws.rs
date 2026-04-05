@@ -1128,7 +1128,7 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "graph_summary".to_string(),
-            description: "Get a condensed summary of the repo's knowledge graph: node/edge counts, top types by fields, top functions by calls, modules, test coverage stats.".to_string(),
+            description: "Get a condensed summary of the repo's knowledge graph: node/edge counts, top types by fields, top functions by calls, modules, test coverage, spec coverage (governed/unspecced), and risk indicators (high-complexity untested code, unspecced hot paths).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -2798,7 +2798,7 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 ### Scope Types
 - `all`: Show everything
 - `focus`: BFS from a node. Fields: node (name or "$clicked"), edges (array), direction ("outgoing"/"incoming"/"both"), depth (number)
-  **IMPORTANT:** Focus scope defaults to direction="outgoing" and depth=5. For blast radius queries, always set direction="incoming" and depth=10 explicitly. For dependency queries, use direction="outgoing".
+  **IMPORTANT:** Focus scope defaults to direction="both" and depth=5. For blast radius queries, set direction="incoming" and depth=10. For dependency/trace queries, set direction="outgoing".
 - `filter`: Filter by node_types (array), computed (expression), or name_pattern
 - `test_gaps`: Functions not reachable from any test
 - `diff`: Changed nodes between commits. Fields: from_commit, to_commit (SHA prefixes, min 4 chars). For temporal diff, prefix with ~ and use epoch seconds: "~1711929600"
@@ -2815,6 +2815,7 @@ Specs are first-class entities in the knowledge graph (Vision Principle 3). They
 ### Computed Expressions (for filter scope)
 - `$where(property, 'op', value)` — property: complexity, churn, test_coverage, incoming_calls, outgoing_calls, field_count, test_fragility, risk_score. op: >, >=, <, <=, ==
   - risk_score = churn × complexity × (1 - test_coverage) — composite risk metric
+  - NOTE: span_duration, span_count, error_rate require OTLP runtime data and are NOT available in static analysis. Use structural metrics (complexity, churn, risk_score) instead.
 - `$callers(node, depth?)`, `$callees(node, depth?)` — call graph traversal
 - `$implementors(trait)` — types implementing a trait
 - `$fields(type)` — fields of a type
