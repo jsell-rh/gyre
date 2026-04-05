@@ -82,7 +82,14 @@ pub struct GraphSummary {
     /// Spec coverage: how many nodes have a governing spec
     #[serde(default)]
     pub spec_coverage: SpecCoverageSummary,
-    /// Risk indicators: high-complexity untested code, unspecced hot paths
+    /// Percentage of nodes with spec_path or GovernedBy edges (0.0-100.0)
+    #[serde(default)]
+    pub spec_coverage_pct: f64,
+    /// Percentage of testable nodes (functions/methods) reachable from test nodes (0.0-100.0)
+    #[serde(default)]
+    pub test_coverage_pct: f64,
+    /// Risk indicators: high-complexity untested code, unspecced hot paths,
+    /// and nodes with complexity > p90 and low coverage
     #[serde(default)]
     pub risk_indicators: Vec<String>,
 }
@@ -2165,6 +2172,18 @@ pub fn compute_graph_summary(
     let spec_total = active_nodes.len();
     let unspecced = spec_total.saturating_sub(governed);
 
+    // Compute percentage fields
+    let spec_coverage_pct = if spec_total > 0 {
+        (governed as f64 / spec_total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let test_coverage_pct = if total_functions > 0 {
+        (reachable_count as f64 / total_functions as f64) * 100.0
+    } else {
+        0.0
+    };
+
     // Risk indicators — top anomalies the LLM should know about
     let mut risk_indicators = Vec::new();
     let high_complexity_untested: Vec<&str> = active_nodes
@@ -2208,6 +2227,57 @@ pub fn compute_graph_summary(
         ));
     }
 
+    // High-risk nodes: complexity > p90 AND low test coverage
+    // Compute p90 complexity threshold from all functions with complexity data
+    let mut complexities: Vec<u32> = active_nodes
+        .iter()
+        .filter(|n| {
+            matches!(
+                n.node_type,
+                NodeType::Function | NodeType::Method
+            )
+        })
+        .filter_map(|n| n.complexity)
+        .filter(|c| *c > 0)
+        .collect();
+    if !complexities.is_empty() {
+        complexities.sort_unstable();
+        let p90_idx = (complexities.len() as f64 * 0.9).ceil() as usize;
+        let p90_threshold = complexities[p90_idx.min(complexities.len() - 1)];
+        let high_risk: Vec<String> = active_nodes
+            .iter()
+            .filter(|n| {
+                matches!(
+                    n.node_type,
+                    NodeType::Function | NodeType::Method
+                )
+            })
+            .filter(|n| n.complexity.unwrap_or(0) >= p90_threshold)
+            .filter(|n| {
+                // Low coverage: not reachable from tests OR test_coverage < 0.3
+                !reachable.contains(&n.id.to_string())
+                    || n.test_coverage.map_or(false, |tc| tc < 0.3)
+            })
+            .take(10)
+            .map(|n| {
+                format!(
+                    "{} (complexity: {}, coverage: {})",
+                    n.name,
+                    n.complexity.unwrap_or(0),
+                    n.test_coverage
+                        .map_or("none".to_string(), |c| format!("{:.0}%", c * 100.0))
+                )
+            })
+            .collect();
+        if !high_risk.is_empty() {
+            risk_indicators.push(format!(
+                "High-risk (complexity >= p90={}, low coverage): {}",
+                p90_threshold,
+                high_risk.join(", ")
+            ));
+        }
+    }
+
     GraphSummary {
         repo_id: repo_id.to_string(),
         node_counts,
@@ -2225,6 +2295,8 @@ pub fn compute_graph_summary(
             unspecced,
             total: spec_total,
         },
+        spec_coverage_pct,
+        test_coverage_pct,
         risk_indicators,
     }
 }
