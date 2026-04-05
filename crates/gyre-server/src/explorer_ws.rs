@@ -3390,4 +3390,289 @@ Done."#;
             "Max refinement turns should be 3 per spec (dedicated, not shared)"
         );
     }
+
+    // ── Agent flow and self-check loop tests ──────────────────────────────
+
+    #[test]
+    fn test_parse_view_query_preserves_complex_json() {
+        // Ensure nested emphasis, groups, callouts, and narrative survive round-trip
+        let query_json = r##"{"scope":{"type":"focus","node":"$clicked","edges":["calls","contains"],"direction":"incoming","depth":3},"emphasis":{"highlight":{"matched":{"color":"#ef4444","label":"blast"}},"dim_unmatched":0.12,"tiered_colors":["#ef4444","#f97316","#eab308"]},"groups":[{"name":"Core","nodes":["mod::core"],"color":"#3b82f6"}],"callouts":[{"node":"fn::main","text":"entry point","color":"#10b981"}],"zoom":"fit","annotation":{"title":"Blast radius: $name","description":"Shows {{count}} affected nodes"}}"##;
+        let text = format!(
+            "Here is the blast radius view.\n\n<view_query>{}</view_query>\n\nNotice the tiered colors.",
+            query_json
+        );
+        let (clean, query) = parse_view_query_from_text(&text);
+        assert!(query.is_some(), "Complex nested JSON should parse");
+        let q = query.unwrap();
+        assert_eq!(q["scope"]["type"], "focus");
+        assert_eq!(q["scope"]["node"], "$clicked");
+        assert_eq!(q["emphasis"]["dim_unmatched"], 0.12);
+        assert!(q["groups"].is_array());
+        assert!(q["callouts"].is_array());
+        assert!(clean.contains("blast radius view"));
+        assert!(clean.contains("tiered colors"));
+    }
+
+    #[test]
+    fn test_parse_view_query_whitespace_around_tags() {
+        // Tags with leading/trailing whitespace inside the JSON block
+        let text = r#"Result:
+
+<view_query>
+  {
+    "scope": { "type": "test_gaps" },
+    "zoom": "fit"
+  }
+</view_query>
+
+Explanation."#;
+        let (clean, query) = parse_view_query_from_text(text);
+        assert!(query.is_some(), "Whitespace-padded JSON should parse");
+        assert_eq!(query.unwrap()["scope"]["type"], "test_gaps");
+        assert!(clean.contains("Result"));
+        assert!(clean.contains("Explanation"));
+    }
+
+    #[test]
+    fn test_parse_view_query_text_mentioning_view_query_tag_literally() {
+        // Text that mentions <view_query> as a string but doesn't contain a real block
+        let text = "Use the <view_query> tag to output JSON. No actual block here.";
+        let (_clean, query) = parse_view_query_from_text(text);
+        // The parser will try to find </view_query> after the opening tag;
+        // since there is none, the query should be None.
+        assert!(
+            query.is_none(),
+            "Mentioning the tag without a closing tag should not produce a query"
+        );
+    }
+
+    #[test]
+    fn test_parse_view_query_empty_json_object() {
+        let text = "<view_query>{}</view_query>";
+        let (clean, query) = parse_view_query_from_text(text);
+        assert!(query.is_some(), "Empty JSON object should parse");
+        assert!(clean.is_empty());
+        // An empty object is valid JSON but not a valid ViewQuery; the parser
+        // only extracts JSON, validation happens later in the agent loop.
+        assert!(query.unwrap().is_object());
+    }
+
+    #[test]
+    fn test_parse_view_query_extracts_last_when_first_is_invalid() {
+        // First block has invalid JSON, second has valid JSON -- should get the valid one
+        let text = r#"Attempt 1:
+
+<view_query>{invalid json}</view_query>
+
+Attempt 2:
+
+<view_query>{"scope": {"type": "all"}}</view_query>"#;
+        let (_clean, query) = parse_view_query_from_text(text);
+        assert!(query.is_some(), "Should parse the second valid block");
+        assert_eq!(query.unwrap()["scope"]["type"], "all");
+    }
+
+    // ── system_default_views validation ───────────────────────────────────
+
+    #[test]
+    fn test_system_default_views_have_valid_scope_types() {
+        let defaults = system_default_views();
+        let valid_scopes = ["all", "focus", "filter", "test_gaps", "diff", "concept"];
+        for (name, _desc, query) in &defaults {
+            let scope_type = query["scope"]["type"].as_str().unwrap_or("");
+            assert!(
+                valid_scopes.contains(&scope_type),
+                "Default view '{}' has invalid scope type '{}'; expected one of {:?}",
+                name,
+                scope_type,
+                valid_scopes
+            );
+        }
+    }
+
+    #[test]
+    fn test_system_default_views_all_deserialize_to_view_query() {
+        // Each default must parse into a valid ViewQuery AND pass validation
+        let defaults = system_default_views();
+        for (name, _desc, query_json) in &defaults {
+            let parsed =
+                serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone());
+            assert!(
+                parsed.is_ok(),
+                "Default view '{}' failed deserialization: {:?}",
+                name,
+                parsed.err()
+            );
+            let vq = parsed.unwrap();
+            let errors = vq.validate();
+            assert!(
+                errors.is_empty(),
+                "Default view '{}' has validation errors: {:?}",
+                name,
+                errors
+            );
+        }
+    }
+
+    #[test]
+    fn test_system_default_views_names_are_unique() {
+        let defaults = system_default_views();
+        let names: Vec<&str> = defaults.iter().map(|(n, _, _)| *n).collect();
+        let mut seen = std::collections::HashSet::new();
+        for name in &names {
+            assert!(seen.insert(name), "Duplicate default view name: '{}'", name);
+        }
+    }
+
+    #[test]
+    fn test_system_default_views_include_interactive_clicked_view() {
+        // At least one view should use "$clicked" for interactive exploration
+        let defaults = system_default_views();
+        let has_clicked = defaults
+            .iter()
+            .any(|(_, _, q)| q.to_string().contains("$clicked"));
+        assert!(
+            has_clicked,
+            "Default views should include at least one interactive '$clicked' view"
+        );
+    }
+
+    // ── build_system_prompt agent-loop content ────────────────────────────
+
+    #[test]
+    fn test_system_prompt_describes_self_check_workflow() {
+        let prompt = build_system_prompt();
+        // The prompt must instruct the LLM to dry-run before finalizing
+        assert!(
+            prompt.contains("dry-run"),
+            "System prompt must mention dry-run for self-check"
+        );
+        assert!(
+            prompt.contains("refine"),
+            "System prompt must mention refinement on warnings"
+        );
+        assert!(
+            prompt.contains("<view_query>"),
+            "System prompt must show the view_query output format tag"
+        );
+        assert!(
+            prompt.contains("</view_query>"),
+            "System prompt must show the closing view_query tag"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_documents_edge_types() {
+        let prompt = build_system_prompt();
+        let edge_types = [
+            "calls",
+            "contains",
+            "implements",
+            "depends_on",
+            "field_of",
+            "returns",
+            "routes_to",
+            "governed_by",
+            "renders",
+            "persists_to",
+            "produced_by",
+        ];
+        for edge in &edge_types {
+            assert!(
+                prompt.contains(edge),
+                "System prompt should document edge type '{}' but it doesn't",
+                edge
+            );
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_documents_node_types() {
+        let prompt = build_system_prompt();
+        let node_types = [
+            "package",
+            "module",
+            "type",
+            "interface",
+            "function",
+            "endpoint",
+            "component",
+            "table",
+            "constant",
+            "field",
+            "spec",
+        ];
+        for nt in &node_types {
+            assert!(
+                prompt.contains(nt),
+                "System prompt should document node type '{}' but it doesn't",
+                nt
+            );
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_is_nonempty_and_has_minimum_structure() {
+        let prompt = build_system_prompt();
+        // The prompt should be substantial (at minimum several KB of instructions)
+        assert!(
+            prompt.len() > 2000,
+            "System prompt should be at least 2000 chars, got {}",
+            prompt.len()
+        );
+        // Must contain the agent identity
+        assert!(
+            prompt.contains("Gyre Explorer"),
+            "System prompt should identify as Gyre Explorer agent"
+        );
+        // Must contain workflow steps
+        assert!(
+            prompt.contains("Workflow"),
+            "System prompt should have a Workflow section"
+        );
+        // Must contain output format instructions
+        assert!(
+            prompt.contains("Output Format"),
+            "System prompt should have Output Format section"
+        );
+        // Must contain rules section
+        assert!(
+            prompt.contains("Rules"),
+            "System prompt should have Rules section"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_feedback_loop_instructions() {
+        let prompt = build_system_prompt();
+        // Vision Principle 5 integration
+        assert!(
+            prompt.contains("Feedback Loop"),
+            "System prompt should contain feedback loop instructions"
+        );
+        assert!(
+            prompt.contains("Observe"),
+            "Feedback loop should reference the Observe stage"
+        );
+        assert!(
+            prompt.contains("Encode"),
+            "Feedback loop should reference the Encode stage"
+        );
+    }
+
+    #[test]
+    fn test_agent_turn_budgets_are_independent() {
+        // The agent loop uses two independent budgets. Verify the total.
+        let total = MAX_TOOL_TURNS + MAX_REFINEMENT_TURNS;
+        assert_eq!(
+            total, 8,
+            "Total agent loop budget should be 8 (5 tool + 3 refinement)"
+        );
+        // Tool turns and refinement turns must both be > 0
+        assert!(MAX_TOOL_TURNS > 0, "Must allow at least 1 tool turn");
+        assert!(
+            MAX_REFINEMENT_TURNS > 0,
+            "Must allow at least 1 refinement turn for self-check"
+        );
+    }
 }
