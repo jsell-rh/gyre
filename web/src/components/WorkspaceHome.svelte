@@ -1469,6 +1469,14 @@
                                   </button>
                                 {/each}
                               </span>
+                              {#if mr._gates.failed > 0}
+                                {@const failedGate = mr._gates.details.find(g => g.status === 'failed')}
+                                {#if failedGate?.output || failedGate?.error}
+                                  <button class="gate-error-snippet" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }} title="Click to view full gate output">
+                                    {(failedGate.error ?? failedGate.output ?? '').split('\n')[0]?.slice(0, 100)}
+                                  </button>
+                                {/if}
+                              {/if}
                             {:else if mr._gates}
                               <span class="gate-summary">
                                 {#if mr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{mr._gates.passed}</span>{/if}
@@ -2409,6 +2417,24 @@
   .gate-badge-ws-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
   .gate-badge-ws-pending, .gate-badge-ws-running { color: var(--color-text-muted); background: var(--color-surface-elevated); }
   .gate-badge-ws-more { color: var(--color-text-muted); background: var(--color-surface-elevated); font-size: 10px; font-weight: 600; }
+  .gate-error-snippet {
+    display: block;
+    width: 100%;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 5%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 15%, transparent);
+    border-radius: var(--radius-sm);
+    padding: 2px 6px;
+    cursor: pointer;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: background var(--transition-fast);
+  }
+  .gate-error-snippet:hover { background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
 
   /* ── Agent cards (workspace overview) ────────────────────── */
   .agents-list { display: flex; flex-direction: column; gap: var(--space-1); }
