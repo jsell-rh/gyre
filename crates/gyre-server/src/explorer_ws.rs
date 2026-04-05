@@ -296,9 +296,12 @@ async fn handle_explorer_session(
         .unwrap_or_else(std::time::Instant::now);
 
     // Ping/pong keepalive: keeps connections alive through proxies/load balancers.
+    // Track last pong to detect dead connections (2 missed pongs = dead).
     let mut ping_interval =
         tokio::time::interval(std::time::Duration::from_secs(WS_PING_INTERVAL_SECS));
     ping_interval.tick().await; // consume the immediate first tick
+    let mut last_pong = std::time::Instant::now();
+    let pong_timeout = std::time::Duration::from_secs(WS_PING_INTERVAL_SECS * 2 + 5);
 
     loop {
         let msg = tokio::select! {
@@ -306,7 +309,10 @@ async fn handle_explorer_session(
                 match incoming {
                     Some(Ok(Message::Text(text))) => text,
                     Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Pong(_))) => continue,
+                    Some(Ok(Message::Pong(_))) => {
+                        last_pong = std::time::Instant::now();
+                        continue;
+                    }
                     Some(Ok(_)) => continue,
                     Some(Err(e)) => {
                         warn!("WebSocket error: {e}");
@@ -315,6 +321,11 @@ async fn handle_explorer_session(
                 }
             }
             _ = ping_interval.tick() => {
+                // Check for dead connection (no pong received within timeout)
+                if last_pong.elapsed() > pong_timeout {
+                    warn!(user = %auth.agent_id, "Explorer WS: no pong received in {:?}, closing dead connection", pong_timeout);
+                    break;
+                }
                 if sender.send(Message::Ping(vec![].into())).await.is_err() {
                     break; // Client disconnected
                 }
@@ -1185,7 +1196,8 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
 /// reads JSON lines from stdout, and forwards text/view_query/status messages
 /// to the WebSocket client.
 ///
-/// Opt-in via `GYRE_EXPLORER_SDK=1` env var.
+/// SDK is the default path when the script exists. Opt-out via `GYRE_EXPLORER_SDK=0`.
+/// Falls back to native LlmPort when the SDK script doesn't exist or is explicitly disabled.
 async fn run_explorer_agent_sdk(
     state: &AppState,
     repo_id: &str,

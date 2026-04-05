@@ -1284,6 +1284,77 @@ fn resolve_computed_expression_inner(
         return spec_node_ids;
     }
 
+    // $reachable(node, [edge_types], direction, depth) — general BFS traversal primitive.
+    // Example: $reachable(MyService, [calls, implements], outgoing, 5)
+    if trimmed.starts_with("$reachable(") && trimmed.ends_with(')') {
+        let inner = &trimmed[11..trimmed.len() - 1];
+        // Parse arguments: node, [edge_types], direction, depth
+        // We need to handle the array inside, so we parse carefully
+        let mut args: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut bracket_depth = 0;
+        for ch in inner.chars() {
+            match ch {
+                '[' => {
+                    bracket_depth += 1;
+                    current.push(ch);
+                }
+                ']' => {
+                    bracket_depth -= 1;
+                    current.push(ch);
+                }
+                ',' if bracket_depth == 0 => {
+                    args.push(current.trim().to_string());
+                    current = String::new();
+                }
+                _ => current.push(ch),
+            }
+        }
+        if !current.trim().is_empty() {
+            args.push(current.trim().to_string());
+        }
+
+        if args.len() >= 2 {
+            let node_ref = args[0].trim().trim_matches('\'').trim_matches('"').to_string();
+            let edge_types_str = &args[1];
+            let direction = if args.len() > 2 {
+                args[2].trim().trim_matches('\'').trim_matches('"').to_string()
+            } else {
+                "outgoing".to_string()
+            };
+            let bfs_depth: u32 = if args.len() > 3 {
+                args[3].trim().parse().unwrap_or(5)
+            } else {
+                5
+            };
+
+            // Parse edge types from array syntax: [calls, implements, ...]
+            let edge_types: Vec<EdgeType> = edge_types_str
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .filter_map(|s| parse_edge_type(s.trim().trim_matches('\'').trim_matches('"')))
+                .collect();
+
+            if edge_types.is_empty() {
+                return HashSet::new();
+            }
+
+            let resolved_name = resolve_node_ref(&node_ref, selected_node_id);
+            if let Some(found) = find_node_by_ref(active_nodes, &resolved_name) {
+                return bfs_traverse(
+                    &found.id.to_string(),
+                    &edge_types,
+                    &direction,
+                    bfs_depth,
+                    outgoing,
+                    incoming,
+                );
+            }
+        }
+        return HashSet::new();
+    }
+
     // $ungoverned — nodes with no GovernedBy edge and no spec_path set.
     // Useful for finding code that needs spec governance.
     if trimmed == "$ungoverned" {

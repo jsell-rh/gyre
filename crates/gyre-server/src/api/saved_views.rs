@@ -130,40 +130,53 @@ pub async fn list_views(
         })?;
 
     // Seed system default views on first access (lazy initialization).
-    // Check for system views specifically to avoid re-seeding when user deletes personal views.
-    if !views.iter().any(|v| v.is_system) {
-        let now = now_secs();
-        let workspace_id = resolve_workspace_id(&state, &repo_id).await;
-        for default in system_default_views() {
-            let view = SavedView {
-                id: new_id(),
-                repo_id: Id::new(&repo_id),
-                workspace_id: Id::new(&workspace_id),
-                tenant_id: Id::new(&auth.tenant_id),
-                name: default.0.to_string(),
-                description: Some(default.1.to_string()),
-                query_json: default.2.to_string(),
-                created_by: "system".to_string(),
-                created_at: now,
-                updated_at: now,
-                is_system: true,
-            };
-            let _ = state.saved_views.create(view).await;
+    // Reconcile: if existing system views are a subset of current defaults,
+    // add any missing ones (handles server upgrades adding new default views).
+    {
+        let existing_system_names: std::collections::HashSet<&str> = views
+            .iter()
+            .filter(|v| v.is_system)
+            .map(|v| v.name.as_str())
+            .collect();
+        let defaults = system_default_views();
+        let missing: Vec<_> = defaults
+            .iter()
+            .filter(|(name, _, _)| !existing_system_names.contains(name))
+            .collect();
+        if !missing.is_empty() {
+            let now = now_secs();
+            let workspace_id = resolve_workspace_id(&state, &repo_id).await;
+            for default in &missing {
+                let view = SavedView {
+                    id: new_id(),
+                    repo_id: Id::new(&repo_id),
+                    workspace_id: Id::new(&workspace_id),
+                    tenant_id: Id::new(&auth.tenant_id),
+                    name: default.0.to_string(),
+                    description: Some(default.1.to_string()),
+                    query_json: default.2.to_string(),
+                    created_by: "system".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                    is_system: true,
+                };
+                let _ = state.saved_views.create(view).await;
+            }
+            // Re-fetch after seeding (already tenant-filtered at SQL level).
+            let refreshed = state
+                .saved_views
+                .list_by_repo_and_tenant(&rid, &tid)
+                .await
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to list views: {e}"),
+                    )
+                })?;
+            return Ok(Json(
+                refreshed.into_iter().map(ViewResponse::from).collect(),
+            ));
         }
-        // Re-fetch after seeding (already tenant-filtered at SQL level).
-        let refreshed = state
-            .saved_views
-            .list_by_repo_and_tenant(&rid, &tid)
-            .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to list views: {e}"),
-                )
-            })?;
-        return Ok(Json(
-            refreshed.into_iter().map(ViewResponse::from).collect(),
-        ));
     }
 
     Ok(Json(views.into_iter().map(ViewResponse::from).collect()))

@@ -384,6 +384,19 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["repo_id"]
                 }
+            },
+            {
+                "name": "node_provenance",
+                "description": "Get provenance (creation/modification history) for specific nodes. Shows who created or modified the node, when, and in which commit.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "node_id": { "type": "string", "description": "Node ID to get provenance for" },
+                        "name_pattern": { "type": "string", "description": "Find nodes by name and return their provenance" }
+                    },
+                    "required": ["repo_id"]
+                }
             }
         ]
     })
@@ -1422,6 +1435,67 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
     ))
 }
 
+async fn handle_node_provenance(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let rid = Id::new(&repo_id);
+
+    // Find nodes by ID or name pattern
+    let target_nodes: Vec<gyre_common::graph::GraphNode> = if let Some(node_id) = get_str(args, "node_id") {
+        let nid = Id::new(node_id);
+        match state.graph_store.get_node(&nid).await {
+            Ok(Some(n)) => vec![n],
+            Ok(None) => return tool_error(format!("Node not found: {node_id}")),
+            Err(e) => return tool_error(format!("Failed: {e}")),
+        }
+    } else if let Some(pattern) = get_str(args, "name_pattern") {
+        let pat_lower = pattern.to_lowercase();
+        match state.graph_store.list_nodes(&rid, None).await {
+            Ok(nodes) => nodes
+                .into_iter()
+                .filter(|n| {
+                    n.deleted_at.is_none()
+                        && (n.name.to_lowercase().contains(&pat_lower)
+                            || n.qualified_name.to_lowercase().contains(&pat_lower))
+                })
+                .take(10)
+                .collect(),
+            Err(e) => return tool_error(format!("Failed: {e}")),
+        }
+    } else {
+        return tool_error("Provide either node_id or name_pattern");
+    };
+
+    let items: Vec<Value> = target_nodes
+        .iter()
+        .map(|n| {
+            json!({
+                "id": n.id.to_string(),
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "node_type": format!("{:?}", n.node_type).to_lowercase(),
+                "file_path": n.file_path,
+                "created_at": n.created_at,
+                "last_modified_at": n.last_modified_at,
+                "created_sha": n.created_sha,
+                "last_modified_sha": n.last_modified_sha,
+                "spec_path": n.spec_path,
+                "complexity": n.complexity,
+                "churn_count_30d": n.churn_count_30d,
+                "test_coverage": n.test_coverage,
+            })
+        })
+        .collect();
+
+    tool_result(format!(
+        "{} node(s) provenance:\n{}",
+        items.len(),
+        serde_json::to_string_pretty(&items).unwrap_or_default()
+    ))
+}
+
 // ── MCP Resources ─────────────────────────────────────────────────────────────
 
 fn resource_definitions() -> Value {
@@ -1701,6 +1775,7 @@ pub async fn mcp_handler(
                 "graph_query_dryrun" => handle_graph_query_dryrun(&state, &args).await,
                 "graph_nodes" => handle_graph_nodes(&state, &args).await,
                 "graph_edges" => handle_graph_edges(&state, &args).await,
+                "node_provenance" => handle_node_provenance(&state, &args).await,
                 other => tool_error(format!("Unknown tool: {other}")),
             };
             JsonRpcResponse::ok(id, result)
@@ -1813,6 +1888,7 @@ mod tests {
         assert!(names.contains(&"gyre_agent_heartbeat"));
         assert!(names.contains(&"gyre_agent_complete"));
         assert!(names.contains(&"gyre_search"));
+        assert!(names.contains(&"node_provenance"));
     }
 
     #[tokio::test]
