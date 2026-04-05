@@ -721,6 +721,20 @@
                                 </div>
                                 {#if agentId && sha}
                                   <div class="popover-actions">
+                                    {#if line.conversation_sha}
+                                      <button
+                                        class="popover-conversation-btn"
+                                        onclick={() => {
+                                          const convSha = line.conversation_sha;
+                                          if (goToEntityDetail) goToEntityDetail('agent', agentId, { repo_id: repoId, conversation_sha: convSha, _openTab: 'chat' });
+                                          else openDetailPanel?.({ type: 'agent', id: agentId, data: { repo_id: repoId, conversation_sha: convSha, _openTab: 'chat' } });
+                                        }}
+                                        title="View the agent's conversation at this commit"
+                                      >
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>
+                                        View conversation
+                                      </button>
+                                    {/if}
                                     <button
                                       class="investigate-btn-prominent popover-investigate"
                                       onclick={() => investigateLine(line)}
@@ -1970,6 +1984,29 @@
     opacity: 1 !important;
     width: 100%;
     justify-content: center;
+  }
+
+  .popover-conversation-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    background: color-mix(in srgb, var(--color-info, #1e90ff) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-info, #1e90ff) 30%, var(--color-border));
+    border-radius: var(--radius-sm);
+    color: var(--color-info, #1e90ff);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    transition: all var(--transition-fast);
+    width: 100%;
+    justify-content: center;
+  }
+
+  .popover-conversation-btn:hover {
+    background: color-mix(in srgb, var(--color-info, #1e90ff) 20%, transparent);
+    border-color: var(--color-info, #1e90ff);
   }
 
   .no-data {
