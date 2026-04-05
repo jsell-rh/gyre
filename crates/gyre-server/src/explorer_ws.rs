@@ -2758,6 +2758,7 @@ Specs are first-class entities in the knowledge graph (Vision Principle 3). They
 - `$descendants(module)`, `$ancestors(node)` — containment hierarchy
 - `$governed_by(spec_path)` — nodes governed by a spec
 - `$test_unreachable`, `$test_reachable` — test coverage
+- `$ungoverned` — nodes with no spec governance (no GovernedBy edge, no spec_path)
 - `$intersect(A, B)`, `$union(A, B)`, `$diff(A, B)` — set operations on expressions
 - `$reachable(node, [edge_types], direction, depth)` — general BFS
 
