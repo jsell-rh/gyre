@@ -193,9 +193,8 @@ describe('WorkspaceHome — basic rendering', () => {
 
   it('shows key sections when workspace is set', () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    // Single-column layout: Repos + Activity (collapsed)
+    // Single-column layout: Repos + Entity tabs
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="section-activity"]')).toBeTruthy();
   });
 });
 

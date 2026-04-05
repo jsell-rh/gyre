@@ -52,9 +52,8 @@ describe('WorkspaceHome', () => {
   it('shows key sections when workspace is provided', () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    // Single-column layout: Repos + Activity (collapsed)
+    // Single-column layout: Repos + Entity tabs
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="section-activity"]')).toBeTruthy();
   });
 
   it('each section has correct aria-labelledby', () => {
