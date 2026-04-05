@@ -16,15 +16,14 @@
 //! on WebSocket upgrades, but header-based auth should be preferred in all other
 //! cases to avoid token leakage in server logs and browser history.
 //!
-//! ## Architecture Note: LLM Port vs Claude Agent SDK
+//! ## Architecture Note: Claude Agent SDK (default) vs LLM Port (fallback)
 //!
-//! The spec recommends Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`), but
-//! that's a Node.js package. Our server is Rust, so we use the internal `llm_port`
-//! abstraction which provides the same conversation-with-tools pattern. The tools
-//! (graph_summary, graph_query_dryrun, etc.) execute locally against in-memory
-//! graph data — no MCP round-trip — providing lower latency for interactive
-//! exploration. The self-check loop, refinement budget, and conversation history
-//! management are functionally equivalent to what the SDK provides.
+//! Per spec, the Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) is the default
+//! path. The SDK subprocess (`scripts/explorer-agent.mjs`) uses `query()` with MCP
+//! tools served by the Gyre server. The native `llm_port` Rust path is the fallback
+//! when the SDK script is not available (e.g. no Node.js) or explicitly disabled via
+//! `GYRE_EXPLORER_SDK=0`. Both paths provide the same conversation-with-tools pattern
+//! including self-check loop, refinement budget, and conversation history management.
 
 use axum::{
     extract::{
@@ -1676,8 +1675,9 @@ async fn run_explorer_agent(
     auth: &AuthenticatedAgent,
 ) -> anyhow::Result<()> {
     // Check if SDK-based explorer agent should be used.
-    // Opt-in via GYRE_EXPLORER_SDK=1, or auto-enable when no LLM port is configured
-    // but the SDK script exists (allows using the SDK as the sole LLM backend).
+    // Per spec: Claude Agent SDK is the default path. The SDK provides the
+    // spec-mandated `query()` interface with MCP tools. The native LlmPort
+    // is the fallback when the SDK script is not available or GYRE_EXPLORER_SDK=0.
     // SDK script path: MUST use absolute path via GYRE_EXPLORER_SDK_PATH env var.
     // Relative paths are resolved against the server binary's directory (not CWD)
     // to prevent hijacking via writable agent worktrees.
@@ -1714,10 +1714,10 @@ async fn run_explorer_agent(
         // Path doesn't exist — reject rather than allow unchecked execution
         false
     };
-    // Use sdk_path_valid (which already checks existence via canonicalize())
-    // instead of re-checking sdk_path.exists() to prevent TOCTOU race.
-    let use_sdk = sdk_path_valid
-        && (std::env::var("GYRE_EXPLORER_SDK").unwrap_or_default() == "1" || state.llm.is_none());
+    // Per spec: SDK is the default path when available. Opt-out via GYRE_EXPLORER_SDK=0.
+    // Falls back to native LlmPort when SDK script doesn't exist or is explicitly disabled.
+    let sdk_disabled = std::env::var("GYRE_EXPLORER_SDK").unwrap_or_default() == "0";
+    let use_sdk = sdk_path_valid && !sdk_disabled;
     if use_sdk {
         // SECURITY: SDK path uses the server's master auth_token, not the user's.
         // Restrict to admin-only to prevent RBAC bypass (a read-only member would
