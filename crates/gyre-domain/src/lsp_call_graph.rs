@@ -1253,15 +1253,35 @@ fn try_go_callgraph_binary(
     repo_id: &Id,
     _commit_sha: &str,
 ) -> Option<LspCallGraphResult> {
-    // Look for the binary in scripts/go-callgraph/ relative to the executable,
-    // or in PATH as 'gyre-go-callgraph'.
+    // Look for the binary in multiple locations:
+    // 1. Relative to executable (production deployment)
+    // 2. CARGO_MANIFEST_DIR ancestor's scripts/ (development builds via cargo)
+    // 3. Current working directory's scripts/ (running from repo root)
+    // 4. In PATH as 'gyre-go-callgraph'
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let cwd_scripts = std::env::current_dir()
+        .ok()
+        .map(|d| d.join("scripts/go-callgraph/go-callgraph"));
+    // Walk up from exe dir to find workspace root (contains scripts/)
+    let workspace_scripts = exe_dir.as_ref().and_then(|d| {
+        let mut dir = d.as_path();
+        for _ in 0..5 {
+            let candidate = dir.join("scripts/go-callgraph/go-callgraph");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            dir = dir.parent()?;
+        }
+        None
+    });
     let binary_candidates = [
         exe_dir
             .as_ref()
             .map(|d| d.join("scripts/go-callgraph/go-callgraph")),
+        workspace_scripts,
+        cwd_scripts,
         Some(PathBuf::from("gyre-go-callgraph")),
     ];
 
