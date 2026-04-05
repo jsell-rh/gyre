@@ -1006,69 +1006,36 @@
         </div>
         {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
           <p class="ws-header-status">{statusSentence}</p>
-          {#if statusItems.length > 0}
-            <div class="ws-status-badges">
-              {#each statusItems as item}
-                <button class="ws-status-badge ws-status-badge-{item.variant}" onclick={() => {
-                  if (item.tab === 'specs' || item.tab === 'tasks' || item.tab === 'mrs' || item.tab === 'agents') {
-                    wsTab = item.tab;
-                  }
-                }} title={item.text}>
-                  <span class="ws-status-badge-icon">{item.icon}</span>
-                  {item.text}
-                </button>
-              {/each}
-            </div>
-          {/if}
         {/if}
       </header>
 
-      <!-- ── Pipeline flow bar ─────────────────────────────────────── -->
+      <!-- ── Pipeline flow bar (compact) ──────────────────────────── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
-        {@const specsPct = pipelineSpecs.total > 0 ? Math.round((pipelineSpecs.approved / pipelineSpecs.total) * 100) : 0}
-        {@const tasksPct = pipelineTasks.total > 0 ? Math.round((pipelineTasks.done / pipelineTasks.total) * 100) : 0}
-        {@const mrsPct = pipelineMrs.total > 0 ? Math.round((pipelineMrs.merged / pipelineMrs.total) * 100) : 0}
         <nav class="pipeline-bar" aria-label="Pipeline status">
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { wsTab = 'specs'; }} title="{pipelineSpecs.total} specs — {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { wsTab = 'specs'; }} title="{pipelineSpecs.approved}/{pipelineSpecs.total} specs approved{pipelineSpecs.pending > 0 ? `, ${pipelineSpecs.pending} need approval` : ''}">
             <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
             <span class="pipeline-stage-label">Specs</span>
-            {#if pipelineSpecs.total > 0}
-              <span class="pipeline-progress-bar" role="progressbar" aria-valuenow={specsPct} aria-valuemin="0" aria-valuemax="100">
-                <span class="pipeline-progress-fill pipeline-fill-{pipelineSpecs.pending > 0 ? 'warn' : 'ok'}" style="width: {specsPct}%"></span>
-              </span>
-            {/if}
-            {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warning">{pipelineSpecs.pending} pending</span>{/if}
+            {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warning">{pipelineSpecs.pending}</span>{/if}
           </button>
           <span class="pipeline-arrow" aria-hidden="true">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-alert={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; }} title="{pipelineTasks.total} tasks — {pipelineTasks.done} done, {pipelineTasks.in_progress} in progress, {pipelineTasks.blocked} blocked">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-alert={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; }} title="{pipelineTasks.done}/{pipelineTasks.total} tasks done{pipelineTasks.in_progress > 0 ? `, ${pipelineTasks.in_progress} active` : ''}{pipelineTasks.blocked > 0 ? `, ${pipelineTasks.blocked} blocked` : ''}">
             <span class="pipeline-stage-count">{pipelineTasks.total}</span>
             <span class="pipeline-stage-label">Tasks</span>
-            {#if pipelineTasks.total > 0}
-              <span class="pipeline-progress-bar" role="progressbar" aria-valuenow={tasksPct} aria-valuemin="0" aria-valuemax="100">
-                <span class="pipeline-progress-fill pipeline-fill-{pipelineTasks.blocked > 0 ? 'danger' : 'ok'}" style="width: {tasksPct}%"></span>
-              </span>
-            {/if}
-            {#if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineTasks.in_progress} active</span>{/if}
-            {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked} blocked</span>{/if}
+            {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked}</span>
+            {:else if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineTasks.in_progress}</span>{/if}
           </button>
           <span class="pipeline-arrow" aria-hidden="true">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => { wsTab = 'agents'; }} title="{pipelineAgents.total} agents — {pipelineAgents.active} active">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => { wsTab = 'agents'; }} title="{pipelineAgents.active} of {pipelineAgents.total} agents running">
             <span class="pipeline-stage-count">{pipelineAgents.total}</span>
             <span class="pipeline-stage-label">Agents</span>
-            {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active} running</span>{/if}
+            {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active}</span>{/if}
           </button>
           <span class="pipeline-arrow" aria-hidden="true">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-alert={pipelineMrs.failed_gates > 0} onclick={() => { wsTab = 'mrs'; }} title="{pipelineMrs.total} MRs — {pipelineMrs.open} open, {pipelineMrs.merged} merged">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-alert={pipelineMrs.failed_gates > 0} onclick={() => { wsTab = 'mrs'; }} title="{pipelineMrs.merged}/{pipelineMrs.total} MRs merged{pipelineMrs.open > 0 ? `, ${pipelineMrs.open} open` : ''}{pipelineMrs.failed_gates > 0 ? `, ${pipelineMrs.failed_gates} gate failures` : ''}">
             <span class="pipeline-stage-count">{pipelineMrs.total}</span>
             <span class="pipeline-stage-label">MRs</span>
-            {#if pipelineMrs.total > 0}
-              <span class="pipeline-progress-bar" role="progressbar" aria-valuenow={mrsPct} aria-valuemin="0" aria-valuemax="100">
-                <span class="pipeline-progress-fill pipeline-fill-{pipelineMrs.failed_gates > 0 ? 'danger' : 'ok'}" style="width: {mrsPct}%"></span>
-              </span>
-            {/if}
-            {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates} failed</span>
-            {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineMrs.open} open</span>
-            {:else if pipelineMrs.merged > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineMrs.merged} merged</span>{/if}
+            {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates}</span>
+            {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineMrs.open}</span>{/if}
           </button>
         </nav>
       {/if}
@@ -2115,8 +2082,8 @@
   .pipeline-stage {
     display: flex;
     align-items: center;
-    gap: var(--space-1);
-    padding: var(--space-1) var(--space-2);
+    gap: 4px;
+    padding: 3px var(--space-2);
     border-radius: var(--radius-sm);
     background: transparent;
     border: 1px solid transparent;
@@ -2167,10 +2134,13 @@
 
   .pipeline-stage-badge {
     font-size: 10px;
-    font-weight: 600;
+    font-weight: 700;
+    font-family: var(--font-mono);
     padding: 0 4px;
-    border-radius: var(--radius-sm);
+    border-radius: 8px;
     line-height: 1.5;
+    min-width: 16px;
+    text-align: center;
   }
 
   .pipeline-badge-warning { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 12%, transparent); }
