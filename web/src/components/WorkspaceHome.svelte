@@ -1435,7 +1435,8 @@
                         {@const repoName = (repoId && repoMap[repoId]) ? repoMap[repoId].name : null}
                         {@const queueItem = mergeQueueItems.find(q => (q.merge_request_id ?? q.mr_id) === mr.id)}
                         {@const specName = mr.spec_ref ? mr.spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '') : null}
-                        <button class="mr-card-ws mr-card-ws-{mrStatus}" onclick={() => nav('mr', mr.id, { ...mr, repo_id: repoId })} tabindex="0">
+                        {@const mrWhy = mr._gates?.failed > 0 ? `Blocked — ${mr._gates.details?.filter(g => g.status === 'failed').map(g => g.name).join(', ') || 'gates'} failed` : queueItem ? `In merge queue (#${(queueItem.position ?? 0) + 1})` : mrStatus === 'merged' ? 'All gates passed, merged' : mrStatus === 'open' && mr._gates?.passed === mr._gates?.total && mr._gates?.total > 0 ? 'All gates passed — ready to merge' : mrStatus === 'open' ? 'Open — awaiting gates' : ''}
+                        <button class="mr-card-ws mr-card-ws-{mrStatus}" onclick={() => nav('mr', mr.id, { ...mr, repo_id: repoId })} tabindex="0" title={mrWhy}>
                           <div class="mr-card-header">
                             <span class="mr-card-status mr-card-status-{mrStatus}">
                               {mrStatus === 'merged' ? '✓' : mrStatus === 'closed' ? '✗' : '○'}
@@ -1448,6 +1449,9 @@
                               </button>
                             {/if}
                           </div>
+                          {#if mrWhy}
+                            <div class="mr-card-why mr-card-why-{mr._gates?.failed > 0 ? 'danger' : mrStatus === 'merged' ? 'success' : 'info'}">{mrWhy}</div>
+                          {/if}
                           <div class="mr-card-meta">
                             {#if repoName}<span class="mr-card-repo">{repoName}</span>{/if}
                             {#if mr.author_agent_id}<span class="mr-card-author">by {entityName('agent', mr.author_agent_id)}</span>{/if}
@@ -2486,6 +2490,10 @@
     transition: all var(--transition-fast); flex-shrink: 0;
   }
   .diff-stat-inline:hover { background: var(--color-surface-elevated); border-color: var(--color-border); }
+  .mr-card-why { font-size: 10px; font-weight: 500; font-style: italic; padding: 0 var(--space-1); }
+  .mr-card-why-danger { color: var(--color-danger); }
+  .mr-card-why-success { color: var(--color-success); }
+  .mr-card-why-info { color: var(--color-text-muted); }
   .mr-card-meta { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-muted); font-size: 11px; }
   .mr-card-repo { font-weight: 500; color: var(--color-text-secondary); }
   .mr-card-author { font-style: italic; }
