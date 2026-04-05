@@ -1418,39 +1418,17 @@
                     {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
                     <div class="activity-content">
                       <div class="activity-main-row">
-                        <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
+                        <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
                         <span class="activity-label">{activityLabel(event)}</span>
-                        {#if event.entity_name ?? event.title}
-                          <span class="activity-detail">{event.entity_name ?? event.title}</span>
-                        {/if}
-                        {#if event.repo_id && repoMap[event.repo_id]}
-                          <span class="activity-repo">{repoMap[event.repo_id].name}</span>
-                        {/if}
                         {#if event.timestamp ?? event.created_at}
                           <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                         {/if}
                       </div>
-                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
+                      {#if event.entity_name ?? event.title}
+                        <p class="activity-entity-name">{event.entity_name ?? event.title}</p>
                       {/if}
-                      {#if (event.agent_id && primaryType !== 'agent') || (event.mr_id && primaryType !== 'mr') || (event.spec_path && primaryType !== 'spec')}
-                        <div class="activity-refs">
-                          {#if event.agent_id && primaryType !== 'agent'}
-                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }}>
-                              <Icon name="agent" size={10} /> {entityName('agent', event.agent_id)}
-                            </button>
-                          {/if}
-                          {#if event.mr_id && primaryType !== 'mr'}
-                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }}>
-                              <Icon name="git-merge" size={10} /> {entityName('mr', event.mr_id)}
-                            </button>
-                          {/if}
-                          {#if event.spec_path && primaryType !== 'spec'}
-                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }}>
-                              <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                            </button>
-                          {/if}
-                        </div>
+                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
+                        <p class="activity-reason">{event.description.length > 80 ? event.description.slice(0, 77) + '...' : event.description}</p>
                       {/if}
                     </div>
                   </button>
@@ -5275,16 +5253,26 @@
   .activity-main-row {
     display: flex;
     align-items: baseline;
-    gap: var(--space-2);
+    gap: var(--space-1);
     flex-wrap: wrap;
+  }
+
+  .activity-entity-name {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    font-weight: 500;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .activity-reason {
     margin: 0;
     font-size: 10px;
     color: var(--color-text-muted);
-    line-height: 1.4;
-    padding-left: calc(16px + var(--space-2));
+    line-height: 1.3;
   }
 
   .activity-refs {
