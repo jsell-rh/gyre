@@ -115,6 +115,7 @@ pub async fn list_views(
     Path(repo_id): Path<String>,
     auth: AuthenticatedAgent,
 ) -> Result<Json<Vec<ViewResponse>>, (axum::http::StatusCode, String)> {
+    check_workspace_membership(&state, &auth, &repo_id).await?;
     let rid = Id::new(&repo_id);
     let tid = Id::new(&auth.tenant_id);
     let views = state
