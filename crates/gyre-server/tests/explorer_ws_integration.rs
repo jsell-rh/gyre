@@ -97,7 +97,7 @@ impl WsCtx {
         ws_stream.split()
     }
 
-    /// Read next text message with timeout.
+    /// Read next text message with timeout, skipping non-text frames (Ping/Pong).
     async fn read_msg(
         reader: &mut futures_util::stream::SplitStream<
             tokio_tungstenite::WebSocketStream<
@@ -105,10 +105,21 @@ impl WsCtx {
             >,
         >,
     ) -> Option<serde_json::Value> {
-        let timeout = tokio::time::timeout(std::time::Duration::from_secs(5), reader.next()).await;
-        match timeout {
-            Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str(&text).ok(),
-            _ => None,
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(remaining, reader.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    return serde_json::from_str(&text).ok();
+                }
+                Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {
+                    continue; // Skip control frames
+                }
+                _ => return None,
+            }
         }
     }
 
@@ -184,7 +195,7 @@ async fn explorer_ws_save_and_load_view() {
 
     // Read until we get a views response
     let mut views_msg = None;
-    for _ in 0..5 {
+    for _ in 0..10 {
         if let Some(msg) = WsCtx::read_msg(&mut stream).await {
             if msg["type"] == "views" {
                 views_msg = Some(msg);
@@ -211,7 +222,7 @@ async fn explorer_ws_save_and_load_view() {
     .unwrap();
 
     let mut query_msg = None;
-    for _ in 0..5 {
+    for _ in 0..10 {
         if let Some(msg) = WsCtx::read_msg(&mut stream).await {
             if msg["type"] == "view_query" {
                 query_msg = Some(msg);
@@ -244,9 +255,9 @@ async fn explorer_ws_delete_view() {
     .await
     .unwrap();
 
-    // Read views response to get the ID
+    // Read views response to get the ID (skip warnings from deprecated ?token= auth)
     let mut view_id = String::new();
-    for _ in 0..5 {
+    for _ in 0..10 {
         if let Some(msg) = WsCtx::read_msg(&mut stream).await {
             if msg["type"] == "views" {
                 let views = msg["views"].as_array().unwrap();
@@ -255,6 +266,7 @@ async fn explorer_ws_delete_view() {
                     break;
                 }
             }
+            // Skip warning/status messages
         }
     }
     assert!(!view_id.is_empty(), "Should find the saved view");
@@ -270,7 +282,7 @@ async fn explorer_ws_delete_view() {
 
     // Verify it's gone from the updated views list
     let mut found_deleted = true;
-    for _ in 0..5 {
+    for _ in 0..10 {
         if let Some(msg) = WsCtx::read_msg(&mut stream).await {
             if msg["type"] == "views" {
                 let views = msg["views"].as_array().unwrap();
