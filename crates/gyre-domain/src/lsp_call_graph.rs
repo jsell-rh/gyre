@@ -1203,14 +1203,18 @@ pub fn extract_call_graph_go(
     // Prefer the dedicated go-callgraph binary (uses golang.org/x/tools/go/callgraph CHA)
     // which produces a complete call graph in a single pass — the gold standard per spec.
     // Falls back to gopls LSP if the binary is not available.
-    if let Some(result) = try_go_callgraph_binary(repo_root, nodes, existing_edges, repo_id, commit_sha) {
+    if let Some(result) =
+        try_go_callgraph_binary(repo_root, nodes, existing_edges, repo_id, commit_sha)
+    {
         return result;
     }
 
     if !gopls_available() {
         return LspCallGraphResult {
             edges: Vec::new(),
-            errors: vec!["Neither gyre-go-callgraph nor gopls found — skipping Go call graph".into()],
+            errors: vec![
+                "Neither gyre-go-callgraph nor gopls found — skipping Go call graph".into(),
+            ],
             definitions_queried: 0,
             new_edges_found: 0,
             total_definitions: 0,
@@ -1247,26 +1251,25 @@ fn try_go_callgraph_binary(
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
     let binary_candidates = [
-        exe_dir.as_ref().map(|d| d.join("scripts/go-callgraph/go-callgraph")),
+        exe_dir
+            .as_ref()
+            .map(|d| d.join("scripts/go-callgraph/go-callgraph")),
         Some(PathBuf::from("gyre-go-callgraph")),
     ];
 
-    let binary_path = binary_candidates
-        .iter()
-        .flatten()
-        .find(|p| {
-            // Check if executable exists (for absolute paths) or is in PATH
-            if p.is_absolute() {
-                p.exists()
-            } else {
-                Command::new(p)
-                    .arg("--help")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok()
-            }
-        });
+    let binary_path = binary_candidates.iter().flatten().find(|p| {
+        // Check if executable exists (for absolute paths) or is in PATH
+        if p.is_absolute() {
+            p.exists()
+        } else {
+            Command::new(p)
+                .arg("--help")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok()
+        }
+    });
 
     let binary_path = match binary_path {
         Some(p) => p.clone(),
@@ -1299,17 +1302,29 @@ fn try_go_callgraph_binary(
     let output = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = child.stdout.take().map(|mut s| {
-                    let mut buf = Vec::new();
-                    let _ = s.read_to_end(&mut buf);
-                    buf
-                }).unwrap_or_default();
-                let stderr = child.stderr.take().map(|mut s| {
-                    let mut buf = Vec::new();
-                    let _ = s.read_to_end(&mut buf);
-                    buf
-                }).unwrap_or_default();
-                break std::process::Output { status, stdout, stderr };
+                let stdout = child
+                    .stdout
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = Vec::new();
+                        let _ = s.read_to_end(&mut buf);
+                        buf
+                    })
+                    .unwrap_or_default();
+                let stderr = child
+                    .stderr
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = Vec::new();
+                        let _ = s.read_to_end(&mut buf);
+                        buf
+                    })
+                    .unwrap_or_default();
+                break std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                };
             }
             Ok(None) => {
                 if Instant::now() > deadline {
@@ -1348,7 +1363,11 @@ fn try_go_callgraph_binary(
         }
         return Some(LspCallGraphResult {
             edges: Vec::new(),
-            errors: vec![format!("go-callgraph exited with {}: {}", output.status, stderr.chars().take(500).collect::<String>())],
+            errors: vec![format!(
+                "go-callgraph exited with {}: {}",
+                output.status,
+                stderr.chars().take(500).collect::<String>()
+            )],
             definitions_queried: 0,
             new_edges_found: 0,
             total_definitions: 0,
@@ -1389,7 +1408,9 @@ fn try_go_callgraph_binary(
     // Also build by name for simpler matching
     let node_by_name: HashMap<&str, &GraphNode> = nodes
         .iter()
-        .filter(|n| n.deleted_at.is_none() && matches!(n.node_type, NodeType::Function | NodeType::Endpoint))
+        .filter(|n| {
+            n.deleted_at.is_none() && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
+        })
         .map(|n| (n.name.as_str(), n))
         .collect();
 
@@ -1560,12 +1581,7 @@ pub fn extract_call_graph_auto(
 
     for lang in &languages {
         let result = extract_call_graph_for_language(
-            *lang,
-            repo_root,
-            nodes,
-            &all_edges,
-            repo_id,
-            commit_sha,
+            *lang, repo_root, nodes, &all_edges, repo_id, commit_sha,
         );
         // Merge into combined edges, extending the edge set for subsequent extractors
         all_edges.extend(result.edges.iter().cloned());
@@ -1575,7 +1591,9 @@ pub fn extract_call_graph_auto(
         combined.new_edges_found += result.new_edges_found;
         combined.total_definitions += result.total_definitions;
         combined.incomplete |= result.incomplete;
-        combined.missing_toolchains.extend(result.missing_toolchains);
+        combined
+            .missing_toolchains
+            .extend(result.missing_toolchains);
     }
 
     combined

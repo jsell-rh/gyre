@@ -1625,7 +1625,8 @@ pub fn dry_run(
     if result_set.is_empty() {
         let is_interactive = matches!(&query.scope, Scope::Focus { node, .. } if node == "$clicked" || node == "$selected");
         if is_interactive && selected_node_id.is_none() {
-            warnings.push("Interactive mode: click a node on the canvas to see results".to_string());
+            warnings
+                .push("Interactive mode: click a node on the canvas to see results".to_string());
         } else if !is_interactive {
             warnings.push("Scope matched 0 nodes".to_string());
         }
@@ -3887,7 +3888,11 @@ mod tests {
             narrative: vec![],
         };
         let errors = q.validate();
-        assert!(errors.is_empty(), "Branch names should be valid: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Branch names should be valid: {:?}",
+            errors
+        );
 
         let q2 = ViewQuery {
             scope: Scope::Diff {
@@ -3903,7 +3908,11 @@ mod tests {
             narrative: vec![],
         };
         let errors2 = q2.validate();
-        assert!(errors2.is_empty(), "Feature branch names should be valid: {:?}", errors2);
+        assert!(
+            errors2.is_empty(),
+            "Feature branch names should be valid: {:?}",
+            errors2
+        );
     }
 
     // ── Unicode safety tests ──────────────────────────────────────────
@@ -4469,8 +4478,13 @@ mod tests {
         };
         let result = dry_run(&query, &nodes, &[], None);
         // Should match exactly "Task", not "TaskPort" or "TaskFilter"
-        assert_eq!(result.groups_resolved[0].matched, 1, "Exact match should find only Task");
-        assert!(result.groups_resolved[0].nodes.contains(&"pkg.Task".to_string()));
+        assert_eq!(
+            result.groups_resolved[0].matched, 1,
+            "Exact match should find only Task"
+        );
+        assert!(result.groups_resolved[0]
+            .nodes
+            .contains(&"pkg.Task".to_string()));
     }
 
     #[test]
@@ -4638,8 +4652,15 @@ mod tests {
         );
         // Default depth 5: should include n0 (root) + n1..n5 = 6 nodes
         // n6 is at depth 6, should be excluded
-        assert_eq!(result.len(), 6, "Default $callers depth should be 5 (root + 5 hops)");
-        assert!(!result.contains("n6"), "n6 is at depth 6, should be excluded");
+        assert_eq!(
+            result.len(),
+            6,
+            "Default $callers depth should be 5 (root + 5 hops)"
+        );
+        assert!(
+            !result.contains("n6"),
+            "n6 is at depth 6, should be excluded"
+        );
     }
 
     // ── $ungoverned ──────────────────────────────────────────────────────
@@ -4656,14 +4677,8 @@ mod tests {
         let edges = vec![make_edge("e1", "n1", "spec_node", EdgeType::GovernedBy)];
         let (outgoing, incoming) = build_adjacency(&edges);
         let active: Vec<&GraphNode> = nodes.iter().collect();
-        let result = resolve_computed_expression(
-            "$ungoverned",
-            &active,
-            &edges,
-            &outgoing,
-            &incoming,
-            None,
-        );
+        let result =
+            resolve_computed_expression("$ungoverned", &active, &edges, &outgoing, &incoming, None);
         // n1 is governed by edge, n2 has spec_path, n3 has neither
         assert!(result.contains("n3"), "n3 has no governance");
         assert!(!result.contains("n1"), "n1 has GovernedBy edge");
@@ -4680,14 +4695,8 @@ mod tests {
         let edges: Vec<GraphEdge> = vec![];
         let (outgoing, incoming) = build_adjacency(&edges);
         let active: Vec<&GraphNode> = nodes.iter().collect();
-        let result = resolve_computed_expression(
-            "$ungoverned",
-            &active,
-            &edges,
-            &outgoing,
-            &incoming,
-            None,
-        );
+        let result =
+            resolve_computed_expression("$ungoverned", &active, &edges, &outgoing, &incoming, None);
         assert!(!result.contains("s1"), "Spec nodes excluded");
         assert!(!result.contains("m1"), "Module nodes excluded");
         assert!(result.contains("f1"), "Ungoverned function included");
@@ -4720,6 +4729,9 @@ mod tests {
     #[test]
     fn test_validate_ungoverned_expression() {
         assert!(validate_computed_expression("$ungoverned").is_none());
-        assert!(validate_computed_expression("$intersect($where(complexity, '>', 10), $ungoverned)").is_none());
+        assert!(validate_computed_expression(
+            "$intersect($where(complexity, '>', 10), $ungoverned)"
+        )
+        .is_none());
     }
 }

@@ -668,7 +668,9 @@ mod tests {
         let defaults = system_default_views();
         for (name, _desc, query_json) in &defaults {
             let parsed: gyre_common::view_query::ViewQuery = serde_json::from_str(query_json)
-                .unwrap_or_else(|e| panic!("System view '{}' failed to parse as ViewQuery: {}", name, e));
+                .unwrap_or_else(|e| {
+                    panic!("System view '{}' failed to parse as ViewQuery: {}", name, e)
+                });
             let errors = parsed.validate();
             assert!(
                 errors.is_empty(),
