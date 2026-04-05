@@ -1417,12 +1417,9 @@ fn try_go_callgraph_binary(
     // methods with the same name on different types (e.g., FooService.Handle,
     // BarService.Handle) which are common in Go.
     let mut node_by_name: HashMap<&str, Vec<&GraphNode>> = HashMap::new();
-    for n in nodes
-        .iter()
-        .filter(|n| {
-            n.deleted_at.is_none() && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
-        })
-    {
+    for n in nodes.iter().filter(|n| {
+        n.deleted_at.is_none() && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
+    }) {
         node_by_name.entry(n.name.as_str()).or_default().push(n);
     }
 
