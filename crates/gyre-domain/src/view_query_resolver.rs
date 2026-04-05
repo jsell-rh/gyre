@@ -3870,6 +3870,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_diff_scope_accepts_branch_names() {
+        // Diff scope should accept branch names like "main", "HEAD", "v1.0"
+        let q = ViewQuery {
+            scope: Scope::Diff {
+                from_commit: "main".to_string(),
+                to_commit: "HEAD".to_string(),
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors = q.validate();
+        assert!(errors.is_empty(), "Branch names should be valid: {:?}", errors);
+
+        let q2 = ViewQuery {
+            scope: Scope::Diff {
+                from_commit: "feature/my-branch".to_string(),
+                to_commit: "v1.0.0".to_string(),
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let errors2 = q2.validate();
+        assert!(errors2.is_empty(), "Feature branch names should be valid: {:?}", errors2);
+    }
+
     // ── Unicode safety tests ──────────────────────────────────────────
 
     #[test]
@@ -4604,5 +4640,86 @@ mod tests {
         // n6 is at depth 6, should be excluded
         assert_eq!(result.len(), 6, "Default $callers depth should be 5 (root + 5 hops)");
         assert!(!result.contains("n6"), "n6 is at depth 6, should be excluded");
+    }
+
+    // ── $ungoverned ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ungoverned_returns_nodes_without_spec() {
+        let mut nodes = vec![
+            make_node("n1", "AuthService", NodeType::Type),
+            make_node("n2", "LoginHandler", NodeType::Function),
+            make_node("n3", "Unspecified", NodeType::Type),
+        ];
+        // n1 has GovernedBy edge
+        nodes[1].spec_path = Some("specs/auth.md".to_string());
+        let edges = vec![make_edge("e1", "n1", "spec_node", EdgeType::GovernedBy)];
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let result = resolve_computed_expression(
+            "$ungoverned",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        // n1 is governed by edge, n2 has spec_path, n3 has neither
+        assert!(result.contains("n3"), "n3 has no governance");
+        assert!(!result.contains("n1"), "n1 has GovernedBy edge");
+        assert!(!result.contains("n2"), "n2 has spec_path");
+    }
+
+    #[test]
+    fn test_ungoverned_excludes_spec_and_module_nodes() {
+        let mut spec_node = make_node("s1", "my_spec", NodeType::Spec);
+        spec_node.spec_path = None; // Spec node without spec_path still excluded
+        let mod_node = make_node("m1", "my_module", NodeType::Module);
+        let func_node = make_node("f1", "orphan_func", NodeType::Function);
+        let nodes = vec![spec_node, mod_node, func_node];
+        let edges: Vec<GraphEdge> = vec![];
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let result = resolve_computed_expression(
+            "$ungoverned",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(!result.contains("s1"), "Spec nodes excluded");
+        assert!(!result.contains("m1"), "Module nodes excluded");
+        assert!(result.contains("f1"), "Ungoverned function included");
+    }
+
+    #[test]
+    fn test_ungoverned_intersect_with_where() {
+        let mut nodes = vec![
+            make_node("n1", "SimpleFunc", NodeType::Function),
+            make_node("n2", "ComplexFunc", NodeType::Function),
+        ];
+        nodes[0].complexity = Some(5);
+        nodes[1].complexity = Some(15);
+        let edges: Vec<GraphEdge> = vec![];
+        let result = resolve_scope(
+            &Scope::Filter {
+                node_types: vec![],
+                computed: Some("$intersect($where(complexity, '>', 10), $ungoverned)".to_string()),
+                name_pattern: None,
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        assert_eq!(result.len(), 1, "Only complex ungoverned func");
+        assert!(result.contains("n2"), "ComplexFunc has complexity 15 > 10");
+        assert!(!result.contains("n1"), "SimpleFunc has complexity 5 <= 10");
+    }
+
+    #[test]
+    fn test_validate_ungoverned_expression() {
+        assert!(validate_computed_expression("$ungoverned").is_none());
+        assert!(validate_computed_expression("$intersect($where(complexity, '>', 10), $ungoverned)").is_none());
     }
 }
