@@ -43,7 +43,9 @@ pub trait SavedViewRepository: Send + Sync {
             .collect())
     }
     async fn update(&self, view: SavedView) -> Result<SavedView>;
-    async fn delete(&self, id: &Id) -> Result<()>;
+    /// Delete a view. Requires tenant_id for defense-in-depth: the WHERE clause
+    /// includes tenant_id to prevent cross-tenant deletion even with a valid ID.
+    async fn delete(&self, id: &Id, tenant_id: &Id) -> Result<()>;
     /// Delete a view with tenant_id guard for defense-in-depth.
     /// Returns true if a row was deleted, false if no matching row found.
     async fn delete_scoped(&self, id: &Id, tenant_id: &Id) -> Result<bool> {
@@ -53,7 +55,7 @@ pub trait SavedViewRepository: Send + Sync {
                 return Ok(false);
             }
         }
-        self.delete(id).await?;
+        self.delete(id, tenant_id).await?;
         Ok(true)
     }
 }

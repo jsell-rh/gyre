@@ -185,14 +185,21 @@ impl SavedViewRepository for SqliteStorage {
         .await?
     }
 
-    async fn delete(&self, id: &Id) -> Result<()> {
+    async fn delete(&self, id: &Id, tenant_id: &Id) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant_id = tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::delete(saved_views::table.find(id.as_str()))
-                .execute(&mut *conn)
-                .context("delete saved view")?;
+            // Defense-in-depth: include tenant_id in WHERE clause to prevent
+            // cross-tenant deletion even if the caller has a valid view ID.
+            diesel::delete(
+                saved_views::table
+                    .find(id.as_str())
+                    .filter(saved_views::tenant_id.eq(tenant_id.as_str())),
+            )
+            .execute(&mut *conn)
+            .context("delete saved view")?;
             Ok(())
         })
         .await?

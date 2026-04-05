@@ -481,7 +481,8 @@ pub async fn delete_view(
         }
     }
 
-    match state.saved_views.delete(&vid).await {
+    let tid = Id::new(&auth.tenant_id);
+    match state.saved_views.delete(&vid, &tid).await {
         Ok(()) => Ok(axum::http::StatusCode::NO_CONTENT),
         Err(e) => Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
