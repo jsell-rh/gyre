@@ -25,6 +25,8 @@
     activeAgents = [],
     /** @type {Array} All MRs for this repo (used for single-MR navigation) */
     failedMrs = [],
+    /** @type {Array} Merge queue items for this repo */
+    queueItems = [],
     onclick = undefined,
     onStatClick = undefined,
   } = $props();
@@ -98,6 +100,25 @@
             {#if latestMr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{latestMr._gates.passed}</span>{/if}
             {#if latestMr._gates.failed > 0}<span class="gate-mini gate-mini-fail">✗{latestMr._gates.failed}</span>{/if}
           </span>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Merge queue items for this repo -->
+    {#if queueItems.length > 0}
+      <div class="repo-queue-strip">
+        <span class="repo-queue-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><path d="M16 3h5v5M4 20L21 3"/></svg>
+        </span>
+        {#each queueItems.slice(0, 2) as item, i}
+          {@const mrTitle = item._title ?? entityName('mr', item.merge_request_id ?? item.mr_id)}
+          <button class="repo-queue-item" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('mr', item.merge_request_id ?? item.mr_id, item._mr ?? {}); }}>
+            <span class="repo-queue-pos">#{i + 1}</span>
+            <span class="repo-queue-title">{mrTitle}</span>
+          </button>
+        {/each}
+        {#if queueItems.length > 2}
+          <span class="repo-queue-more">+{queueItems.length - 2}</span>
         {/if}
       </div>
     {/if}
@@ -281,6 +302,63 @@
 
   .gate-mini-pass { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
   .gate-mini-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+
+  /* Merge queue strip */
+  .repo-queue-strip {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) 0;
+    font-size: var(--text-xs);
+  }
+
+  .repo-queue-icon {
+    color: var(--color-warning);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+  }
+
+  .repo-queue-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 1px 6px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--color-text-secondary);
+    transition: background var(--transition-fast);
+    max-width: 140px;
+    overflow: hidden;
+  }
+
+  .repo-queue-item:hover {
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    text-decoration: underline;
+  }
+
+  .repo-queue-pos {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-warning);
+    flex-shrink: 0;
+  }
+
+  .repo-queue-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .repo-queue-more {
+    color: var(--color-text-muted);
+    font-size: 10px;
+    flex-shrink: 0;
+  }
 
   /* Pipeline mini-flow */
   .repo-card-pipeline {
