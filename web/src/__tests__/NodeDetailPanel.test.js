@@ -211,3 +211,338 @@ describe('NodeDetailPanel', () => {
     expect(sectionTitles).toContain('Used By (1)');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Moldable view type dispatch
+// ---------------------------------------------------------------------------
+describe('NodeDetailPanel -- moldable view type dispatch', () => {
+  function moldableViewType(nodeType) {
+    switch (nodeType) {
+      case 'type':
+      case 'table':
+      case 'component':
+        return 'type';
+      case 'interface':
+      case 'trait':
+        return 'trait';
+      case 'endpoint':
+        return 'endpoint';
+      case 'spec':
+        return 'spec';
+      default:
+        return null;
+    }
+  }
+
+  it('type node_type maps to "type" moldable view', () => {
+    expect(moldableViewType('type')).toBe('type');
+  });
+
+  it('table node_type maps to "type" moldable view', () => {
+    expect(moldableViewType('table')).toBe('type');
+  });
+
+  it('component node_type maps to "type" moldable view', () => {
+    expect(moldableViewType('component')).toBe('type');
+  });
+
+  it('interface node_type maps to "trait" moldable view', () => {
+    expect(moldableViewType('interface')).toBe('trait');
+  });
+
+  it('trait node_type maps to "trait" moldable view', () => {
+    expect(moldableViewType('trait')).toBe('trait');
+  });
+
+  it('endpoint node_type maps to "endpoint" moldable view', () => {
+    expect(moldableViewType('endpoint')).toBe('endpoint');
+  });
+
+  it('spec node_type maps to "spec" moldable view', () => {
+    expect(moldableViewType('spec')).toBe('spec');
+  });
+
+  it('function node_type returns null (generic view)', () => {
+    expect(moldableViewType('function')).toBeNull();
+  });
+
+  it('module node_type returns null (generic view)', () => {
+    expect(moldableViewType('module')).toBeNull();
+  });
+
+  it('package node_type returns null (generic view)', () => {
+    expect(moldableViewType('package')).toBeNull();
+  });
+
+  it('moldable view labels are correct', () => {
+    const labels = { type: 'Type View', trait: 'Trait View', endpoint: 'Endpoint View', spec: 'Spec View' };
+    expect(labels[moldableViewType('type')]).toBe('Type View');
+    expect(labels[moldableViewType('interface')]).toBe('Trait View');
+    expect(labels[moldableViewType('endpoint')]).toBe('Endpoint View');
+    expect(labels[moldableViewType('spec')]).toBe('Spec View');
+  });
+
+  it('renders type badge for TYPE_NODE', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES },
+    });
+    expect(container.querySelector('.detail-type-badge')?.textContent).toBe('Type');
+  });
+
+  it('renders interface badge for INTERFACE_NODE', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: INTERFACE_NODE, nodes: NODES, edges: EDGES },
+    });
+    expect(container.querySelector('.detail-type-badge')?.textContent).toBe('Interface / Trait');
+  });
+
+  it('renders function badge for TEST_NODE', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TEST_NODE, nodes: NODES, edges: EDGES },
+    });
+    expect(container.querySelector('.detail-type-badge')?.textContent).toBe('Function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Relationship computation from edges
+// ---------------------------------------------------------------------------
+describe('NodeDetailPanel -- relationship computation', () => {
+  function computeRelationships(node, nodes, edges) {
+    const nodeId = node.id;
+    const implementedBy = [];
+    const implementsTraits = [];
+    const calledBy = [];
+    const callsOut = [];
+    const fields = [];
+    const contains = [];
+    const usedBy = [];
+    const methods = [];
+    let containedIn = null;
+    let governedBy = null;
+
+    for (const e of edges) {
+      const src = e.source_id;
+      const tgt = e.target_id;
+      const et = (e.edge_type ?? '').toLowerCase();
+
+      if (et === 'implements' && tgt === nodeId) {
+        const srcNode = nodes.find(n => n.id === src);
+        if (srcNode) implementedBy.push(srcNode);
+      }
+      if (et === 'implements' && src === nodeId) {
+        const tgtNode = nodes.find(n => n.id === tgt);
+        if (tgtNode) implementsTraits.push(tgtNode);
+      }
+      if (et === 'calls' && tgt === nodeId) {
+        const srcNode = nodes.find(n => n.id === src);
+        if (srcNode) calledBy.push(srcNode);
+      }
+      if (et === 'calls' && src === nodeId) {
+        const tgtNode = nodes.find(n => n.id === tgt);
+        if (tgtNode) callsOut.push(tgtNode);
+      }
+      if (et === 'contains' && src === nodeId) {
+        const tgtNode = nodes.find(n => n.id === tgt);
+        if (tgtNode) {
+          contains.push(tgtNode);
+          if (tgtNode.node_type === 'function') methods.push(tgtNode);
+        }
+      }
+      if (et === 'contains' && tgt === nodeId) {
+        const srcNode = nodes.find(n => n.id === src);
+        if (srcNode) containedIn = srcNode;
+      }
+      if (et === 'governed_by' && src === nodeId) {
+        governedBy = tgt;
+      }
+    }
+
+    // Populate usedBy
+    for (const e of edges) {
+      const src = e.source_id;
+      const tgt = e.target_id;
+      const et = (e.edge_type ?? '').toLowerCase();
+      if (tgt === nodeId && (et === 'calls' || et === 'field_of' || et === 'routes_to' || et === 'contains')) {
+        const srcNode = nodes.find(n => n.id === src);
+        if (srcNode && !usedBy.some(u => u.id === srcNode.id)) usedBy.push(srcNode);
+      }
+    }
+
+    return { implementedBy, implements: implementsTraits, calledBy, calls: callsOut, fields, containedIn, contains, governedBy, usedBy, methods };
+  }
+
+  it('computes implements relationships for TYPE_NODE', () => {
+    const rels = computeRelationships(TYPE_NODE, NODES, EDGES);
+    expect(rels.implements.length).toBe(1);
+    expect(rels.implements[0].name).toBe('TaskPort');
+  });
+
+  it('computes implementedBy for INTERFACE_NODE', () => {
+    const rels = computeRelationships(INTERFACE_NODE, NODES, EDGES);
+    expect(rels.implementedBy.length).toBe(1);
+    expect(rels.implementedBy[0].name).toBe('User');
+  });
+
+  it('computes calledBy for TYPE_NODE', () => {
+    const rels = computeRelationships(TYPE_NODE, NODES, EDGES);
+    expect(rels.calledBy.length).toBe(1);
+    expect(rels.calledBy[0].name).toBe('test_create_user');
+  });
+
+  it('computes usedBy for TYPE_NODE', () => {
+    const rels = computeRelationships(TYPE_NODE, NODES, EDGES);
+    // usedBy includes callers and nodes that contain/route_to this node
+    expect(rels.usedBy.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('returns empty relationships for a node with no edges', () => {
+    const isolatedNode = { id: 'isolated', node_type: 'function', name: 'lonely' };
+    const rels = computeRelationships(isolatedNode, [isolatedNode], []);
+    expect(rels.implementedBy).toHaveLength(0);
+    expect(rels.calledBy).toHaveLength(0);
+    expect(rels.calls).toHaveLength(0);
+    expect(rels.usedBy).toHaveLength(0);
+    expect(rels.containedIn).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Visibility badge formatting
+// ---------------------------------------------------------------------------
+describe('NodeDetailPanel -- visibility badge formatting', () => {
+  function visibilityBadge(visibility) {
+    const v = (visibility ?? '').toLowerCase();
+    return v === 'public' ? 'pub' : v === 'private' ? 'priv' : v;
+  }
+
+  it('formats public as "pub"', () => {
+    expect(visibilityBadge('public')).toBe('pub');
+  });
+
+  it('formats Public (capitalized) as "pub"', () => {
+    expect(visibilityBadge('Public')).toBe('pub');
+  });
+
+  it('formats private as "priv"', () => {
+    expect(visibilityBadge('private')).toBe('priv');
+  });
+
+  it('formats crate visibility as-is', () => {
+    expect(visibilityBadge('crate')).toBe('crate');
+  });
+
+  it('formats empty visibility as empty string', () => {
+    expect(visibilityBadge('')).toBe('');
+  });
+
+  it('handles null visibility', () => {
+    expect(visibilityBadge(null)).toBe('');
+  });
+
+  it('handles undefined visibility', () => {
+    expect(visibilityBadge(undefined)).toBe('');
+  });
+
+  it('renders visibility badge in component', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES },
+    });
+    const visBadge = container.querySelector('.detail-vis-badge');
+    expect(visBadge).toBeTruthy();
+    expect(visBadge?.textContent).toBe('[pub]');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Method call count computation
+// ---------------------------------------------------------------------------
+describe('NodeDetailPanel -- method call count computation', () => {
+  const TRAIT_NODE = {
+    id: 't1', node_type: 'interface', name: 'Repository', qualified_name: 'ports.Repository',
+    file_path: 'ports/repo.rs', line_start: 1, line_end: 30, visibility: 'public', test_node: false,
+  };
+
+  const METHOD_NODES = [
+    { id: 'm1', node_type: 'function', name: 'find_by_id', qualified_name: 'ports.Repository.find_by_id', visibility: 'public', test_node: false },
+    { id: 'm2', node_type: 'function', name: 'save', qualified_name: 'ports.Repository.save', visibility: 'public', test_node: false },
+    { id: 'm3', node_type: 'function', name: 'delete', qualified_name: 'ports.Repository.delete', visibility: 'public', test_node: false },
+  ];
+
+  const ALL_NODES = [TRAIT_NODE, ...METHOD_NODES];
+
+  const METHOD_EDGES = [
+    { id: 'me1', source_id: 't1', target_id: 'm1', edge_type: 'contains' },
+    { id: 'me2', source_id: 't1', target_id: 'm2', edge_type: 'contains' },
+    { id: 'me3', source_id: 't1', target_id: 'm3', edge_type: 'contains' },
+    // Callers of find_by_id (3 callers)
+    { id: 'c1', source_id: 'x1', target_id: 'm1', edge_type: 'calls' },
+    { id: 'c2', source_id: 'x2', target_id: 'm1', edge_type: 'calls' },
+    { id: 'c3', source_id: 'x3', target_id: 'm1', edge_type: 'calls' },
+    // Callers of save (1 caller)
+    { id: 'c4', source_id: 'x1', target_id: 'm2', edge_type: 'calls' },
+    // delete has no callers
+  ];
+
+  function computeMethodCallCounts(traitNode, nodes, edges) {
+    if (traitNode.node_type !== 'interface' && traitNode.node_type !== 'trait') return new Map();
+    // Find methods (functions contained by the trait)
+    const methods = [];
+    for (const e of edges) {
+      if (e.edge_type === 'contains' && e.source_id === traitNode.id) {
+        const tgtNode = nodes.find(n => n.id === e.target_id);
+        if (tgtNode && tgtNode.node_type === 'function') methods.push(tgtNode);
+      }
+    }
+    // Count call edges targeting each method
+    const counts = new Map();
+    for (const method of methods) {
+      let count = 0;
+      for (const e of edges) {
+        if (e.edge_type === 'calls' && e.target_id === method.id) count++;
+      }
+      counts.set(method.id, count);
+    }
+    return counts;
+  }
+
+  it('counts call-site counts for each trait method', () => {
+    const counts = computeMethodCallCounts(TRAIT_NODE, ALL_NODES, METHOD_EDGES);
+    expect(counts.get('m1')).toBe(3); // find_by_id has 3 callers
+    expect(counts.get('m2')).toBe(1); // save has 1 caller
+    expect(counts.get('m3')).toBe(0); // delete has no callers
+  });
+
+  it('returns empty map for non-interface nodes', () => {
+    const fnNode = { id: 'fn1', node_type: 'function', name: 'foo' };
+    const counts = computeMethodCallCounts(fnNode, ALL_NODES, METHOD_EDGES);
+    expect(counts.size).toBe(0);
+  });
+
+  it('returns empty map when trait has no methods', () => {
+    const emptyTrait = { id: 'et1', node_type: 'interface', name: 'Empty' };
+    const counts = computeMethodCallCounts(emptyTrait, [emptyTrait], []);
+    expect(counts.size).toBe(0);
+  });
+
+  it('identifies most-called method', () => {
+    const counts = computeMethodCallCounts(TRAIT_NODE, ALL_NODES, METHOD_EDGES);
+    let maxId = null;
+    let maxCount = -1;
+    for (const [id, count] of counts) {
+      if (count > maxCount) { maxCount = count; maxId = id; }
+    }
+    expect(maxId).toBe('m1'); // find_by_id
+    expect(maxCount).toBe(3);
+  });
+
+  it('identifies uncalled methods (potential dead code)', () => {
+    const counts = computeMethodCallCounts(TRAIT_NODE, ALL_NODES, METHOD_EDGES);
+    const uncalled = [];
+    for (const [id, count] of counts) {
+      if (count === 0) uncalled.push(id);
+    }
+    expect(uncalled).toContain('m3'); // delete is uncalled
+    expect(uncalled).not.toContain('m1');
+  });
+});

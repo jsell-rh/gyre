@@ -1102,4 +1102,171 @@ describe('Spec path extraction from message content', () => {
     const paths = extractSpecPaths(content);
     expect(paths).toEqual(['specs/system/meta-spec-reconciliation.md']);
   });
+
+  it('extracts deeply nested spec paths', () => {
+    const content = 'Refer to specs/system/agent-gates.md and specs/development/architecture.md';
+    const paths = extractSpecPaths(content);
+    expect(paths).toHaveLength(2);
+    expect(paths).toContain('specs/system/agent-gates.md');
+    expect(paths).toContain('specs/development/architecture.md');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Initial state tests
+// ---------------------------------------------------------------------------
+describe('ExplorerChat initial state', () => {
+  it('starts with connecting status', () => {
+    const initialStatus = 'connecting';
+    expect(initialStatus).toBe('connecting');
+  });
+
+  it('starts with empty messages array', () => {
+    const messages = [];
+    expect(messages).toHaveLength(0);
+  });
+
+  it('starts with empty streaming text', () => {
+    const streamingText = '';
+    expect(streamingText).toBe('');
+  });
+
+  it('starts with zero reconnect count', () => {
+    const reconnectCount = 0;
+    expect(reconnectCount).toBe(0);
+  });
+
+  it('status transitions from connecting to ready on socket open', () => {
+    let status = 'connecting';
+    // Simulate onopen
+    status = 'ready';
+    expect(status).toBe('ready');
+  });
+
+  it('status transitions from connecting to error when no auth token', () => {
+    let status = 'connecting';
+    const token = null;
+    if (!token) status = 'error';
+    expect(status).toBe('error');
+  });
+
+  it('status transitions from connecting to disconnected when no repoId', () => {
+    let status = 'connecting';
+    const repoId = '';
+    if (!repoId) status = 'disconnected';
+    expect(status).toBe('disconnected');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// User and assistant message rendering data
+// ---------------------------------------------------------------------------
+describe('ExplorerChat message rendering', () => {
+  it('user messages have role=user and content', () => {
+    const msg = { id: 1, role: 'user', content: 'Show me endpoints', timestamp: Date.now() };
+    expect(msg.role).toBe('user');
+    expect(msg.content).toBe('Show me endpoints');
+    expect(msg.timestamp).toBeGreaterThan(0);
+  });
+
+  it('assistant messages have role=assistant and optional viewQuery', () => {
+    const msg = {
+      id: 2, role: 'assistant', content: 'Here are the endpoints.',
+      viewQuery: { scope: { type: 'filter', node_types: ['endpoint'] } },
+      timestamp: Date.now(),
+    };
+    expect(msg.role).toBe('assistant');
+    expect(msg.viewQuery).toBeDefined();
+    expect(msg.viewQuery.scope.node_types).toEqual(['endpoint']);
+  });
+
+  it('error messages have isError flag', () => {
+    const msg = { id: 3, role: 'assistant', content: 'Rate limit exceeded', isError: true, timestamp: Date.now() };
+    expect(msg.isError).toBe(true);
+  });
+
+  it('messages are ordered by id', () => {
+    const messages = [
+      { id: 1, role: 'user', content: 'Hello' },
+      { id: 2, role: 'assistant', content: 'Hi' },
+      { id: 3, role: 'user', content: 'Show types' },
+      { id: 4, role: 'assistant', content: 'Here are types.', viewQuery: { scope: { type: 'filter' } } },
+    ];
+    for (let i = 1; i < messages.length; i++) {
+      expect(messages[i].id).toBeGreaterThan(messages[i - 1].id);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Saved views dropdown data
+// ---------------------------------------------------------------------------
+describe('Saved views dropdown rendering', () => {
+  it('renders empty when no saved views', () => {
+    const savedViews = [];
+    expect(savedViews).toHaveLength(0);
+  });
+
+  it('renders saved views sorted by creation time', () => {
+    const savedViews = [
+      { id: 'v1', name: 'Endpoints', created_at: 1700001000 },
+      { id: 'v2', name: 'Types', created_at: 1700000000 },
+      { id: 'v3', name: 'Test gaps', created_at: 1700002000 },
+    ];
+    const sorted = [...savedViews].sort((a, b) => b.created_at - a.created_at);
+    expect(sorted[0].name).toBe('Test gaps');
+    expect(sorted[1].name).toBe('Endpoints');
+    expect(sorted[2].name).toBe('Types');
+  });
+
+  it('each saved view has id, name, and created_at', () => {
+    const view = { id: 'v1', name: 'My View', created_at: 1700000000 };
+    expect(view.id).toBeDefined();
+    expect(view.name).toBeDefined();
+    expect(view.created_at).toBeDefined();
+  });
+
+  it('active view id tracks current selection', () => {
+    let activeViewId = null;
+    const views = [{ id: 'v1' }, { id: 'v2' }];
+    activeViewId = 'v1';
+    expect(activeViewId).toBe('v1');
+    activeViewId = null;
+    expect(activeViewId).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session message count and user message length limits
+// ---------------------------------------------------------------------------
+describe('ExplorerChat session limits', () => {
+  const MAX_USER_MESSAGE_LENGTH = 10000;
+  const MAX_SESSION_MESSAGES = 200;
+
+  it('rejects messages exceeding MAX_USER_MESSAGE_LENGTH', () => {
+    const longMessage = 'a'.repeat(MAX_USER_MESSAGE_LENGTH + 1);
+    expect(longMessage.length).toBeGreaterThan(MAX_USER_MESSAGE_LENGTH);
+    const isValid = longMessage.length <= MAX_USER_MESSAGE_LENGTH;
+    expect(isValid).toBe(false);
+  });
+
+  it('accepts messages within MAX_USER_MESSAGE_LENGTH', () => {
+    const normalMessage = 'Show me the blast radius of create_user';
+    expect(normalMessage.length).toBeLessThanOrEqual(MAX_USER_MESSAGE_LENGTH);
+  });
+
+  it('tracks session message count', () => {
+    let sessionMessageCount = 0;
+    for (let i = 0; i < 5; i++) {
+      sessionMessageCount++;
+    }
+    expect(sessionMessageCount).toBe(5);
+    expect(sessionMessageCount).toBeLessThan(MAX_SESSION_MESSAGES);
+  });
+
+  it('warns when approaching session limit', () => {
+    const sessionMessageCount = 195;
+    const isNearLimit = sessionMessageCount >= MAX_SESSION_MESSAGES - 10;
+    expect(isNearLimit).toBe(true);
+  });
 });

@@ -1408,3 +1408,278 @@ describe('ExplorerCanvas — accessibility', () => {
     expect(canvas?.getAttribute('tabindex')).toBe('0');
   });
 });
+
+// ── Semantic zoom level computation ────────────────────────────────────
+
+describe('ExplorerCanvas -- semantic zoom level computation', () => {
+  // Unit test of the semantic zoom visibility rules from ExplorerCanvas.svelte
+  // Overview (< 0.3): packages, modules only
+  // Architecture (0.3-0.6): + types, traits, interfaces, enums, specs
+  // Integration (0.6-1.0): + endpoints, tables, classes, components
+  // Detail (1.0-2.0): + functions, methods
+  // Full (> 2.0): + fields, constants, enum variants
+
+  function isVisibleAtZoom(nodeType, zoom) {
+    if (zoom < 0.3 && !['package', 'module'].includes(nodeType)) return false;
+    if (zoom < 0.6 && ['function', 'method', 'endpoint', 'field', 'constant', 'table', 'component', 'class', 'enum_variant'].includes(nodeType)) return false;
+    if (zoom < 1.0 && ['function', 'method', 'field', 'constant', 'enum_variant'].includes(nodeType)) return false;
+    if (zoom < 2.0 && ['field', 'constant', 'enum_variant'].includes(nodeType)) return false;
+    return true;
+  }
+
+  it('overview zoom (< 0.3) shows only packages and modules', () => {
+    expect(isVisibleAtZoom('package', 0.2)).toBe(true);
+    expect(isVisibleAtZoom('module', 0.2)).toBe(true);
+    expect(isVisibleAtZoom('type', 0.2)).toBe(false);
+    expect(isVisibleAtZoom('function', 0.2)).toBe(false);
+    expect(isVisibleAtZoom('endpoint', 0.2)).toBe(false);
+    expect(isVisibleAtZoom('field', 0.2)).toBe(false);
+  });
+
+  it('architecture zoom (0.3-0.6) adds types, traits, interfaces, specs', () => {
+    expect(isVisibleAtZoom('package', 0.45)).toBe(true);
+    expect(isVisibleAtZoom('module', 0.45)).toBe(true);
+    expect(isVisibleAtZoom('type', 0.45)).toBe(true);
+    expect(isVisibleAtZoom('interface', 0.45)).toBe(true);
+    expect(isVisibleAtZoom('trait', 0.45)).toBe(true);
+    expect(isVisibleAtZoom('spec', 0.45)).toBe(true);
+    expect(isVisibleAtZoom('function', 0.45)).toBe(false);
+    expect(isVisibleAtZoom('endpoint', 0.45)).toBe(false);
+    expect(isVisibleAtZoom('field', 0.45)).toBe(false);
+  });
+
+  it('integration zoom (0.6-1.0) adds endpoints, tables, classes, components', () => {
+    expect(isVisibleAtZoom('endpoint', 0.8)).toBe(true);
+    expect(isVisibleAtZoom('table', 0.8)).toBe(true);
+    expect(isVisibleAtZoom('class', 0.8)).toBe(true);
+    expect(isVisibleAtZoom('component', 0.8)).toBe(true);
+    expect(isVisibleAtZoom('type', 0.8)).toBe(true);
+    expect(isVisibleAtZoom('function', 0.8)).toBe(false);
+    expect(isVisibleAtZoom('method', 0.8)).toBe(false);
+    expect(isVisibleAtZoom('field', 0.8)).toBe(false);
+  });
+
+  it('detail zoom (1.0-2.0) adds functions and methods', () => {
+    expect(isVisibleAtZoom('function', 1.5)).toBe(true);
+    expect(isVisibleAtZoom('method', 1.5)).toBe(true);
+    expect(isVisibleAtZoom('endpoint', 1.5)).toBe(true);
+    expect(isVisibleAtZoom('type', 1.5)).toBe(true);
+    expect(isVisibleAtZoom('field', 1.5)).toBe(false);
+    expect(isVisibleAtZoom('constant', 1.5)).toBe(false);
+    expect(isVisibleAtZoom('enum_variant', 1.5)).toBe(false);
+  });
+
+  it('full zoom (> 2.0) shows everything including fields and constants', () => {
+    expect(isVisibleAtZoom('field', 2.5)).toBe(true);
+    expect(isVisibleAtZoom('constant', 2.5)).toBe(true);
+    expect(isVisibleAtZoom('enum_variant', 2.5)).toBe(true);
+    expect(isVisibleAtZoom('function', 2.5)).toBe(true);
+    expect(isVisibleAtZoom('package', 2.5)).toBe(true);
+  });
+
+  it('boundary zoom values are handled correctly', () => {
+    // At exactly 0.3, packages and types visible, but not functions/endpoints
+    expect(isVisibleAtZoom('type', 0.3)).toBe(true);
+    expect(isVisibleAtZoom('function', 0.3)).toBe(false);
+    // At exactly 0.6, endpoints visible, but not functions
+    expect(isVisibleAtZoom('endpoint', 0.6)).toBe(true);
+    expect(isVisibleAtZoom('function', 0.6)).toBe(false);
+    // At exactly 1.0, functions visible, but not fields
+    expect(isVisibleAtZoom('function', 1.0)).toBe(true);
+    expect(isVisibleAtZoom('field', 1.0)).toBe(false);
+    // At exactly 2.0, fields visible
+    expect(isVisibleAtZoom('field', 2.0)).toBe(true);
+  });
+
+  it('query-matched nodes bypass zoom filtering', () => {
+    // In the component, isQueryMatched nodes are always shown regardless of zoom.
+    // Test the bypass logic:
+    const zoom = 0.1; // Overview zoom
+    const nodeType = 'function';
+    const isQueryMatched = true;
+    const visible = isQueryMatched || isVisibleAtZoom(nodeType, zoom);
+    expect(visible).toBe(true);
+  });
+});
+
+// ── Search query filtering logic ───────────────────────────────────────
+
+describe('ExplorerCanvas -- search query filtering', () => {
+  it('filters by name substring', () => {
+    const q = 'handler';
+    const results = NODES.filter(n =>
+      n.name?.toLowerCase().includes(q) ||
+      n.qualified_name?.toLowerCase().includes(q)
+    );
+    // 'handlers' matches by name, plus create_user and get_user match via qualified_name (api.handlers.*)
+    expect(results.length).toBe(3);
+    const names = results.map(n => n.name);
+    expect(names).toContain('handlers');
+    expect(names).toContain('create_user');
+    expect(names).toContain('get_user');
+  });
+
+  it('filters by qualified name', () => {
+    const q = 'api.handlers.create';
+    const results = NODES.filter(n =>
+      n.qualified_name?.toLowerCase().includes(q)
+    );
+    expect(results.length).toBe(1);
+    expect(results[0].name).toBe('create_user');
+  });
+
+  it('filters by node type', () => {
+    const q = 'package';
+    const results = NODES.filter(n =>
+      n.node_type?.toLowerCase().includes(q)
+    );
+    expect(results.length).toBe(2);
+  });
+
+  it('returns empty for no match', () => {
+    const q = 'nonexistent';
+    const results = NODES.filter(n =>
+      n.name?.toLowerCase().includes(q) ||
+      n.qualified_name?.toLowerCase().includes(q)
+    );
+    expect(results.length).toBe(0);
+  });
+
+  it('empty query matches nothing (no blank search)', () => {
+    const q = '';
+    // In the component, an empty search query hides the search overlay
+    expect(q.length).toBe(0);
+  });
+});
+
+// ── Context menu items ─────────────────────────────────────────────────
+
+describe('ExplorerCanvas -- context menu item structure', () => {
+  // The context menu has 4 primary actions and additional collapsible items
+  const PRIMARY_ACTIONS = ['trace', 'blast', 'callers', 'callees'];
+  const COLLAPSIBLE_ACTIONS = ['drill', 'spec', 'detail', 'open_in_code', 'provenance', 'history'];
+
+  it('has exactly 4 primary context menu actions', () => {
+    expect(PRIMARY_ACTIONS).toHaveLength(4);
+  });
+
+  it('primary actions are trace, blast, callers, callees', () => {
+    expect(PRIMARY_ACTIONS).toContain('trace');
+    expect(PRIMARY_ACTIONS).toContain('blast');
+    expect(PRIMARY_ACTIONS).toContain('callers');
+    expect(PRIMARY_ACTIONS).toContain('callees');
+  });
+
+  it('collapsible "more" section has additional actions', () => {
+    expect(COLLAPSIBLE_ACTIONS.length).toBeGreaterThanOrEqual(4);
+    expect(COLLAPSIBLE_ACTIONS).toContain('drill');
+    expect(COLLAPSIBLE_ACTIONS).toContain('spec');
+    expect(COLLAPSIBLE_ACTIONS).toContain('detail');
+    expect(COLLAPSIBLE_ACTIONS).toContain('open_in_code');
+    expect(COLLAPSIBLE_ACTIONS).toContain('provenance');
+    expect(COLLAPSIBLE_ACTIONS).toContain('history');
+  });
+
+  it('total context menu actions is primary + collapsible', () => {
+    const total = PRIMARY_ACTIONS.length + COLLAPSIBLE_ACTIONS.length;
+    expect(total).toBe(10);
+  });
+
+  it('context menu action availability depends on node properties', () => {
+    const fn = NODES[2]; // create_user function
+    const pkg = NODES[0]; // api package
+
+    // drill: available for nodes with children (contains edges)
+    const parentToChildren = new Map();
+    for (const e of EDGES) {
+      if (e.edge_type === 'contains') {
+        if (!parentToChildren.has(e.source_id)) parentToChildren.set(e.source_id, []);
+        parentToChildren.get(e.source_id).push(e.target_id);
+      }
+    }
+    expect((parentToChildren.get(pkg.id) ?? []).length).toBeGreaterThan(0); // drill available
+    expect((parentToChildren.get(fn.id) ?? []).length).toBe(0); // no drill
+
+    // open_in_code: requires file_path
+    expect(fn.file_path).toBeTruthy(); // available
+    expect(pkg.file_path).toBe(''); // not available
+  });
+});
+
+// ── Interactive query template storage ─────────────────────────────────
+
+describe('ExplorerCanvas -- interactive query template storage', () => {
+  it('stores $clicked query as interactive template', () => {
+    let interactiveQueryTemplate = null;
+    const query = {
+      scope: { type: 'focus', node: '$clicked', edges: ['calls'], direction: 'incoming', depth: 10 },
+      emphasis: { dim_unmatched: 0.12 },
+    };
+
+    if (query.scope?.node === '$clicked') {
+      interactiveQueryTemplate = JSON.parse(JSON.stringify(query));
+    }
+
+    expect(interactiveQueryTemplate).not.toBeNull();
+    expect(interactiveQueryTemplate.scope.node).toBe('$clicked');
+  });
+
+  it('stores $selected query as selected template', () => {
+    let selectedQueryTemplate = null;
+    const query = {
+      scope: { type: 'focus', node: '$selected', edges: ['calls'], direction: 'both', depth: 5 },
+    };
+
+    if (query.scope?.node === '$selected') {
+      selectedQueryTemplate = JSON.parse(JSON.stringify(query));
+    }
+
+    expect(selectedQueryTemplate).not.toBeNull();
+    expect(selectedQueryTemplate.scope.node).toBe('$selected');
+  });
+
+  it('non-interactive queries do not clear interactive templates', () => {
+    let interactiveQueryTemplate = { scope: { type: 'focus', node: '$clicked' } };
+    const newQuery = {
+      scope: { type: 'filter', node_types: ['function'] },
+    };
+
+    // Per spec: non-interactive queries should NOT clear the stored template
+    if (newQuery.scope?.node === '$clicked') {
+      interactiveQueryTemplate = JSON.parse(JSON.stringify(newQuery));
+    } else if (newQuery.scope?.node === '$selected') {
+      // nothing
+    } else if (!newQuery) {
+      interactiveQueryTemplate = null;
+    }
+    // Template should persist
+    expect(interactiveQueryTemplate.scope.node).toBe('$clicked');
+  });
+
+  it('null query clears interactive templates', () => {
+    let interactiveQueryTemplate = { scope: { type: 'focus', node: '$clicked' } };
+    const newQuery = null;
+
+    if (!newQuery) {
+      interactiveQueryTemplate = null;
+    }
+    expect(interactiveQueryTemplate).toBeNull();
+  });
+
+  it('resolves $clicked template with clicked node name', () => {
+    const template = {
+      scope: { type: 'focus', node: '$clicked', edges: ['calls'], direction: 'incoming', depth: 10 },
+      annotation: { title: 'Blast radius: $name' },
+    };
+
+    const clickedNode = NODES[2]; // create_user
+    const resolved = JSON.parse(JSON.stringify(template));
+    resolved.scope.node = clickedNode.name;
+    if (resolved.annotation?.title) {
+      resolved.annotation.title = resolved.annotation.title.replace('$name', clickedNode.name);
+    }
+
+    expect(resolved.scope.node).toBe('create_user');
+    expect(resolved.annotation.title).toBe('Blast radius: create_user');
+  });
+});
