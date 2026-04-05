@@ -625,6 +625,9 @@
   // ── Activity pagination ──────────────────────────────────────
   let activityLimit = $state(8);
 
+  // Collapse activity when there's active work happening
+  let activityCollapsed = $derived(wsAgents.some(a => a.status === 'active') || wsTasks.some(t => t.status === 'in_progress'));
+
   // ── Pipeline hero stage click → show inline detail popover ──────────
   let expandedStage = $state(null); // null | 'specs' | 'tasks' | 'agents' | 'mrs'
 
@@ -1202,11 +1205,14 @@
         </div>
       {/if}
 
-      <!-- ── Main content: two-column layout ──────────────────────── -->
-      <div class="ws-two-col">
+      <!-- ── Briefing banner (subtle, under header) ──────────────── -->
+      {#if !briefingLoading && briefingData?.summary}
+        <div class="ws-briefing-banner">
+          <p class="ws-briefing-banner-text">{briefingData.summary}</p>
+        </div>
+      {/if}
 
-        <!-- Left column: Actions + Activity feed -->
-        <div class="ws-col-primary">
+      <!-- ── Main content: single-column priority layout ──────── -->
 
           <!-- Action Needed (compact, dismissible) -->
           {#if !decisionsLoading && actionableNotifications.length > 0}
@@ -1288,82 +1294,7 @@
             </section>
           {/if}
 
-          <!-- Recent Activity -->
-          <section class="activity-section" data-testid="section-activity">
-            <h2 class="section-heading">Recent Activity</h2>
-            {#if activityLoading}
-              <div class="skeleton-row"></div>
-            {:else if activityEvents.length === 0}
-              <p class="empty-text">No recent activity.</p>
-            {:else}
-              <div class="activity-timeline">
-                {#each activityEvents.slice(0, activityLimit) as event, i}
-                  {@const variant = activityVariant(event)}
-                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                  <button
-                    class="activity-item activity-item-clickable"
-                    onclick={() => {
-                      if (primaryType && primaryId) {
-                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                        nav(primaryType, primaryId, data);
-                      }
-                    }}
-                  >
-                    <div class="activity-dot activity-dot-{variant}"></div>
-                    {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                    <div class="activity-content">
-                      <div class="activity-main-row">
-                        <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
-                        <span class="activity-label">{activityLabel(event)}</span>
-                        {#if event.entity_name ?? event.title}
-                          <span class="activity-detail">{event.entity_name ?? event.title}</span>
-                        {/if}
-                        {#if event.repo_id && repoMap[event.repo_id]}
-                          <span class="activity-repo">{repoMap[event.repo_id].name}</span>
-                        {/if}
-                        {#if event.timestamp ?? event.created_at}
-                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                        {/if}
-                      </div>
-                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
-                      {/if}
-                      {#if (event.agent_id && primaryType !== 'agent') || (event.mr_id && primaryType !== 'mr') || (event.spec_path && primaryType !== 'spec')}
-                        <div class="activity-refs">
-                          {#if event.agent_id && primaryType !== 'agent'}
-                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }}>
-                              <Icon name="agent" size={10} /> {entityName('agent', event.agent_id)}
-                            </button>
-                          {/if}
-                          {#if event.mr_id && primaryType !== 'mr'}
-                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }}>
-                              <Icon name="git-merge" size={10} /> {entityName('mr', event.mr_id)}
-                            </button>
-                          {/if}
-                          {#if event.spec_path && primaryType !== 'spec'}
-                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }}>
-                              <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                            </button>
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
-                  </button>
-                {/each}
-              </div>
-              {#if activityEvents.length > activityLimit}
-                <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
-                  Show more ({activityEvents.length - activityLimit} remaining)
-                </button>
-              {/if}
-            {/if}
-          </section>
-        </div><!-- .ws-col-primary -->
-
-        <!-- Right column: Repos + Merge Queue -->
-        <div class="ws-col-secondary">
-          <!-- Repos -->
+          <!-- Repos (primary content) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
               <h2 class="section-heading">Repositories</h2>
@@ -1491,16 +1422,84 @@
             </section>
           {/if}
 
-          <!-- Workspace briefing (AI-generated summary) -->
-          {#if !briefingLoading && briefingData?.summary}
-            <div class="ws-briefing-compact">
-              <h2 class="section-heading">Briefing</h2>
-              <p class="ws-briefing-summary">{briefingData.summary}</p>
-            </div>
-          {/if}
-        </div><!-- .ws-col-secondary -->
+      <!-- briefing moved to banner above -->
 
-      </div><!-- .ws-two-col -->
+          <!-- Recent Activity (collapsed when there's active work) -->
+          <details class="activity-details" open={!activityCollapsed && activityEvents.length > 0} data-testid="section-activity">
+            <summary class="activity-summary">
+              <h2 class="section-heading section-heading-inline">Recent Activity</h2>
+              {#if activityEvents.length > 0}
+                <span class="activity-count-badge">{activityEvents.length}</span>
+              {/if}
+            </summary>
+            {#if activityLoading}
+              <div class="skeleton-row"></div>
+            {:else if activityEvents.length === 0}
+              <p class="empty-text">No recent activity.</p>
+            {:else}
+              <div class="activity-timeline">
+                {#each activityEvents.slice(0, activityLimit) as event, i}
+                  {@const variant = activityVariant(event)}
+                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                  <button
+                    class="activity-item activity-item-clickable"
+                    onclick={() => {
+                      if (primaryType && primaryId) {
+                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                        nav(primaryType, primaryId, data);
+                      }
+                    }}
+                  >
+                    <div class="activity-dot activity-dot-{variant}"></div>
+                    {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                    <div class="activity-content">
+                      <div class="activity-main-row">
+                        <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
+                        <span class="activity-label">{activityLabel(event)}</span>
+                        {#if event.entity_name ?? event.title}
+                          <span class="activity-detail">{event.entity_name ?? event.title}</span>
+                        {/if}
+                        {#if event.repo_id && repoMap[event.repo_id]}
+                          <span class="activity-repo">{repoMap[event.repo_id].name}</span>
+                        {/if}
+                        {#if event.timestamp ?? event.created_at}
+                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                        {/if}
+                      </div>
+                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
+                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
+                      {/if}
+                      {#if (event.agent_id && primaryType !== 'agent') || (event.mr_id && primaryType !== 'mr') || (event.spec_path && primaryType !== 'spec')}
+                        <div class="activity-refs">
+                          {#if event.agent_id && primaryType !== 'agent'}
+                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }}>
+                              <Icon name="agent" size={10} /> {entityName('agent', event.agent_id)}
+                            </button>
+                          {/if}
+                          {#if event.mr_id && primaryType !== 'mr'}
+                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }}>
+                              <Icon name="git-merge" size={10} /> {entityName('mr', event.mr_id)}
+                            </button>
+                          {/if}
+                          {#if event.spec_path && primaryType !== 'spec'}
+                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }}>
+                              <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
+                            </button>
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  </button>
+                {/each}
+              </div>
+              {#if activityEvents.length > activityLimit}
+                <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
+                  Show more ({activityEvents.length - activityLimit} remaining)
+                </button>
+              {/if}
+            {/if}
+          </details>
 
     </div><!-- .focused-dashboard -->
   {/if}
@@ -1841,6 +1840,49 @@
     flex-direction: column;
   }
 
+  .activity-details {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .activity-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+  }
+
+  .activity-summary::-webkit-details-marker { display: none; }
+
+  .activity-summary::marker { content: ''; }
+
+  .section-heading-inline {
+    margin: 0;
+    padding: 0;
+  }
+
+  .activity-count-badge {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+  }
+
+  .activity-details[open] .activity-summary {
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .activity-details .activity-timeline {
+    padding: var(--space-2) var(--space-3);
+  }
+
   /* ── Merge queue compact ──────────────────────────────────── */
   .merge-queue-compact {
     border: 1px solid color-mix(in srgb, var(--color-warning) 30%, var(--color-border));
@@ -2111,9 +2153,15 @@
   }
 
   .repo-cards-list {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
     gap: var(--space-2);
+  }
+
+  @media (max-width: 768px) {
+    .repo-cards-list {
+      grid-template-columns: 1fr;
+    }
   }
 
   /* ── Workspace header ────────────────────────────────────────────── */
@@ -2351,6 +2399,22 @@
     margin: 0;
     line-height: 1.4;
     font-weight: 500;
+  }
+
+  .ws-briefing-banner {
+    padding: var(--space-2) var(--space-3);
+    border-left: 3px solid var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 3%, var(--color-surface));
+    border-radius: 0 var(--radius) var(--radius) 0;
+  }
+
+  .ws-briefing-banner-text {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    line-height: 1.4;
+    font-style: italic;
+    max-width: 800px;
   }
 
   .ws-briefing-inline {
