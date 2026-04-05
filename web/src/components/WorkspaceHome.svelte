@@ -1340,15 +1340,18 @@
                     <p class="ws-overview-empty">No tasks. Tasks are auto-created when specs are approved.</p>
                   {:else}
                     <table class="ws-overview-table">
-                      <thead><tr><th>Status</th><th>Title</th><th>Priority</th><th>Spec</th><th>Agent</th><th>Updated</th></tr></thead>
+                      <thead><tr><th>Status</th><th>Title</th><th>Priority</th><th>Spec</th><th>Agent</th><th>Repo</th><th>Updated</th></tr></thead>
                       <tbody>
                         {#each wsTasks.slice(0, 20) as task}
-                          <tr class="ws-overview-row" onclick={() => nav('task', task.id, task)} tabindex="0" role="button">
-                            <td><span class="ws-status-dot ws-status-{task.status}">{task.status === 'done' ? '✓' : task.status === 'in_progress' ? '◉' : task.status === 'blocked' ? '✗' : '○'}</span> {task.status?.replace(/_/g, ' ')}</td>
+                          {@const statusLabel = task.status === 'in_progress' ? 'in progress' : task.status?.replace(/_/g, ' ') ?? ''}
+                          {@const statusWhy = task.status === 'blocked' ? 'Blocked — waiting on dependency' : task.status === 'done' ? 'Completed' : task.status === 'in_progress' ? 'Agent is implementing' : task.status === 'review' ? 'Implementation complete, under review' : ''}
+                          <tr class="ws-overview-row" onclick={() => nav('task', task.id, task)} tabindex="0" role="button" title={statusWhy}>
+                            <td><span class="ws-status-dot ws-status-{task.status}">{task.status === 'done' ? '✓' : task.status === 'in_progress' ? '◉' : task.status === 'blocked' ? '✗' : task.status === 'review' ? '⊘' : '○'}</span> {statusLabel}</td>
                             <td class="cell-title">{task.title ?? 'Untitled'}</td>
-                            <td>{task.priority ?? ''}</td>
+                            <td><span class="priority-pill priority-{task.priority ?? 'low'}">{task.priority ?? ''}</span></td>
                             <td class="cell-mono">{#if task.spec_path}{task.spec_path.split('/').pop()?.replace(/\.md$/, '')}{/if}</td>
                             <td class="cell-mono">{#if task.assigned_to}{entityName('agent', task.assigned_to)}{/if}</td>
+                            <td class="cell-mono">{#if task.repo_id && repoMap[task.repo_id]}{repoMap[task.repo_id].name}{/if}</td>
                             <td class="cell-time">{relTime(task.updated_at ?? task.created_at)}</td>
                           </tr>
                         {/each}
@@ -1407,17 +1410,18 @@
                     <p class="ws-overview-empty">No agents. Agents are spawned when tasks are assigned.</p>
                   {:else}
                     <table class="ws-overview-table">
-                      <thead><tr><th>Status</th><th>Name</th><th>Task</th><th>Spec</th><th>Repo</th><th>Started</th></tr></thead>
+                      <thead><tr><th>Status</th><th>Name</th><th>Task</th><th>Spec</th><th>Repo</th><th>Duration</th></tr></thead>
                       <tbody>
                         {#each wsAgents.slice(0, 20) as agent}
                           {@const agentStatus = agent.status ?? 'unknown'}
+                          {@const elapsed = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
                           <tr class="ws-overview-row" onclick={() => nav('agent', agent.id, agent)} tabindex="0" role="button">
                             <td><span class="ws-status-dot ws-status-{agentStatus}">{agentStatus === 'active' || agentStatus === 'running' ? '◉' : agentStatus === 'completed' || agentStatus === 'idle' ? '✓' : agentStatus === 'failed' || agentStatus === 'dead' ? '✗' : '○'}</span> {agentStatus}</td>
                             <td class="cell-title">{agent.name ?? formatId('agent', agent.id)}</td>
                             <td class="cell-mono">{#if agent.task_id ?? agent.current_task_id}{entityName('task', agent.task_id ?? agent.current_task_id)}{/if}</td>
                             <td class="cell-mono">{#if agent.spec_path}{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}{/if}</td>
                             <td class="cell-mono">{#if agent.repo_id && repoMap[agent.repo_id]}{repoMap[agent.repo_id].name}{/if}</td>
-                            <td class="cell-time">{relTime(agent.created_at ?? agent.spawned_at)}</td>
+                            <td class="cell-time" title={absTime(agent.created_at ?? agent.spawned_at)}>{elapsed != null ? formatDuration(elapsed) : relTime(agent.created_at ?? agent.spawned_at)}</td>
                           </tr>
                         {/each}
                       </tbody>
