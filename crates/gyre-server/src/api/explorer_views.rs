@@ -107,7 +107,7 @@ pub struct GenerateViewRequest {
 
 // ── Built-in view seeding (uses SavedViewRepository) ─────────────────────────
 
-/// Seed the 4 system default views for a workspace if they haven't been seeded.
+/// Seed system default views for a workspace if they haven't been seeded.
 ///
 /// Uses the same canonical defaults as the repo-scoped saved_views API.
 /// The check-then-insert race is handled by INSERT OR IGNORE at the adapter level.

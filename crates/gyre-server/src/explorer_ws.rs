@@ -1668,7 +1668,7 @@ async fn run_explorer_agent(
     user_question: &str,
     canvas_state: &gyre_common::view_query::CanvasState,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    receiver: &mut futures_util::stream::SplitStream<WebSocket>,
+    _receiver: &mut futures_util::stream::SplitStream<WebSocket>,
     conversation_history: &mut Vec<ConversationMessage>,
     cached_nodes: &mut Option<Vec<gyre_common::graph::GraphNode>>,
     cached_edges: &mut Option<Vec<gyre_common::graph::GraphEdge>>,
