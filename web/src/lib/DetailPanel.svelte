@@ -1870,6 +1870,37 @@
               </div>
             {:else}
               {@const mr = mrDetail ?? entity.data ?? {}}
+              <!-- Quick action bar — most important actions immediately visible -->
+              <div class="mr-quick-actions">
+                <button class="mr-quick-btn mr-quick-diff" onclick={() => { activeTab = 'diff'; }} title="View code changes">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M12 3v18M3 12h18"/></svg>
+                  Diff{#if mr.diff_stats} <span class="mr-quick-stat">+{mr.diff_stats.insertions ?? 0} -{mr.diff_stats.deletions ?? 0}</span>{/if}
+                </button>
+                <button class="mr-quick-btn mr-quick-gates" onclick={() => { activeTab = 'gates'; }} title="View quality gate results">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 12l2 2 4-4"/></svg>
+                  Gates{#if mr._gateSummary} <span class="mr-quick-stat mr-quick-stat-{mr._gateSummary.failed > 0 ? 'danger' : 'success'}">{mr._gateSummary.passed}/{mr._gateSummary.total}</span>{/if}
+                </button>
+                <button class="mr-quick-btn mr-quick-timeline" onclick={() => { activeTab = 'timeline'; }} title="View SDLC event timeline">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                  Timeline
+                </button>
+                {#if mr.status === 'merged'}
+                  <button class="mr-quick-btn mr-quick-attestation" onclick={() => { activeTab = 'attestation'; }} title="View signed attestation bundle">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    Attestation
+                  </button>
+                {/if}
+                {#if mr.status === 'open' && !mr.queue_position}
+                  <button class="mr-quick-btn mr-quick-enqueue" onclick={async () => {
+                    enqueueing = true;
+                    try { await api.enqueue(entity.id); toastSuccess('MR enqueued — gates will run'); } catch (err) { toastError('Enqueue failed: ' + (err?.message ?? err)); }
+                    finally { enqueueing = false; }
+                  }} disabled={enqueueing} title="Add to merge queue for gate execution">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
+                    {enqueueing ? 'Enqueuing...' : 'Enqueue'}
+                  </button>
+                {/if}
+              </div>
               <!-- Prominent status journey block — click steps to see details -->
               {#if mr._statusStory?.length > 0}
                 <div class="mr-status-journey">
@@ -2027,11 +2058,32 @@
                     </span>
                     {#if mr.status === 'merged'}
                       <span class="provenance-arrow">&#x2192;</span>
-                      <span class="provenance-node provenance-code">
-                        <span class="provenance-icon prov-icon-code"></span>
-                        <span class="provenance-type">Merged</span>
-                        <span class="provenance-name">{mr.diff_stats ? `+${mr.diff_stats.insertions ?? 0} -${mr.diff_stats.deletions ?? 0}` : (mr.merged_at ? relativeTime(mr.merged_at) || formatDate(mr.merged_at) : 'merged')}</span>
-                      </span>
+                      {#if goToRepoTab}
+                        <button class="provenance-node provenance-code" onclick={() => { goToRepoTab('code', { subTab: 'files' }); close(); }} title="View merged code in explorer">
+                          <span class="provenance-icon prov-icon-code"></span>
+                          <span class="provenance-type">Code</span>
+                          <span class="provenance-name">{mr.diff_stats ? `+${mr.diff_stats.insertions ?? 0} -${mr.diff_stats.deletions ?? 0}` : 'view'}</span>
+                        </button>
+                      {:else}
+                        <span class="provenance-node provenance-code">
+                          <span class="provenance-icon prov-icon-code"></span>
+                          <span class="provenance-type">Merged</span>
+                          <span class="provenance-name">{mr.diff_stats ? `+${mr.diff_stats.insertions ?? 0} -${mr.diff_stats.deletions ?? 0}` : (mr.merged_at ? relativeTime(mr.merged_at) || formatDate(mr.merged_at) : 'merged')}</span>
+                        </span>
+                      {/if}
+                      <span class="provenance-arrow">&#x2192;</span>
+                      {#if goToRepoTab}
+                        <button class="provenance-node provenance-graph" onclick={() => { goToRepoTab('architecture'); close(); }} title="View architecture graph">
+                          <span class="provenance-icon prov-icon-graph"></span>
+                          <span class="provenance-type">Graph</span>
+                          <span class="provenance-name">architecture</span>
+                        </button>
+                      {:else}
+                        <span class="provenance-node provenance-graph">
+                          <span class="provenance-icon prov-icon-graph"></span>
+                          <span class="provenance-type">Graph</span>
+                        </span>
+                      {/if}
                     {/if}
                   </div>
                 </div>
@@ -2245,6 +2297,35 @@
               </div>
             {:else}
               {@const ag = agentDetail ?? entity.data ?? {}}
+              <!-- Quick action bar for agents -->
+              <div class="mr-quick-actions">
+                {#if ag.status === 'active'}
+                  <button class="mr-quick-btn mr-quick-diff" onclick={() => { activeTab = 'chat'; }} title="View live agent conversation">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                    Live Chat
+                  </button>
+                {/if}
+                <button class="mr-quick-btn" onclick={() => { activeTab = 'history'; }} title="View agent log output">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 7h10M7 12h10M7 17h6"/></svg>
+                  Logs
+                </button>
+                <button class="mr-quick-btn" onclick={() => { activeTab = 'trace'; }} title="View execution trace spans">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                  Trace
+                </button>
+                {#if ag.conversation_sha}
+                  <button class="mr-quick-btn" onclick={() => { activeTab = 'ask-why'; }} title="View full agent reasoning transcript">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+                    Why?
+                  </button>
+                {/if}
+                {#if ag.mr_id}
+                  <button class="mr-quick-btn" onclick={() => navigateTo('mr', ag.mr_id)} title="View the MR this agent created">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M5 3v6a4 4 0 004 4h2M5 3L3 5M5 3l2 2M15 7v6a4 4 0 01-4 4h-2"/></svg>
+                    View MR
+                  </button>
+                {/if}
+              </div>
               {#if ag.status && ag.status !== 'pending'}
                 {@const phases = (() => {
                   const p = [{ label: 'Spawned', variant: 'info', time: ag.created_at }];
@@ -2625,6 +2706,27 @@
               </div>
             {:else}
               {@const tk = taskDetail ?? entity.data ?? {}}
+              <!-- Quick navigation to linked entities -->
+              <div class="mr-quick-actions">
+                {#if tk.spec_path}
+                  <button class="mr-quick-btn" onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })} title="View the specification this task implements">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    Spec
+                  </button>
+                {/if}
+                {#if tk.assigned_to}
+                  <button class="mr-quick-btn" onclick={() => navigateTo('agent', tk.assigned_to)} title="View the agent working on this task">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+                    Agent
+                  </button>
+                {/if}
+                {#if tk.mr_id}
+                  <button class="mr-quick-btn" onclick={() => navigateTo('mr', tk.mr_id)} title="View the merge request created for this task">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><path d="M5 3v6a4 4 0 004 4h2M5 3L3 5M5 3l2 2M15 7v6a4 4 0 01-4 4h-2"/></svg>
+                    MR
+                  </button>
+                {/if}
+              </div>
               <!-- Status journey visualization -->
               {#if tk.status && tk.status !== 'backlog'}
                 {@const taskPhases = (() => {
@@ -8128,6 +8230,68 @@
   }
 
   /* ── MR status journey (prominent block at top of info tab) ────────── */
+  /* ── MR Quick Action Bar ──────────────────────────────────────── */
+  .mr-quick-actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .mr-quick-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text-secondary);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .mr-quick-btn:hover {
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface-elevated));
+  }
+
+  .mr-quick-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .mr-quick-stat {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    opacity: 0.8;
+  }
+
+  .mr-quick-stat-danger { color: var(--color-danger); }
+  .mr-quick-stat-success { color: var(--color-success); }
+
+  .mr-quick-enqueue {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: var(--color-text-inverse);
+  }
+
+  .mr-quick-enqueue:hover {
+    background: var(--color-primary-hover);
+    color: var(--color-text-inverse);
+  }
+
+  .mr-quick-enqueue:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
   .mr-status-journey {
     background: var(--color-surface-raised, var(--color-bg-alt));
     border: 1px solid var(--color-border);
@@ -9123,6 +9287,7 @@
   .prov-icon-agent { background: var(--color-success); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3Cpath d='M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z'/%3E%3C/svg%3E") center/contain no-repeat; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3Cpath d='M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z'/%3E%3C/svg%3E") center/contain no-repeat; }
   .prov-icon-mr { background: var(--color-primary); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Ccircle cx='18' cy='18' r='3'/%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Cpath d='M6 21V9a9 9 0 0 0 9 9'/%3E%3C/svg%3E") center/contain no-repeat; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Ccircle cx='18' cy='18' r='3'/%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Cpath d='M6 21V9a9 9 0 0 0 9 9'/%3E%3C/svg%3E") center/contain no-repeat; }
   .prov-icon-code { background: var(--color-text-secondary); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Cpolyline points='16 18 22 12 16 6'/%3E%3Cpolyline points='8 6 2 12 8 18'/%3E%3C/svg%3E") center/contain no-repeat; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Cpolyline points='16 18 22 12 16 6'/%3E%3Cpolyline points='8 6 2 12 8 18'/%3E%3C/svg%3E") center/contain no-repeat; }
+  .prov-icon-graph { background: var(--color-info); mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Ccircle cx='18' cy='5' r='3'/%3E%3Ccircle cx='6' cy='12' r='3'/%3E%3Ccircle cx='18' cy='19' r='3'/%3E%3Cline x1='8.59' y1='13.51' x2='15.42' y2='17.49'/%3E%3Cline x1='15.41' y1='6.51' x2='8.59' y2='10.49'/%3E%3C/svg%3E") center/contain no-repeat; -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2'%3E%3Ccircle cx='18' cy='5' r='3'/%3E%3Ccircle cx='6' cy='12' r='3'/%3E%3Ccircle cx='18' cy='19' r='3'/%3E%3Cline x1='8.59' y1='13.51' x2='15.42' y2='17.49'/%3E%3Cline x1='15.41' y1='6.51' x2='8.59' y2='10.49'/%3E%3C/svg%3E") center/contain no-repeat; }
 
   .provenance-type {
     font-size: 9px;

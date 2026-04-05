@@ -43,6 +43,13 @@
     decisionsCount = 0,
   } = $props();
 
+  // ── Workspace overview tab state ────────────────────────────────────────
+  // Pipeline stages navigate directly to the single repo's tab when there's only one repo.
+  // When multiple repos exist, clicking a stage expands a minimal summary below the bar.
+  let wsTab = $state(null); // 'specs' | 'tasks' | 'mrs' | 'agents' | 'budget' | null
+
+  const goToRepoTab = getContext('goToRepoTab') ?? null;
+
   // ── Create Workspace form state ───────────────────────────────────────
   let createWsOpen = $state(false);
   let createWsForm = $state({ name: '', description: '' });
@@ -474,41 +481,6 @@
     }
   }
 
-  // ── Quick MR enqueue from sidebar ──────────────────────────────────────
-  let mrEnqueueStates = $state({});
-
-  async function quickEnqueueMr(mr, e) {
-    e?.stopPropagation();
-    mrEnqueueStates = { ...mrEnqueueStates, [mr.id]: 'loading' };
-    try {
-      await api.enqueue(mr.id);
-      mrEnqueueStates = { ...mrEnqueueStates, [mr.id]: 'queued' };
-      toastSuccess(`MR "${mr.title ?? 'Untitled'}" enqueued for merge`);
-      // Update MR in list
-      const updated = await api.mergeRequest(mr.id).catch(() => null);
-      if (updated) {
-        wsMrs = wsMrs.map(m => m.id === mr.id ? { ...m, ...updated } : m);
-      }
-    } catch (err) {
-      mrEnqueueStates = { ...mrEnqueueStates, [mr.id]: 'error' };
-      toastError('Enqueue failed: ' + (err.message ?? err));
-    }
-  }
-
-  // ── Spec navigation ────────────────────────────────────────────────────
-  function navigateToSpec(spec) {
-    // Try direct navigation to spec detail first (one-click to detail)
-    if (spec.path && spec.repo_id) {
-      nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id });
-      return;
-    }
-    // Fallback: navigate to repo specs tab
-    const repo = repoMap[spec.repo_id];
-    if (repo && onSelectRepo) {
-      onSelectRepo(repo, 'specs', spec.path);
-    }
-  }
-
   // ── New Repo form state ────────────────────────────────────────────────
   let newRepoOpen = $state(false);
   let newRepoName = $state('');
@@ -608,10 +580,9 @@
   });
 
   // ── Activity pagination ──────────────────────────────────────
-  let activityLimit = $state(5);  // compact by default, expandable
+  let activityLimit = $state(5);  // show enough activity to be useful
 
-  // Collapse activity when there's active work happening
-  let activityCollapsed = $derived(wsAgents.some(a => a.status === 'active') || wsTasks.some(t => t.status === 'in_progress'));
+  // (pipeline-detail list expansion removed — entities are browsed per-repo)
 
   // ── Repo card data ────────────────────────────────────────────────────
   // repoHealth(repo) function already defined above (line ~265)
@@ -1016,7 +987,7 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Workspace header ──────── -->
+      <!-- ── Workspace header (lean: name + status sentence) ──────── -->
       <header class="ws-header">
         <div class="ws-header-top-row">
           <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
@@ -1027,96 +998,214 @@
             </span>
           {/if}
         </div>
-        <!-- Status sentence — concise summary of workspace state -->
         {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
           <p class="ws-header-status">{statusSentence}</p>
         {/if}
       </header>
 
-      <!-- ── Main content: single-column layout ──────────────────── -->
-      <div class="ws-main-content">
+      <!-- ── Pipeline flow bar (compact) ──────────────────────────── -->
+      {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
+        {@const singleRepo = repos.length === 1 ? repos[0] : null}
+        <nav class="pipeline-bar" aria-label="Pipeline status">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { if (singleRepo) { onSelectRepo?.(singleRepo, 'specs'); } else { wsTab = wsTab === 'specs' ? null : 'specs'; } }} title="{pipelineSpecs.approved}/{pipelineSpecs.total} specs approved{pipelineSpecs.pending > 0 ? `, ${pipelineSpecs.pending} need approval` : ''}">
+            <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
+            <span class="pipeline-stage-label">Specs</span>
+            {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warning">{pipelineSpecs.pending}</span>{/if}
+          </button>
+          <span class="pipeline-arrow" aria-hidden="true">→</span>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-alert={pipelineTasks.blocked > 0} onclick={() => { if (singleRepo) { onSelectRepo?.(singleRepo, 'tasks'); } else { wsTab = wsTab === 'tasks' ? null : 'tasks'; } }} title="{pipelineTasks.done}/{pipelineTasks.total} tasks done{pipelineTasks.in_progress > 0 ? `, ${pipelineTasks.in_progress} active` : ''}{pipelineTasks.blocked > 0 ? `, ${pipelineTasks.blocked} blocked` : ''}">
+            <span class="pipeline-stage-count">{pipelineTasks.total}</span>
+            <span class="pipeline-stage-label">Tasks</span>
+            {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked}</span>
+            {:else if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineTasks.in_progress}</span>{/if}
+          </button>
+          <span class="pipeline-arrow" aria-hidden="true">→</span>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => { if (singleRepo) { onSelectRepo?.(singleRepo, 'agents'); } else { wsTab = wsTab === 'agents' ? null : 'agents'; } }} title="{pipelineAgents.active} of {pipelineAgents.total} agents running">
+            <span class="pipeline-stage-count">{pipelineAgents.total}</span>
+            <span class="pipeline-stage-label">Agents</span>
+            {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active}</span>{/if}
+          </button>
+          <span class="pipeline-arrow" aria-hidden="true">→</span>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-alert={pipelineMrs.failed_gates > 0} onclick={() => { if (singleRepo) { onSelectRepo?.(singleRepo, 'mrs'); } else { wsTab = wsTab === 'mrs' ? null : 'mrs'; } }} title="{pipelineMrs.merged}/{pipelineMrs.total} MRs merged{pipelineMrs.open > 0 ? `, ${pipelineMrs.open} open` : ''}{pipelineMrs.failed_gates > 0 ? `, ${pipelineMrs.failed_gates} gate failures` : ''}">
+            <span class="pipeline-stage-count">{pipelineMrs.total}</span>
+            <span class="pipeline-stage-label">MRs</span>
+            {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates}</span>
+            {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineMrs.open}</span>{/if}
+          </button>
+          {#if mergeQueueItems.length > 0}
+            <span class="pipeline-arrow" aria-hidden="true">→</span>
+            <button class="pipeline-stage pipeline-stage-active" onclick={() => { if (singleRepo) { onSelectRepo?.(singleRepo, 'mrs'); } else { wsTab = wsTab === 'mrs' ? null : 'mrs'; } }} title="{mergeQueueItems.length} MR{mergeQueueItems.length !== 1 ? 's' : ''} in merge queue">
+              <span class="pipeline-stage-count">{mergeQueueItems.length}</span>
+              <span class="pipeline-stage-label">Queue</span>
+            </button>
+          {/if}
+          {#if pipelineMrs.merged > 0}
+            <span class="pipeline-arrow" aria-hidden="true">→</span>
+            <span class="pipeline-stage pipeline-stage-done" title="{pipelineMrs.merged} MR{pipelineMrs.merged !== 1 ? 's' : ''} merged">
+              <span class="pipeline-stage-count">{pipelineMrs.merged}</span>
+              <span class="pipeline-stage-label">Merged</span>
+            </span>
+          {/if}
+        </nav>
+      {/if}
 
-          <!-- Action Needed (compact, dismissible) -->
-          {#if !decisionsLoading && actionableNotifications.length > 0}
-            {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
-            <section class="ws-decisions-section" class:decisions-danger={hasDangerDecision} data-testid="section-decisions">
-              <div class="decisions-header">
-                <h2 class="decisions-title">
-                  {actionableNotifications.length} item{actionableNotifications.length !== 1 ? 's need' : ' needs'} attention
-                </h2>
-                {#if actionableNotifications.length > 3}
-                  <button class="section-btn" onclick={() => showAllDecisions = !showAllDecisions}>
-                    {showAllDecisions ? 'Show less' : `Show all`}
-                  </button>
-                {/if}
-              </div>
-              <div class="decisions-list">
-                {#each (showAllDecisions ? actionableNotifications : actionableNotifications.slice(0, 3)) as n (n.id)}
-                  {@const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type}
-                  {@const body = getBody(n)}
-                  {@const aState = actionStates[n.id]}
-                  {@const severity = nt === 'gate_failure' || nt === 'agent_failed' ? 'danger' : nt === 'spec_approval' || nt === 'mr_needs_review' ? 'action' : 'warn'}
-                  <div class="decision-item decision-severity-{severity}" class:decision-resolved={aState?.success}>
-                    <div class="decision-icon decision-icon-{severity}">
-                      {TYPE_ICONS[nt] ?? '?'}
-                    </div>
-                    <button class="decision-body" onclick={() => {
-                      if (body.mr_id) nav('mr', body.mr_id, { repo_id: n.repo_id, _openTab: nt === 'gate_failure' ? 'gates' : undefined });
-                      else if (body.agent_id) nav('agent', body.agent_id, { repo_id: n.repo_id, _openTab: nt === 'agent_failed' ? 'history' : undefined });
-                      else if (body.task_id) nav('task', body.task_id, { repo_id: n.repo_id });
-                      else if (body.spec_path) {
-                        const sp = normalizeSpecPath(body.spec_path);
-                        nav('spec', sp, { path: sp, repo_id: n.repo_id });
-                      }
-                    }}>
-                      <span class="decision-type">{typeLabel(nt)}{#if n.repo_id && repoMap[n.repo_id]} · {repoMap[n.repo_id].name}{/if}</span>
-                      <span class="decision-title">{n.title ?? n.message ?? ''}</span>
-                      {#if nt === 'gate_failure' && body.gate_name}
-                        <span class="decision-detail">
-                          Gate "{body.gate_name}" failed{#if body.gate_type} ({body.gate_type.replace(/_/g, ' ')}){/if} — merge blocked
-                          {#if body.error}<code class="decision-error-preview">{body.error.split('\n')[0]?.slice(0, 100)}</code>{/if}
-                        </span>
-                      {:else if nt === 'gate_failure' && body.mr_id}
-                        <span class="decision-detail">Quality gate failed on {entityName('mr', body.mr_id)}</span>
-                      {:else if nt === 'agent_failed' && body.agent_name}
-                        <span class="decision-detail">Agent "{body.agent_name}" stopped — check logs for root cause</span>
-                      {:else if nt === 'agent_failed' && body.agent_id}
-                        <span class="decision-detail">{entityName('agent', body.agent_id)} encountered an error</span>
-                      {:else if nt === 'spec_approval' && body.spec_path}
-                        <span class="decision-detail">Agents cannot begin until "{body.spec_path.split('/').pop()?.replace(/\.md$/, '')}" is approved</span>
-                      {:else if nt === 'mr_needs_review' && body.mr_id}
-                        <span class="decision-detail">{entityName('mr', body.mr_id)} is ready for human review</span>
-                      {:else if nt === 'budget_warning'}
-                        <span class="decision-detail">Budget threshold exceeded — consider adjusting limits</span>
-                      {/if}
-                      {#if n.created_at}
-                        <span class="decision-time">{relTime(n.created_at)}</span>
-                      {/if}
+      <!-- ── Pipeline detail: compact multi-repo summary (only for multi-repo workspaces) ──── -->
+      {#if wsTab && repos.length > 1}
+        <div class="pipeline-detail-compact" data-testid="pipeline-detail">
+          <div class="pipeline-detail-header">
+            <span class="pipeline-detail-title">
+              {wsTab === 'specs' ? 'Specs' : wsTab === 'tasks' ? 'Tasks' : wsTab === 'mrs' ? 'Merge Requests' : wsTab === 'agents' ? 'Agents' : 'Budget'} across {repos.length} repos
+            </span>
+            <button class="pipeline-detail-close" onclick={() => { wsTab = null; }} title="Close" aria-label="Close panel">✕</button>
+          </div>
+          <div class="pipeline-detail-body">
+            {#each repos as repo (repo.id)}
+              {@const repoSpecs = wsTab === 'specs' ? specs.filter(s => s.repo_id === repo.id) : []}
+              {@const repoTasksFiltered = wsTab === 'tasks' ? wsTasks.filter(t => t.repo_id === repo.id) : []}
+              {@const repoMrsFiltered = wsTab === 'mrs' ? wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id) : []}
+              {@const repoAgentsFiltered = wsTab === 'agents' ? wsAgents.filter(a => a.repo_id === repo.id) : []}
+              {@const count = wsTab === 'specs' ? repoSpecs.length : wsTab === 'tasks' ? repoTasksFiltered.length : wsTab === 'mrs' ? repoMrsFiltered.length : repoAgentsFiltered.length}
+              {#if count > 0}
+                <button class="pipeline-repo-row" onclick={() => onSelectRepo?.(repo, wsTab === 'mrs' ? 'mrs' : wsTab)}>
+                  <span class="pipeline-repo-name">{repo.name}</span>
+                  <span class="pipeline-repo-count">{count}</span>
+                  {#if wsTab === 'specs'}
+                    {@const pending = repoSpecs.filter(s => (s.approval_status ?? s.status) === 'pending').length}
+                    {#if pending > 0}<span class="pipeline-repo-badge pipeline-badge-warning">{pending} pending</span>{/if}
+                  {:else if wsTab === 'tasks'}
+                    {@const blocked = repoTasksFiltered.filter(t => t.status === 'blocked').length}
+                    {@const active = repoTasksFiltered.filter(t => t.status === 'in_progress').length}
+                    {#if blocked > 0}<span class="pipeline-repo-badge pipeline-badge-danger">{blocked} blocked</span>
+                    {:else if active > 0}<span class="pipeline-repo-badge pipeline-badge-active">{active} active</span>{/if}
+                  {:else if wsTab === 'mrs'}
+                    {@const failed = repoMrsFiltered.filter(m => m._gates?.failed > 0).length}
+                    {@const open = repoMrsFiltered.filter(m => m.status === 'open').length}
+                    {#if failed > 0}<span class="pipeline-repo-badge pipeline-badge-danger">{failed} failed gates</span>
+                    {:else if open > 0}<span class="pipeline-repo-badge pipeline-badge-active">{open} open</span>{/if}
+                  {:else if wsTab === 'agents'}
+                    {@const running = repoAgentsFiltered.filter(a => a.status === 'active' || a.status === 'running').length}
+                    {#if running > 0}<span class="pipeline-repo-badge pipeline-badge-success">{running} running</span>{/if}
+                  {/if}
+                  <span class="pipeline-repo-arrow">→</span>
+                </button>
+              {/if}
+            {/each}
+          </div>
+        </div>
+      {/if}
+
+      <!-- ── Two-column layout: main (repos) + sidebar (status/activity) ──── -->
+      <div class="ws-two-col">
+
+        <!-- ══ Main column: action items + repos ═════════════════════ -->
+        <div class="ws-main-content">
+
+          <!-- Action Needed: combined decisions + pending specs (compact) -->
+          {#if !decisionsLoading && !specsLoading}
+            {@const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending')}
+            {@const allActionItems = [...actionableNotifications.map(n => ({ kind: 'notif', n })), ...pendingSpecs.map(s => ({ kind: 'spec', s }))]}
+            {#if allActionItems.length > 0}
+              {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
+              <section class="ws-decisions-section" class:decisions-danger={hasDangerDecision} data-testid="section-decisions">
+                <div class="decisions-header">
+                  <h2 class="decisions-title">
+                    {allActionItems.length} item{allActionItems.length !== 1 ? 's need' : ' needs'} your attention
+                  </h2>
+                  {#if allActionItems.length > 4}
+                    <button class="section-btn" onclick={() => showAllDecisions = !showAllDecisions}>
+                      {showAllDecisions ? 'Show less' : `Show all ${allActionItems.length}`}
                     </button>
-                    <div class="decision-actions">
-                      {#if aState?.success}
-                        <span class="decision-done">{aState.message}</span>
-                      {:else if aState?.loading}
-                        <span class="decision-loading">...</span>
-                      {:else}
-                        {#if nt === 'spec_approval'}
-                          <button class="inline-action-btn inline-action-approve" onclick={() => handleApproveSpec(n)}>Approve</button>
-                          <button class="inline-action-btn inline-action-reject" onclick={() => handleRejectSpec(n)}>Reject</button>
-                        {:else if nt === 'gate_failure'}
-                          <button class="inline-action-btn inline-action-approve" onclick={() => handleRetry(n)}>Retry</button>
-                        {:else if nt === 'mr_needs_review'}
-                          <button class="inline-action-btn inline-action-approve" onclick={() => { const mrId = body.mr_id; if (mrId) nav('mr', mrId, { repo_id: n.repo_id }); }}>Review</button>
-                        {/if}
-                        <button class="inline-action-btn inline-action-reject" onclick={() => handleDismiss(n)} title="Dismiss">✕</button>
-                      {/if}
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            </section>
+                  {/if}
+                </div>
+                <div class="decisions-list">
+                  {#each (showAllDecisions ? allActionItems : allActionItems.slice(0, 4)) as item}
+                    {#if item.kind === 'notif'}
+                      {@const n = item.n}
+                      {@const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type}
+                      {@const body = getBody(n)}
+                      {@const aState = actionStates[n.id]}
+                      {@const severity = nt === 'gate_failure' || nt === 'agent_failed' ? 'danger' : nt === 'spec_approval' || nt === 'mr_needs_review' ? 'action' : 'warn'}
+                      <div class="decision-item decision-severity-{severity}" class:decision-resolved={aState?.success}>
+                        <div class="decision-icon decision-icon-{severity}">
+                          {TYPE_ICONS[nt] ?? '?'}
+                        </div>
+                        <button class="decision-body" onclick={() => {
+                          if (body.mr_id) nav('mr', body.mr_id, { repo_id: n.repo_id, _openTab: nt === 'gate_failure' ? 'gates' : undefined });
+                          else if (body.agent_id) nav('agent', body.agent_id, { repo_id: n.repo_id, _openTab: nt === 'agent_failed' ? 'history' : undefined });
+                          else if (body.task_id) nav('task', body.task_id, { repo_id: n.repo_id });
+                          else if (body.spec_path) {
+                            const sp = normalizeSpecPath(body.spec_path);
+                            nav('spec', sp, { path: sp, repo_id: n.repo_id });
+                          }
+                        }}>
+                          <span class="decision-type">{typeLabel(nt)}{#if n.repo_id && repoMap[n.repo_id]} · {repoMap[n.repo_id].name}{/if}</span>
+                          <span class="decision-title">{n.title ?? n.message ?? ''}</span>
+                          {#if nt === 'gate_failure' && body.gate_name}
+                            <span class="decision-detail">Gate "{body.gate_name}" failed{#if body.gate_type} ({body.gate_type.replace(/_/g, ' ')}){/if} — merge blocked</span>
+                          {:else if nt === 'gate_failure' && body.mr_id}
+                            <span class="decision-detail">Quality gate failed on {entityName('mr', body.mr_id)}</span>
+                          {:else if nt === 'agent_failed' && body.agent_name}
+                            <span class="decision-detail">Agent "{body.agent_name}" stopped — check logs</span>
+                          {:else if nt === 'spec_approval' && body.spec_path}
+                            <span class="decision-detail">Agents blocked until approved</span>
+                          {:else if nt === 'mr_needs_review'}
+                            <span class="decision-detail">Ready for human review</span>
+                          {:else if nt === 'budget_warning'}
+                            <span class="decision-detail">Budget threshold exceeded</span>
+                          {/if}
+                        </button>
+                        <div class="decision-actions">
+                          {#if aState?.success}
+                            <span class="decision-done">{aState.message}</span>
+                          {:else if aState?.loading}
+                            <span class="decision-loading">...</span>
+                          {:else}
+                            {#if nt === 'spec_approval'}
+                              <button class="inline-action-btn inline-action-approve" onclick={() => handleApproveSpec(n)}>Approve</button>
+                              <button class="inline-action-btn inline-action-reject" onclick={() => handleRejectSpec(n)}>Reject</button>
+                            {:else if nt === 'gate_failure'}
+                              <button class="inline-action-btn inline-action-approve" onclick={() => handleRetry(n)}>Retry</button>
+                            {:else if nt === 'mr_needs_review'}
+                              <button class="inline-action-btn inline-action-approve" onclick={() => { const mrId = body.mr_id; if (mrId) nav('mr', mrId, { repo_id: n.repo_id }); }}>Review</button>
+                            {/if}
+                            <button class="inline-action-btn inline-action-reject" onclick={() => handleDismiss(n)} title="Dismiss">✕</button>
+                          {/if}
+                        </div>
+                      </div>
+                    {:else}
+                      {@const spec = item.s}
+                      {@const specRepo = repoMap[spec.repo_id]}
+                      {@const actionState = specActionStates[spec.path]}
+                      <div class="decision-item decision-severity-action" class:decision-resolved={actionState === 'approved' || actionState === 'rejected'}>
+                        <div class="decision-icon decision-icon-action">!</div>
+                        <button class="decision-body" onclick={() => nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id })}>
+                          <span class="decision-type">Spec review{#if specRepo} · {specRepo.name}{/if}</span>
+                          <span class="decision-title">{spec.path.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</span>
+                          <span class="decision-detail">Agents blocked until approved{#if spec.created_at ?? spec.synced_at} · pushed {relTime(spec.created_at ?? spec.synced_at)}{/if}</span>
+                        </button>
+                        <div class="decision-actions">
+                          {#if actionState === 'loading'}
+                            <span class="decision-loading">...</span>
+                          {:else if actionState === 'approved'}
+                            <span class="decision-done">Approved</span>
+                          {:else if actionState === 'rejected'}
+                            <span class="decision-done">Rejected</span>
+                          {:else if actionState === 'error'}
+                            <span class="pending-spec-error">Failed</span>
+                          {:else}
+                            <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)}>Approve</button>
+                            <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)}>Reject</button>
+                          {/if}
+                        </div>
+                      </div>
+                    {/if}
+                  {/each}
+                </div>
+              </section>
+            {/if}
           {/if}
 
-          <!-- Repos (primary content) -->
+          <!-- Repos (primary content — the main thing users interact with) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
               <h2 class="section-heading">Repositories</h2>
@@ -1173,13 +1262,6 @@
                       failedMrs={wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m._gates?.failed > 0)}
                       specBreakdown={repoSpecBreakdown(repo)}
                       latestMr={repoLatestMr(repo)}
-                      pendingSpecs={specs.filter(s => s.repo_id === repo.id && (s.approval_status ?? s.status) === 'pending')}
-                      onApproveSpec={(spec) => quickApproveSpec(spec)}
-                      onRejectSpec={(spec) => quickRejectSpec(spec)}
-                      queueItems={mergeQueueItems.filter(item => {
-                        const mr = item._mr;
-                        return (mr?.repository_id ?? mr?.repo_id) === repo.id;
-                      })}
                       onclick={() => onSelectRepo?.(repo)}
                       onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
                     />
@@ -1220,72 +1302,82 @@
               {/if}
             </div>
           </section>
+        </div><!-- .ws-main-content -->
 
-          <!-- ── Merge Queue (workspace-wide) ────────────────── -->
-          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
-            <section class="ws-merge-queue" data-testid="section-merge-queue">
-              <div class="section-header-row">
-                <h2 class="section-heading">Merge Queue</h2>
-                <span class="section-count">{mergeQueueItems.length} item{mergeQueueItems.length !== 1 ? 's' : ''}</span>
-              </div>
-              <div class="merge-queue-list">
-                {#each mergeQueueItems.slice(0, 5) as item, i}
-                  {@const mrId = item.merge_request_id ?? item.mr_id}
-                  {@const mr = item._mr ?? {}}
-                  {@const repoId = mr.repository_id ?? mr.repo_id}
-                  {@const gateDetails = mr._gates?.details ?? []}
-                  <button class="queue-entry" onclick={() => nav('mr', mrId, { repo_id: repoId, title: mr.title })}>
-                    <span class="queue-position">#{i + 1}</span>
-                    <div class="queue-entry-info">
-                      <span class="queue-entry-title">{item._title ?? 'Untitled MR'}</span>
-                      <span class="queue-entry-meta">
-                        {#if repoId && repoMap[repoId]}<span class="ec-chip">{repoMap[repoId].name}</span>{/if}
-                        {#if item._branch}<span class="ec-chip ec-chip-mono">{item._branch}</span>{/if}
-                        {#if item._spec_ref}
-                          {@const specPath = item._spec_ref.split('@')[0]}
-                          <span class="ec-chip ec-chip-spec">{specPath.split('/').pop()?.replace(/\.md$/, '')}</span>
-                        {/if}
-                      </span>
-                    </div>
-                    {#if gateDetails.length > 0}
-                      <span class="queue-gates">
-                        {#each gateDetails.slice(0, 3) as g}
-                          <span class="ec-gate-chip ec-gate-{g.status}" title="{g.name}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
-                        {/each}
-                      </span>
-                    {/if}
-                    {#if item._deps?.length > 0}
-                      <span class="queue-deps" title="Waiting on {item._deps.length} dependency">
-                        <Icon name="link" size={10} /> {item._deps.length}
-                      </span>
-                    {/if}
-                  </button>
-                {/each}
-                {#if mergeQueueItems.length > 5}
-                  <p class="entity-panel-overflow">{mergeQueueItems.length - 5} more in queue</p>
-                {/if}
-              </div>
-            </section>
+        <!-- ══ Sidebar: live status + activity ═══════════════════════ -->
+        <aside class="ws-sidebar">
+
+          <!-- Active Agents (live work — most important sidebar widget) -->
+          {#if !agentsLoading && wsAgents.filter(a => a.status === 'active').length > 0}
+            {@const activeList = wsAgents.filter(a => a.status === 'active')}
+            <div class="sidebar-widget sidebar-widget-live" data-testid="section-active-agents">
+              <h3 class="sidebar-widget-title"><span class="live-dot"></span> {activeList.length} agent{activeList.length !== 1 ? 's' : ''} working</h3>
+              {#each activeList as agent (agent.id)}
+                {@const agentRepo = repoMap[agent.repo_id]}
+                <button class="sidebar-agent" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
+                  <span class="sidebar-agent-name">{agent.name ?? formatId('agent', agent.id)}</span>
+                  <span class="sidebar-agent-meta">
+                    {#if agent.spec_path}<span>{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>{/if}
+                    {#if agentRepo}<span class="sidebar-agent-repo">{agentRepo.name}</span>{/if}
+                    {#if agent.spawned_at ?? agent.created_at}<span class="sidebar-agent-time">{formatDuration(agent.spawned_at ?? agent.created_at)}</span>{/if}
+                  </span>
+                </button>
+              {/each}
+            </div>
           {/if}
 
-          <!-- ── Recent Activity ─────────────────────────────── -->
-          {#if !activityLoading && activityEvents.length > 0}
-            <section class="ws-activity-section" data-testid="section-activity">
-              <div class="section-header-row">
-                <h2 class="section-heading">Recent Activity</h2>
-                {#if activityEvents.length > 5}
-                  <button class="section-btn section-btn-compact" onclick={() => { activityLimit = activityLimit <= 5 ? 20 : 5; }}>
-                    {activityLimit <= 5 ? 'Show more' : 'Show less'}
+          <!-- Merge Queue -->
+          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
+            <div class="sidebar-widget" data-testid="section-merge-queue">
+              <h3 class="sidebar-widget-title">Merge Queue <span class="sidebar-count">{mergeQueueItems.length}</span></h3>
+              {#each mergeQueueItems.slice(0, 5) as item, i (item.merge_request_id ?? item.mr_id ?? i)}
+                {@const mrId = item.merge_request_id ?? item.mr_id}
+                {@const mr = item._mr ?? {}}
+                <button class="sidebar-queue-item" onclick={() => nav('mr', mrId, { repo_id: mr.repository_id ?? mr.repo_id, title: item._title })}>
+                  <span class="sidebar-queue-pos">#{i + 1}</span>
+                  <span class="sidebar-queue-title">{item._title}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          <!-- Recently Shipped -->
+          {#if !mrsLoading}
+            {@const recentlyMerged = wsMrs.filter(m => m.status === 'merged').sort((a, b) => (b.merged_at ?? b.updated_at ?? 0) - (a.merged_at ?? a.updated_at ?? 0)).slice(0, 5)}
+            {#if recentlyMerged.length > 0}
+              <div class="sidebar-widget">
+                <h3 class="sidebar-widget-title">Recently Shipped</h3>
+                {#each recentlyMerged as mr (mr.id)}
+                  {@const mrRepo = repoMap[mr.repository_id ?? mr.repo_id]}
+                  {@const specPath = mr.spec_ref?.split('@')[0]}
+                  <button class="sidebar-shipped-item" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })}>
+                    <span class="sidebar-shipped-check">✓</span>
+                    <div class="sidebar-shipped-info">
+                      <span class="sidebar-shipped-title">{mr.title ?? 'Untitled'}</span>
+                      <span class="sidebar-shipped-meta">
+                        {#if specPath}{specPath.split('/').pop()?.replace(/\.md$/, '')} →{/if}
+                        merged {relTime(mr.merged_at ?? mr.updated_at)}
+                        {#if mr.diff_stats}<span class="diff-ins-tiny">+{mr.diff_stats.insertions ?? 0}</span><span class="diff-del-tiny">-{mr.diff_stats.deletions ?? 0}</span>{/if}
+                      </span>
+                    </div>
+                    {#if mrRepo}<span class="sidebar-shipped-repo">{mrRepo.name}</span>{/if}
                   </button>
-                {/if}
+                {/each}
               </div>
-              <div class="activity-timeline">
-                {#each activityEvents.slice(0, activityLimit) as event, i}
+            {/if}
+          {/if}
+
+          <!-- Activity feed (compact timeline) -->
+          {#if activityEvents.length > 0}
+            <div class="sidebar-widget">
+              <h3 class="sidebar-widget-title">Activity <span class="sidebar-count">{activityEvents.length}</span></h3>
+              <div class="sidebar-activity">
+                {#each activityEvents.slice(0, activityLimit) as event}
                   {@const variant = activityVariant(event)}
                   {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
                   {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
                   <button
-                    class="activity-item activity-item-clickable"
+                    class="sidebar-activity-item"
                     onclick={() => {
                       if (primaryType && primaryId) {
                         const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
@@ -1293,31 +1385,25 @@
                       }
                     }}
                   >
-                    <div class="activity-dot activity-dot-{variant}"></div>
-                    {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                    <div class="activity-content">
-                      <div class="activity-main-row">
-                        <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
-                        <span class="activity-label">{activityLabel(event)}</span>
-                        {#if event.repo_id && repoMap[event.repo_id]}<span class="activity-repo-badge">{repoMap[event.repo_id].name}</span>{/if}
-                        {#if event.timestamp ?? event.created_at}
-                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                        {/if}
-                      </div>
-                      {#if event.entity_name ?? event.title}
-                        <p class="activity-entity-name">{event.entity_name ?? event.title}</p>
-                      {/if}
-                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
-                      {/if}
-                    </div>
+                    <span class="sidebar-activity-dot sidebar-activity-dot-{variant}"></span>
+                    <span class="sidebar-activity-label">{activityLabel(event)}</span>
+                    {#if event.entity_name ?? event.title}
+                      <span class="sidebar-activity-entity">{event.entity_name ?? event.title}</span>
+                    {/if}
+                    <span class="sidebar-activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                   </button>
                 {/each}
               </div>
-            </section>
+              {#if activityEvents.length > activityLimit}
+                <button class="sidebar-more-btn" onclick={() => { activityLimit = activityLimit <= 5 ? 30 : 5; }}>
+                  {activityLimit <= 5 ? `Show all ${activityEvents.length}` : 'Show less'}
+                </button>
+              {/if}
+            </div>
           {/if}
 
-      </div><!-- .ws-main-content -->
+        </aside>
+      </div><!-- .ws-two-col -->
 
     </div><!-- .focused-dashboard -->
   {/if}
@@ -1356,353 +1442,6 @@
 </Modal>
 
 <style>
-  /* ═══ Merge Queue section ═══════════════════════════════════════════════ */
-  .ws-merge-queue {
-    margin-top: var(--space-1);
-  }
-
-  .merge-queue-list {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    background: var(--color-border);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .queue-entry {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface);
-    border: none;
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    text-align: left;
-    width: 100%;
-    transition: background var(--transition-fast);
-  }
-
-  .queue-entry:hover {
-    background: var(--color-surface-elevated);
-  }
-
-  .queue-position {
-    font-family: var(--font-mono);
-    font-weight: 700;
-    font-size: var(--text-xs);
-    color: var(--color-warning);
-    width: 24px;
-    text-align: center;
-    flex-shrink: 0;
-  }
-
-  .queue-entry-info {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .queue-entry-title {
-    font-weight: 500;
-    color: var(--color-text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .queue-entry-meta {
-    display: flex;
-    gap: var(--space-1);
-    flex-wrap: wrap;
-  }
-
-  .queue-gates {
-    display: flex;
-    gap: 2px;
-    flex-shrink: 0;
-  }
-
-  .queue-deps {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
-  .section-count {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-family: var(--font-mono);
-  }
-
-  /* ═══ Pipeline flow sections ═══════════════════════════════════════════ */
-  .pipeline-flow {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .pipeline-section {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    background: var(--color-surface);
-    overflow: hidden;
-  }
-
-  .pipeline-section-collapsed {
-    border-color: transparent;
-    background: transparent;
-  }
-
-  .pipeline-section-header {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    width: 100%;
-    background: transparent;
-    border: none;
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-sm);
-    color: var(--color-text);
-    text-align: left;
-    transition: background var(--transition-fast);
-  }
-
-  .pipeline-section-header:hover {
-    background: var(--color-surface-elevated);
-  }
-
-  .pipeline-section-title {
-    font-weight: 600;
-    flex: 1;
-  }
-
-  .pipeline-section-count {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-family: var(--font-mono);
-  }
-
-  .pipeline-section-chevron {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    width: 16px;
-    text-align: center;
-  }
-
-  .pipeline-section .feed-body {
-    border-top: 1px solid var(--color-border);
-  }
-
-  /* ── Pipeline hero — compact inline flow ─────────────── */
-  .pipeline-hero {
-    display: flex;
-    align-items: center;
-    gap: 0;
-    overflow-x: auto;
-  }
-
-  .pipeline-hero-stage {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: var(--space-1) var(--space-2);
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--radius);
-    cursor: pointer;
-    font-family: var(--font-body);
-    transition: all var(--transition-fast);
-    position: relative;
-    white-space: nowrap;
-  }
-
-  .pipeline-hero-stage:hover {
-    background: var(--color-surface-elevated);
-    border-color: var(--color-border);
-  }
-
-  .pipeline-hero-count {
-    font-size: var(--text-sm);
-    font-weight: 800;
-    font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    line-height: 1;
-  }
-
-  .pipeline-hero-label {
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-
-  .pipeline-hero-badge {
-    font-size: 10px;
-    font-weight: 500;
-    color: var(--color-text-secondary);
-    white-space: nowrap;
-    display: flex;
-    align-items: center;
-    gap: 3px;
-  }
-
-  .pipeline-hero-badge-warn { color: var(--color-warning); font-weight: 600; }
-  .pipeline-hero-badge-danger { color: var(--color-danger); font-weight: 600; }
-  .pipeline-hero-badge-ok { color: var(--color-success); font-weight: 600; }
-
-  .pipeline-hero-active .pipeline-hero-count { color: var(--color-primary); }
-  .pipeline-hero-active .pipeline-hero-label { color: var(--color-primary); }
-  .pipeline-hero-done .pipeline-hero-count { color: var(--color-success); }
-  .pipeline-hero-done .pipeline-hero-label { color: var(--color-success); }
-  .pipeline-hero-warn .pipeline-hero-count { color: var(--color-danger); }
-  .pipeline-hero-warn .pipeline-hero-label { color: var(--color-danger); }
-
-  .pipeline-hero-arrow {
-    display: flex;
-    align-items: center;
-    color: var(--color-text-muted);
-    opacity: 0.3;
-    flex-shrink: 0;
-    padding: 0 2px;
-  }
-
-  .pipeline-hero-pulse {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--color-success);
-    animation: pipeline-pulse 2s ease-in-out infinite;
-    flex-shrink: 0;
-  }
-
-  @keyframes pipeline-pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.4; transform: scale(0.7); }
-  }
-
-  .pipeline-hero-selected {
-    background: var(--color-surface-elevated);
-    border-color: var(--color-primary);
-    box-shadow: 0 0 0 1px var(--color-primary);
-  }
-
-  .pipeline-hero-done-stage {
-    cursor: default;
-  }
-
-  .pipeline-hero-done-stage:hover {
-    transform: none;
-  }
-
-  /* ── Stage popover ─────────────────────────────────────────── */
-  .stage-popover {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    background: var(--color-surface);
-    box-shadow: var(--shadow-sm);
-    overflow: hidden;
-  }
-
-  .stage-popover-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
-  }
-
-  .stage-popover-title {
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text);
-  }
-
-  .stage-popover-close {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--color-text-muted);
-    font-size: var(--text-sm);
-    padding: 2px 6px;
-    border-radius: var(--radius-sm);
-  }
-
-  .stage-popover-close:hover {
-    background: var(--color-border);
-    color: var(--color-text);
-  }
-
-  .stage-popover-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--color-border);
-    font-size: var(--text-sm);
-    width: 100%;
-    text-align: left;
-  }
-
-  .stage-popover-item:last-child { border-bottom: none; }
-
-  .stage-popover-link {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--color-link);
-    font-family: inherit;
-    font-size: inherit;
-    padding: 0;
-    text-decoration: none;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 1;
-    text-align: left;
-  }
-
-  .stage-popover-link:hover { text-decoration: underline; }
-
-  .stage-popover-repo {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
-  .stage-popover-context {
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    font-style: italic;
-  }
-
-  .stage-popover-actions {
-    display: flex;
-    gap: var(--space-1);
-    flex-shrink: 0;
-    margin-left: auto;
-  }
-
-  .stage-popover-empty {
-    font-size: var(--text-sm);
-    color: var(--color-text-muted);
-    padding: var(--space-3);
-    text-align: center;
-    font-style: italic;
-  }
-
   /* ── Section headings ──────────────────────────────────────── */
   .section-heading {
     font-family: var(--font-display);
@@ -1736,6 +1475,37 @@
   .ws-activity-section {
     display: flex;
     flex-direction: column;
+  }
+
+  .ws-activity-details {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .ws-activity-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+  }
+
+  .ws-activity-summary::-webkit-details-marker { display: none; }
+
+  .ws-activity-summary::marker { content: ''; }
+
+  .ws-activity-details[open] .ws-activity-summary {
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .ws-activity-details .activity-timeline {
+    padding: var(--space-2) var(--space-3);
+    max-height: 400px;
+    overflow-y: auto;
   }
 
   .activity-details {
@@ -1773,9 +1543,6 @@
     border-radius: var(--radius-sm);
   }
 
-  .activity-details[open] .activity-summary {
-    border-bottom: 1px solid var(--color-border);
-  }
 
   .activity-details .activity-timeline {
     padding: var(--space-2) var(--space-3);
@@ -1933,12 +1700,280 @@
     min-height: 0;
   }
 
-  /* ── Single-column main content ──────────────────────────────── */
+  /* ── Two-column layout: main + sidebar ────────────────────────── */
+  .ws-two-col {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: var(--space-4);
+    min-height: 0;
+  }
+
   .ws-main-content {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
     min-width: 0;
+  }
+
+  .ws-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  /* ── Sidebar widgets ──────────────────────────────────────────── */
+  .sidebar-widget {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .sidebar-widget-live {
+    border-color: color-mix(in srgb, var(--color-success) 30%, var(--color-border));
+    background: color-mix(in srgb, var(--color-success) 3%, var(--color-surface));
+  }
+
+  .sidebar-widget-title {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .sidebar-count {
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    font-size: 10px;
+  }
+
+  /* Sidebar: agents */
+  .sidebar-agent {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+    width: 100%;
+  }
+
+  .sidebar-agent:hover { background: var(--color-surface-elevated); }
+
+  .sidebar-agent-name {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sidebar-agent-meta {
+    display: flex;
+    gap: var(--space-2);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    flex-wrap: wrap;
+  }
+
+  .sidebar-agent-repo { font-weight: 600; }
+  .sidebar-agent-time { color: var(--color-success); font-family: var(--font-mono); font-weight: 600; }
+
+  /* Sidebar: merge queue */
+  .sidebar-queue-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+    width: 100%;
+  }
+
+  .sidebar-queue-item:hover { background: var(--color-surface-elevated); }
+
+  .sidebar-queue-pos {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--color-text-muted);
+    width: 20px;
+    flex-shrink: 0;
+  }
+
+  .sidebar-queue-title {
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Sidebar: recently shipped */
+  .sidebar-shipped-item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+    width: 100%;
+  }
+
+  .sidebar-shipped-item:hover { background: var(--color-surface-elevated); }
+
+  .sidebar-shipped-check {
+    color: var(--color-success);
+    font-weight: 700;
+    font-size: var(--text-xs);
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .sidebar-shipped-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .sidebar-shipped-title {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sidebar-shipped-meta {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    display: flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .sidebar-shipped-repo {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+    align-self: center;
+  }
+
+  /* Sidebar: activity */
+  .sidebar-activity {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .sidebar-activity-item {
+    display: grid;
+    grid-template-columns: 8px 1fr auto;
+    gap: var(--space-2);
+    align-items: baseline;
+    padding: 3px var(--space-2);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+    width: 100%;
+    font-size: 11px;
+  }
+
+  .sidebar-activity-item:hover { background: var(--color-surface-elevated); }
+
+  .sidebar-activity-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-top: 4px;
+    flex-shrink: 0;
+  }
+
+  .sidebar-activity-dot-success { background: var(--color-success); }
+  .sidebar-activity-dot-danger { background: var(--color-danger); }
+  .sidebar-activity-dot-warning { background: var(--color-warning); }
+  .sidebar-activity-dot-info { background: var(--color-info, #1e90ff); }
+  .sidebar-activity-dot-muted { background: var(--color-text-muted); }
+
+  .sidebar-activity-label {
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .sidebar-activity-entity {
+    display: none; /* shown on hover via parent */
+  }
+
+  .sidebar-activity-time {
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    font-size: 10px;
+  }
+
+  .sidebar-more-btn {
+    background: transparent;
+    border: none;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    padding: var(--space-1) 0;
+    text-align: center;
+    font-family: var(--font-body);
+  }
+
+  .sidebar-more-btn:hover { color: var(--color-primary); }
+
+  @media (max-width: 900px) {
+    .ws-two-col {
+      grid-template-columns: 1fr;
+    }
+    .ws-sidebar {
+      order: -1; /* Put status widgets above repos on mobile */
+    }
   }
 
   /* ── Unified pipeline tabs (replaces separate pipeline hero + entity tab bar) ── */
@@ -1949,103 +1984,6 @@
     overflow: hidden;
   }
 
-  .ws-pipeline-tabs {
-    display: flex;
-    align-items: center;
-    border-bottom: 1px solid var(--color-border);
-    overflow-x: auto;
-    background: var(--color-surface-elevated);
-    padding: 0 var(--space-2);
-  }
-
-  .pipeline-tab {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: var(--space-2) var(--space-3);
-    background: transparent;
-    border: none;
-    border-bottom: 2px solid transparent;
-    cursor: pointer;
-    font-family: var(--font-body);
-    white-space: nowrap;
-    transition: all var(--transition-fast);
-    margin-bottom: -1px;
-  }
-
-  .pipeline-tab:hover {
-    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
-  }
-
-  .pipeline-tab-count {
-    font-size: var(--text-sm);
-    font-weight: 800;
-    font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    line-height: 1;
-  }
-
-  .pipeline-tab-label {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-
-  .pipeline-tab-badge {
-    font-size: 10px;
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: var(--radius-sm);
-    white-space: nowrap;
-    display: flex;
-    align-items: center;
-    gap: 3px;
-  }
-
-  .pipeline-tab-badge-warn { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
-  .pipeline-tab-badge-danger { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
-  .pipeline-tab-badge-ok { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
-
-  .pipeline-tab-pulse {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--color-success);
-    animation: pipeline-pulse 2s ease-in-out infinite;
-    flex-shrink: 0;
-  }
-
-  .pipeline-tab-active {
-    border-bottom-color: var(--color-primary);
-  }
-
-  .pipeline-tab-active .pipeline-tab-count,
-  .pipeline-tab-active .pipeline-tab-label {
-    color: var(--color-primary);
-  }
-
-  .pipeline-tab-attention .pipeline-tab-count { color: var(--color-danger); }
-  .pipeline-tab-attention .pipeline-tab-label { color: var(--color-danger); }
-  .pipeline-tab-running .pipeline-tab-count { color: var(--color-success); }
-  .pipeline-tab-running .pipeline-tab-label { color: var(--color-success); }
-  .pipeline-tab-done .pipeline-tab-count { color: var(--color-success); }
-  .pipeline-tab-done .pipeline-tab-label { color: var(--color-text-muted); }
-
-  .pipeline-tab-arrow {
-    display: flex;
-    align-items: center;
-    color: var(--color-text-muted);
-    opacity: 0.25;
-    flex-shrink: 0;
-  }
-
-  .pipeline-tab-spacer {
-    flex: 1;
-    min-width: var(--space-2);
-  }
-
   .entity-panel-overflow {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
@@ -2054,6 +1992,770 @@
     margin: 0;
     font-style: italic;
   }
+
+  /* ── Active agents section ──────────────────────────────────── */
+  .ws-active-agents {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .live-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: hstat-pulse 2s ease-in-out infinite;
+    margin-right: 2px;
+    vertical-align: middle;
+  }
+
+  .active-agents-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: var(--space-2);
+  }
+
+  .active-agent-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-success) 3%, var(--color-surface));
+    border: 1px solid color-mix(in srgb, var(--color-success) 20%, var(--color-border));
+    border-left: 3px solid var(--color-success);
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: all var(--transition-fast);
+    width: 100%;
+  }
+
+  .active-agent-card:hover {
+    border-color: var(--color-success);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .active-agent-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .active-agent-name {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .active-agent-time {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-success);
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .active-agent-context {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .active-agent-spec { font-style: italic; }
+  .active-agent-task { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .active-agent-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-1);
+    font-size: 10px;
+  }
+
+  .active-agent-repo {
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .active-agent-view {
+    color: var(--color-primary);
+    font-weight: 600;
+  }
+
+  /* ── Merge queue section ────────────────────────────────────── */
+  .ws-merge-queue-section {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .queue-count-badge {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-info, #1e90ff);
+    background: color-mix(in srgb, var(--color-info, #1e90ff) 10%, transparent);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    margin-left: var(--space-1);
+  }
+
+  .merge-queue-list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .merge-queue-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .merge-queue-item:last-child { border-bottom: none; }
+  .merge-queue-item:hover { background: var(--color-surface-elevated); }
+
+  .queue-position {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-text-muted);
+    width: 24px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .queue-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .queue-item-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .queue-item-meta {
+    display: flex;
+    gap: var(--space-2);
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .queue-item-branch {
+    font-family: var(--font-mono);
+    background: var(--color-surface-elevated);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .queue-item-repo {
+    font-weight: 600;
+  }
+
+  .queue-item-spec {
+    font-style: italic;
+  }
+
+  .queue-item-deps {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+
+  .queue-item-status {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+
+  .queue-item-status-open { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 10%, transparent); }
+  .queue-item-status-merged { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
+  .queue-item-status-pending { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+
+  /* ── Pending specs section ──────────────────────────────────── */
+  .ws-pending-specs-section {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .pending-specs-badge {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    margin-left: var(--space-1);
+  }
+
+  .pending-specs-list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid color-mix(in srgb, var(--color-warning) 25%, var(--color-border));
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .pending-spec-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0;
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+    transition: opacity var(--transition-fast);
+  }
+
+  .pending-spec-item:last-child { border-bottom: none; }
+
+  .pending-spec-resolved { opacity: 0.5; }
+
+  .pending-spec-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+  }
+
+  .pending-spec-body:hover { background: var(--color-surface-elevated); }
+
+  .pending-spec-name {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pending-spec-meta {
+    display: flex;
+    gap: var(--space-2);
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .pending-spec-repo {
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+
+  .pending-spec-kind {
+    background: var(--color-surface-elevated);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .pending-spec-actions {
+    display: flex;
+    gap: var(--space-1);
+    padding-right: var(--space-3);
+    flex-shrink: 0;
+  }
+
+  .pending-spec-done {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-success);
+  }
+
+  .pending-spec-error {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-danger);
+  }
+
+  /* ── Recently merged section ────────────────────────────────── */
+  .recently-merged-list {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-1) 0;
+  }
+
+  .recently-merged-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border) 50%, transparent);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .recently-merged-item:last-child { border-bottom: none; }
+  .recently-merged-item:hover { background: var(--color-surface-elevated); }
+
+  .merged-item-main {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    flex: 1;
+    min-width: 0;
+  }
+
+  .merged-item-check {
+    color: var(--color-success);
+    font-weight: 700;
+    font-size: var(--text-sm);
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .merged-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .merged-item-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .merged-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--color-text-muted);
+    overflow: hidden;
+  }
+
+  .merged-meta-spec {
+    font-style: italic;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .merged-meta-agent {
+    font-family: var(--font-mono);
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .merged-meta-arrow { color: var(--color-text-muted); }
+  .merged-meta-status { color: var(--color-success); font-weight: 600; }
+  .merged-meta-time { white-space: nowrap; }
+
+  .merged-item-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .merged-diff-stats {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    display: flex;
+    gap: 3px;
+  }
+
+  .merged-gates-mini {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .merged-repo-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .diff-ins-tiny { color: var(--color-success); font-weight: 600; }
+  .diff-del-tiny { color: var(--color-danger); font-weight: 600; }
+  /* ── Pipeline detail panel (compact multi-repo navigator) ──────── */
+  .pipeline-detail-compact {
+    border: 1px solid var(--color-border);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+    margin-top: -1px;
+    animation: pipeline-detail-in 0.15s ease-out;
+  }
+
+  @keyframes pipeline-detail-in {
+    from { opacity: 0; max-height: 0; }
+    to { opacity: 1; max-height: 300px; }
+  }
+
+  .pipeline-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-1) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .pipeline-detail-title {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .pipeline-detail-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-fast);
+  }
+
+  .pipeline-detail-close:hover {
+    background: var(--color-surface-elevated);
+    color: var(--color-text);
+  }
+
+  .pipeline-detail-body {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .pipeline-repo-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .pipeline-repo-row:last-child { border-bottom: none; }
+  .pipeline-repo-row:hover { background: var(--color-surface-elevated); }
+
+  .pipeline-repo-name {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-primary);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pipeline-repo-count {
+    font-size: var(--text-sm);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-text);
+    flex-shrink: 0;
+  }
+
+  .pipeline-repo-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+
+  .pipeline-repo-arrow {
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    flex-shrink: 0;
+  }
+
+  /* ── Pipeline flow bar ───────────────────────────────────────── */
+  .pipeline-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow-x: auto;
+  }
+
+  .pipeline-stage {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    border: 1px solid transparent;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .pipeline-stage:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+  }
+
+  .pipeline-stage-active { color: var(--color-text); font-weight: 600; }
+  .pipeline-stage-done { color: var(--color-success); }
+  .pipeline-stage-alert { color: var(--color-danger); }
+  .pipeline-stage-count {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: var(--text-sm);
+    color: inherit;
+  }
+
+  .pipeline-stage-label { font-weight: 500; }
+
+  .pipeline-progress-bar {
+    display: block;
+    width: 100%;
+    height: 3px;
+    background: var(--color-border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 2px;
+  }
+  .pipeline-progress-fill {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.5s ease;
+  }
+  .pipeline-fill-ok { background: var(--color-success); }
+  .pipeline-fill-warn { background: var(--color-warning); }
+  .pipeline-fill-danger { background: var(--color-danger); }
+
+  .pipeline-stage-badge {
+    font-size: 10px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    padding: 0 4px;
+    border-radius: 8px;
+    line-height: 1.5;
+    min-width: 16px;
+    text-align: center;
+  }
+
+  .pipeline-badge-warning { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 12%, transparent); }
+  .pipeline-badge-active { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent); }
+  .pipeline-badge-success { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 12%, transparent); }
+  .pipeline-badge-danger { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 12%, transparent); }
+
+  .pipeline-arrow {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    flex-shrink: 0;
+    opacity: 0.5;
+  }
+
+  /* ── Workspace overview tabs ────────────────────────────────── */
+  .ws-overview-section {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .ws-overview-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--color-border);
+    overflow-x: auto;
+  }
+
+  .ws-overview-tab {
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    transition: all var(--transition-fast);
+  }
+
+  .ws-overview-tab:hover { color: var(--color-text); background: var(--color-surface-elevated); }
+  .ws-overview-tab-active { color: var(--color-primary); border-bottom-color: var(--color-primary); font-weight: 600; }
+
+  .ws-overview-tab-count {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    margin-left: 2px;
+  }
+
+  .ws-overview-content {
+    padding: var(--space-2);
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  .ws-overview-more-btn {
+    display: block;
+    width: 100%;
+    padding: var(--space-2);
+    background: transparent;
+    border: none;
+    border-top: 1px solid var(--color-border);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    font-weight: 500;
+    transition: background var(--transition-fast);
+  }
+
+  .ws-overview-more-btn:hover { background: var(--color-surface-elevated); }
+
+  .ws-overview-empty {
+    text-align: center;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    padding: var(--space-4);
+    margin: 0;
+  }
+
+  .ws-overview-more {
+    text-align: center;
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    padding: var(--space-2);
+    margin: 0;
+    font-style: italic;
+  }
+
+
+  .ws-status-dot {
+    display: inline-block;
+    margin-right: 3px;
+    font-size: 10px;
+  }
+
+  .ws-status-approved, .ws-status-merged, .ws-status-done, .ws-status-completed, .ws-status-idle { color: var(--color-success); }
+  .ws-status-pending, .ws-status-open, .ws-status-in_progress, .ws-status-active, .ws-status-running { color: var(--color-warning); }
+  .ws-status-rejected, .ws-status-closed, .ws-status-blocked, .ws-status-failed, .ws-status-dead { color: var(--color-danger); }
+  .ws-status-draft, .ws-status-backlog, .ws-status-spawning, .ws-status-unknown { color: var(--color-text-muted); }
+
+  .cell-title { font-weight: 500; color: var(--color-text); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell-mono { font-family: var(--font-mono); font-size: 10px; color: var(--color-text-muted); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell-time { font-size: 10px; color: var(--color-text-muted); white-space: nowrap; }
+  .cell-action { white-space: nowrap; }
+  .cell-diff { white-space: nowrap; font-family: var(--font-mono); font-size: 10px; }
+  .diff-stat-clickable {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 1px 4px;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    transition: all var(--transition-fast);
+  }
+  .diff-stat-clickable:hover { background: var(--color-surface-elevated); border-color: var(--color-border); }
+  .diff-ins-tiny { color: var(--color-success); }
+  .diff-del-tiny { color: var(--color-danger); }
+  .diff-files-tiny { color: var(--color-text-muted); }
+
+  /* ── Budget panel ──────────────────────────────────────────── */
+  .ws-budget-panel { padding: var(--space-2); }
+
+  .budget-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: var(--space-2);
+  }
+
+  .budget-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2);
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius-sm);
+  }
+
+  .budget-stat-label { font-size: 10px; color: var(--color-text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+  .budget-stat-value { font-size: var(--text-sm); font-weight: 700; font-family: var(--font-mono); color: var(--color-text); }
+
+  .budget-cost-summary { margin-top: var(--space-3); }
+  .budget-cost-heading { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-secondary); margin: 0 0 var(--space-2) 0; }
 
   .priority-pill {
     font-size: var(--text-xs);
@@ -2070,6 +2772,17 @@
     display: inline-flex;
     gap: 2px;
   }
+
+  .gate-mini {
+    font-weight: 600;
+    padding: 0 3px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .gate-mini-pass { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .gate-mini-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
 
   /* Workspace gate badges (named, clickable) */
   .gate-names-ws { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
@@ -2095,6 +2808,26 @@
   .gate-badge-ws-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
   .gate-badge-ws-pending, .gate-badge-ws-running { color: var(--color-text-muted); background: var(--color-surface-elevated); }
   .gate-badge-ws-more { color: var(--color-text-muted); background: var(--color-surface-elevated); font-size: 10px; font-weight: 600; }
+  .gate-error-snippet {
+    display: block;
+    width: 100%;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 5%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 15%, transparent);
+    border-radius: var(--radius-sm);
+    padding: 2px 6px;
+    cursor: pointer;
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: background var(--transition-fast);
+  }
+  .gate-error-snippet:hover { background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
+
+  /* (pipeline-detail entity cards removed — entities are browsed per-repo in RepoMode) */
 
   .activity-timeline-full {
     padding: var(--space-2) 0;
@@ -2144,6 +2877,53 @@
     font-family: var(--font-display);
   }
 
+  .ws-header-stats {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+
+  .ws-hstat {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .ws-hstat-num {
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+  }
+
+  .ws-hstat-warn .ws-hstat-num { color: var(--color-warning); }
+  .ws-hstat-danger .ws-hstat-num { color: var(--color-danger); }
+
+  .ws-hstat-live {
+    color: var(--color-success);
+  }
+
+  .ws-hstat-live .ws-hstat-num {
+    color: var(--color-success);
+  }
+
+  .ws-hstat-pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: hstat-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes hstat-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.7); }
+  }
+
   .ws-header-desc {
     margin: 0;
     font-size: var(--text-sm);
@@ -2159,6 +2939,78 @@
     max-width: 700px;
     line-height: 1.4;
   }
+
+  .ws-header-status-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .ws-status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px var(--space-2);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    transition: all var(--transition-fast);
+  }
+
+  .ws-status-chip:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+  }
+
+  .ws-status-icon { font-size: var(--text-sm); }
+
+  .ws-status-chip-danger { color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 30%, var(--color-border)); }
+  .ws-status-chip-danger:hover { border-color: var(--color-danger); }
+  .ws-status-chip-warning { color: var(--color-warning); border-color: color-mix(in srgb, var(--color-warning) 30%, var(--color-border)); }
+  .ws-status-chip-warning:hover { border-color: var(--color-warning); }
+  .ws-status-chip-success { color: var(--color-success); border-color: color-mix(in srgb, var(--color-success) 30%, var(--color-border)); }
+  .ws-status-chip-success:hover { border-color: var(--color-success); }
+  .ws-status-chip-info { color: var(--color-info, #1e90ff); border-color: color-mix(in srgb, var(--color-info, #1e90ff) 30%, var(--color-border)); }
+  .ws-status-chip-info:hover { border-color: var(--color-info, #1e90ff); }
+  .ws-status-chip-muted { color: var(--color-text-muted); }
+
+  .ws-status-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .ws-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .ws-status-badge:hover { border-color: var(--color-border); background: var(--color-surface-elevated); }
+
+  .ws-status-badge-icon { font-weight: 700; }
+
+  .ws-status-badge-danger { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 6%, transparent); }
+  .ws-status-badge-warning { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 6%, transparent); }
+  .ws-status-badge-success { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 6%, transparent); }
+  .ws-status-badge-info { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 6%, transparent); }
+  .ws-status-badge-muted { color: var(--color-text-muted); }
 
   /* ── Budget indicator ─────────────────────────────────────────────── */
   .ws-budget-indicator {
@@ -2676,86 +3528,6 @@
     opacity: 0.6;
   }
 
-  /* ── Merge queue inline (inside MRs tab) ─────────────────────────── */
-  .ws-merge-queue-inline {
-    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, var(--color-border));
-    background: color-mix(in srgb, var(--color-warning) 4%, var(--color-surface));
-    border-radius: var(--radius);
-    padding: var(--space-2) var(--space-3);
-    margin-bottom: var(--space-3);
-  }
-
-  .mq-inline-header {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    margin-bottom: var(--space-1);
-  }
-
-  .mq-inline-label {
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .mq-inline-count {
-    font-size: 10px;
-    font-weight: 600;
-    color: var(--color-warning);
-    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
-    padding: 0 5px;
-    border-radius: 8px;
-  }
-
-  .mq-inline-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: 2px var(--space-1);
-    background: transparent;
-    border: none;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    color: var(--color-text);
-    text-align: left;
-    width: 100%;
-    transition: background var(--transition-fast);
-  }
-
-  .mq-inline-item:hover {
-    background: var(--color-surface-elevated);
-  }
-
-  .mq-inline-pos {
-    font-family: var(--font-mono);
-    font-weight: 700;
-    color: var(--color-warning);
-    min-width: 20px;
-  }
-
-  .mq-inline-title {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .mq-inline-gates {
-    display: flex;
-    gap: 3px;
-  }
-
-  .mq-inline-more {
-    font-size: 10px;
-    color: var(--color-text-muted);
-    padding-left: 24px;
-    margin-top: var(--space-1);
-  }
-
   /* ── Queue list (legacy, used by standalone queue view) ─────────── */
   .mq-list {
     display: flex;
@@ -3107,33 +3879,6 @@
     overflow: hidden;
   }
 
-  .activity-summary-bar {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface-elevated);
-    cursor: pointer;
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text);
-    user-select: none;
-    list-style: none;
-  }
-
-  .activity-summary-bar::-webkit-details-marker { display: none; }
-
-  .activity-summary-bar::before {
-    content: '▸';
-    font-size: 10px;
-    color: var(--color-text-muted);
-    transition: transform var(--transition-fast);
-  }
-
-  .activity-details[open] > .activity-summary-bar::before {
-    transform: rotate(90deg);
-  }
-
   .activity-count-badge {
     font-size: 10px;
     font-weight: 700;
@@ -3387,108 +4132,7 @@
     flex-shrink: 0;
   }
 
-  /* ── Entity card list (GitHub-style compact rows) ────────────────────── */
-  .entity-card-list {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    background: var(--color-border);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-
-  .entity-card {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface);
-    border: none;
-    cursor: pointer;
-    text-align: left;
-    font-family: var(--font-body);
-    width: 100%;
-    transition: background var(--transition-fast);
-  }
-
-  .entity-card:hover {
-    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
-  }
-
-  .entity-card:focus-visible {
-    outline: 2px solid var(--color-focus);
-    outline-offset: -2px;
-  }
-
-  .entity-card-active {
-    border-left: 3px solid var(--color-success);
-  }
-
-  .entity-card-danger {
-    border-left: 3px solid var(--color-danger);
-  }
-
-  .entity-card-primary {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-width: 0;
-  }
-
-  .ec-status-icon {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 20px;
-    height: 20px;
-  }
-
-  .ec-status-open { color: var(--color-success); }
-  .ec-status-merged { color: var(--color-blocked, #5e40be); }
-  .ec-status-closed { color: var(--color-danger); }
-
-  .ec-title {
-    font-size: var(--text-sm);
-    font-weight: 500;
-    color: var(--color-text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .ec-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    flex-shrink: 0;
-    margin-left: auto;
-  }
-
-  .ec-duration {
-    font-size: var(--text-xs);
-    font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    flex-shrink: 0;
-  }
-
-  .ec-duration-live {
-    color: var(--color-success);
-    font-weight: 600;
-  }
-
-  .entity-card-meta {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    flex-wrap: wrap;
-    padding-left: 0;
-    font-size: var(--text-xs);
-  }
-
+  /* ── Shared chips (used by merge queue and entity cards) ─────────────── */
   .ec-chip {
     display: inline-flex;
     align-items: center;
@@ -3550,58 +4194,6 @@
     font-style: italic;
   }
 
-  .ec-path {
-    font-size: 10px;
-    font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 200px;
-  }
-
-  .ec-diff {
-    display: inline-flex;
-    gap: 3px;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    cursor: pointer;
-    padding: 1px 4px;
-    border-radius: var(--radius-sm);
-    border: none;
-    background: transparent;
-  }
-
-  .ec-diff:hover { background: var(--color-surface-elevated); }
-
-  .ec-context {
-    font-size: 11px;
-    font-style: italic;
-    color: var(--color-text-muted);
-  }
-
-  .ec-context-warn { color: var(--color-warning); font-style: normal; font-weight: 500; }
-  .ec-context-danger { color: var(--color-danger); font-style: normal; font-weight: 500; }
-  .ec-context-success { color: var(--color-success); }
-
-  .ec-time {
-    color: var(--color-text-muted);
-    white-space: nowrap;
-    margin-left: auto;
-    flex-shrink: 0;
-    font-size: 11px;
-  }
-
-  /* Gate summary in MR cards */
-  .entity-card-gates {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-    padding: var(--space-1) 0 0;
-    font-size: 11px;
-  }
-
   .ec-gate-chip {
     display: inline-flex;
     align-items: center;
@@ -3630,58 +4222,6 @@
     font-size: 10px;
     color: var(--color-text-muted);
     font-family: var(--font-mono);
-  }
-
-  /* ── Legacy entity tables (kept for compat) ─────────────────────────── */
-  .ws-entity-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--text-xs);
-  }
-
-  .ws-entity-table th {
-    text-align: left;
-    padding: var(--space-1) var(--space-2);
-    font-weight: 600;
-    color: var(--color-text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-size: 10px;
-    border-bottom: 1px solid var(--color-border);
-    background: var(--color-surface-elevated);
-    white-space: nowrap;
-  }
-
-  .ws-entity-table .th-actions { width: 120px; }
-
-  .ws-entity-row {
-    cursor: pointer;
-    transition: background var(--transition-fast);
-  }
-
-  .ws-entity-row:hover {
-    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
-  }
-
-  .ws-entity-row td {
-    padding: var(--space-1) var(--space-2);
-    border-bottom: 1px solid var(--color-border);
-    vertical-align: middle;
-  }
-
-  .entity-name-cell {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-width: 0;
-  }
-
-  .entity-primary-name {
-    font-weight: 500;
-    color: var(--color-text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .entity-secondary-path {
@@ -4399,6 +4939,7 @@
   }
 
   /* ── Decisions / Action Needed section ────────────────────────────── */
+  /* ── Active agents strip ────────────────────────────────────── */
   .ws-decisions-section {
     border: 1px solid var(--color-warning);
     border-left: 3px solid var(--color-warning);

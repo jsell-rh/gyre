@@ -1564,16 +1564,16 @@
     <!-- ── Status bar (24px) ─────────────────────────────────────────── -->
     <footer class="status-bar" aria-label={$t('status_bar.label')}>
       {#if trustLevel}
-        <span class="status-item status-trust" title={$t('status_bar.trust')}>
+        <button class="status-item status-trust status-item-clickable" title="{$t('status_bar.trust')} — click to view workspace settings" onclick={() => goToWorkspaceSettings()}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
           </svg>
           {$t('status_bar.trust')}: {trustLevel}
-        </span>
+        </button>
       {/if}
 
       {#if budgetPct !== null}
-        <span class="status-item status-budget" title={$t('status_bar.budget')}>
+        <button class="status-item status-budget status-item-clickable" title="{$t('status_bar.budget')} — click to view budget settings" onclick={() => goToWorkspaceSettings()}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true">
             <rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>
           </svg>
@@ -1594,7 +1594,7 @@
               style="width: {budgetPct}%"
             ></span>
           </span>
-        </span>
+        </button>
       {/if}
 
       <span class="status-spacer"></span>
@@ -2274,6 +2274,23 @@
     align-items: center;
     gap: var(--space-1);
     white-space: nowrap;
+  }
+
+  .status-item-clickable {
+    cursor: pointer;
+    border: none;
+    background: none;
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    padding: 0;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+  }
+
+  .status-item-clickable:hover {
+    background: var(--color-surface-elevated);
+    padding: 0 var(--space-1);
   }
 
   .status-spacer { flex: 1; }
