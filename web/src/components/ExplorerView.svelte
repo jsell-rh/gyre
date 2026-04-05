@@ -230,11 +230,17 @@
     for (const n of affectedNodes) {
       affectedTypes.set(n.node_type ?? 'unknown', (affectedTypes.get(n.node_type ?? 'unknown') ?? 0) + 1);
     }
+    // Detect new gyre:assert directives added during editing
+    const originalAssertCount = (specEditorOriginal.match(/gyre:assert/g) ?? []).length;
+    const currentAssertCount = (specEditorContent.match(/gyre:assert/g) ?? []).length;
+    const newAssertions = currentAssertCount - originalAssertCount;
+
     return {
       governedCount: governedNodeIds.size,
       connectedSpecs: connectedSpecIds.size,
       implementingRepos: repoIds.size,
       byType: [...affectedTypes.entries()].map(([t, c]) => `${c} ${t}${c !== 1 ? 's' : ''}`).join(', '),
+      newAssertions,
     };
   });
 
@@ -373,6 +379,11 @@
         const reason = approvalErr?.message ?? 'Approval endpoint unavailable';
         showToast(`Spec saved, but approval submission failed: ${reason}. You may need to submit for approval separately.`, { type: 'warning' });
       }
+
+      // Trigger spec assertion checking post-publish (vision.md Principle 5: Execute step)
+      try {
+        await api.checkSpecAssertions(selectedRepoId, specEditorPath, specEditorContent);
+      } catch { /* assertion check is best-effort */ }
 
       closeSpecEditor();
       // Execute→Observe loop (vision.md Principle 5): after publishing,
@@ -1328,6 +1339,10 @@
                     <span class="instant-count">{instantImpact.governedCount} governed node{instantImpact.governedCount !== 1 ? 's' : ''}</span>
                     {#if instantImpact.byType}
                       <span class="instant-types">({instantImpact.byType})</span>
+                    {/if}
+                    {#if instantImpact.newAssertions > 0}
+                      <span class="instant-sep">|</span>
+                      <span class="instant-new-assertion">{instantImpact.newAssertions} new assertion{instantImpact.newAssertions !== 1 ? 's' : ''} detected</span>
                     {/if}
                   </div>
                 {/if}
@@ -2635,6 +2650,7 @@
   .instant-count { color: var(--color-text); }
   .instant-sep { color: var(--color-text-muted); }
   .instant-types { color: var(--color-text-muted); font-family: 'SF Mono', Menlo, monospace; font-size: 11px; }
+  .instant-new-assertion { color: #f59e0b; font-weight: 600; }
 
   .spec-editor-predict-error {
     font-size: var(--text-xs);

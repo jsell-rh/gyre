@@ -651,7 +651,7 @@
                       <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
                       <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
                     </svg>
-                    {path.split('/').pop()}
+                    {path.split('/').pop()} <span class="spec-ref-action">Edit in Explorer</span>
                   </button>
                 {/each}
               </div>
@@ -1197,6 +1197,18 @@
   .spec-ref-btn:focus-visible {
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
+  }
+
+  .spec-ref-action {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    font-size: 10px;
+    opacity: 0.7;
+    margin-left: 2px;
+  }
+
+  .spec-ref-btn:hover .spec-ref-action {
+    opacity: 1;
   }
 
   /* ── Streaming indicator ─────────────────────────────────────────── */
