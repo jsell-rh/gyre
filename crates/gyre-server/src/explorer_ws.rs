@@ -1136,7 +1136,11 @@ async fn stream_text(
             while pos > 0 && bytes[pos - 1] != b' ' && bytes[pos - 1] != b'\n' {
                 pos -= 1;
             }
-            if pos == 0 { target } else { pos }
+            if pos == 0 {
+                target
+            } else {
+                pos
+            }
         })
     };
 

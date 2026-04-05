@@ -2231,12 +2231,7 @@ pub fn compute_graph_summary(
     // Compute p90 complexity threshold from all functions with complexity data
     let mut complexities: Vec<u32> = active_nodes
         .iter()
-        .filter(|n| {
-            matches!(
-                n.node_type,
-                NodeType::Function | NodeType::Method
-            )
-        })
+        .filter(|n| matches!(n.node_type, NodeType::Function | NodeType::Method))
         .filter_map(|n| n.complexity)
         .filter(|c| *c > 0)
         .collect();
@@ -2246,12 +2241,7 @@ pub fn compute_graph_summary(
         let p90_threshold = complexities[p90_idx.min(complexities.len() - 1)];
         let high_risk: Vec<String> = active_nodes
             .iter()
-            .filter(|n| {
-                matches!(
-                    n.node_type,
-                    NodeType::Function | NodeType::Method
-                )
-            })
+            .filter(|n| matches!(n.node_type, NodeType::Function | NodeType::Method))
             .filter(|n| n.complexity.unwrap_or(0) >= p90_threshold)
             .filter(|n| {
                 // Low coverage: not reachable from tests OR test_coverage < 0.3

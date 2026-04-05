@@ -437,9 +437,10 @@ pub async fn delete_explorer_view(
 
     check_ownership(&view, &caller)?;
 
+    let tid = Id::new(&caller.tenant_id);
     state
         .saved_views
-        .delete(&vid)
+        .delete(&vid, &tid)
         .await
         .map_err(ApiError::Internal)?;
 

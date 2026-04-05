@@ -85,8 +85,11 @@ impl SavedViewRepository for MemSavedViewRepository {
         }
     }
 
-    async fn delete(&self, id: &Id) -> Result<()> {
-        self.views.lock().unwrap().retain(|v| v.id != *id);
+    async fn delete(&self, id: &Id, tenant_id: &Id) -> Result<()> {
+        self.views
+            .lock()
+            .unwrap()
+            .retain(|v| !(v.id == *id && v.tenant_id == *tenant_id));
         Ok(())
     }
 }
