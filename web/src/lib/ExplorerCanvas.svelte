@@ -40,9 +40,14 @@
     } else if (activeQuery?.scope?.node === '$selected') {
       selectedQueryTemplate = JSON.parse(JSON.stringify(activeQuery));
     } else if (!activeQuery) {
+      // Only clear templates when query is explicitly cleared (null),
+      // not when a different non-interactive query replaces them.
+      // Interactive modes are persistent per spec §7.
       interactiveQueryTemplate = null;
       selectedQueryTemplate = null;
     }
+    // Non-interactive queries do NOT clear interactive templates.
+    // The user can still click nodes to re-trigger the interactive mode.
   });
 
   // Re-evaluate $selected query whenever selectedNodeId changes

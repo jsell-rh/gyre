@@ -54,7 +54,10 @@ pub enum Scope {
 }
 
 fn default_direction() -> String {
-    "outgoing".to_string()
+    // Default "both" so queries work for both callers and callees analysis.
+    // LLM prompt documents explicit direction for blast radius (incoming)
+    // and trace-from-here (outgoing), but omitting should give useful results.
+    "both".to_string()
 }
 fn default_depth() -> u32 {
     5

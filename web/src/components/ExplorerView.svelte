@@ -143,8 +143,8 @@
           .finally(() => { assertionsLoading = false; });
       }
       // Auto-highlight governed code on canvas (spec→code navigation, Vision §3)
-      // Sanitize specPath to prevent query injection via single quotes
-      const sanitizedPath = specPath.replace(/'/g, '');
+      // Sanitize specPath to prevent query injection via single quotes and unbalanced parens
+      const sanitizedPath = specPath.replace(/'/g, '').replace(/[()]/g, '_');
       activeViewQuery = {
         scope: { type: 'filter', computed: `$governed_by('${sanitizedPath}')` },
         emphasis: {
