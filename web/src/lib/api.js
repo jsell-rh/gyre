@@ -690,6 +690,17 @@ export const api = {
       throw e;
     }
   },
+  // Thorough preview: create throwaway branch, run agents, get real impact
+  thoroughPreview: async (repoId, body) => {
+    return await request(`/repos/${repoId}/graph/thorough-preview`, {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  },
+  // Task status polling
+  taskStatus: async (taskId) => {
+    return await request(`/tasks/${taskId}`);
+  },
   // View query dry-run — resolves a view query server-side, returns node_metrics etc.
   graphQueryDryrun: (repoId, query, selectedNodeId) =>
     request(`/repos/${repoId}/graph/query-dryrun`, {

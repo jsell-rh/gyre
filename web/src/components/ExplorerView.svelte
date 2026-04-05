@@ -384,6 +384,77 @@
   let specEditorDirty = $derived(specEditorContent !== specEditorOriginal);
   let publishLoading = $state(false);
   let publishError = $state('');
+  let thoroughLoading = $state(false);
+
+  // Thorough preview: create throwaway branch, run agents, show real impact (minutes)
+  async function runThoroughPreview() {
+    if (!selectedRepoId || !specEditorPath || thoroughLoading || !specEditorDirty) return;
+    thoroughLoading = true;
+    try {
+      // Step 1: Save the spec draft to a throwaway branch
+      const result = await api.thoroughPreview(selectedRepoId, {
+        spec_path: specEditorPath,
+        draft_content: specEditorContent,
+      });
+      // Step 2: Show a toast indicating the preview is running
+      showToast('Full preview started — agents are implementing on a throwaway branch. This may take a few minutes.', { type: 'info' });
+      // Step 3: Poll for results
+      if (result?.task_id) {
+        pollThoroughPreview(result.task_id);
+      } else if (result?.predictions) {
+        // Immediate result (fast path)
+        const overlays = [];
+        for (const item of (result.predictions ?? [])) {
+          overlays.push({
+            id: item.id ?? `thorough-${overlays.length}`,
+            name: item.name ?? item.qualified_name ?? '?',
+            type: item.node_type ?? 'unknown',
+            action: item.action ?? 'change',
+            confidence: 'high', // Thorough preview = high confidence
+            reason: item.reason ?? 'Confirmed by agent execution',
+          });
+        }
+        ghostOverlays = overlays;
+        showToast(`Full preview complete: ${overlays.length} confirmed changes.`, { type: 'success' });
+      }
+    } catch (e) {
+      // If thorough preview endpoint doesn't exist, fall back to prediction with a message
+      if (e.message?.includes('404') || e.message?.includes('not found')) {
+        showToast('Full preview not yet available — using LLM prediction instead.', { type: 'warning' });
+        runPrediction();
+      } else {
+        showToast(`Full preview failed: ${e.message ?? 'Unknown error'}`, { type: 'error' });
+      }
+    } finally {
+      thoroughLoading = false;
+    }
+  }
+
+  async function pollThoroughPreview(taskId) {
+    for (let i = 0; i < 30; i++) { // Poll up to 5 minutes (30 × 10s)
+      await new Promise(r => setTimeout(r, 10000));
+      try {
+        const status = await api.taskStatus(taskId);
+        if (status?.status === 'completed') {
+          const overlays = (status.predictions ?? []).map((item, idx) => ({
+            id: item.id ?? `thorough-${idx}`,
+            name: item.name ?? '?',
+            type: item.node_type ?? 'unknown',
+            action: item.action ?? 'change',
+            confidence: 'high',
+            reason: item.reason ?? 'Confirmed by agent execution',
+          }));
+          ghostOverlays = overlays;
+          showToast(`Full preview complete: ${overlays.length} confirmed changes.`, { type: 'success' });
+          return;
+        } else if (status?.status === 'failed') {
+          showToast(`Full preview failed: ${status.error ?? 'Agent execution failed'}`, { type: 'error' });
+          return;
+        }
+      } catch { /* Keep polling */ }
+    }
+    showToast('Full preview timed out — check task status for results.', { type: 'warning' });
+  }
 
   // Debounced auto-prediction and spec assertion re-check:
   // Run predictions 2s after user stops typing per spec §3.2-3.3.
@@ -1591,12 +1662,27 @@
                       onclick={runPrediction}
                       disabled={predictLoading || !specEditorDirty}
                       type="button"
+                      title="LLM prediction: what code changes would this spec produce? (2-5s)"
                     >
                       {#if predictLoading}
                         <span class="spinner" aria-hidden="true"></span>
                         {$t('explorer_view.spec_editor_predicting')}
                       {:else}
                         {$t('explorer_view.spec_editor_preview')}
+                      {/if}
+                    </button>
+                    <button
+                      class="spec-editor-thorough-btn"
+                      onclick={runThoroughPreview}
+                      disabled={thoroughLoading || !specEditorDirty}
+                      type="button"
+                      title="Full preview: create throwaway branch, run agents, show real downstream impact (minutes)"
+                    >
+                      {#if thoroughLoading}
+                        <span class="spinner" aria-hidden="true"></span>
+                        Running full preview...
+                      {:else}
+                        Full preview
                       {/if}
                     </button>
                     <button
@@ -3046,6 +3132,17 @@
     outline: 2px solid var(--color-focus);
     outline-offset: 2px;
   }
+
+  .spec-editor-thorough-btn {
+    display: flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: #7c3aed; border: 1px solid #7c3aed;
+    border-radius: var(--radius); color: #fff;
+    font-family: var(--font-body); font-size: var(--text-sm); font-weight: 500;
+    cursor: pointer; transition: background var(--transition-fast), opacity var(--transition-fast);
+  }
+  .spec-editor-thorough-btn:hover:not(:disabled) { background: #6d28d9; }
+  .spec-editor-thorough-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .spec-editor-publish-btn {
     padding: 6px 16px;

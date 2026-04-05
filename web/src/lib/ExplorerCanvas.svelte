@@ -4362,6 +4362,40 @@
         zoom: 'fit',
         annotation: { title: `Callees of: ${node.name}`, description: `What does this call?` },
       });
+    } else if (action === 'type_view') {
+      // Moldable Type View: show fields, usage patterns, implementors, and governing spec
+      const name = node.qualified_name || node.name;
+      onInteractiveQuery({
+        scope: { type: 'focus', node: name, edges: ['field_of', 'implements', 'calls', 'governed_by'], direction: 'both', depth: 2 },
+        emphasis: { tiered_colors: ['#8b5cf6', '#a78bfa', '#c4b5fd', '#94a3b8'], dim_unmatched: 0.1 },
+        edges: { filter: ['field_of', 'implements', 'calls', 'governed_by'] },
+        zoom: 'fit',
+        annotation: { title: `Type: ${node.name}`, description: `Fields, usage, and implementations` },
+        groups: [
+          { label: 'Fields', nodes: [] }, // Will be populated by resolver
+          { label: 'Users', nodes: [] },
+        ],
+      });
+    } else if (action === 'trait_view') {
+      // Moldable Trait View: show methods, implementations, and dependents
+      const name = node.qualified_name || node.name;
+      onInteractiveQuery({
+        scope: { type: 'focus', node: name, edges: ['implements', 'contains', 'calls'], direction: 'both', depth: 2 },
+        emphasis: { tiered_colors: ['#34d399', '#6ee7b7', '#a7f3d0', '#94a3b8'], dim_unmatched: 0.1 },
+        edges: { filter: ['implements', 'contains', 'calls'] },
+        zoom: 'fit',
+        annotation: { title: `Trait: ${node.name}`, description: `Methods, implementations, and dependents` },
+      });
+    } else if (action === 'endpoint_view') {
+      // Moldable Endpoint View: show request/response flow, handlers, gates, and tests
+      const name = node.qualified_name || node.name;
+      onInteractiveQuery({
+        scope: { type: 'focus', node: name, edges: ['routes_to', 'calls', 'governed_by'], direction: 'both', depth: 3 },
+        emphasis: { tiered_colors: ['#f97316', '#fb923c', '#fdba74', '#94a3b8'], dim_unmatched: 0.1 },
+        edges: { filter: ['routes_to', 'calls', 'governed_by'] },
+        zoom: 'fit',
+        annotation: { title: `Endpoint: ${node.name}`, description: `Request flow, handlers, and test coverage` },
+      });
     } else if (action === 'spec') {
       if (node.spec_path) {
         onNodeDetail({ ...node, _action: 'view_spec' });
@@ -5182,6 +5216,25 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
             View provenance
           </button>
+          <!-- Moldable views: entity-specific queries based on node type (system-explorer.md §2) -->
+          {#if contextMenu.node.node_type === 'type' || contextMenu.node.node_type === 'struct' || contextMenu.node.node_type === 'class'}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('type_view')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+              Type view
+            </button>
+          {/if}
+          {#if contextMenu.node.node_type === 'interface' || contextMenu.node.node_type === 'trait'}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trait_view')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+              Trait view
+            </button>
+          {/if}
+          {#if contextMenu.node.node_type === 'endpoint'}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('endpoint_view')}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              Endpoint view
+            </button>
+          {/if}
           <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('blast')}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
             Blast radius
