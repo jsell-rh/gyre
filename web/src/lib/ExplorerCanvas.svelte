@@ -905,13 +905,27 @@
     // PathTreeNode: synthetic grouping node
     const root = { name: 'root', fullPath: '', children: new Map(), graphNodes: [], totalDescendants: 0, treeDepth: 0 };
 
+    // Determine if we have meaningful Contains edges (domain boundaries).
+    // If most root nodes have children, use Contains-based hierarchy.
+    // Otherwise fall back to file-path hierarchy.
+    const nodesWithChildren = rootNodes.filter(n => (parentToChildren.get(n.id) ?? []).length > 0).length;
+    const useContainsHierarchy = nodesWithChildren > rootNodes.length * 0.3;
+
     for (const n of rootNodes) {
-      // Use file_path for hierarchy (more reliable than qualified_name for Python)
-      let pathStr = n.file_path ?? n.qualified_name ?? n.name ?? '';
-      // Normalize: strip file extension, replace / with .
-      pathStr = pathStr.replace(/\.(py|rs|go|ts|js|tsx|jsx|svelte|vue)$/, '').replace(/\//g, '.');
-      // Remove trailing __init__ (Python package markers)
-      pathStr = pathStr.replace(/\.__init__$/, '');
+      // Prefer qualified_name for domain-boundary hierarchy (e.g., "gyre_domain::task::Task"),
+      // fall back to file_path for grouping when qualified_name isn't informative.
+      let pathStr = '';
+      if (useContainsHierarchy && n.qualified_name && n.qualified_name.includes('.')) {
+        pathStr = n.qualified_name;
+      } else if (useContainsHierarchy && n.qualified_name && n.qualified_name.includes('::')) {
+        pathStr = n.qualified_name.replace(/::/g, '.');
+      } else {
+        pathStr = n.file_path ?? n.qualified_name ?? n.name ?? '';
+        // Normalize: strip file extension, replace / with .
+        pathStr = pathStr.replace(/\.(py|rs|go|ts|js|tsx|jsx|svelte|vue)$/, '').replace(/\//g, '.');
+        // Remove trailing __init__ (Python package markers)
+        pathStr = pathStr.replace(/\.__init__$/, '');
+      }
       if (!pathStr) pathStr = n.name ?? 'unknown';
 
       const parts = pathStr.split(/\.|::/);
@@ -4645,8 +4659,10 @@
   // Compute trace path ordering and connecting edges when a trace query is active.
   // Uses depth-first ordering to represent call-stack execution order: when A calls B
   // and B calls C, the order is A(1)→B(2)→C(3) — which matches the actual execution
-  // stack. For functions with multiple sequential callees, children are sorted
-  // alphabetically for determinism (we lack source-order information from static analysis).
+  // stack (callee executes before returning to caller to call the next function).
+  // BFS would incorrectly assign all direct callees the same depth-level number.
+  // For functions with multiple sequential callees, children are sorted alphabetically
+  // for determinism (we lack intra-function call ordering from static analysis).
   $effect(() => {
     // Detect trace queries: focus scope with outgoing direction (Calls/RoutesTo traversal)
     const isTrace = activeQuery?.scope?.type === 'focus' &&
