@@ -50,6 +50,10 @@ vi.mock('../lib/api.js', () => ({
   },
 }));
 
+vi.mock('../lib/ExplorerCanvas.svelte', () => ({
+  default: function ExplorerCanvasStub() {},
+}));
+
 vi.mock('../lib/toast.svelte.js', () => ({
   toastInfo: vi.fn(),
   toastSuccess: vi.fn(),
@@ -189,7 +193,7 @@ describe('WorkspaceHome — basic rendering', () => {
 
   it('shows key sections when workspace is set', () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    // Streamlined layout: Repos section is the primary content area
+    // Single-column layout: Repos + Entity tabs
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
   });
 });

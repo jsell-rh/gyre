@@ -32,6 +32,11 @@ vi.mock('../lib/api.js', () => ({
   },
 }));
 
+// ExplorerCanvas is complex — stub it out
+vi.mock('../lib/ExplorerCanvas.svelte', () => ({
+  default: function ExplorerCanvasStub() {},
+}));
+
 import WorkspaceHome from '../components/WorkspaceHome.svelte';
 
 describe('WorkspaceHome', () => {
@@ -47,7 +52,7 @@ describe('WorkspaceHome', () => {
   it('shows key sections when workspace is provided', () => {
     const ws = { id: 'ws-1', name: 'Test', slug: 'test' };
     const { container } = render(WorkspaceHome, { props: { workspace: ws } });
-    // Streamlined layout: Repos section is the primary content area
+    // Single-column layout: Repos + Entity tabs
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
   });
 

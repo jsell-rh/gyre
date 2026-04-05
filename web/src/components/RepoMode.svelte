@@ -13,6 +13,7 @@
   import { api } from '../lib/api.js';
   import { entityName, shortId } from '../lib/entityNames.svelte.js';
   import { relativeTime } from '../lib/timeFormat.js';
+  import CopyableId from '../lib/CopyableId.svelte';
   import { taskStatusTooltip, mrStatusTooltip, agentStatusTooltip } from '../lib/statusTooltips.js';
   import Badge from '../lib/Badge.svelte';
   import EntityLink from '../lib/EntityLink.svelte';
@@ -726,7 +727,7 @@
                   <td title={mrStatusTooltip(mr)}>
                     <Badge value={mr.queue_position != null ? `queued #${mr.queue_position + 1}` : (mr.status ?? 'open')} variant={mr.queue_position != null ? 'warning' : mrStatusVariant(mr.status)} />
                     {#if mr.status === 'merged' && mr.merge_commit_sha}
-                      <code class="sha-inline mono" title="Click to copy {mr.merge_commit_sha}" onclick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); toastSuccess('SHA copied'); }} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); navigator.clipboard.writeText(mr.merge_commit_sha); } }}>{mr.merge_commit_sha.slice(0, 7)}</code>
+                      <span onclick={(e) => e.stopPropagation()}><CopyableId value={mr.merge_commit_sha} variant="sha" copyLabel="Merge SHA" /></span>
                     {:else if mr.status === 'open' && mr._gates?.failed > 0}
                       {@const failedGateNames = (mr._gates.details ?? []).filter(g => g.status === 'failed').map(g => g.name).slice(0, 2)}
                       <span class="status-why status-why-danger">{failedGateNames.length > 0 ? failedGateNames.join(', ') : `${mr._gates.failed} gate${mr._gates.failed !== 1 ? 's' : ''}`} failed</span>
@@ -830,6 +831,7 @@
                 <th>Duration</th>
                 <th>Cost</th>
                 <th>Spawned</th>
+                <th class="th-action"></th>
               </tr>
             </thead>
             <tbody>
@@ -850,6 +852,13 @@
                   <td class="cell-time">{#if completedDur != null}{humanDuration(completedDur)}{:else if agent.status === 'active' && elapsedSec != null}{humanDuration(elapsedSec)}{/if}</td>
                   <td class="cell-mono">{#if totalTokens > 0}<span class="token-count" title="{totalTokens.toLocaleString()} tokens">{totalTokens > 999999 ? (totalTokens / 1000000).toFixed(1) + 'M' : totalTokens > 999 ? (totalTokens / 1000).toFixed(0) + 'k' : totalTokens}</span>{/if}</td>
                   <td class="cell-time">{relativeTime(agent.created_at)}</td>
+                  <td class="cell-action">
+                    {#if agent.status === 'failed' || agent.status === 'dead'}
+                      <button class="quick-action-btn quick-action-view" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', agent.id, { ...agent, _openTab: 'history' }); }} title="View agent logs">Logs</button>
+                    {:else if agent.status === 'active'}
+                      <button class="quick-action-btn quick-action-view" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('agent', agent.id, { ...agent, _openTab: 'chat' }); }} title="View agent conversation">Chat</button>
+                    {/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>

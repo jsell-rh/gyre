@@ -752,8 +752,8 @@
                     <span class="ws-indicator ws-indicator-warning" title="{wsPendingDecisions.length} pending decisions">{wsPendingDecisions.length} pending</span>
                   {/if}
                   {#if ws.health}
-                    <span class="health-badge" class:health-ok={ws.health === 'healthy'} class:health-warn={ws.health === 'gate_failure'}>
-                      {ws.health === 'healthy' ? '●' : '!'} {ws.health}
+                    <span class="health-badge" class:health-ok={ws.health === 'healthy'} class:health-warn={ws.health === 'gate_failure'} title={ws.health === 'healthy' ? 'Workspace is healthy — agents active or all work complete' : ws.health === 'gate_failure' ? 'One or more MRs have failing quality gates — needs attention' : ws.health === 'idle' ? 'No active agents — waiting for approved specs' : ws.health}>
+                      {ws.health === 'healthy' ? '●' : ws.health === 'gate_failure' ? '!' : '○'} {ws.health === 'gate_failure' ? 'gates failing' : ws.health}
                     </span>
                   {/if}
                 </div>

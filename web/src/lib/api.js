@@ -657,6 +657,22 @@ export const api = {
     request(`/admin/llm/prompts/${encodeURIComponent(feature)}`),
   adminLlmPromptSet: (feature, data) =>
     request(`/admin/llm/prompts/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Graph diff (architecture delta between commits/branches)
+  repoGraphDiff: (id, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/repos/${id}/graph/diff${qs ? '?' + qs : ''}`);
+  },
+  // Workspace-scope concept search
+  workspaceGraphConcept: (wsId, name) =>
+    request(`/workspaces/${wsId}/graph/concept/${encodeURIComponent(name)}`),
+  // API token management
+  createApiToken: (data) =>
+    request('/users/me/tokens', { method: 'POST', body: JSON.stringify(data) }),
+  deleteApiToken: (id) =>
+    request(`/users/me/tokens/${id}`, { method: 'DELETE' }),
+  listApiTokens: () => request('/users/me/tokens'),
+  // Server version
+  serverVersion: () => request('/version'),
   // Activity feed
   activityFeed: (limit = 20) =>
     request(`/activity?limit=${limit}`),

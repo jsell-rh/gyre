@@ -19,6 +19,7 @@
   import RepoCard from './RepoCard.svelte';
   import Modal from '../lib/Modal.svelte';
   import Icon from '../lib/Icon.svelte';
+  import CopyableId from '../lib/CopyableId.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -136,10 +137,6 @@
   let budgetLoading = $state(true);
   let budgetData = $state(null); // { config, usage }
   let costData = $state(null);   // cost summary
-
-  // ── Briefing state ─────────────────────────────────────────────────────
-  let briefingLoading = $state(true);
-  let briefingData = $state(null);
 
   // ── Repo lookup map (id → repo) ────────────────────────────────────────
   let repoMap = $state({});
@@ -294,6 +291,7 @@
               output: g.output,
               error: g.error,
               command: g.command,
+              duration_ms: (g.started_at && g.finished_at) ? Math.round((g.finished_at - g.started_at) * 1000) : g.duration_ms,
             };
           });
           return { id: mr.id, passed, failed, total: arr.length, details };
@@ -348,19 +346,6 @@
       wsAgents = [];
     } finally {
       agentsLoading = false;
-    }
-  }
-
-  // ── Briefing: load ─────────────────────────────────────────────────────
-  async function loadBriefing() {
-    if (!workspace?.id) return;
-    briefingLoading = true;
-    try {
-      briefingData = await api.getWorkspaceBriefing(workspace.id);
-    } catch {
-      briefingData = null;
-    } finally {
-      briefingLoading = false;
     }
   }
 
@@ -623,24 +608,10 @@
   });
 
   // ── Activity pagination ──────────────────────────────────────
-  let activityLimit = $state(8);
+  let activityLimit = $state(5);  // compact by default, expandable
 
-  // ── Pipeline hero stage click → show inline detail popover ──────────
-  let expandedStage = $state(null); // null | 'specs' | 'tasks' | 'agents' | 'mrs'
-
-  function toggleStage(stageId) {
-    expandedStage = expandedStage === stageId ? null : stageId;
-  }
-
-  /** Get the top items needing attention for a pipeline stage */
-  let stageItems = $derived.by(() => {
-    return {
-      specs: specs.filter(s => (s.approval_status ?? s.status) === 'pending').slice(0, 5),
-      tasks: wsTasks.filter(t => t.status === 'in_progress' || t.status === 'blocked').slice(0, 5),
-      agents: wsAgents.filter(a => a.status === 'active' || a.status === 'failed').slice(0, 5),
-      mrs: wsMrs.filter(m => m.status === 'open' || m._gates?.failed > 0).slice(0, 5),
-    };
-  });
+  // Collapse activity when there's active work happening
+  let activityCollapsed = $derived(wsAgents.some(a => a.status === 'active') || wsTasks.some(t => t.status === 'in_progress'));
 
   // ── Repo card data ────────────────────────────────────────────────────
   // repoHealth(repo) function already defined above (line ~265)
@@ -977,18 +948,25 @@
   });
 
   let statusSentence = $derived.by(() => {
-    if (statusItems.length === 0) {
-      const s = provenanceSummary;
-      if (specs.length === 0 && repos.length === 0) return 'Get started by creating a repo and pushing specs.';
-      if (specs.length === 0 && repos.length > 0) return `${repos.length} repo${repos.length !== 1 ? 's' : ''} ready. Push specs to start the autonomous pipeline.`;
-      if (s.approved > 0 && s.totalTasks === 0) return `${s.approved} spec${s.approved !== 1 ? 's' : ''} approved — tasks will be created automatically.`;
-      if (s.mergedMrs > 0 && s.activeAgentCount === 0 && s.openMrs === 0 && s.pending === 0) {
-        return `All clear: ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged with signed attestations across ${repos.length} repo${repos.length !== 1 ? 's' : ''}.`;
-      }
-      if (s.totalTasks > 0 && s.activeAgentCount === 0) return `${s.totalTasks} task${s.totalTasks !== 1 ? 's' : ''} tracked. No agents running.`;
-      return `${repos.length} repo${repos.length !== 1 ? 's' : ''}. No active work.`;
+    const s = provenanceSummary;
+    // Build a natural sentence summarizing the workspace state
+    if (specs.length === 0 && repos.length === 0) return 'Get started by creating a repo and pushing specs.';
+    if (specs.length === 0 && repos.length > 0) return `${repos.length} repo${repos.length !== 1 ? 's' : ''} ready. Push specs to start the autonomous pipeline.`;
+
+    const parts = [];
+    if (s.failedGates > 0) parts.push(`${s.failedGates} MR${s.failedGates !== 1 ? 's have' : ' has'} failed gates`);
+    if (s.pending > 0) parts.push(`${s.pending} spec${s.pending !== 1 ? 's' : ''} awaiting approval`);
+    if (s.activeAgentCount > 0) parts.push(`${s.activeAgentCount} agent${s.activeAgentCount !== 1 ? 's' : ''} running`);
+    if (s.openMrs > 0 && s.failedGates === 0) parts.push(`${s.openMrs} open MR${s.openMrs !== 1 ? 's' : ''}`);
+
+    if (parts.length > 0) return parts.join(' · ') + '.';
+
+    if (s.mergedMrs > 0 && s.activeAgentCount === 0 && s.openMrs === 0 && s.pending === 0) {
+      return `All clear — ${s.mergedMrs} MR${s.mergedMrs !== 1 ? 's' : ''} merged across ${repos.length} repo${repos.length !== 1 ? 's' : ''}.`;
     }
-    return statusItems.map(i => i.text).join('. ') + '.';
+    if (s.approved > 0 && s.totalTasks === 0) return `${s.approved} spec${s.approved !== 1 ? 's' : ''} approved — tasks will be created automatically.`;
+    if (s.totalTasks > 0 && s.activeAgentCount === 0) return `${s.totalTasks} task${s.totalTasks !== 1 ? 's' : ''} tracked, no agents running.`;
+    return `${repos.length} repo${repos.length !== 1 ? 's' : ''}, no active work.`;
   });
 
   // ── Budget percentage ──────────────────────────────────────────────────
@@ -1011,7 +989,6 @@
     loadAgents();
     loadActivity();
     loadBudget();
-    loadBriefing();
     loadMergeQueue();
   });
 </script>
@@ -1041,172 +1018,23 @@
 
       <!-- ── Workspace header ──────── -->
       <header class="ws-header">
-        <div class="ws-header-main">
-          <div class="ws-header-top-row">
-            <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
-            <div class="ws-header-actions">
-              {#if budgetPct !== null}
-                <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
-                  <span class="ws-budget-bar"><span class="ws-budget-fill" style="width: {budgetPct}%"></span></span>
-                  <span class="ws-budget-label">{budgetPct}%</span>
-                </span>
-              {/if}
-              <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings (g s)">
-                <Icon name="settings" size={14} />
-                Settings
-              </button>
-              <button class="ws-header-link" onclick={() => goToAgentRules?.()} title="Agent rules (g a)">
-                <Icon name="spec" size={14} />
-                Agent Rules
-              </button>
-            </div>
-          </div>
-          <!-- Status: one-line summary of what's happening -->
-          {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-            <p class="ws-header-status">{statusSentence}</p>
-          {:else if workspace.description}
-            <p class="ws-header-desc">{workspace.description}</p>
+        <div class="ws-header-top-row">
+          <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
+          {#if budgetPct !== null}
+            <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
+              <span class="ws-budget-bar"><span class="ws-budget-fill" style="width: {budgetPct}%"></span></span>
+              <span class="ws-budget-label">{budgetPct}%</span>
+            </span>
           {/if}
         </div>
+        <!-- Status sentence — concise summary of workspace state -->
+        {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
+          <p class="ws-header-status">{statusSentence}</p>
+        {/if}
       </header>
 
-      <!-- ── Pipeline hero — always visible, shows the full lifecycle flow ── -->
-      {#if !specsLoading || !tasksLoading || !mrsLoading || !agentsLoading || specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
-      <div class="pipeline-hero" data-testid="pipeline-hero">
-        <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineSpecs.pending > 0} class:pipeline-hero-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} class:pipeline-hero-selected={expandedStage === 'specs'} onclick={() => toggleStage('specs')}>
-          <span class="pipeline-hero-count">{specs.length}</span>
-          <span class="pipeline-hero-label">Specs</span>
-          {#if pipelineSpecs.pending > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-warn">{pipelineSpecs.pending} pending</span>
-          {:else if pipelineSpecs.approved > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineSpecs.approved} approved</span>
-          {/if}
-        </button>
-        <span class="pipeline-hero-arrow">
-          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineTasks.in_progress > 0} class:pipeline-hero-warn={pipelineTasks.blocked > 0} class:pipeline-hero-selected={expandedStage === 'tasks'} onclick={() => toggleStage('tasks')}>
-          <span class="pipeline-hero-count">{wsTasks.length}</span>
-          <span class="pipeline-hero-label">Tasks</span>
-          {#if pipelineTasks.in_progress > 0}
-            <span class="pipeline-hero-badge">{pipelineTasks.in_progress} active</span>
-          {:else if pipelineTasks.blocked > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineTasks.blocked} blocked</span>
-          {/if}
-        </button>
-        <span class="pipeline-hero-arrow">
-          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineAgents.active > 0} class:pipeline-hero-selected={expandedStage === 'agents'} onclick={() => toggleStage('agents')}>
-          <span class="pipeline-hero-count">{wsAgents.length}</span>
-          <span class="pipeline-hero-label">Agents</span>
-          {#if pipelineAgents.active > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-ok"><span class="pipeline-hero-pulse"></span>{pipelineAgents.active} running</span>
-          {/if}
-        </button>
-        <span class="pipeline-hero-arrow">
-          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        <button class="pipeline-hero-stage" class:pipeline-hero-warn={pipelineMrs.failed_gates > 0} class:pipeline-hero-selected={expandedStage === 'mrs'} onclick={() => toggleStage('mrs')}>
-          <span class="pipeline-hero-count">{pipelineMrs.open + pipelineMrs.failed_gates}</span>
-          <span class="pipeline-hero-label">MRs</span>
-          {#if pipelineMrs.failed_gates > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineMrs.failed_gates} failed</span>
-          {:else if pipelineMrs.open > 0}
-            <span class="pipeline-hero-badge">{pipelineMrs.open} open</span>
-          {/if}
-        </button>
-        <span class="pipeline-hero-arrow">
-          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        <button class="pipeline-hero-stage pipeline-hero-done-stage" class:pipeline-hero-done={pipelineMrs.merged > 0} onclick={() => toggleStage('mrs')}>
-          <span class="pipeline-hero-count">{pipelineMrs.merged}</span>
-          <span class="pipeline-hero-label">Merged</span>
-        </button>
-      </div>
-      {/if}
-
-      <!-- ── Pipeline stage popover — shows top items when a stage is clicked ── -->
-      {#if expandedStage}
-        <div class="stage-popover" data-testid="stage-popover">
-          {#if expandedStage === 'specs' && stageItems.specs.length > 0}
-            <div class="stage-popover-header">
-              <span class="stage-popover-title">Specs needing approval</span>
-              <button class="stage-popover-close" onclick={() => { expandedStage = null; }}>✕</button>
-            </div>
-            {#each stageItems.specs as spec}
-              {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
-              <div class="stage-popover-item">
-                <button class="stage-popover-link" onclick={() => navigateToSpec(spec)}>{specName}</button>
-                {#if spec.repo_id && repoMap[spec.repo_id]}<span class="stage-popover-repo">{repoMap[spec.repo_id].name}</span>{/if}
-                <div class="stage-popover-actions">
-                  <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'}>Approve</button>
-                  <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)} disabled={specActionStates[spec.path] === 'loading'}>Reject</button>
-                </div>
-              </div>
-            {/each}
-          {:else if expandedStage === 'tasks' && stageItems.tasks.length > 0}
-            <div class="stage-popover-header">
-              <span class="stage-popover-title">Active & blocked tasks</span>
-              <button class="stage-popover-close" onclick={() => { expandedStage = null; }}>✕</button>
-            </div>
-            {#each stageItems.tasks as task}
-              <button class="stage-popover-item stage-popover-link" onclick={() => nav('task', task.id, { repo_id: task.repo_id, title: task.title })}>
-                <span class="status-pill status-pill-{task.status}">{task.status}</span>
-                <span>{task.title ?? 'Untitled'}</span>
-                {#if task.repo_id && repoMap[task.repo_id]}<span class="stage-popover-repo">{repoMap[task.repo_id].name}</span>{/if}
-              </button>
-            {/each}
-          {:else if expandedStage === 'agents' && stageItems.agents.length > 0}
-            <div class="stage-popover-header">
-              <span class="stage-popover-title">Active agents</span>
-              <button class="stage-popover-close" onclick={() => { expandedStage = null; }}>✕</button>
-            </div>
-            {#each stageItems.agents as agent}
-              {@const agentName = agent.name ?? formatId('agent', agent.id)}
-              {@const specName = agent.spec_path?.split('/').pop()?.replace(/\.md$/, '')}
-              <button class="stage-popover-item stage-popover-link" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
-                <span class="status-pill status-pill-{agent.status}">{#if agent.status === 'active'}<span class="status-pulse-tiny"></span>{/if}{agent.status}</span>
-                <span>{agentName}</span>
-                {#if specName}<span class="stage-popover-context">implementing {specName}</span>{/if}
-                {#if agent.repo_id && repoMap[agent.repo_id]}<span class="stage-popover-repo">{repoMap[agent.repo_id].name}</span>{/if}
-              </button>
-            {/each}
-          {:else if expandedStage === 'mrs' && stageItems.mrs.length > 0}
-            <div class="stage-popover-header">
-              <span class="stage-popover-title">Open merge requests</span>
-              <button class="stage-popover-close" onclick={() => { expandedStage = null; }}>✕</button>
-            </div>
-            {#each stageItems.mrs as mr}
-              {@const gates = mr._gates}
-              <div class="stage-popover-item">
-                <button class="stage-popover-link" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })}>{mr.title ?? 'Untitled MR'}</button>
-                {#if gates?.failed > 0}<span class="gate-chip gate-chip-failed">✗{gates.failed}</span>{/if}
-                {#if gates?.passed > 0}<span class="gate-chip gate-chip-passed">✓{gates.passed}</span>{/if}
-                {#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}<span class="stage-popover-repo">{repoMap[mr.repository_id ?? mr.repo_id].name}</span>{/if}
-                <div class="stage-popover-actions">
-                  {#if mr.status === 'open' && mr.queue_position == null}
-                    <button class="inline-action-btn inline-action-approve" onclick={(e) => { e.stopPropagation(); quickEnqueueMr(mr, e); }}>Enqueue</button>
-                  {/if}
-                  <button class="inline-action-btn inline-action-view" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, _openTab: 'diff' }); }}>Diff</button>
-                </div>
-              </div>
-            {/each}
-          {:else}
-            <div class="stage-popover-header">
-              <span class="stage-popover-title">No items needing attention</span>
-              <button class="stage-popover-close" onclick={() => { expandedStage = null; }}>✕</button>
-            </div>
-            <p class="stage-popover-empty">All clear for this stage.</p>
-          {/if}
-        </div>
-      {/if}
-
-      <!-- ── Main content: two-column layout ──────────────────────── -->
-      <div class="ws-two-col">
-
-        <!-- Left column: Actions + Activity feed -->
-        <div class="ws-col-primary">
+      <!-- ── Main content: single-column layout ──────────────────── -->
+      <div class="ws-main-content">
 
           <!-- Action Needed (compact, dismissible) -->
           {#if !decisionsLoading && actionableNotifications.length > 0}
@@ -1288,82 +1116,7 @@
             </section>
           {/if}
 
-          <!-- Recent Activity -->
-          <section class="activity-section" data-testid="section-activity">
-            <h2 class="section-heading">Recent Activity</h2>
-            {#if activityLoading}
-              <div class="skeleton-row"></div>
-            {:else if activityEvents.length === 0}
-              <p class="empty-text">No recent activity.</p>
-            {:else}
-              <div class="activity-timeline">
-                {#each activityEvents.slice(0, activityLimit) as event, i}
-                  {@const variant = activityVariant(event)}
-                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                  <button
-                    class="activity-item activity-item-clickable"
-                    onclick={() => {
-                      if (primaryType && primaryId) {
-                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                        nav(primaryType, primaryId, data);
-                      }
-                    }}
-                  >
-                    <div class="activity-dot activity-dot-{variant}"></div>
-                    {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                    <div class="activity-content">
-                      <div class="activity-main-row">
-                        <span class="activity-icon"><Icon name={activityIconName(event)} size={12} /></span>
-                        <span class="activity-label">{activityLabel(event)}</span>
-                        {#if event.entity_name ?? event.title}
-                          <span class="activity-detail">{event.entity_name ?? event.title}</span>
-                        {/if}
-                        {#if event.repo_id && repoMap[event.repo_id]}
-                          <span class="activity-repo">{repoMap[event.repo_id].name}</span>
-                        {/if}
-                        {#if event.timestamp ?? event.created_at}
-                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                        {/if}
-                      </div>
-                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
-                      {/if}
-                      {#if (event.agent_id && primaryType !== 'agent') || (event.mr_id && primaryType !== 'mr') || (event.spec_path && primaryType !== 'spec')}
-                        <div class="activity-refs">
-                          {#if event.agent_id && primaryType !== 'agent'}
-                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('agent', event.agent_id, { repo_id: event.repo_id }); }}>
-                              <Icon name="agent" size={10} /> {entityName('agent', event.agent_id)}
-                            </button>
-                          {/if}
-                          {#if event.mr_id && primaryType !== 'mr'}
-                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('mr', event.mr_id, { repo_id: event.repo_id }); }}>
-                              <Icon name="git-merge" size={10} /> {entityName('mr', event.mr_id)}
-                            </button>
-                          {/if}
-                          {#if event.spec_path && primaryType !== 'spec'}
-                            <button class="activity-ref-chip" onclick={(e) => { e.stopPropagation(); nav('spec', event.spec_path, { path: event.spec_path, repo_id: event.repo_id }); }}>
-                              <Icon name="spec" size={10} /> {event.spec_path.split('/').pop()?.replace(/\.md$/, '')}
-                            </button>
-                          {/if}
-                        </div>
-                      {/if}
-                    </div>
-                  </button>
-                {/each}
-              </div>
-              {#if activityEvents.length > activityLimit}
-                <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
-                  Show more ({activityEvents.length - activityLimit} remaining)
-                </button>
-              {/if}
-            {/if}
-          </section>
-        </div><!-- .ws-col-primary -->
-
-        <!-- Right column: Repos + Merge Queue -->
-        <div class="ws-col-secondary">
-          <!-- Repos -->
+          <!-- Repos (primary content) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
               <h2 class="section-heading">Repositories</h2>
@@ -1420,6 +1173,13 @@
                       failedMrs={wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m._gates?.failed > 0)}
                       specBreakdown={repoSpecBreakdown(repo)}
                       latestMr={repoLatestMr(repo)}
+                      pendingSpecs={specs.filter(s => s.repo_id === repo.id && (s.approval_status ?? s.status) === 'pending')}
+                      onApproveSpec={(spec) => quickApproveSpec(spec)}
+                      onRejectSpec={(spec) => quickRejectSpec(spec)}
+                      queueItems={mergeQueueItems.filter(item => {
+                        const mr = item._mr;
+                        return (mr?.repository_id ?? mr?.repo_id) === repo.id;
+                      })}
                       onclick={() => onSelectRepo?.(repo)}
                       onStatClick={(r, tab) => onSelectRepo?.(r, tab)}
                     />
@@ -1461,46 +1221,103 @@
             </div>
           </section>
 
-          <!-- Merge Queue (compact, if items queued) -->
+          <!-- ── Merge Queue (workspace-wide) ────────────────── -->
           {#if !mergeQueueLoading && mergeQueueItems.length > 0}
-            <section class="merge-queue-compact" data-testid="section-merge-queue">
-              <div class="mq-compact-header">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14" aria-hidden="true"><path d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>
-                <span class="mq-compact-title">Merge Queue</span>
-                <span class="mq-compact-count">{mergeQueueItems.length} queued</span>
+            <section class="ws-merge-queue" data-testid="section-merge-queue">
+              <div class="section-header-row">
+                <h2 class="section-heading">Merge Queue</h2>
+                <span class="section-count">{mergeQueueItems.length} item{mergeQueueItems.length !== 1 ? 's' : ''}</span>
               </div>
-              <div class="mq-compact-items">
+              <div class="merge-queue-list">
                 {#each mergeQueueItems.slice(0, 5) as item, i}
                   {@const mrId = item.merge_request_id ?? item.mr_id}
-                  <button class="mq-compact-item" onclick={() => nav('mr', mrId, item._mr)}>
-                    <span class="mq-compact-pos">#{i + 1}</span>
-                    <span class="mq-compact-mr-title">{item._title}</span>
-                    {#if item._mr?._gates?.total > 0}
-                      <span class="mq-compact-gates">
-                        {#if item._mr._gates.failed > 0}<span class="gate-chip gate-chip-failed">✗{item._mr._gates.failed}</span>{/if}
-                        {#if item._mr._gates.passed > 0}<span class="gate-chip gate-chip-passed">✓{item._mr._gates.passed}</span>{/if}
+                  {@const mr = item._mr ?? {}}
+                  {@const repoId = mr.repository_id ?? mr.repo_id}
+                  {@const gateDetails = mr._gates?.details ?? []}
+                  <button class="queue-entry" onclick={() => nav('mr', mrId, { repo_id: repoId, title: mr.title })}>
+                    <span class="queue-position">#{i + 1}</span>
+                    <div class="queue-entry-info">
+                      <span class="queue-entry-title">{item._title ?? 'Untitled MR'}</span>
+                      <span class="queue-entry-meta">
+                        {#if repoId && repoMap[repoId]}<span class="ec-chip">{repoMap[repoId].name}</span>{/if}
+                        {#if item._branch}<span class="ec-chip ec-chip-mono">{item._branch}</span>{/if}
+                        {#if item._spec_ref}
+                          {@const specPath = item._spec_ref.split('@')[0]}
+                          <span class="ec-chip ec-chip-spec">{specPath.split('/').pop()?.replace(/\.md$/, '')}</span>
+                        {/if}
+                      </span>
+                    </div>
+                    {#if gateDetails.length > 0}
+                      <span class="queue-gates">
+                        {#each gateDetails.slice(0, 3) as g}
+                          <span class="ec-gate-chip ec-gate-{g.status}" title="{g.name}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
+                        {/each}
                       </span>
                     {/if}
-                    {#if item._branch}<span class="mq-compact-branch">{item._branch}</span>{/if}
+                    {#if item._deps?.length > 0}
+                      <span class="queue-deps" title="Waiting on {item._deps.length} dependency">
+                        <Icon name="link" size={10} /> {item._deps.length}
+                      </span>
+                    {/if}
                   </button>
                 {/each}
                 {#if mergeQueueItems.length > 5}
-                  <span class="mq-compact-more">+{mergeQueueItems.length - 5} more</span>
+                  <p class="entity-panel-overflow">{mergeQueueItems.length - 5} more in queue</p>
                 {/if}
               </div>
             </section>
           {/if}
 
-          <!-- Workspace briefing (AI-generated summary) -->
-          {#if !briefingLoading && briefingData?.summary}
-            <div class="ws-briefing-compact">
-              <h2 class="section-heading">Briefing</h2>
-              <p class="ws-briefing-summary">{briefingData.summary}</p>
-            </div>
+          <!-- ── Recent Activity ─────────────────────────────── -->
+          {#if !activityLoading && activityEvents.length > 0}
+            <section class="ws-activity-section" data-testid="section-activity">
+              <div class="section-header-row">
+                <h2 class="section-heading">Recent Activity</h2>
+                {#if activityEvents.length > 5}
+                  <button class="section-btn section-btn-compact" onclick={() => { activityLimit = activityLimit <= 5 ? 20 : 5; }}>
+                    {activityLimit <= 5 ? 'Show more' : 'Show less'}
+                  </button>
+                {/if}
+              </div>
+              <div class="activity-timeline">
+                {#each activityEvents.slice(0, activityLimit) as event, i}
+                  {@const variant = activityVariant(event)}
+                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                  <button
+                    class="activity-item activity-item-clickable"
+                    onclick={() => {
+                      if (primaryType && primaryId) {
+                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                        nav(primaryType, primaryId, data);
+                      }
+                    }}
+                  >
+                    <div class="activity-dot activity-dot-{variant}"></div>
+                    {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                    <div class="activity-content">
+                      <div class="activity-main-row">
+                        <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
+                        <span class="activity-label">{activityLabel(event)}</span>
+                        {#if event.repo_id && repoMap[event.repo_id]}<span class="activity-repo-badge">{repoMap[event.repo_id].name}</span>{/if}
+                        {#if event.timestamp ?? event.created_at}
+                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                        {/if}
+                      </div>
+                      {#if event.entity_name ?? event.title}
+                        <p class="activity-entity-name">{event.entity_name ?? event.title}</p>
+                      {/if}
+                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
+                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
+                      {/if}
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            </section>
           {/if}
-        </div><!-- .ws-col-secondary -->
 
-      </div><!-- .ws-two-col -->
+      </div><!-- .ws-main-content -->
 
     </div><!-- .focused-dashboard -->
   {/if}
@@ -1539,6 +1356,93 @@
 </Modal>
 
 <style>
+  /* ═══ Merge Queue section ═══════════════════════════════════════════════ */
+  .ws-merge-queue {
+    margin-top: var(--space-1);
+  }
+
+  .merge-queue-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    background: var(--color-border);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .queue-entry {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    text-align: left;
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .queue-entry:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .queue-position {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: var(--text-xs);
+    color: var(--color-warning);
+    width: 24px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .queue-entry-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .queue-entry-title {
+    font-weight: 500;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .queue-entry-meta {
+    display: flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .queue-gates {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+
+  .queue-deps {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .section-count {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
   /* ═══ Pipeline flow sections ═══════════════════════════════════════════ */
   .pipeline-flow {
     display: flex;
@@ -1600,27 +1504,19 @@
     border-top: 1px solid var(--color-border);
   }
 
-  /* ── Pipeline hero — interactive flow visualization ─────────────── */
+  /* ── Pipeline hero — compact inline flow ─────────────── */
   .pipeline-hero {
     display: flex;
-    align-items: stretch;
+    align-items: center;
     gap: 0;
-    padding: var(--space-1);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg, var(--radius));
     overflow-x: auto;
   }
 
   .pipeline-hero-stage {
     display: flex;
-    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 2px;
-    padding: var(--space-2) var(--space-3);
-    flex: 1;
-    min-width: 80px;
+    gap: 4px;
+    padding: var(--space-1) var(--space-2);
     background: transparent;
     border: 1px solid transparent;
     border-radius: var(--radius);
@@ -1628,16 +1524,16 @@
     font-family: var(--font-body);
     transition: all var(--transition-fast);
     position: relative;
+    white-space: nowrap;
   }
 
   .pipeline-hero-stage:hover {
     background: var(--color-surface-elevated);
     border-color: var(--color-border);
-    transform: translateY(-1px);
   }
 
   .pipeline-hero-count {
-    font-size: var(--text-lg, 18px);
+    font-size: var(--text-sm);
     font-weight: 800;
     font-family: var(--font-mono);
     color: var(--color-text-muted);
@@ -1836,101 +1732,56 @@
     flex-direction: column;
   }
 
-  .activity-section {
+  .activity-section,
+  .ws-activity-section {
     display: flex;
     flex-direction: column;
   }
 
-  /* ── Merge queue compact ──────────────────────────────────── */
-  .merge-queue-compact {
-    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, var(--color-border));
+  .activity-details {
+    border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    background: color-mix(in srgb, var(--color-warning) 3%, var(--color-surface));
+    background: var(--color-surface);
     overflow: hidden;
   }
 
-  .mq-compact-header {
+  .activity-summary {
     display: flex;
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-2) var(--space-3);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--color-text);
-    border-bottom: 1px solid color-mix(in srgb, var(--color-warning) 15%, transparent);
-  }
-
-  .mq-compact-count {
-    font-size: var(--text-xs);
-    color: var(--color-warning);
-    font-weight: 500;
-    margin-left: auto;
-  }
-
-  .mq-compact-items {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .mq-compact-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    width: 100%;
-    background: transparent;
-    border: none;
-    border-bottom: 1px solid var(--color-border);
     cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-    font-size: var(--text-sm);
-    transition: background var(--transition-fast);
+    user-select: none;
+    list-style: none;
   }
 
-  .mq-compact-item:last-child { border-bottom: none; }
-  .mq-compact-item:hover { background: var(--color-surface-elevated); }
+  .activity-summary::-webkit-details-marker { display: none; }
 
-  .mq-compact-pos {
+  .activity-summary::marker { content: ''; }
+
+  .section-heading-inline {
+    margin: 0;
+    padding: 0;
+  }
+
+  .activity-count-badge {
+    font-size: var(--text-xs);
     font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    font-weight: 700;
-    color: var(--color-warning);
-    min-width: 24px;
-  }
-
-  .mq-compact-mr-title {
-    flex: 1;
-    color: var(--color-text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .mq-compact-gates {
-    display: flex;
-    gap: 3px;
-    flex-shrink: 0;
-  }
-
-  .mq-compact-branch {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
     color: var(--color-text-muted);
-    flex-shrink: 0;
-    max-width: 120px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    background: var(--color-surface-elevated);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
   }
 
-  .mq-compact-more {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
+  .activity-details[open] .activity-summary {
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .activity-details .activity-timeline {
     padding: var(--space-2) var(--space-3);
-    text-align: center;
-    font-style: italic;
   }
+
+  /* merge queue compact section removed — items shown on repo cards */
 
   /* ── Pipeline attention section ──────────────────────────────────── */
   .pipeline-attention {
@@ -2082,32 +1933,185 @@
     min-height: 0;
   }
 
-  /* ── Two-column layout ──────────────────────────────────────── */
-  .ws-two-col {
-    display: grid;
-    grid-template-columns: 1fr 340px;
-    gap: var(--space-3);
-    align-items: start;
-  }
-
-  @media (max-width: 900px) {
-    .ws-two-col {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  .ws-col-primary {
+  /* ── Single-column main content ──────────────────────────────── */
+  .ws-main-content {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-2);
     min-width: 0;
   }
 
-  .ws-col-secondary {
+  /* ── Unified pipeline tabs (replaces separate pipeline hero + entity tab bar) ── */
+  .ws-entity-tabs {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .ws-pipeline-tabs {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    min-width: 0;
+    align-items: center;
+    border-bottom: 1px solid var(--color-border);
+    overflow-x: auto;
+    background: var(--color-surface-elevated);
+    padding: 0 var(--space-2);
+  }
+
+  .pipeline-tab {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    font-family: var(--font-body);
+    white-space: nowrap;
+    transition: all var(--transition-fast);
+    margin-bottom: -1px;
+  }
+
+  .pipeline-tab:hover {
+    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
+  }
+
+  .pipeline-tab-count {
+    font-size: var(--text-sm);
+    font-weight: 800;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    line-height: 1;
+  }
+
+  .pipeline-tab-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .pipeline-tab-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .pipeline-tab-badge-warn { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
+  .pipeline-tab-badge-danger { background: color-mix(in srgb, var(--color-danger) 15%, transparent); color: var(--color-danger); }
+  .pipeline-tab-badge-ok { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
+
+  .pipeline-tab-pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: pipeline-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  .pipeline-tab-active {
+    border-bottom-color: var(--color-primary);
+  }
+
+  .pipeline-tab-active .pipeline-tab-count,
+  .pipeline-tab-active .pipeline-tab-label {
+    color: var(--color-primary);
+  }
+
+  .pipeline-tab-attention .pipeline-tab-count { color: var(--color-danger); }
+  .pipeline-tab-attention .pipeline-tab-label { color: var(--color-danger); }
+  .pipeline-tab-running .pipeline-tab-count { color: var(--color-success); }
+  .pipeline-tab-running .pipeline-tab-label { color: var(--color-success); }
+  .pipeline-tab-done .pipeline-tab-count { color: var(--color-success); }
+  .pipeline-tab-done .pipeline-tab-label { color: var(--color-text-muted); }
+
+  .pipeline-tab-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--color-text-muted);
+    opacity: 0.25;
+    flex-shrink: 0;
+  }
+
+  .pipeline-tab-spacer {
+    flex: 1;
+    min-width: var(--space-2);
+  }
+
+  .entity-panel-overflow {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-align: center;
+    padding: var(--space-2) 0;
+    margin: 0;
+    font-style: italic;
+  }
+
+  .priority-pill {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+  }
+
+  .priority-critical, .priority-high { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 12%, transparent); }
+  .priority-medium { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 12%, transparent); }
+  .priority-low { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+
+  .gate-summary {
+    display: inline-flex;
+    gap: 2px;
+  }
+
+  /* Workspace gate badges (named, clickable) */
+  .gate-names-ws { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+  .gate-badge-ws {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    line-height: 1.5;
+    border: 1px solid transparent;
+    background: none;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+  }
+  .gate-badge-ws:hover { border-color: var(--color-border); }
+  .gate-badge-ws-icon { font-weight: 700; }
+  .gate-badge-ws-name { font-weight: 500; max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
+  .gate-badge-ws-passed { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .gate-badge-ws-failed { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .gate-badge-ws-pending, .gate-badge-ws-running { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+  .gate-badge-ws-more { color: var(--color-text-muted); background: var(--color-surface-elevated); font-size: 10px; font-weight: 600; }
+
+  .activity-timeline-full {
+    padding: var(--space-2) 0;
+  }
+
+  .activity-repo-badge {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+    flex-shrink: 0;
+    position: sticky;
+    top: var(--space-2);
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
   }
 
   .repo-cards-list {
@@ -2120,14 +2124,9 @@
   .ws-header {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-  }
-
-  .ws-header-main {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
+    gap: var(--space-1);
+    padding-bottom: var(--space-1);
+    border-bottom: 1px solid var(--color-border);
   }
 
   .ws-header-top-row {
@@ -2159,146 +2158,6 @@
     color: var(--color-text-secondary);
     max-width: 700px;
     line-height: 1.4;
-  }
-
-  /* Status chips CSS removed — workspace home uses status sentence instead */
-
-  /* ── Compact provenance flow in header ── */
-  .ws-header-flow {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    margin-top: 4px;
-  }
-
-  .ws-flow-stage {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-family: var(--font-body);
-    transition: all var(--transition-fast);
-  }
-
-  .ws-flow-stage:hover { background: var(--color-surface-elevated); border-color: var(--color-border); }
-
-  .ws-flow-count {
-    font-size: var(--text-xs);
-    font-weight: 700;
-    font-family: var(--font-mono);
-    color: var(--color-text-muted);
-    line-height: 1;
-  }
-
-  .ws-flow-label {
-    font-size: 10px;
-    font-weight: 500;
-    color: var(--color-text-muted);
-  }
-
-  .ws-flow-active .ws-flow-count { color: var(--color-primary); }
-  .ws-flow-done .ws-flow-count { color: var(--color-success); }
-  .ws-flow-warn .ws-flow-count { color: var(--color-danger); }
-
-  .ws-flow-arrow {
-    color: var(--color-text-muted);
-    font-size: 9px;
-    opacity: 0.4;
-  }
-
-  /* ── Integrated status chips (replacing pipeline progress bar) ── */
-  .ws-status-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1);
-    margin-top: 2px;
-  }
-
-  .ws-status-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 10px;
-    border-radius: 999px;
-    font-size: var(--text-xs);
-    font-weight: 500;
-    font-family: var(--font-body);
-    cursor: pointer;
-    border: 1px solid transparent;
-    transition: all var(--transition-fast);
-    line-height: 1.3;
-  }
-
-  .ws-status-chip:hover {
-    filter: brightness(1.15);
-    transform: translateY(-1px);
-  }
-
-  .ws-status-chip-icon {
-    font-size: 10px;
-  }
-
-  .ws-status-chip-danger {
-    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
-    color: var(--color-danger);
-    border-color: color-mix(in srgb, var(--color-danger) 25%, transparent);
-  }
-
-  .ws-status-chip-warning {
-    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
-    color: var(--color-warning);
-    border-color: color-mix(in srgb, var(--color-warning) 25%, transparent);
-  }
-
-  .ws-status-chip-success {
-    background: color-mix(in srgb, var(--color-success) 12%, transparent);
-    color: var(--color-success);
-    border-color: color-mix(in srgb, var(--color-success) 25%, transparent);
-  }
-
-  .ws-status-chip-info {
-    background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent);
-    color: var(--color-info, #1e90ff);
-    border-color: color-mix(in srgb, var(--color-info, #1e90ff) 25%, transparent);
-  }
-
-  .ws-status-chip-muted {
-    background: var(--color-surface-elevated);
-    color: var(--color-text-muted);
-    border-color: var(--color-border);
-  }
-
-  .ws-header-actions {
-    display: flex;
-    gap: var(--space-1);
-    flex-shrink: 0;
-    align-items: center;
-  }
-
-  .ws-header-link {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    padding: var(--space-1) var(--space-2);
-    background: transparent;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    white-space: nowrap;
-    transition: all var(--transition-fast);
-  }
-
-  .ws-header-link:hover {
-    color: var(--color-primary);
-    border-color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
   }
 
   /* ── Budget indicator ─────────────────────────────────────────────── */
@@ -2351,6 +2210,46 @@
     margin: 0;
     line-height: 1.4;
     font-weight: 500;
+  }
+
+  .ws-briefing {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-left: 3px solid var(--color-info);
+    background: color-mix(in srgb, var(--color-info) 4%, var(--color-surface));
+    border-radius: 0 var(--radius) var(--radius) 0;
+  }
+
+  .ws-briefing-icon {
+    flex-shrink: 0;
+    color: var(--color-info);
+    margin-top: 1px;
+  }
+
+  .ws-briefing-text {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    line-height: 1.5;
+    max-width: 800px;
+  }
+
+  .ws-briefing-banner {
+    padding: var(--space-2) var(--space-3);
+    border-left: 3px solid var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 3%, var(--color-surface));
+    border-radius: 0 var(--radius) var(--radius) 0;
+  }
+
+  .ws-briefing-banner-text {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    line-height: 1.4;
+    font-style: italic;
+    max-width: 800px;
   }
 
   .ws-briefing-inline {
@@ -3486,6 +3385,251 @@
     align-items: center;
     gap: var(--space-1);
     flex-shrink: 0;
+  }
+
+  /* ── Entity card list (GitHub-style compact rows) ────────────────────── */
+  .entity-card-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    background: var(--color-border);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .entity-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    font-family: var(--font-body);
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .entity-card:hover {
+    background: color-mix(in srgb, var(--color-primary) 4%, transparent);
+  }
+
+  .entity-card:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  .entity-card-active {
+    border-left: 3px solid var(--color-success);
+  }
+
+  .entity-card-danger {
+    border-left: 3px solid var(--color-danger);
+  }
+
+  .entity-card-primary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+
+  .ec-status-icon {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+  }
+
+  .ec-status-open { color: var(--color-success); }
+  .ec-status-merged { color: var(--color-blocked, #5e40be); }
+  .ec-status-closed { color: var(--color-danger); }
+
+  .ec-title {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .ec-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+
+  .ec-duration {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+  }
+
+  .ec-duration-live {
+    color: var(--color-success);
+    font-weight: 600;
+  }
+
+  .entity-card-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+    padding-left: 0;
+    font-size: var(--text-xs);
+  }
+
+  .ec-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    color: var(--color-text-muted);
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    border: none;
+    font-family: var(--font-body);
+    transition: color var(--transition-fast), background var(--transition-fast);
+  }
+
+  .ec-chip:hover {
+    color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+  }
+
+  .ec-chip-mono {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0;
+  }
+
+  .ec-chip-agent {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
+  }
+
+  .ec-chip-agent:hover {
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 16%, transparent);
+  }
+
+  .ec-chip-spec {
+    color: var(--color-info);
+    background: color-mix(in srgb, var(--color-info) 8%, transparent);
+  }
+
+  .ec-chip-spec:hover {
+    color: var(--color-info);
+    background: color-mix(in srgb, var(--color-info) 16%, transparent);
+  }
+
+  .ec-chip-merged {
+    color: var(--color-blocked, #5e40be);
+    background: color-mix(in srgb, var(--color-blocked, #5e40be) 8%, transparent);
+  }
+
+  .ec-chip-muted {
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .ec-path {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 200px;
+  }
+
+  .ec-diff {
+    display: inline-flex;
+    gap: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+    border: none;
+    background: transparent;
+  }
+
+  .ec-diff:hover { background: var(--color-surface-elevated); }
+
+  .ec-context {
+    font-size: 11px;
+    font-style: italic;
+    color: var(--color-text-muted);
+  }
+
+  .ec-context-warn { color: var(--color-warning); font-style: normal; font-weight: 500; }
+  .ec-context-danger { color: var(--color-danger); font-style: normal; font-weight: 500; }
+  .ec-context-success { color: var(--color-success); }
+
+  .ec-time {
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    margin-left: auto;
+    flex-shrink: 0;
+    font-size: 11px;
+  }
+
+  /* Gate summary in MR cards */
+  .entity-card-gates {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    padding: var(--space-1) 0 0;
+    font-size: 11px;
+  }
+
+  .ec-gate-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-weight: 500;
+    white-space: nowrap;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: opacity var(--transition-fast);
+  }
+
+  .ec-gate-chip:hover { opacity: 0.8; }
+
+  .ec-gate-icon {
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .ec-gate-passed, .ec-gate-pass { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .ec-gate-failed, .ec-gate-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .ec-gate-pending { color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text-muted) 8%, transparent); }
+  .ec-gate-more { color: var(--color-text-muted); font-style: italic; }
+
+  .ec-gate-dur {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
   }
 
   /* ── Legacy entity tables (kept for compat) ─────────────────────────── */
@@ -4774,18 +4918,7 @@
     cursor: default;
   }
 
-  button.repo-stat-clickable {
-    cursor: pointer;
-    transition: border-color var(--transition-fast), background var(--transition-fast);
-  }
-
-  button.repo-stat-clickable:hover {
-    border-color: var(--color-primary);
-    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
-    color: var(--color-text);
-  }
-
-  .repo-stat-empty {
+.repo-stat-empty {
     color: var(--color-text-muted);
     border: none;
     background: none;
@@ -5360,16 +5493,26 @@
   .activity-main-row {
     display: flex;
     align-items: baseline;
-    gap: var(--space-2);
+    gap: var(--space-1);
     flex-wrap: wrap;
+  }
+
+  .activity-entity-name {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    font-weight: 500;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .activity-reason {
     margin: 0;
     font-size: 10px;
     color: var(--color-text-muted);
-    line-height: 1.4;
-    padding-left: calc(16px + var(--space-2));
+    line-height: 1.3;
   }
 
   .activity-refs {

@@ -15,6 +15,7 @@
   import { toastSuccess, toastError } from './toast.svelte.js';
   import { detectLang, highlightLine } from './syntaxHighlight.js';
   import { renderMarkdown } from './markdown.js';
+  import CopyableId from './CopyableId.svelte';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -1897,7 +1898,7 @@
                   </div>
                   {#if mr.merge_commit_sha}
                     <div class="status-journey-sha">
-                      <code class="sha-badge mono copyable" title="Click to copy: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 7)}</code>
+                      <CopyableId value={mr.merge_commit_sha} variant="sha" copyLabel="Merge SHA" icon />
                     </div>
                   {/if}
                 </div>
@@ -1926,7 +1927,7 @@
                   <Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
                   <span class="status-explain" class:status-explain-danger={mr.status !== 'merged' && (mr._gateSummary?.failed > 0 || mr.has_conflicts)} class:status-explain-warn={mr.status === 'closed'}>{mrStatusExplain(mr)}</span>
                 </dd>
-                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('mr', entity.id)}</dd>
+                <dt>ID</dt><dd><CopyableId value={entity.id} label={sharedFormatId('mr', entity.id)} copyLabel="MR ID" icon /></dd>
                 {#if mr.description}
                   <dt>Description</dt><dd class="task-description">{mr.description}</dd>
                 {/if}
@@ -1958,10 +1959,10 @@
                   <dt>Agent</dt><dd><button class="entity-link mono" title={mr.agent_id} onclick={() => navigateTo('agent', mr.agent_id)}>{entityName('agent', mr.agent_id)}</button></dd>
                 {/if}
                 {#if mr.repository_id ?? mr.repo_id}
-                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {mr.repository_id ?? mr.repo_id}" onclick={() => copyId(mr.repository_id ?? mr.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.repository_id ?? mr.repo_id); }}>{entityName('repo', mr.repository_id ?? mr.repo_id)}</dd>
+                  <dt>Repo</dt><dd><CopyableId value={mr.repository_id ?? mr.repo_id} label={entityName('repo', mr.repository_id ?? mr.repo_id)} copyLabel="Repo ID" icon /></dd>
                 {/if}
                 {#if mr.author_id && mr.author_id !== mr.author_agent_id}
-                  <dt>Author</dt><dd class="mono copyable" title="Click to copy: {mr.author_id}" onclick={() => copyId(mr.author_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.author_id); }}>{mr.author_id === 'human-reviewer' || mr.author_id === 'system' ? mr.author_id : entityName('agent', mr.author_id)}</dd>
+                  <dt>Author</dt><dd><CopyableId value={mr.author_id} label={mr.author_id === 'human-reviewer' || mr.author_id === 'system' ? mr.author_id : entityName('agent', mr.author_id)} copyLabel="Author ID" icon /></dd>
                 {/if}
                 {#if mr.task_id}
                   <dt>Task</dt><dd><button class="entity-link" title={mr.task_id} onclick={() => navigateTo('task', mr.task_id)}>{entityName('task', mr.task_id)}</button></dd>
@@ -2218,7 +2219,7 @@
                 <div class="mr-merged-info">
                   <Badge value="merged" variant="success" />
                   {#if mr.merge_commit_sha}
-                    <code class="sha-badge mono copyable" title="Click to copy: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 7)}</code>
+                    <CopyableId value={mr.merge_commit_sha} variant="sha" copyLabel="Merge SHA" icon />
                   {/if}
                   {#if mr._commitSig}
                     <span class="sig-badge" title="Commit signed with {mr._commitSig.algorithm ?? 'unknown'}">
@@ -2342,7 +2343,7 @@
                   <Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} />
                   <span class="status-explain" class:status-explain-danger={ag.status === 'failed' || ag.status === 'dead'} class:status-explain-warn={ag.status === 'stopped'}>{agentStatusExplain(ag)}</span>
                 </dd>
-                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('agent', entity.id)}</dd>
+                <dt>ID</dt><dd><CopyableId value={entity.id} label={sharedFormatId('agent', entity.id)} copyLabel="Agent ID" icon /></dd>
                 {#if ag.agent_type}
                   <dt>Type</dt><dd>{ag.agent_type}</dd>
                 {/if}
@@ -2375,13 +2376,13 @@
                   <dt>Spec</dt><dd><button class="entity-link mono" title={ag.spec_path} onclick={() => navigateTo('spec', ag.spec_path, { path: ag.spec_path, repo_id: ag.repo_id })}>{ag.spec_path.split('/').pop()}</button></dd>
                 {/if}
                 {#if ag.repo_id}
-                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {ag.repo_id}" onclick={() => copyId(ag.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(ag.repo_id); }}>{entityName('repo', ag.repo_id)}</dd>
+                  <dt>Repo</dt><dd><CopyableId value={ag.repo_id} label={entityName('repo', ag.repo_id)} copyLabel="Repo ID" icon /></dd>
                 {/if}
                 {#if ag.mr_id}
                   <dt>MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{entityName('mr', ag.mr_id)}</button></dd>
                 {/if}
                 {#if ag.workspace_id}
-                  <dt>Workspace</dt><dd class="mono copyable" title="Click to copy: {ag.workspace_id}" onclick={() => copyId(ag.workspace_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(ag.workspace_id); }}>{entityName('workspace', ag.workspace_id)}</dd>
+                  <dt>Workspace</dt><dd><CopyableId value={ag.workspace_id} label={entityName('workspace', ag.workspace_id)} copyLabel="Workspace ID" icon /></dd>
                 {/if}
                 {#if ag.created_at}
                   <dt>Spawned</dt><dd>{fmtDate(ag.created_at)}</dd>
@@ -2401,7 +2402,7 @@
                 <div class="agent-container-info agent-conversation-link">
                   <span class="progress-section-label">Agent Reasoning</span>
                   <button class="entity-link" onclick={() => { activeTab = 'ask-why'; }} title="View the full conversation transcript of this agent's work">
-                    <code class="sha-badge mono">{ag.conversation_sha.slice(0, 7)}</code>
+                    <CopyableId value={ag.conversation_sha} variant="sha" copyLabel="Conversation SHA" />
                     <span class="att-conv-arrow">View agent reasoning transcript</span>
                   </button>
                   <p class="agent-conversation-desc">This agent's full LLM conversation is preserved for provenance and can be replayed.</p>
@@ -2593,7 +2594,7 @@
                     This agent's reasoning was recorded.
                     <button class="entity-link" onclick={() => { activeTab = 'ask-why'; }} title="View the agent's conversation and decision-making process">View Conversation →</button>
                   </p>
-                  <code class="sha-badge mono copyable" title="Click to copy conversation SHA: {ag.conversation_sha}" onclick={() => copyId(ag.conversation_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(ag.conversation_sha); }}>{ag.conversation_sha.slice(0, 12)}...</code>
+                  <CopyableId value={ag.conversation_sha} variant="sha" chars={12} copyLabel="Conversation SHA" icon />
                 </div>
               {/if}
 
@@ -2672,7 +2673,7 @@
                   <Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} />
                   <span class="status-explain" class:status-explain-danger={tk.status === 'failed' || tk.status === 'blocked'} class:status-explain-warn={tk.status === 'cancelled'}>{taskStatusExplain(tk)}</span>
                 </dd>
-                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('task', entity.id)}</dd>
+                <dt>ID</dt><dd><CopyableId value={entity.id} label={sharedFormatId('task', entity.id)} copyLabel="Task ID" icon /></dd>
                 {#if tk.priority}
                   <dt>Priority</dt>
                   <dd>
@@ -2698,7 +2699,7 @@
                   <dt>Agent</dt><dd><button class="entity-link mono" title={tk.assigned_to} onclick={() => navigateTo('agent', tk.assigned_to)}>{entityName('agent', tk.assigned_to)}</button></dd>
                 {/if}
                 {#if tk.repo_id}
-                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {tk.repo_id}" onclick={() => copyId(tk.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(tk.repo_id); }}>{entityName('repo', tk.repo_id)}</dd>
+                  <dt>Repo</dt><dd><CopyableId value={tk.repo_id} label={entityName('repo', tk.repo_id)} copyLabel="Repo ID" icon /></dd>
                 {/if}
                 {#if tk.labels?.length > 0}
                   <dt>Labels</dt><dd>{tk.labels.join(', ')}</dd>
@@ -2937,7 +2938,7 @@
           {:else}
             <dl class="entity-meta">
               <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
-              <dt>{$t('detail_panel.id')}</dt><dd class="mono" title={entity.id}>{sharedFormatId(entity.type, entity.id)}</dd>
+              <dt>{$t('detail_panel.id')}</dt><dd><CopyableId value={entity.id} label={sharedFormatId(entity.type, entity.id)} copyLabel="Node ID" icon /></dd>
               {#if entity.data?.status}
                 <dt>{$t('detail_panel.status')}</dt><dd>{entity.data.status}</dd>
               {/if}
@@ -2945,7 +2946,7 @@
                 <dt>{$t('detail_panel.created')}</dt><dd>{fmtDate(entity.data.created_at)}</dd>
               {/if}
               {#if entity.data?.spec_path}
-                <dt>{$t('detail_panel.spec')}</dt><dd class="mono">{entity.data.spec_path}</dd>
+                <dt>{$t('detail_panel.spec')}</dt><dd><button class="entity-link mono" onclick={() => navigateTo('spec', entity.data.spec_path, { path: entity.data.spec_path, repo_id: entity.data?.repo_id })} title={entity.data.spec_path}>{entity.data.spec_path.split('/').pop()?.replace(/\.md$/, '') ?? entity.data.spec_path}</button></dd>
               {/if}
             </dl>
           {/if}
@@ -3094,13 +3095,13 @@
                 <dt>{$t('detail_panel.kind')}</dt><dd>{sd.kind}</dd>
               {/if}
               {#if sd.current_sha}
-                <dt>{$t('detail_panel.sha')}</dt><dd><code class="sha-badge mono copyable" title="Click to copy: {sd.current_sha}" onclick={() => copyId(sd.current_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sd.current_sha); }}>{sd.current_sha.slice(0, 7)}</code></dd>
+                <dt>{$t('detail_panel.sha')}</dt><dd><CopyableId value={sd.current_sha} variant="sha" copyLabel="Spec SHA" icon /></dd>
               {/if}
               {#if sd.drift_status && sd.drift_status !== 'none'}
                 <dt>Drift</dt><dd><Badge value={sd.drift_status} variant={sd.drift_status === 'drifted' ? 'warning' : 'muted'} /></dd>
               {/if}
               {#if sd.repo_id}
-                <dt>Repo</dt><dd class="mono">{entityName('repo', sd.repo_id)}</dd>
+                <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {sd.repo_id}" onclick={() => copyId(sd.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sd.repo_id); }}>{entityName('repo', sd.repo_id)}</dd>
               {/if}
               {#if sd.updated_at}
                 <dt>{$t('detail_panel.updated')}</dt><dd>{fmtDate(sd.updated_at)}</dd>
@@ -3738,7 +3739,7 @@
                   {@const fileStatusLower = (file.status ?? 'modified').toLowerCase()}
                   {@const fileAdds = file.insertions ?? (file.hunks ? file.hunks.reduce((sum, h) => sum + h.lines.filter(l => l.type === 'add').length, 0) : null)}
                   {@const fileDels = file.deletions ?? (file.hunks ? file.hunks.reduce((sum, h) => sum + h.lines.filter(l => l.type === 'delete').length, 0) : null)}
-                  <details class="diff-file" id="diff-file-{idx}" open={mrDiff.files.length <= 10}>
+                  <details class="diff-file" id="diff-file-{idx}" open={mrDiff.files.length <= 10 || (fileAdds + fileDels) < 50}>
                     <summary class="diff-file-header">
                       <Badge value={fileStatusLower} variant={fileStatusLower === 'added' ? 'success' : fileStatusLower === 'deleted' ? 'danger' : 'info'} />
                       <span class="diff-file-path mono">{file.path}</span>
@@ -3818,7 +3819,7 @@
                 {@const specRef = commit._agentRecord?.spec_ref ?? commit.spec_ref}
                 <div class="commit-item">
                   <div class="commit-header">
-                    <code class="sha-badge mono copyable" title="Click to copy: {sha}" onclick={() => copyId(sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sha); }}>{sha.slice(0, 7)}</code>
+                    <CopyableId value={sha} variant="sha" copyLabel="Commit SHA" />
                     <span class="commit-message">{commit.message ?? commit.summary ?? '—'}</span>
                   </div>
                   <div class="commit-meta">
@@ -3885,8 +3886,22 @@
                 }}>Re-run gates</button>
               {/if}
             </div>
+            <!-- Group gates: required first, then advisory -->
+            {@const sortedGates = [...mrGates].sort((a, b) => {
+              // Failed required first, then failed advisory, then passed, then pending
+              const statusOrder = { failed: 0, Failed: 0, running: 1, Running: 1, pending: 2, Pending: 2, passed: 3, Passed: 3 };
+              const reqOrder = (g) => g.required === false ? 1 : 0;
+              const aScore = reqOrder(a) * 10 + (statusOrder[a.status] ?? 2);
+              const bScore = reqOrder(b) * 10 + (statusOrder[b.status] ?? 2);
+              return aScore - bScore;
+            })}
+            {@const reqGates = sortedGates.filter(g => g.required !== false)}
+            {@const advGates = sortedGates.filter(g => g.required === false)}
+            {#if reqGates.length > 0 && advGates.length > 0}
+              <h4 class="gates-group-heading">Required <span class="gates-group-count">{reqGates.length}</span></h4>
+            {/if}
             <ul class="gates-list">
-              {#each mrGates as gate}
+              {#each reqGates.length > 0 && advGates.length > 0 ? reqGates : sortedGates as gate}
                 {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
                 {@const gateTypeLabel = gate.gate_type ? gate.gate_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : ''}
                 {@const gateName = gate.gate_name ?? gate.name ?? (gateTypeLabel || (gate.command ? gate.command.split(' ')[0].split('/').pop() : '') || 'Quality Gate')}
@@ -3901,40 +3916,56 @@
                   security_scan: 'Scans for known security vulnerabilities',
                   coverage_check: 'Checks test coverage meets threshold',
                 })[gate.gate_type] ?? null}
-                <li class="gate-item gate-item-{gateStatus}" class:gate-item-required={gate.required !== false}>
+                <li class="gate-card gate-card-{gateStatus}" class:gate-card-required={gate.required !== false}>
+                  {#if gateStatus === 'failed' && gate.required !== false}
+                    <div class="gate-error-banner">Merge blocked — this required gate failed</div>
+                  {/if}
                   <div class="gate-row">
-                    <span class="gate-status-icon">{gateStatus === 'passed' ? '✓' : gateStatus === 'failed' ? '✗' : gateStatus === 'running' ? '⟳' : '○'}</span>
+                    <span class="gate-status-icon gate-status-icon-{gateStatus}">{gateStatus === 'passed' ? '✓' : gateStatus === 'failed' ? '✗' : gateStatus === 'running' ? '⟳' : '○'}</span>
                     <div class="gate-name-block">
                       <span class="gate-name" title={gate.gate_id ?? ''}>{gateName}</span>
+                      {#if gateTypeLabel}
+                        <span class="gate-type-tag">{gateTypeLabel}</span>
+                      {/if}
                       {#if gateDesc}
                         <span class="gate-description">{gateDesc}</span>
                       {/if}
                     </div>
-                    <span class="gate-status-badge gate-status-badge-{gateStatus}">
-                      {#if gateStatus === 'passed'}
-                        Passed
-                      {:else if gateStatus === 'failed'}
-                        Failed
-                      {:else if gateStatus === 'running'}
-                        Running
-                      {:else}
-                        <span class="gate-pending-pulse"></span>Waiting...
+                    <div class="gate-meta">
+                      {#if gate.required !== undefined}
+                        <span class="gate-required-badge" class:advisory={!gate.required}>
+                          {gate.required ? 'Required' : 'Advisory'}
+                        </span>
                       {/if}
-                    </span>
-                    {#if gate.required !== undefined}
-                      <span class="gate-required-badge" class:advisory={!gate.required}>
-                        {gate.required ? 'Required' : 'Advisory'}
+                      {#if duration}
+                        <span class="gate-duration-pill">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                          {duration < 1000 ? duration + 'ms' : (duration / 1000).toFixed(1) + 's'}
+                        </span>
+                      {/if}
+                      <span class="gate-status-badge gate-status-badge-{gateStatus}">
+                        {#if gateStatus === 'passed'}Passed{:else if gateStatus === 'failed'}Failed{:else if gateStatus === 'running'}Running{:else}<span class="gate-pending-pulse"></span>Pending{/if}
                       </span>
-                    {/if}
-                    {#if duration}
-                      <span class="gate-duration">{duration < 1000 ? duration + 'ms' : (duration / 1000).toFixed(1) + 's'}</span>
-                    {/if}
+                    </div>
                   </div>
                   {#if gate.command}
-                    <div class="gate-cmd-row">
-                      <span class="gate-cmd-label">$</span>
-                      <code class="gate-cmd mono">{gate.command}</code>
-                    </div>
+                    {@const isJsonCmd = gate.command.trim().startsWith('{')}
+                    {@const parsedCmd = isJsonCmd ? (() => { try { return JSON.parse(gate.command); } catch { return null; } })() : null}
+                    {#if parsedCmd}
+                      <div class="gate-cmd-row gate-cmd-configured">
+                        <span class="gate-cmd-label gate-cmd-hint">Configuration</span>
+                        <span class="gate-config-items">
+                          {#each Object.entries(parsedCmd).filter(([k]) => k !== 'test_command') as [key, val]}
+                            <span class="gate-config-item"><span class="gate-config-key">{key.replace(/_/g, ' ')}</span> {val}</span>
+                          {/each}
+                        </span>
+                      </div>
+                    {:else}
+                      <div class="gate-cmd-row">
+                        <span class="gate-cmd-label">$</span>
+                        <code class="gate-cmd mono">{gate.command}</code>
+                      </div>
+                    {/if}
                   {:else}
                     <div class="gate-cmd-row gate-cmd-configured">
                       <span class="gate-cmd-label gate-cmd-hint">Configured in repo settings</span>
@@ -3988,6 +4019,50 @@
                 </li>
               {/each}
             </ul>
+            {#if reqGates.length > 0 && advGates.length > 0}
+              <h4 class="gates-group-heading gates-group-advisory">Advisory <span class="gates-group-count">{advGates.length}</span></h4>
+              <ul class="gates-list">
+                {#each advGates as gate}
+                  {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
+                  {@const gateTypeLabel = gate.gate_type ? gate.gate_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : ''}
+                  {@const gateName = gate.gate_name ?? gate.name ?? (gateTypeLabel || (gate.command ? gate.command.split(' ')[0].split('/').pop() : '') || 'Quality Gate')}
+                  {@const gateStatus = (gate.status === 'Passed' || gate.status === 'passed') ? 'passed' : (gate.status === 'Failed' || gate.status === 'failed') ? 'failed' : (gate.status === 'Running' || gate.status === 'running') ? 'running' : gate.status ?? 'pending'}
+                  <li class="gate-card gate-card-{gateStatus} gate-card-advisory">
+                    <div class="gate-row">
+                      <span class="gate-status-icon gate-status-icon-{gateStatus}">{gateStatus === 'passed' ? '✓' : gateStatus === 'failed' ? '✗' : gateStatus === 'running' ? '⟳' : '○'}</span>
+                      <div class="gate-name-block">
+                        <span class="gate-name">{gateName}</span>
+                        {#if gateTypeLabel}<span class="gate-type-tag">{gateTypeLabel}</span>{/if}
+                      </div>
+                      <div class="gate-meta">
+                        <span class="gate-required-badge advisory">Advisory</span>
+                        {#if duration}
+                          <span class="gate-duration-pill">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            {duration < 1000 ? duration + 'ms' : (duration / 1000).toFixed(1) + 's'}
+                          </span>
+                        {/if}
+                        <span class="gate-status-badge gate-status-badge-{gateStatus}">
+                          {#if gateStatus === 'passed'}Passed{:else if gateStatus === 'failed'}Failed{:else}Pending{/if}
+                        </span>
+                      </div>
+                    </div>
+                    {#if gate.command}
+                      <div class="gate-cmd-row"><span class="gate-cmd-label">$</span><code class="gate-cmd mono">{gate.command}</code></div>
+                    {/if}
+                    {#if gate.output}
+                      <details class="gate-output-details" open={gateStatus === 'failed'}>
+                        <summary class="gate-output-label">Output <button class="gate-copy-btn" onclick={(e) => { e.stopPropagation(); e.preventDefault(); navigator.clipboard.writeText(gate.output); e.target.textContent = 'Copied!'; setTimeout(() => { e.target.textContent = 'Copy'; }, 1500); }}>Copy</button></summary>
+                        <pre class="gate-output gate-terminal">{gate.output}</pre>
+                      </details>
+                    {/if}
+                    {#if gate.error}
+                      <details class="gate-output-details" open><summary class="gate-output-label gate-error-label">Error</summary><pre class="gate-output gate-terminal gate-error">{gate.error}</pre></details>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
           {:else}
             <p class="no-data">No gate results for this merge request. Quality gates (tests, lint, traces) are configured per-repository in Settings and run automatically when an MR is enqueued.</p>
           {/if}
@@ -4002,6 +4077,45 @@
           {:else if mrAttestation}
             {@const att = mrAttestation.attestation ?? mrAttestation}
             <div class="attestation-block">
+              <!-- Provenance chain visual -->
+              {#if att.spec_ref || att.author_agent_id || att.task_id}
+                <div class="provenance-chain-visual">
+                  {#if att.spec_ref}
+                    {@const pSpecPath = att.spec_ref.split('@')[0]}
+                    <button class="prov-node prov-node-spec" onclick={() => navigateTo('spec', pSpecPath, { path: pSpecPath })}>
+                      <span class="prov-node-icon">S</span>
+                      <span class="prov-node-label">{pSpecPath.split('/').pop()?.replace(/\.md$/, '')}</span>
+                    </button>
+                    <span class="prov-arrow">→</span>
+                  {/if}
+                  {#if att.task_id}
+                    <button class="prov-node prov-node-task" onclick={() => navigateTo('task', att.task_id)}>
+                      <span class="prov-node-icon">T</span>
+                      <span class="prov-node-label">{entityName('task', att.task_id)}</span>
+                    </button>
+                    <span class="prov-arrow">→</span>
+                  {/if}
+                  {#if att.author_agent_id}
+                    <button class="prov-node prov-node-agent" onclick={() => navigateTo('agent', att.author_agent_id)}>
+                      <span class="prov-node-icon">A</span>
+                      <span class="prov-node-label">{entityName('agent', att.author_agent_id)}</span>
+                    </button>
+                    <span class="prov-arrow">→</span>
+                  {/if}
+                  <span class="prov-node prov-node-mr prov-node-current">
+                    <span class="prov-node-icon">MR</span>
+                    <span class="prov-node-label">{entity?.data?.title ?? entityName('mr', entity?.id)}</span>
+                  </span>
+                  {#if att.merge_commit_sha}
+                    <span class="prov-arrow">→</span>
+                    <span class="prov-node prov-node-merged">
+                      <span class="prov-node-icon">✓</span>
+                      <span class="prov-node-label">Merged</span>
+                    </span>
+                  {/if}
+                </div>
+              {/if}
+
               <!-- Verified badge banner -->
               <div class="att-verified-banner" class:att-verified={!!mrAttestation.signature}>
                 <div class="att-verified-icon">
@@ -4025,7 +4139,7 @@
                 {#if att.merge_commit_sha}
                   <dt>Merge commit</dt>
                   <dd>
-                    <code class="sha-badge mono copyable" title={att.merge_commit_sha} onclick={() => copyId(att.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.merge_commit_sha); }}>{att.merge_commit_sha.slice(0, 7)}</code>
+                    <CopyableId value={att.merge_commit_sha} variant="sha" copyLabel="Merge SHA" icon />
                   </dd>
                 {/if}
                 {#if att.spec_ref}
@@ -4034,7 +4148,7 @@
                   <dt>Spec</dt>
                   <dd>
                     <button class="entity-link" title={att.spec_ref} onclick={() => navigateTo('spec', attSpecPath, { path: attSpecPath })}>{attSpecPath.split('/').pop()?.replace(/\.md$/, '')}</button>
-                    {#if attSpecSha}<code class="sha-badge mono" title="Pinned at spec version {attSpecSha}">@{attSpecSha.slice(0, 7)}</code>{/if}
+                    {#if attSpecSha}<CopyableId value={attSpecSha} variant="sha" label="@{attSpecSha.slice(0, 7)}" copyLabel="Spec SHA" />{/if}
                   </dd>
                 {/if}
                 {#if att.spec_fully_approved !== undefined}
@@ -4053,15 +4167,16 @@
                   <dt>Task</dt><dd><button class="entity-link" title={att.task_id} onclick={() => navigateTo('task', att.task_id)}>{entityName('task', att.task_id)}</button></dd>
                 {/if}
                 {#if att.repo_id}
-                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {att.repo_id}" onclick={() => copyId(att.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.repo_id); }}>{entityName('repo', att.repo_id)}</dd>
+                  <dt>Repo</dt><dd><CopyableId value={att.repo_id} label={entityName('repo', att.repo_id)} copyLabel="Repo ID" /></dd>
                 {/if}
                 {#if att.conversation_sha}
                   <dt>Conversation</dt>
                   <dd>
-                    <button class="entity-link mono" title="View agent reasoning for this merge" onclick={() => { activeTab = 'ask-why'; }}>
-                      <code class="sha-badge mono">{att.conversation_sha.slice(0, 7)}</code>
-                      <span class="att-conv-arrow">View reasoning</span>
+                    <button class="att-reasoning-btn" title="View the agent's reasoning and tool calls that produced this code" onclick={() => { activeTab = 'ask-why'; }}>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                      View agent reasoning
                     </button>
+                    <CopyableId value={att.conversation_sha} variant="sha" copyLabel="Conversation SHA" />
                   </dd>
                 {/if}
                 {#if att.gate_results?.length > 0}
@@ -4178,6 +4293,13 @@
                 {@const prevTime = i > 0 ? (mrTimeline[i-1].timestamp ?? mrTimeline[i-1].created_at) : null}
                 {@const thisTime = evt.timestamp ?? evt.created_at}
                 {@const elapsed = (prevTime && thisTime) ? Math.round(thisTime - prevTime) : null}
+                {#if elapsed && elapsed >= 60}
+                  <div class="timeline-gap-indicator">
+                    <span class="timeline-gap-line"></span>
+                    <span class="timeline-gap-label">{elapsed < 3600 ? Math.round(elapsed / 60) + 'm' : (elapsed / 3600).toFixed(1) + 'h'} elapsed</span>
+                    <span class="timeline-gap-line"></span>
+                  </div>
+                {/if}
                 <div class="timeline-item">
                   <div class="timeline-connector">
                     <div class="timeline-dot timeline-dot-{timelineEventVariant(evtType, evt)}">
@@ -6066,6 +6188,11 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     margin-bottom: var(--space-2);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    max-height: 200px;
+    overflow-y: auto;
   }
 
   .diff-tree-actions {
@@ -6373,6 +6500,28 @@
     font-size: var(--text-xs);
   }
 
+  .gate-config-items {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-left: var(--space-2);
+  }
+
+  .gate-config-item {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    background: color-mix(in srgb, var(--color-border) 30%, transparent);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+  }
+
+  .gate-config-key {
+    font-weight: 600;
+    color: var(--color-text-muted);
+    margin-right: 2px;
+    text-transform: capitalize;
+  }
+
   .gate-structured-output {
     display: flex;
     flex-wrap: wrap;
@@ -6393,6 +6542,101 @@
   .gate-metric-success { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
   .gate-metric-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
   .gate-metric-warn { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
+
+  /* Gate card styles (enhanced from gate-item) */
+  .gate-card {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    border-left: 3px solid var(--color-border);
+  }
+
+  .gate-card-passed { border-left-color: var(--color-success); }
+  .gate-card-failed { border-left-color: var(--color-danger); }
+  .gate-card-running { border-left-color: var(--color-warning); }
+
+  .gate-card-required.gate-card-failed {
+    border-left-width: 4px;
+    background: color-mix(in srgb, var(--color-danger) 3%, var(--color-surface-elevated));
+  }
+
+  .gate-card-advisory {
+    opacity: 0.85;
+  }
+
+  .gate-error-banner {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    margin-bottom: var(--space-1);
+  }
+
+  .gate-status-icon-passed { color: var(--color-success); }
+  .gate-status-icon-failed { color: var(--color-danger); }
+  .gate-status-icon-running { color: var(--color-warning); }
+  .gate-status-icon-pending { color: var(--color-text-muted); }
+
+  .gate-type-tag {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--color-text-muted);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .gate-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .gate-duration-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+  }
+
+  .gates-group-heading {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: var(--space-3) 0 var(--space-1) 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .gates-group-advisory {
+    margin-top: var(--space-4);
+    color: var(--color-text-muted);
+  }
+
+  .gates-group-count {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+  }
 
   .gate-duration {
     font-size: var(--text-xs);
@@ -6642,6 +6886,98 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+  }
+
+  /* Provenance chain visual */
+  .provenance-chain-visual {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    margin-bottom: var(--space-2);
+    overflow-x: auto;
+    flex-wrap: wrap;
+  }
+
+  .prov-node {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+    max-width: 160px;
+  }
+
+  .prov-node:hover {
+    border-color: var(--color-primary);
+    background: color-mix(in srgb, var(--color-primary) 5%, var(--color-surface));
+  }
+
+  .prov-node-icon {
+    font-weight: 700;
+    font-size: 9px;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .prov-node-spec .prov-node-icon { background: color-mix(in srgb, var(--color-info) 15%, transparent); color: var(--color-info); }
+  .prov-node-task .prov-node-icon { background: color-mix(in srgb, var(--color-warning) 15%, transparent); color: var(--color-warning); }
+  .prov-node-agent .prov-node-icon { background: color-mix(in srgb, var(--color-success) 15%, transparent); color: var(--color-success); }
+  .prov-node-mr .prov-node-icon { background: color-mix(in srgb, var(--color-primary) 15%, transparent); color: var(--color-primary); }
+  .prov-node-merged .prov-node-icon { background: var(--color-success); color: white; }
+
+  .prov-node-current {
+    border-color: var(--color-primary);
+    font-weight: 600;
+  }
+
+  .prov-node-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .prov-arrow {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    opacity: 0.5;
+    flex-shrink: 0;
+  }
+
+  .att-reasoning-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 25%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--color-primary);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    font-family: var(--font-body);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .att-reasoning-btn:hover {
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border-color: var(--color-primary);
   }
 
   .att-verified-banner {
@@ -7427,6 +7763,29 @@
     color: var(--color-text-muted);
     font-family: var(--font-mono);
     opacity: 0.7;
+  }
+
+  .timeline-gap-indicator {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0 var(--space-1) 24px;
+  }
+
+  .timeline-gap-line {
+    flex: 1;
+    height: 1px;
+    background: var(--color-border);
+    background: repeating-linear-gradient(90deg, var(--color-border) 0, var(--color-border) 4px, transparent 4px, transparent 8px);
+  }
+
+  .timeline-gap-label {
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    background: var(--color-surface);
+    padding: 0 var(--space-1);
   }
 
   .timeline-actor {

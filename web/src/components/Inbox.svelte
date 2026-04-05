@@ -408,9 +408,9 @@
                       {/if}
                     </span>
                   {:else if body.spec_path}
-                    <span class="card-subtitle" title={body.spec_path}>{body.spec_path}</span>
+                    <button class="card-subtitle card-subtitle-link" title={body.spec_path} onclick={(e) => { e.stopPropagation(); openDetail({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }}>{body.spec_path.split('/').pop()?.replace(/\.md$/, '') ?? body.spec_path}</button>
                   {:else if body.meta_spec_path}
-                    <span class="card-subtitle" title={body.meta_spec_path}>{body.meta_spec_path}</span>
+                    <span class="card-subtitle" title={body.meta_spec_path}>{body.meta_spec_path.split('/').pop()?.replace(/\.md$/, '') ?? body.meta_spec_path}</span>
                   {/if}
                 </div>
               </div>
@@ -921,6 +921,20 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .card-subtitle-link {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+    font: inherit;
+    color: var(--color-link, var(--color-primary));
+  }
+
+  .card-subtitle-link:hover {
+    text-decoration: underline;
   }
 
   .card-header-right {

@@ -738,7 +738,7 @@
                   <td class="td-name">{ct.name ?? '—'}</td>
                   <td>{ct.kind ?? ct.target_type ?? ct.type ?? '—'}</td>
                   <td>
-                    <span class="status-pill" class:status-ok={ct.status === 'healthy' || ct.status === 'active'} class:status-warn={ct.status === 'degraded'} class:status-err={ct.status === 'error' || ct.status === 'offline'}>
+                    <span class="status-pill" class:status-ok={ct.status === 'healthy' || ct.status === 'active'} class:status-warn={ct.status === 'degraded'} class:status-err={ct.status === 'error' || ct.status === 'offline'} title={ct.status === 'healthy' || ct.status === 'active' ? 'Compute target is available for agent workloads' : ct.status === 'degraded' ? 'Compute target is responding but with reduced capacity' : ct.status === 'error' ? 'Compute target encountered an error — agents cannot be spawned here' : ct.status === 'offline' ? 'Compute target is unreachable — check network connectivity' : ''}>
                       {ct.status ?? '—'}
                     </span>
                   </td>
@@ -1016,7 +1016,7 @@
                   <td class="td-mono">{job.schedule ?? '—'}</td>
                   <td class="td-mono">{job.last_run ? new Date(job.last_run).toLocaleString() : '—'}</td>
                   <td>
-                    <span class="status-pill" class:status-ok={job.status === 'ok' || job.status === 'success'} class:status-warn={job.status === 'running'} class:status-err={job.status === 'error' || job.status === 'failed'}>
+                    <span class="status-pill" class:status-ok={job.status === 'ok' || job.status === 'success'} class:status-warn={job.status === 'running'} class:status-err={job.status === 'error' || job.status === 'failed'} title={job.status === 'ok' || job.status === 'success' ? 'Last run completed successfully' : job.status === 'running' ? 'Job is currently executing' : job.status === 'error' || job.status === 'failed' ? 'Last run failed — check logs for details' : ''}>
                       {job.status ?? '—'}
                     </span>
                   </td>
