@@ -53,28 +53,22 @@ if (canvas_state?.active_lens) {
 
 const userMessage = canvasContext ? `[Canvas: ${canvasContext}]\n\n${question}` : question;
 
-// Build conversation history context for the system prompt.
-// The SDK's query() prompt parameter is either a plain string or an AsyncIterable
-// (for streaming input), not a structured messages array. To provide multi-turn
-// context, we append the prior conversation turns to the system prompt so the model
-// sees them as grounding context, and pass only the current user question as prompt.
-let historyContext = '';
+// Build conversation history as structured multi-turn messages.
+// The SDK's query() accepts a `messages` array of {role, content} objects for
+// multi-turn conversations. We pass prior history as alternating user/assistant
+// messages and append the current question as the final user message.
+// History content is JSON-encoded within the prompt to avoid injection risks
+// (no XML escaping needed — JSON strings are naturally safe).
+let historyMessages = [];
 if (history?.length) {
-  // Escape XML-like tags in message content to prevent prompt injection.
-  // A user could craft content containing "</user><system>...</system>" to
-  // break out of the role tag and inject arbitrary instructions.
-  function escapeXmlTags(s) {
-    return s.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  for (const msg of history) {
+    // Normalize role to 'user' or 'assistant' (the only roles the SDK accepts)
+    const role = msg.role === 'assistant' ? 'assistant' : 'user';
+    historyMessages.push({ role, content: msg.content });
   }
-  const turns = history.map(
-    (msg) => `<${msg.role}>${escapeXmlTags(msg.content)}</${msg.role}>`
-  );
-  historyContext =
-    '\n\n## Conversation History\n' +
-    'The following is the prior conversation with this user. ' +
-    'Continue naturally from this context.\n\n' +
-    turns.join('\n\n');
 }
+// Append the current user question as the final message
+historyMessages.push({ role: 'user', content: userMessage });
 const fullPrompt = userMessage;
 
 console.log(JSON.stringify({ type: 'status', status: 'thinking' }));
@@ -96,7 +90,7 @@ const mcpToolNames = [
 
 const options = {
   model: agentModel,
-  systemPrompt: system_prompt ? system_prompt + historyContext : historyContext || undefined,
+  systemPrompt: system_prompt || undefined,
   // Disable all built-in tools (Read, Edit, Bash, etc.) — only MCP tools should be available.
   tools: [],
   // MCP connection to the Gyre server for graph exploration tools.
@@ -112,24 +106,44 @@ const options = {
   // Bypass permission prompts — this is a headless subprocess, not interactive.
   permissionMode: 'bypassPermissions',
   allowDangerouslySkipPermissions: true,
-  // Budget: 5 tool turns (graph exploration) + 3 refinement turns (self-check)
-  // + some margin for the SDK's internal bookkeeping = 12 total.
-  maxTurns: 12,
+  // Budget: MAX_TOOL_TURNS=5 + MAX_REFINEMENT_TURNS=3 = 8 hard cap.
+  // Tool-turn vs refinement-turn tracking is done in the output stream below.
+  maxTurns: 8,
   // Disable session persistence — this is a one-shot subprocess.
   persistSession: false,
 };
+
+// Turn budget constants per spec
+const MAX_TOOL_TURNS = 5;
+const MAX_REFINEMENT_TURNS = 3;
 
 try {
   let fullText = '';
   // Track what we've already streamed to avoid duplicating content
   let streamedLength = 0;
+  // Separate turn counters: tool turns (with tool_use blocks) vs refinement turns (text-only)
+  let toolTurns = 0;
+  let refinementTurns = 0;
 
-  for await (const message of query({ prompt: fullPrompt, options })) {
+  for await (const message of query({ prompt: fullPrompt, options, messages: historyMessages })) {
     switch (message.type) {
       case 'assistant': {
         // Complete assistant message with content blocks.
         // Extract text content and emit any not-yet-streamed portions.
         if (message.message?.content) {
+          const hasToolUse = message.message.content.some((b) => b.type === 'tool_use');
+          if (hasToolUse) {
+            toolTurns++;
+            if (toolTurns > MAX_TOOL_TURNS) {
+              console.error(`[budget] tool turn limit exceeded (${toolTurns}/${MAX_TOOL_TURNS})`);
+            }
+          } else {
+            refinementTurns++;
+            if (refinementTurns > MAX_REFINEMENT_TURNS) {
+              console.error(`[budget] refinement turn limit exceeded (${refinementTurns}/${MAX_REFINEMENT_TURNS})`);
+            }
+          }
+
           for (const block of message.message.content) {
             if (block.type === 'text') {
               fullText += block.text;
