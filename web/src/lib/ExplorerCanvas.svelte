@@ -2,6 +2,11 @@
   import { onDestroy } from 'svelte';
   import { t } from 'svelte-i18n';
   import EmptyState from './EmptyState.svelte';
+  import PlaybackControls from '../components/PlaybackControls.svelte';
+  import NodeBadge from '../components/NodeBadge.svelte';
+  import Breadcrumb from '../components/Breadcrumb.svelte';
+  import EvaluativeOverlay from '../components/EvaluativeOverlay.svelte';
+  import ObservableBanner from '../components/ObservableBanner.svelte';
 
   let {
     repoId = '',
@@ -4760,41 +4765,11 @@
     </div>
 
     {#if lens === 'evaluative'}
-      <div class="eval-metric-group" role="group" aria-label="Evaluative metric">
-        {#if traceData?.spans?.length}
-          <!-- Trace-based metrics (primary evaluative data per spec) -->
-          {#each [['span_duration', 'Duration'], ['span_count', 'Spans'], ['error_rate', 'Errors']] as [key, label]}
-            <button class="tb-btn tb-btn-sm" class:active={evaluativeMetric === key} onclick={() => { evaluativeMetric = key; onLensChange('evaluative'); }} type="button">{label}</button>
-          {/each}
-          <span class="tb-sep-v"></span>
-          <span class="eval-label">Static:</span>
-        {/if}
-        <!-- Static analysis metrics (structural overlay for repos without trace data) -->
-        {#each [['complexity', 'Complexity'], ['churn', 'Churn'], ['incoming_calls', 'Call Count'], ['test_coverage', 'Test Coverage']] as [key, label]}
-          <button class="tb-btn tb-btn-sm" class:active={evaluativeMetric === key} onclick={() => { evaluativeMetric = key; onLensChange('evaluative'); }} type="button">{label}</button>
-        {/each}
-      </div>
-      {#if traceData?.spans?.length}
-        <div class="eval-playback" role="group" aria-label="Trace playback">
-          <button class="tb-btn tb-btn-sm" onclick={() => { evalPlaying = !evalPlaying; if (evalPlaying) scheduleRedraw(); }} type="button" title={evalPlaying ? 'Pause' : 'Play'}>
-            {evalPlaying ? '\u23F8' : '\u25B6'}
-          </button>
-          <input type="range" min="0" max="100" value={Math.round(evalScrubber * 100)}
-            oninput={(e) => { evalScrubber = parseInt(e.target.value) / 100; scheduleRedraw(); }}
-            class="eval-scrubber" title="Trace timeline position" />
-          <select class="eval-speed" value={evalSpeed}
-            onchange={(e) => { evalSpeed = parseFloat(e.target.value); }}>
-            <option value="0.25">0.25x</option>
-            <option value="0.5">0.5x</option>
-            <option value="1">1x</option>
-            <option value="2">2x</option>
-            <option value="5">5x</option>
-          </select>
-          <span class="eval-particle-count">{evalParticles.length} spans</span>
-        </div>
-      {:else}
-        <span class="eval-no-trace">No trace data</span>
-      {/if}
+      <EvaluativeOverlay
+        {evaluativeMetric}
+        {traceData}
+        onMetricChange={(key) => { evaluativeMetric = key; onLensChange('evaluative'); }}
+      />
       <div class="tb-sep"></div>
     {/if}
 
@@ -5184,57 +5159,32 @@
   {/if}
 
   <!-- Breadcrumb -->
-  {#if breadcrumb.length > 0}
-    <div class="treemap-breadcrumb" role="navigation" aria-label="Drill-down path">
-      <button class="breadcrumb-item root" onclick={() => { navigateBreadcrumb(-1); }} type="button" aria-label="Go to root">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
-        Root
-      </button>
-      {#each breadcrumb as crumb, i}
-        <span class="breadcrumb-sep" aria-hidden="true">&rsaquo;</span>
-        <button class="breadcrumb-item" class:current={i === breadcrumb.length - 1} onclick={() => { navigateBreadcrumb(i); }} type="button">{crumb.name}</button>
-      {/each}
-    </div>
-  {/if}
+  <Breadcrumb
+    {breadcrumb}
+    onNavigate={(i) => { navigateBreadcrumb(i); }}
+    onReset={() => { navigateBreadcrumb(-1); }}
+  />
 
   <!-- Observable lens notice banner -->
-  {#if observableBannerVisible}
-    <div class="observable-banner" role="status" aria-live="polite">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="flex-shrink:0">
-        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-      </svg>
-      <span>Observable lens requires an OpenTelemetry collector. Configure <code>GYRE_OTLP_ENDPOINT</code> to see live SLIs, error rates, and latency on the architecture canvas.</span>
-      <button class="observable-banner-close" onclick={() => { observableBannerVisible = false; }} type="button" title="Dismiss">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="10" height="10"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-    </div>
-  {/if}
+  <ObservableBanner
+    visible={observableBannerVisible}
+    onDismiss={() => { observableBannerVisible = false; }}
+  />
 
   <!-- Evaluative trace playback overlay bar -->
-  {#if lens === 'evaluative' && traceData?.spans?.length}
-    <div class="trace-playback-bar" role="toolbar" aria-label="Trace playback controls">
-      <button class="trace-pb-btn" onclick={() => { evalPlaying = !evalPlaying; if (evalPlaying) scheduleRedraw(); }} type="button" title={evalPlaying ? 'Pause trace playback' : 'Play trace playback'}>
-        {#if evalPlaying}
-          <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-        {:else}
-          <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><polygon points="5,3 19,12 5,21"/></svg>
-        {/if}
-      </button>
-      <input type="range" min="0" max="1000" value={Math.round(evalScrubber * 1000)}
-        oninput={(e) => { evalScrubber = parseInt(e.target.value) / 1000; scheduleRedraw(); }}
-        class="trace-pb-scrubber" title="Trace timeline position" />
-      <span class="trace-pb-time">{traceElapsedDisplay} / {traceTotalDisplay}</span>
-      <div class="trace-pb-sep"></div>
-      <select class="trace-pb-speed" value={evalSpeed}
-        onchange={(e) => { evalSpeed = parseFloat(e.target.value); }}>
-        <option value="0.25">0.25x</option>
-        <option value="0.5">0.5x</option>
-        <option value="1">1x</option>
-        <option value="2">2x</option>
-        <option value="5">5x</option>
-      </select>
-      <span class="trace-pb-particles">{evalParticles.length} active spans</span>
-    </div>
+  {#if lens === 'evaluative'}
+    <PlaybackControls
+      {evalPlaying}
+      {evalScrubber}
+      {evalSpeed}
+      {evalParticles}
+      {traceData}
+      {traceElapsedDisplay}
+      {traceTotalDisplay}
+      onPlayToggle={() => { evalPlaying = !evalPlaying; if (evalPlaying) scheduleRedraw(); }}
+      onScrubberChange={(v) => { evalScrubber = v; scheduleRedraw(); }}
+      onSpeedChange={(v) => { evalSpeed = v; }}
+    />
   {/if}
 
   <!-- Anomaly panel (evaluative lens) -->
@@ -5298,59 +5248,7 @@
   .tb-btn-observable { opacity: 0.5; font-style: italic; }
   .tb-btn-observable:hover { opacity: 0.8; }
   .tb-btn-observable::after { content: ''; display: inline-block; width: 6px; height: 6px; background: #475569; border-radius: 50%; margin-left: 4px; vertical-align: middle; }
-  .eval-metric-group { display: flex; gap: 2px; align-items: center; }
-  .eval-label { font-size: 10px; color: #64748b; margin: 0 2px; white-space: nowrap; }
-  .eval-playback { display: flex; gap: 4px; align-items: center; margin-left: 4px; }
-  .eval-scrubber { width: 80px; accent-color: #ef4444; height: 4px; cursor: pointer; }
-  .eval-speed { background: rgba(15,15,26,0.9); color: #94a3b8; border: 1px solid #334155; border-radius: 4px; padding: 2px 4px; font-size: 11px; font-family: 'SF Mono', Menlo, monospace; cursor: pointer; }
-  .eval-particle-count { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; white-space: nowrap; }
-  .eval-no-trace { font-size: 11px; color: #64748b; font-style: italic; margin-left: 4px; }
-
-  /* Observable lens notice banner */
-  .observable-banner {
-    position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 45;
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 16px; background: rgba(15, 15, 26, 0.95); border: 1px solid #334155;
-    border-radius: 8px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(16px);
-    font-size: 12px; color: #94a3b8; font-family: system-ui, -apple-system, sans-serif;
-    animation: observable-fade-in 0.2s ease-out;
-  }
-  .observable-banner-close {
-    display: flex; align-items: center; justify-content: center;
-    width: 18px; height: 18px; background: transparent; border: none;
-    border-radius: 4px; color: #64748b; cursor: pointer; margin-left: 4px;
-  }
-  .observable-banner-close:hover { background: #1e293b; color: #e2e8f0; }
-  @keyframes observable-fade-in { from { opacity: 0; transform: translateX(-50%) translateY(-8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
-
-  /* Trace playback overlay bar */
-  .trace-playback-bar {
-    position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 40;
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 16px; background: rgba(15, 15, 26, 0.95); border: 1px solid #334155;
-    border-radius: 8px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(16px);
-  }
-  .trace-pb-btn {
-    display: flex; align-items: center; justify-content: center;
-    width: 28px; height: 28px; border: none; border-radius: 6px;
-    background: #1e293b; color: #60a5fa; cursor: pointer;
-    transition: all 0.15s;
-  }
-  .trace-pb-btn:hover { background: #334155; color: #93c5fd; }
-  .trace-pb-scrubber { width: 160px; accent-color: #60a5fa; height: 4px; cursor: pointer; }
-  .trace-pb-time {
-    font-size: 11px; color: #e2e8f0; font-family: 'SF Mono', Menlo, monospace;
-    white-space: nowrap; min-width: 100px;
-  }
-  .trace-pb-sep { width: 1px; height: 20px; background: #334155; }
-  .trace-pb-speed {
-    background: rgba(15, 15, 26, 0.9); color: #94a3b8; border: 1px solid #334155;
-    border-radius: 4px; padding: 4px 6px; font-size: 11px;
-    font-family: 'SF Mono', Menlo, monospace; cursor: pointer;
-  }
-  .trace-pb-particles { font-size: 11px; color: #64748b; font-family: 'SF Mono', Menlo, monospace; white-space: nowrap; }
+  /* Styles for eval-metric, observable-banner, trace-playback moved to extracted components */
 
   .tb-sep { width: 1px; height: 20px; background: #334155; margin: 0 4px; }
   .tb-sep-v { width: 1px; height: 16px; background: #475569; margin: 0 2px; display: inline-block; vertical-align: middle; }
@@ -5401,21 +5299,7 @@
   }
   .treemap-minimap:hover { opacity: 1; }
 
-  .treemap-breadcrumb {
-    display: flex; align-items: center; gap: 4px;
-    padding: 6px 12px; border-top: 1px solid #1e293b;
-    background: rgba(15,15,26,0.95); flex-shrink: 0; overflow-x: auto;
-  }
-  .breadcrumb-item {
-    display: flex; align-items: center; gap: 4px;
-    padding: 3px 10px; background: transparent; border: none; border-radius: 4px;
-    color: #60a5fa; font-size: 12px; font-family: 'SF Mono', Menlo, monospace;
-    cursor: pointer; transition: background 0.15s; white-space: nowrap;
-  }
-  .breadcrumb-item:hover { background: #1e293b; }
-  .breadcrumb-item.current { color: #f1f5f9; font-weight: 600; }
-  .breadcrumb-item.root { color: #94a3b8; }
-  .breadcrumb-sep { color: #475569; font-size: 14px; user-select: none; }
+  /* Breadcrumb styles moved to extracted Breadcrumb component */
 
   .query-annotation {
     display: flex; align-items: center; justify-content: space-between;
