@@ -1043,7 +1043,330 @@
             {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates}</span>
             {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineMrs.open}</span>{/if}
           </button>
+          {#if mergeQueueItems.length > 0}
+            <span class="pipeline-arrow" aria-hidden="true">→</span>
+            <button class="pipeline-stage pipeline-stage-active" onclick={() => { wsTab = 'mrs'; }} title="{mergeQueueItems.length} MR{mergeQueueItems.length !== 1 ? 's' : ''} in merge queue">
+              <span class="pipeline-stage-count">{mergeQueueItems.length}</span>
+              <span class="pipeline-stage-label">Queue</span>
+              <span class="pipeline-stage-badge pipeline-badge-active">{mergeQueueItems.length}</span>
+            </button>
+          {/if}
+          {#if pipelineMrs.merged > 0}
+            <span class="pipeline-arrow" aria-hidden="true">→</span>
+            <span class="pipeline-stage pipeline-stage-done" title="{pipelineMrs.merged} MR{pipelineMrs.merged !== 1 ? 's' : ''} merged">
+              <span class="pipeline-stage-count">{pipelineMrs.merged}</span>
+              <span class="pipeline-stage-label">Merged</span>
+            </span>
+          {/if}
         </nav>
+      {/if}
+
+      <!-- ── Pipeline detail (expanded when a stage is clicked) ──── -->
+      {#if wsTab}
+        <div class="pipeline-detail" data-testid="pipeline-detail">
+          <div class="pipeline-detail-header">
+            <span class="pipeline-detail-title">
+              {wsTab === 'specs' ? 'Specs' : wsTab === 'tasks' ? 'Tasks' : wsTab === 'mrs' ? 'Merge Requests' : wsTab === 'agents' ? 'Agents' : 'Budget'}
+            </span>
+            <button class="pipeline-detail-close" onclick={() => { wsTab = null; }} title="Close" aria-label="Close panel">✕</button>
+          </div>
+          <div class="pipeline-detail-body">
+            {#if wsTab === 'specs'}
+              {#if specs.length === 0}
+                <p class="ws-overview-empty">No specs yet. Push specs to your repos to start the autonomous pipeline.</p>
+              {:else}
+                {@const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending')}
+                {@const approvedSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'approved')}
+                {@const otherSpecs = specs.filter(s => !['pending', 'approved'].includes(s.approval_status ?? s.status ?? ''))}
+                {@const sortedSpecs = [...pendingSpecs, ...approvedSpecs, ...otherSpecs]}
+                <div class="specs-list">
+                  {#each sortedSpecs.slice(0, specsShowAll ? Infinity : 20) as spec (spec.path)}
+                    {@const status = spec.approval_status ?? spec.status ?? 'pending'}
+                    {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
+                    {@const repoName = (spec.repo_id && repoMap[spec.repo_id]) ? repoMap[spec.repo_id].name : null}
+                    {@const specTasks = wsTasks.filter(t => t.spec_path === spec.path)}
+                    {@const specMrs = wsMrs.filter(m => m.spec_ref?.startsWith(spec.path))}
+                    {@const actionState = specActionStates[spec.path]}
+                    <button class="spec-card-ws spec-card-ws-{status}" onclick={() => nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id })} tabindex="0">
+                      <div class="spec-card-header">
+                        <span class="spec-card-icon spec-card-icon-{status}">{SPEC_STATUS_ICONS[status] ?? '?'}</span>
+                        <span class="spec-card-title">{specName}</span>
+                        {#if status === 'pending' && !actionState}
+                          <span class="spec-card-actions">
+                            <button class="inline-action-btn inline-action-approve" onclick={(e) => { e.stopPropagation(); quickApproveSpec(spec, e); }}>Approve</button>
+                            <button class="inline-action-btn inline-action-reject" onclick={(e) => { e.stopPropagation(); quickRejectSpec(spec, e); }}>Reject</button>
+                          </span>
+                        {:else if actionState === 'loading'}
+                          <span class="spec-card-action-status">...</span>
+                        {:else if actionState === 'approved'}
+                          <span class="spec-card-action-status spec-card-action-approved">Approved</span>
+                        {:else if actionState === 'rejected'}
+                          <span class="spec-card-action-status spec-card-action-rejected">Rejected</span>
+                        {/if}
+                      </div>
+                      <div class="spec-card-meta">
+                        {#if repoName}<span class="spec-card-repo">{repoName}</span>{/if}
+                        {#if status === 'pending'}
+                          <span class="spec-card-why">Agents cannot start until approved</span>
+                        {:else if status === 'approved' && specTasks.length === 0}
+                          <span class="spec-card-why">Approved — awaiting task creation</span>
+                        {:else if status === 'approved' && specTasks.some(t => t.status === 'in_progress')}
+                          <span class="spec-card-why">Being implemented by {specTasks.filter(t => t.status === 'in_progress').length} agent{specTasks.filter(t => t.status === 'in_progress').length !== 1 ? 's' : ''}</span>
+                        {:else if status === 'approved' && specMrs.some(m => m.status === 'merged')}
+                          <span class="spec-card-why">Fully implemented and merged</span>
+                        {:else if status === 'rejected'}
+                          <span class="spec-card-why">Rejected — revise and re-push</span>
+                        {/if}
+                        <span class="spec-card-time">{relTime(spec.updated_at ?? spec.created_at)}</span>
+                      </div>
+                      {#if specTasks.length > 0 || specMrs.length > 0}
+                        <div class="spec-card-progress">
+                          {#if specTasks.length > 0}
+                            <span class="spec-progress-item">{specTasks.filter(t => t.status === 'done').length}/{specTasks.length} tasks done</span>
+                          {/if}
+                          {#if specMrs.length > 0}
+                            <span class="spec-progress-item">{specMrs.filter(m => m.status === 'merged').length}/{specMrs.length} MRs merged</span>
+                          {/if}
+                        </div>
+                      {/if}
+                    </button>
+                  {/each}
+                </div>
+                {#if specs.length > 20 && !specsShowAll}
+                  <button class="ws-overview-more-btn" onclick={() => { specsShowAll = true; }}>Show all {specs.length} specs</button>
+                {:else if specsShowAll && specs.length > 20}
+                  <button class="ws-overview-more-btn" onclick={() => { specsShowAll = false; }}>Show fewer</button>
+                {/if}
+              {/if}
+
+            {:else if wsTab === 'tasks'}
+              {#if wsTasks.length === 0}
+                <p class="ws-overview-empty">No tasks. Tasks are auto-created when specs are approved.</p>
+              {:else}
+                {@const inProgressTasks = wsTasks.filter(t => t.status === 'in_progress')}
+                {@const blockedTasks = wsTasks.filter(t => t.status === 'blocked')}
+                {@const pendingTasks = wsTasks.filter(t => t.status === 'created' || t.status === 'pending')}
+                {@const doneTasks = wsTasks.filter(t => t.status === 'done')}
+                {@const otherTasks = wsTasks.filter(t => !['in_progress', 'blocked', 'created', 'pending', 'done'].includes(t.status))}
+                {@const sortedTasks = [...blockedTasks, ...inProgressTasks, ...pendingTasks, ...otherTasks, ...doneTasks]}
+                <div class="tasks-list">
+                  {#each sortedTasks.slice(0, tasksShowAll ? Infinity : 20) as task (task.id)}
+                    {@const specName = task.spec_path ? task.spec_path.split('/').pop()?.replace(/\.md$/, '') : null}
+                    {@const repoName = (task.repo_id && repoMap[task.repo_id]) ? repoMap[task.repo_id].name : null}
+                    {@const statusWhy = task.status === 'blocked' ? 'Waiting on dependency' : task.status === 'done' ? 'Implementation complete' : task.status === 'in_progress' ? 'Agent is implementing' : task.status === 'review' ? 'Under review' : 'Awaiting agent assignment'}
+                    <button class="task-card-ws task-card-ws-{task.status}" onclick={() => nav('task', task.id, task)} tabindex="0" title={statusWhy}>
+                      <div class="task-card-header">
+                        <span class="task-card-status task-card-status-{task.status}">
+                          {task.status === 'done' ? '✓' : task.status === 'in_progress' ? '◉' : task.status === 'blocked' ? '✗' : task.status === 'review' ? '⊘' : '○'}
+                        </span>
+                        <span class="task-card-title">{task.title ?? 'Untitled'}</span>
+                        {#if task.priority && task.priority !== 'low'}
+                          <span class="priority-pill priority-{task.priority}">{task.priority}</span>
+                        {/if}
+                      </div>
+                      <div class="task-card-meta">
+                        <span class="task-card-why">{statusWhy}</span>
+                        {#if task.assigned_to}
+                          <span class="task-card-agent">by {entityName('agent', task.assigned_to)}</span>
+                        {/if}
+                      </div>
+                      <div class="task-card-footer">
+                        {#if specName}<span class="task-card-spec">from "{specName}"</span>{/if}
+                        {#if repoName}<span class="task-card-repo">{repoName}</span>{/if}
+                        <span class="task-card-time">{relTime(task.updated_at ?? task.created_at)}</span>
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+                {#if wsTasks.length > 20 && !tasksShowAll}
+                  <button class="ws-overview-more-btn" onclick={() => { tasksShowAll = true; }}>Show all {wsTasks.length} tasks</button>
+                {:else if tasksShowAll && wsTasks.length > 20}
+                  <button class="ws-overview-more-btn" onclick={() => { tasksShowAll = false; }}>Show fewer</button>
+                {/if}
+              {/if}
+
+            {:else if wsTab === 'mrs'}
+              {#if wsMrs.length === 0}
+                <p class="ws-overview-empty">No merge requests. MRs are created when agents complete implementation.</p>
+              {:else}
+                {@const openMrs = wsMrs.filter(m => m.status === 'open')}
+                {@const mergedMrs = wsMrs.filter(m => m.status === 'merged')}
+                {@const sortedMrs = [...openMrs, ...mergedMrs, ...wsMrs.filter(m => m.status !== 'open' && m.status !== 'merged')]}
+                <div class="mrs-list">
+                  {#each sortedMrs.slice(0, mrsShowAll ? Infinity : 20) as mr (mr.id)}
+                    {@const mrStatus = mr.status ?? 'open'}
+                    {@const ds = mr.diff_stats}
+                    {@const repoId = mr.repository_id ?? mr.repo_id}
+                    {@const repoName = (repoId && repoMap[repoId]) ? repoMap[repoId].name : null}
+                    {@const queueItem = mergeQueueItems.find(q => (q.merge_request_id ?? q.mr_id) === mr.id)}
+                    {@const specName = mr.spec_ref ? mr.spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '') : null}
+                    {@const mrWhy = mr._gates?.failed > 0 ? `Blocked — ${mr._gates.details?.filter(g => g.status === 'failed').map(g => g.name).join(', ') || 'gates'} failed` : queueItem ? `In merge queue (#${(queueItem.position ?? 0) + 1})` : mrStatus === 'merged' ? 'All gates passed, merged' : mrStatus === 'open' && mr._gates?.passed === mr._gates?.total && mr._gates?.total > 0 ? 'All gates passed — ready to merge' : mrStatus === 'open' ? 'Open — awaiting gates' : ''}
+                    <button class="mr-card-ws mr-card-ws-{mrStatus}" onclick={() => nav('mr', mr.id, { ...mr, repo_id: repoId })} tabindex="0" title={mrWhy}>
+                      <div class="mr-card-header">
+                        <span class="mr-card-status mr-card-status-{mrStatus}">
+                          {mrStatus === 'merged' ? '✓' : mrStatus === 'closed' ? '✗' : '○'}
+                        </span>
+                        <span class="mr-card-title">{mr.title ?? 'Untitled'}</span>
+                        {#if ds}
+                          <button class="diff-stat-inline" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, repo_id: repoId, _openTab: 'diff' }); }} title="View code diff">
+                            <span class="diff-ins-tiny">+{ds.insertions ?? 0}</span>
+                            <span class="diff-del-tiny">-{ds.deletions ?? 0}</span>
+                          </button>
+                        {/if}
+                      </div>
+                      {#if mrWhy}
+                        <div class="mr-card-why mr-card-why-{mr._gates?.failed > 0 ? 'danger' : mrStatus === 'merged' ? 'success' : 'info'}">{mrWhy}</div>
+                      {/if}
+                      <div class="mr-card-meta">
+                        {#if repoName}<span class="mr-card-repo">{repoName}</span>{/if}
+                        {#if mr.author_agent_id}<span class="mr-card-author">by {entityName('agent', mr.author_agent_id)}</span>{/if}
+                        {#if specName}<span class="mr-card-spec">for "{specName}"</span>{/if}
+                        <span class="mr-card-time">{relTime(mr.created_at)}</span>
+                      </div>
+                      <div class="mr-card-footer">
+                        {#if mr._gates?.details?.length > 0}
+                          <span class="gate-names-ws">
+                            {#each mr._gates.details.slice(0, 4) as g}
+                              <button class="gate-badge-ws gate-badge-ws-{g.status}" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }} title="{g.name}: {g.status}{g.gate_type ? ' (' + g.gate_type.replace(/_/g, ' ') + ')' : ''}{g.output ? '\n' + g.output.split('\n')[0]?.slice(0, 80) : ''}">
+                                <span class="gate-badge-ws-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
+                                <span class="gate-badge-ws-name">{g.name}</span>
+                              </button>
+                            {/each}
+                          </span>
+                          {#if mr._gates.failed > 0}
+                            {@const failedGate = mr._gates.details.find(g => g.status === 'failed')}
+                            {#if failedGate?.output || failedGate?.error}
+                              <button class="gate-error-snippet" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }} title="Click to view full gate output">
+                                {(failedGate.error ?? failedGate.output ?? '').split('\n')[0]?.slice(0, 100)}
+                              </button>
+                            {/if}
+                          {/if}
+                        {:else if mr._gates}
+                          <span class="gate-summary">
+                            {#if mr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{mr._gates.passed}</span>{/if}
+                            {#if mr._gates.failed > 0}<span class="gate-mini gate-mini-fail">✗{mr._gates.failed}</span>{/if}
+                          </span>
+                        {/if}
+                        {#if queueItem}
+                          <span class="mr-card-queue">Queue #{(queueItem.position ?? 0) + 1}</span>
+                        {/if}
+                        {#if mrStatus === 'merged' && mr.merge_commit_sha}
+                          <span class="mr-card-sha mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</span>
+                        {/if}
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+                {#if wsMrs.length > 20 && !mrsShowAll}
+                  <button class="ws-overview-more-btn" onclick={() => { mrsShowAll = true; }}>Show all {wsMrs.length} MRs</button>
+                {:else if mrsShowAll && wsMrs.length > 20}
+                  <button class="ws-overview-more-btn" onclick={() => { mrsShowAll = false; }}>Show fewer</button>
+                {/if}
+              {/if}
+
+            {:else if wsTab === 'agents'}
+              {#if wsAgents.length === 0}
+                <p class="ws-overview-empty">No agents. Agents are spawned when tasks are assigned.</p>
+              {:else}
+                {@const activeAgents = wsAgents.filter(a => a.status === 'active' || a.status === 'running')}
+                {@const completedAgents = wsAgents.filter(a => a.status === 'completed' || a.status === 'idle')}
+                {@const failedAgents = wsAgents.filter(a => a.status === 'failed' || a.status === 'dead')}
+                {@const sortedAgents = [...activeAgents, ...failedAgents, ...completedAgents]}
+                <div class="agents-list">
+                  {#each sortedAgents.slice(0, agentsShowAll ? Infinity : 20) as agent (agent.id)}
+                    {@const agentStatus = agent.status ?? 'unknown'}
+                    {@const isActive = agentStatus === 'active' || agentStatus === 'running'}
+                    {@const isFailed = agentStatus === 'failed' || agentStatus === 'dead'}
+                    {@const elapsed = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
+                    {@const specName = agent.spec_path ? agent.spec_path.split('/').pop()?.replace(/\.md$/, '') : null}
+                    {@const repoName = (agent.repo_id && repoMap[agent.repo_id]) ? repoMap[agent.repo_id].name : null}
+                    {@const taskId = agent.task_id ?? agent.current_task_id}
+                    <button class="agent-card-ws agent-card-ws-{agentStatus}" onclick={() => nav('agent', agent.id, agent)} tabindex="0">
+                      <div class="agent-card-header">
+                        <span class="agent-card-status agent-card-status-{agentStatus}">
+                          {#if isActive}<span class="agent-pulse"></span>{/if}
+                          {isActive ? '◉' : isFailed ? '✗' : agentStatus === 'completed' || agentStatus === 'idle' ? '✓' : '○'}
+                        </span>
+                        <span class="agent-card-name">{agent.name ?? formatId('agent', agent.id)}</span>
+                        {#if elapsed != null}
+                          <span class="agent-card-elapsed" title={absTime(agent.created_at ?? agent.spawned_at)}>{formatDuration(elapsed)}</span>
+                        {/if}
+                      </div>
+                      <div class="agent-card-context">
+                        {#if specName}
+                          <span class="agent-card-spec" title={agent.spec_path}>implementing "{specName}"</span>
+                        {:else if taskId}
+                          <span class="agent-card-spec">working on {entityName('task', taskId)}</span>
+                        {/if}
+                        {#if repoName}
+                          <span class="agent-card-repo">in {repoName}</span>
+                        {/if}
+                      </div>
+                      {#if isFailed}
+                        <div class="agent-card-error">Check logs for failure details</div>
+                      {:else if isActive}
+                        <div class="agent-card-hint">Click to view logs and conversation</div>
+                      {/if}
+                    </button>
+                  {/each}
+                </div>
+                {#if wsAgents.length > 20 && !agentsShowAll}
+                  <button class="ws-overview-more-btn" onclick={() => { agentsShowAll = true; }}>Show all {wsAgents.length} agents</button>
+                {:else if agentsShowAll && wsAgents.length > 20}
+                  <button class="ws-overview-more-btn" onclick={() => { agentsShowAll = false; }}>Show fewer</button>
+                {/if}
+              {/if}
+
+            {:else if wsTab === 'budget'}
+              <div class="ws-budget-panel">
+                {#if budgetData}
+                  <div class="budget-stats-grid">
+                    <div class="budget-stat">
+                      <span class="budget-stat-label">Daily token limit</span>
+                      <span class="budget-stat-value">{budgetData.max_tokens_per_day?.toLocaleString() ?? 'No limit'}</span>
+                    </div>
+                    <div class="budget-stat">
+                      <span class="budget-stat-label">Tokens used today</span>
+                      <span class="budget-stat-value">{budgetData.tokens_used_today?.toLocaleString() ?? '0'}</span>
+                    </div>
+                    <div class="budget-stat">
+                      <span class="budget-stat-label">Max concurrent agents</span>
+                      <span class="budget-stat-value">{budgetData.max_concurrent_agents ?? 'No limit'}</span>
+                    </div>
+                    <div class="budget-stat">
+                      <span class="budget-stat-label">Daily cost limit</span>
+                      <span class="budget-stat-value">{budgetData.max_cost_per_day != null ? `$${budgetData.max_cost_per_day.toFixed(2)}` : 'No limit'}</span>
+                    </div>
+                    {#if budgetData.cost_today != null}
+                      <div class="budget-stat">
+                        <span class="budget-stat-label">Cost today</span>
+                        <span class="budget-stat-value">${budgetData.cost_today.toFixed(2)}</span>
+                      </div>
+                    {/if}
+                  </div>
+                {:else}
+                  <p class="ws-overview-empty">No budget configured for this workspace.</p>
+                {/if}
+                {#if costData}
+                  <div class="budget-cost-summary">
+                    <h4 class="budget-cost-heading">Cost Summary</h4>
+                    <div class="budget-stats-grid">
+                      {#if costData.total_compute != null}
+                        <div class="budget-stat"><span class="budget-stat-label">Compute</span><span class="budget-stat-value">${costData.total_compute.toFixed(2)}</span></div>
+                      {/if}
+                      {#if costData.total_llm != null}
+                        <div class="budget-stat"><span class="budget-stat-label">LLM</span><span class="budget-stat-value">${costData.total_llm.toFixed(2)}</span></div>
+                      {/if}
+                      {#if costData.total_storage != null}
+                        <div class="budget-stat"><span class="budget-stat-label">Storage</span><span class="budget-stat-value">${costData.total_storage.toFixed(2)}</span></div>
+                      {/if}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
+        </div>
       {/if}
 
       <!-- ── Main content: single-column layout ──────────────────── -->
@@ -1236,7 +1559,7 @@
 
           <!-- ── Activity feed (always visible, collapsible) ────── -->
           {#if activityEvents.length > 0}
-            <details class="ws-activity-details" open={activityEvents.length <= 10}>
+            <details class="ws-activity-details">
               <summary class="ws-activity-summary">
                 <h2 class="section-heading section-heading-inline">Activity</h2>
                 <span class="activity-count-badge">{activityEvents.length}</span>
@@ -1283,341 +1606,6 @@
               {/if}
             </details>
           {/if}
-
-          <!-- ── Merge Queue (always visible when items queued) ───── -->
-          {#if mergeQueueItems.length > 0}
-            <div class="merge-queue-banner">
-              <span class="queue-banner-icon">⇉</span>
-              <span class="queue-banner-text">{mergeQueueItems.length} MR{mergeQueueItems.length !== 1 ? 's' : ''} in merge queue</span>
-              <div class="queue-banner-items">
-                {#each mergeQueueItems.slice(0, 5) as item, i}
-                  <button class="queue-banner-item" onclick={() => nav('mr', item.merge_request_id ?? item.mr_id, { repo_id: item._mr?.repository_id ?? item._mr?.repo_id })}>
-                    <span class="queue-banner-pos">#{i + 1}</span>
-                    <span class="queue-banner-title">{item._title}</span>
-                    {#if item._spec_ref}
-                      <span class="queue-banner-spec">for "{item._spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '')}"</span>
-                    {/if}
-                  </button>
-                {/each}
-              </div>
-            </div>
-          {/if}
-
-          <!-- ── Workspace overview tabs ───────── -->
-          <section class="ws-overview-section" data-testid="section-overview">
-            <div class="ws-overview-tabs" role="tablist">
-              {#each [
-                { id: 'specs', label: 'Specs', count: specs.length },
-                { id: 'tasks', label: 'Tasks', count: wsTasks.length },
-                { id: 'mrs', label: 'Merge Requests', count: wsMrs.length },
-                { id: 'agents', label: 'Agents', count: wsAgents.length },
-                { id: 'budget', label: 'Budget', count: null },
-              ] as tab}
-                <button class="ws-overview-tab" class:ws-overview-tab-active={wsTab === tab.id} role="tab" aria-selected={wsTab === tab.id} onclick={() => { wsTab = wsTab === tab.id ? null : tab.id; }}>
-                  {tab.label}{#if tab.count != null} <span class="ws-overview-tab-count">{tab.count}</span>{/if}
-                </button>
-              {/each}
-            </div>
-
-            {#if wsTab}
-              <div class="ws-overview-content">
-                {#if wsTab === 'specs'}
-                  {#if specs.length === 0}
-                    <p class="ws-overview-empty">No specs yet. Push specs to your repos to start the autonomous pipeline.</p>
-                  {:else}
-                    {@const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending')}
-                    {@const approvedSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'approved')}
-                    {@const otherSpecs = specs.filter(s => !['pending', 'approved'].includes(s.approval_status ?? s.status ?? ''))}
-                    {@const sortedSpecs = [...pendingSpecs, ...approvedSpecs, ...otherSpecs]}
-                    <div class="specs-list">
-                      {#each sortedSpecs.slice(0, specsShowAll ? Infinity : 20) as spec (spec.path)}
-                        {@const status = spec.approval_status ?? spec.status ?? 'pending'}
-                        {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
-                        {@const repoName = (spec.repo_id && repoMap[spec.repo_id]) ? repoMap[spec.repo_id].name : null}
-                        {@const specTasks = wsTasks.filter(t => t.spec_path === spec.path)}
-                        {@const specMrs = wsMrs.filter(m => m.spec_ref?.startsWith(spec.path))}
-                        {@const actionState = specActionStates[spec.path]}
-                        <button class="spec-card-ws spec-card-ws-{status}" onclick={() => nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id })} tabindex="0">
-                          <div class="spec-card-header">
-                            <span class="spec-card-icon spec-card-icon-{status}">{SPEC_STATUS_ICONS[status] ?? '?'}</span>
-                            <span class="spec-card-title">{specName}</span>
-                            {#if status === 'pending' && !actionState}
-                              <span class="spec-card-actions">
-                                <button class="inline-action-btn inline-action-approve" onclick={(e) => { e.stopPropagation(); quickApproveSpec(spec, e); }}>Approve</button>
-                                <button class="inline-action-btn inline-action-reject" onclick={(e) => { e.stopPropagation(); quickRejectSpec(spec, e); }}>Reject</button>
-                              </span>
-                            {:else if actionState === 'loading'}
-                              <span class="spec-card-action-status">...</span>
-                            {:else if actionState === 'approved'}
-                              <span class="spec-card-action-status spec-card-action-approved">Approved</span>
-                            {:else if actionState === 'rejected'}
-                              <span class="spec-card-action-status spec-card-action-rejected">Rejected</span>
-                            {/if}
-                          </div>
-                          <div class="spec-card-meta">
-                            {#if repoName}<span class="spec-card-repo">{repoName}</span>{/if}
-                            {#if status === 'pending'}
-                              <span class="spec-card-why">Agents cannot start until approved</span>
-                            {:else if status === 'approved' && specTasks.length === 0}
-                              <span class="spec-card-why">Approved — awaiting task creation</span>
-                            {:else if status === 'approved' && specTasks.some(t => t.status === 'in_progress')}
-                              <span class="spec-card-why">Being implemented by {specTasks.filter(t => t.status === 'in_progress').length} agent{specTasks.filter(t => t.status === 'in_progress').length !== 1 ? 's' : ''}</span>
-                            {:else if status === 'approved' && specMrs.some(m => m.status === 'merged')}
-                              <span class="spec-card-why">Fully implemented and merged</span>
-                            {:else if status === 'rejected'}
-                              <span class="spec-card-why">Rejected — revise and re-push</span>
-                            {/if}
-                            <span class="spec-card-time">{relTime(spec.updated_at ?? spec.created_at)}</span>
-                          </div>
-                          {#if specTasks.length > 0 || specMrs.length > 0}
-                            <div class="spec-card-progress">
-                              {#if specTasks.length > 0}
-                                <span class="spec-progress-item">{specTasks.filter(t => t.status === 'done').length}/{specTasks.length} tasks done</span>
-                              {/if}
-                              {#if specMrs.length > 0}
-                                <span class="spec-progress-item">{specMrs.filter(m => m.status === 'merged').length}/{specMrs.length} MRs merged</span>
-                              {/if}
-                            </div>
-                          {/if}
-                        </button>
-                      {/each}
-                    </div>
-                    {#if specs.length > 20 && !specsShowAll}
-                      <button class="ws-overview-more-btn" onclick={() => { specsShowAll = true; }}>Show all {specs.length} specs</button>
-                    {:else if specsShowAll && specs.length > 20}
-                      <button class="ws-overview-more-btn" onclick={() => { specsShowAll = false; }}>Show fewer</button>
-                    {/if}
-                  {/if}
-
-                {:else if wsTab === 'tasks'}
-                  {#if wsTasks.length === 0}
-                    <p class="ws-overview-empty">No tasks. Tasks are auto-created when specs are approved.</p>
-                  {:else}
-                    {@const inProgressTasks = wsTasks.filter(t => t.status === 'in_progress')}
-                    {@const blockedTasks = wsTasks.filter(t => t.status === 'blocked')}
-                    {@const pendingTasks = wsTasks.filter(t => t.status === 'created' || t.status === 'pending')}
-                    {@const doneTasks = wsTasks.filter(t => t.status === 'done')}
-                    {@const otherTasks = wsTasks.filter(t => !['in_progress', 'blocked', 'created', 'pending', 'done'].includes(t.status))}
-                    {@const sortedTasks = [...blockedTasks, ...inProgressTasks, ...pendingTasks, ...otherTasks, ...doneTasks]}
-                    <div class="tasks-list">
-                      {#each sortedTasks.slice(0, tasksShowAll ? Infinity : 20) as task (task.id)}
-                        {@const specName = task.spec_path ? task.spec_path.split('/').pop()?.replace(/\.md$/, '') : null}
-                        {@const repoName = (task.repo_id && repoMap[task.repo_id]) ? repoMap[task.repo_id].name : null}
-                        {@const statusWhy = task.status === 'blocked' ? 'Waiting on dependency' : task.status === 'done' ? 'Implementation complete' : task.status === 'in_progress' ? 'Agent is implementing' : task.status === 'review' ? 'Under review' : 'Awaiting agent assignment'}
-                        <button class="task-card-ws task-card-ws-{task.status}" onclick={() => nav('task', task.id, task)} tabindex="0" title={statusWhy}>
-                          <div class="task-card-header">
-                            <span class="task-card-status task-card-status-{task.status}">
-                              {task.status === 'done' ? '✓' : task.status === 'in_progress' ? '◉' : task.status === 'blocked' ? '✗' : task.status === 'review' ? '⊘' : '○'}
-                            </span>
-                            <span class="task-card-title">{task.title ?? 'Untitled'}</span>
-                            {#if task.priority && task.priority !== 'low'}
-                              <span class="priority-pill priority-{task.priority}">{task.priority}</span>
-                            {/if}
-                          </div>
-                          <div class="task-card-meta">
-                            <span class="task-card-why">{statusWhy}</span>
-                            {#if task.assigned_to}
-                              <span class="task-card-agent">by {entityName('agent', task.assigned_to)}</span>
-                            {/if}
-                          </div>
-                          <div class="task-card-footer">
-                            {#if specName}<span class="task-card-spec">from "{specName}"</span>{/if}
-                            {#if repoName}<span class="task-card-repo">{repoName}</span>{/if}
-                            <span class="task-card-time">{relTime(task.updated_at ?? task.created_at)}</span>
-                          </div>
-                        </button>
-                      {/each}
-                    </div>
-                    {#if wsTasks.length > 20 && !tasksShowAll}
-                      <button class="ws-overview-more-btn" onclick={() => { tasksShowAll = true; }}>Show all {wsTasks.length} tasks</button>
-                    {:else if tasksShowAll && wsTasks.length > 20}
-                      <button class="ws-overview-more-btn" onclick={() => { tasksShowAll = false; }}>Show fewer</button>
-                    {/if}
-                  {/if}
-
-                {:else if wsTab === 'mrs'}
-                  {#if wsMrs.length === 0}
-                    <p class="ws-overview-empty">No merge requests. MRs are created when agents complete implementation.</p>
-                  {:else}
-                    {@const openMrs = wsMrs.filter(m => m.status === 'open')}
-                    {@const mergedMrs = wsMrs.filter(m => m.status === 'merged')}
-                    {@const sortedMrs = [...openMrs, ...mergedMrs, ...wsMrs.filter(m => m.status !== 'open' && m.status !== 'merged')]}
-                    <div class="mrs-list">
-                      {#each sortedMrs.slice(0, mrsShowAll ? Infinity : 20) as mr (mr.id)}
-                        {@const mrStatus = mr.status ?? 'open'}
-                        {@const ds = mr.diff_stats}
-                        {@const repoId = mr.repository_id ?? mr.repo_id}
-                        {@const repoName = (repoId && repoMap[repoId]) ? repoMap[repoId].name : null}
-                        {@const queueItem = mergeQueueItems.find(q => (q.merge_request_id ?? q.mr_id) === mr.id)}
-                        {@const specName = mr.spec_ref ? mr.spec_ref.split('@')[0].split('/').pop()?.replace(/\.md$/, '') : null}
-                        {@const mrWhy = mr._gates?.failed > 0 ? `Blocked — ${mr._gates.details?.filter(g => g.status === 'failed').map(g => g.name).join(', ') || 'gates'} failed` : queueItem ? `In merge queue (#${(queueItem.position ?? 0) + 1})` : mrStatus === 'merged' ? 'All gates passed, merged' : mrStatus === 'open' && mr._gates?.passed === mr._gates?.total && mr._gates?.total > 0 ? 'All gates passed — ready to merge' : mrStatus === 'open' ? 'Open — awaiting gates' : ''}
-                        <button class="mr-card-ws mr-card-ws-{mrStatus}" onclick={() => nav('mr', mr.id, { ...mr, repo_id: repoId })} tabindex="0" title={mrWhy}>
-                          <div class="mr-card-header">
-                            <span class="mr-card-status mr-card-status-{mrStatus}">
-                              {mrStatus === 'merged' ? '✓' : mrStatus === 'closed' ? '✗' : '○'}
-                            </span>
-                            <span class="mr-card-title">{mr.title ?? 'Untitled'}</span>
-                            {#if ds}
-                              <button class="diff-stat-inline" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, repo_id: repoId, _openTab: 'diff' }); }} title="View code diff">
-                                <span class="diff-ins-tiny">+{ds.insertions ?? 0}</span>
-                                <span class="diff-del-tiny">-{ds.deletions ?? 0}</span>
-                              </button>
-                            {/if}
-                          </div>
-                          {#if mrWhy}
-                            <div class="mr-card-why mr-card-why-{mr._gates?.failed > 0 ? 'danger' : mrStatus === 'merged' ? 'success' : 'info'}">{mrWhy}</div>
-                          {/if}
-                          <div class="mr-card-meta">
-                            {#if repoName}<span class="mr-card-repo">{repoName}</span>{/if}
-                            {#if mr.author_agent_id}<span class="mr-card-author">by {entityName('agent', mr.author_agent_id)}</span>{/if}
-                            {#if specName}<span class="mr-card-spec">for "{specName}"</span>{/if}
-                            <span class="mr-card-time">{relTime(mr.created_at)}</span>
-                          </div>
-                          <div class="mr-card-footer">
-                            {#if mr._gates?.details?.length > 0}
-                              <span class="gate-names-ws">
-                                {#each mr._gates.details.slice(0, 4) as g}
-                                  <button class="gate-badge-ws gate-badge-ws-{g.status}" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }} title="{g.name}: {g.status}{g.gate_type ? ' (' + g.gate_type.replace(/_/g, ' ') + ')' : ''}{g.output ? '\n' + g.output.split('\n')[0]?.slice(0, 80) : ''}">
-                                    <span class="gate-badge-ws-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
-                                    <span class="gate-badge-ws-name">{g.name}</span>
-                                  </button>
-                                {/each}
-                              </span>
-                              {#if mr._gates.failed > 0}
-                                {@const failedGate = mr._gates.details.find(g => g.status === 'failed')}
-                                {#if failedGate?.output || failedGate?.error}
-                                  <button class="gate-error-snippet" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }} title="Click to view full gate output">
-                                    {(failedGate.error ?? failedGate.output ?? '').split('\n')[0]?.slice(0, 100)}
-                                  </button>
-                                {/if}
-                              {/if}
-                            {:else if mr._gates}
-                              <span class="gate-summary">
-                                {#if mr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{mr._gates.passed}</span>{/if}
-                                {#if mr._gates.failed > 0}<span class="gate-mini gate-mini-fail">✗{mr._gates.failed}</span>{/if}
-                              </span>
-                            {/if}
-                            {#if queueItem}
-                              <span class="mr-card-queue">Queue #{(queueItem.position ?? 0) + 1}</span>
-                            {/if}
-                            {#if mrStatus === 'merged' && mr.merge_commit_sha}
-                              <span class="mr-card-sha mono" title={mr.merge_commit_sha}>{mr.merge_commit_sha.slice(0, 7)}</span>
-                            {/if}
-                          </div>
-                        </button>
-                      {/each}
-                    </div>
-                    {#if wsMrs.length > 20 && !mrsShowAll}
-                      <button class="ws-overview-more-btn" onclick={() => { mrsShowAll = true; }}>Show all {wsMrs.length} MRs</button>
-                    {:else if mrsShowAll && wsMrs.length > 20}
-                      <button class="ws-overview-more-btn" onclick={() => { mrsShowAll = false; }}>Show fewer</button>
-                    {/if}
-                  {/if}
-
-                {:else if wsTab === 'agents'}
-                  {#if wsAgents.length === 0}
-                    <p class="ws-overview-empty">No agents. Agents are spawned when tasks are assigned.</p>
-                  {:else}
-                    {@const activeAgents = wsAgents.filter(a => a.status === 'active' || a.status === 'running')}
-                    {@const completedAgents = wsAgents.filter(a => a.status === 'completed' || a.status === 'idle')}
-                    {@const failedAgents = wsAgents.filter(a => a.status === 'failed' || a.status === 'dead')}
-                    {@const sortedAgents = [...activeAgents, ...failedAgents, ...completedAgents]}
-                    <div class="agents-list">
-                      {#each sortedAgents.slice(0, agentsShowAll ? Infinity : 20) as agent (agent.id)}
-                        {@const agentStatus = agent.status ?? 'unknown'}
-                        {@const isActive = agentStatus === 'active' || agentStatus === 'running'}
-                        {@const isFailed = agentStatus === 'failed' || agentStatus === 'dead'}
-                        {@const elapsed = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
-                        {@const specName = agent.spec_path ? agent.spec_path.split('/').pop()?.replace(/\.md$/, '') : null}
-                        {@const repoName = (agent.repo_id && repoMap[agent.repo_id]) ? repoMap[agent.repo_id].name : null}
-                        {@const taskId = agent.task_id ?? agent.current_task_id}
-                        <button class="agent-card-ws agent-card-ws-{agentStatus}" onclick={() => nav('agent', agent.id, agent)} tabindex="0">
-                          <div class="agent-card-header">
-                            <span class="agent-card-status agent-card-status-{agentStatus}">
-                              {#if isActive}<span class="agent-pulse"></span>{/if}
-                              {isActive ? '◉' : isFailed ? '✗' : agentStatus === 'completed' || agentStatus === 'idle' ? '✓' : '○'}
-                            </span>
-                            <span class="agent-card-name">{agent.name ?? formatId('agent', agent.id)}</span>
-                            {#if elapsed != null}
-                              <span class="agent-card-elapsed" title={absTime(agent.created_at ?? agent.spawned_at)}>{formatDuration(elapsed)}</span>
-                            {/if}
-                          </div>
-                          <div class="agent-card-context">
-                            {#if specName}
-                              <span class="agent-card-spec" title={agent.spec_path}>implementing "{specName}"</span>
-                            {:else if taskId}
-                              <span class="agent-card-spec">working on {entityName('task', taskId)}</span>
-                            {/if}
-                            {#if repoName}
-                              <span class="agent-card-repo">in {repoName}</span>
-                            {/if}
-                          </div>
-                          {#if isFailed}
-                            <div class="agent-card-error">Check logs for failure details</div>
-                          {:else if isActive}
-                            <div class="agent-card-hint">Click to view logs and conversation</div>
-                          {/if}
-                        </button>
-                      {/each}
-                    </div>
-                    {#if wsAgents.length > 20 && !agentsShowAll}
-                      <button class="ws-overview-more-btn" onclick={() => { agentsShowAll = true; }}>Show all {wsAgents.length} agents</button>
-                    {:else if agentsShowAll && wsAgents.length > 20}
-                      <button class="ws-overview-more-btn" onclick={() => { agentsShowAll = false; }}>Show fewer</button>
-                    {/if}
-                  {/if}
-
-                {:else if wsTab === 'budget'}
-                  <div class="ws-budget-panel">
-                    {#if budgetData}
-                      <div class="budget-stats-grid">
-                        <div class="budget-stat">
-                          <span class="budget-stat-label">Daily token limit</span>
-                          <span class="budget-stat-value">{budgetData.max_tokens_per_day?.toLocaleString() ?? 'No limit'}</span>
-                        </div>
-                        <div class="budget-stat">
-                          <span class="budget-stat-label">Tokens used today</span>
-                          <span class="budget-stat-value">{budgetData.tokens_used_today?.toLocaleString() ?? '0'}</span>
-                        </div>
-                        <div class="budget-stat">
-                          <span class="budget-stat-label">Max concurrent agents</span>
-                          <span class="budget-stat-value">{budgetData.max_concurrent_agents ?? 'No limit'}</span>
-                        </div>
-                        <div class="budget-stat">
-                          <span class="budget-stat-label">Daily cost limit</span>
-                          <span class="budget-stat-value">{budgetData.max_cost_per_day != null ? `$${budgetData.max_cost_per_day.toFixed(2)}` : 'No limit'}</span>
-                        </div>
-                        {#if budgetData.cost_today != null}
-                          <div class="budget-stat">
-                            <span class="budget-stat-label">Cost today</span>
-                            <span class="budget-stat-value">${budgetData.cost_today.toFixed(2)}</span>
-                          </div>
-                        {/if}
-                      </div>
-                    {:else}
-                      <p class="ws-overview-empty">No budget configured for this workspace.</p>
-                    {/if}
-                    {#if costData}
-                      <div class="budget-cost-summary">
-                        <h4 class="budget-cost-heading">Cost Summary</h4>
-                        <div class="budget-stats-grid">
-                          {#if costData.total_compute != null}
-                            <div class="budget-stat"><span class="budget-stat-label">Compute</span><span class="budget-stat-value">${costData.total_compute.toFixed(2)}</span></div>
-                          {/if}
-                          {#if costData.total_llm != null}
-                            <div class="budget-stat"><span class="budget-stat-label">LLM</span><span class="budget-stat-value">${costData.total_llm.toFixed(2)}</span></div>
-                          {/if}
-                          {#if costData.total_storage != null}
-                            <div class="budget-stat"><span class="budget-stat-label">Storage</span><span class="budget-stat-value">${costData.total_storage.toFixed(2)}</span></div>
-                          {/if}
-                        </div>
-                      </div>
-                    {/if}
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          </section>
 
       </div><!-- .ws-main-content -->
 
@@ -2135,6 +2123,58 @@
   .mq-status-processing { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent); }
   .mq-status-open { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent); }
   .mq-status-completed, .mq-status-merged { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 12%, transparent); }
+
+  /* ── Pipeline detail panel (expands below pipeline bar) ──────── */
+  .pipeline-detail {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+    animation: pipeline-detail-in 0.15s ease-out;
+  }
+
+  @keyframes pipeline-detail-in {
+    from { opacity: 0; max-height: 0; }
+    to { opacity: 1; max-height: 600px; }
+  }
+
+  .pipeline-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .pipeline-detail-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .pipeline-detail-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-fast);
+  }
+
+  .pipeline-detail-close:hover {
+    background: var(--color-surface-elevated);
+    color: var(--color-text);
+  }
+
+  .pipeline-detail-body {
+    padding: var(--space-2) var(--space-3);
+    max-height: 400px;
+    overflow-y: auto;
+  }
 
   /* ── Pipeline flow bar ───────────────────────────────────────── */
   .pipeline-bar {
