@@ -1025,16 +1025,29 @@
 
       <!-- ── Pipeline flow bar ─────────────────────────────────────── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
+        {@const specsPct = pipelineSpecs.total > 0 ? Math.round((pipelineSpecs.approved / pipelineSpecs.total) * 100) : 0}
+        {@const tasksPct = pipelineTasks.total > 0 ? Math.round((pipelineTasks.done / pipelineTasks.total) * 100) : 0}
+        {@const mrsPct = pipelineMrs.total > 0 ? Math.round((pipelineMrs.merged / pipelineMrs.total) * 100) : 0}
         <nav class="pipeline-bar" aria-label="Pipeline status">
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { wsTab = 'specs'; }} title="{pipelineSpecs.total} specs — {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending">
             <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
             <span class="pipeline-stage-label">Specs</span>
+            {#if pipelineSpecs.total > 0}
+              <span class="pipeline-progress-bar" role="progressbar" aria-valuenow={specsPct} aria-valuemin="0" aria-valuemax="100">
+                <span class="pipeline-progress-fill pipeline-fill-{pipelineSpecs.pending > 0 ? 'warn' : 'ok'}" style="width: {specsPct}%"></span>
+              </span>
+            {/if}
             {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warning">{pipelineSpecs.pending} pending</span>{/if}
           </button>
           <span class="pipeline-arrow" aria-hidden="true">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-alert={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; }} title="{pipelineTasks.total} tasks — {pipelineTasks.in_progress} in progress, {pipelineTasks.blocked} blocked">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-alert={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; }} title="{pipelineTasks.total} tasks — {pipelineTasks.done} done, {pipelineTasks.in_progress} in progress, {pipelineTasks.blocked} blocked">
             <span class="pipeline-stage-count">{pipelineTasks.total}</span>
             <span class="pipeline-stage-label">Tasks</span>
+            {#if pipelineTasks.total > 0}
+              <span class="pipeline-progress-bar" role="progressbar" aria-valuenow={tasksPct} aria-valuemin="0" aria-valuemax="100">
+                <span class="pipeline-progress-fill pipeline-fill-{pipelineTasks.blocked > 0 ? 'danger' : 'ok'}" style="width: {tasksPct}%"></span>
+              </span>
+            {/if}
             {#if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineTasks.in_progress} active</span>{/if}
             {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked} blocked</span>{/if}
           </button>
@@ -1048,6 +1061,11 @@
           <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-alert={pipelineMrs.failed_gates > 0} onclick={() => { wsTab = 'mrs'; }} title="{pipelineMrs.total} MRs — {pipelineMrs.open} open, {pipelineMrs.merged} merged">
             <span class="pipeline-stage-count">{pipelineMrs.total}</span>
             <span class="pipeline-stage-label">MRs</span>
+            {#if pipelineMrs.total > 0}
+              <span class="pipeline-progress-bar" role="progressbar" aria-valuenow={mrsPct} aria-valuemin="0" aria-valuemax="100">
+                <span class="pipeline-progress-fill pipeline-fill-{pipelineMrs.failed_gates > 0 ? 'danger' : 'ok'}" style="width: {mrsPct}%"></span>
+              </span>
+            {/if}
             {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates} failed</span>
             {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineMrs.open} open</span>
             {:else if pipelineMrs.merged > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineMrs.merged} merged</span>{/if}
@@ -2127,6 +2145,25 @@
   }
 
   .pipeline-stage-label { font-weight: 500; }
+
+  .pipeline-progress-bar {
+    display: block;
+    width: 100%;
+    height: 3px;
+    background: var(--color-border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 2px;
+  }
+  .pipeline-progress-fill {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.5s ease;
+  }
+  .pipeline-fill-ok { background: var(--color-success); }
+  .pipeline-fill-warn { background: var(--color-warning); }
+  .pipeline-fill-danger { background: var(--color-danger); }
 
   .pipeline-stage-badge {
     font-size: 10px;
