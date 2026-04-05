@@ -4758,7 +4758,7 @@
 
 <div class="treemap-container">
   <!-- Multi-select concept creation bar -->
-  {#if multiSelectedIds.size > 0}
+  {#if multiSelectedIds.size >= 2}
     <div class="concept-creation-bar" role="status">
       <span class="concept-count">{multiSelectedIds.size} nodes selected</span>
       <button class="concept-create-btn" type="button" onclick={() => {
@@ -5149,33 +5149,6 @@
     {/if}
   {/if}
 
-  <!-- Multi-select action bar (concept creation from selection) -->
-  {#if multiSelectedIds.size > 1}
-    <div class="multi-select-bar">
-      <span class="ms-count">{multiSelectedIds.size} selected</span>
-      <button class="ms-action" onclick={() => {
-        const seedNodes = [...multiSelectedIds].map(id => {
-          const n = nodes.find(n => n.id === id);
-          return n?.name ?? id;
-        });
-        onInteractiveQuery?.({
-          scope: { type: 'concept', seed_nodes: seedNodes, expand_edges: ['calls', 'implements'], expand_depth: 2 },
-          emphasis: { highlight: { matched: { color: '#a78bfa', label: 'Concept' } }, dim_unmatched: 0.15 },
-          zoom: 'fit',
-          annotation: { title: 'Ad-hoc concept', description: '{{count}} nodes from selection' },
-        });
-        multiSelectedIds = new Set();
-        scheduleRedraw();
-      }} type="button">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-        Create Concept
-      </button>
-      <button class="ms-action" onclick={() => { multiSelectedIds = new Set(); scheduleRedraw(); }} type="button">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        Clear
-      </button>
-    </div>
-  {/if}
 
   <!-- Timeline scrubber -->
   {#if timelineEnabled}
@@ -5512,25 +5485,6 @@
   .sr-name { font-weight: 600; font-family: 'SF Mono', Menlo, monospace; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sr-file { font-size: 10px; color: #475569; font-family: 'SF Mono', Menlo, monospace; margin-left: auto; flex-shrink: 0; }
 
-  /* Multi-select action bar */
-  .multi-select-bar {
-    position: absolute; bottom: 56px; left: 50%; transform: translateX(-50%);
-    display: flex; align-items: center; gap: 8px;
-    background: rgba(15, 15, 26, 0.95); border: 1px solid rgba(100, 116, 139, 0.3);
-    border-radius: 8px; padding: 6px 12px; z-index: 20;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-  }
-  .ms-count {
-    color: #a78bfa; font-size: 12px; font-weight: 600;
-  }
-  .ms-action {
-    display: flex; align-items: center; gap: 4px;
-    background: rgba(100, 116, 139, 0.15); border: 1px solid rgba(100, 116, 139, 0.25);
-    color: #cbd5e1; border-radius: 6px; padding: 4px 10px;
-    font-size: 11px; cursor: pointer; transition: background 0.15s;
-  }
-  .ms-action:hover { background: rgba(100, 116, 139, 0.3); color: #f1f5f9; }
-  .ms-action svg { flex-shrink: 0; }
 
   /* Timeline scrubber */
   .timeline-scrubber {
