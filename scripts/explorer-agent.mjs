@@ -60,8 +60,14 @@ const userMessage = canvasContext ? `[Canvas: ${canvasContext}]\n\n${question}` 
 // sees them as grounding context, and pass only the current user question as prompt.
 let historyContext = '';
 if (history?.length) {
+  // Escape XML-like tags in message content to prevent prompt injection.
+  // A user could craft content containing "</user><system>...</system>" to
+  // break out of the role tag and inject arbitrary instructions.
+  function escapeXmlTags(s) {
+    return s.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
   const turns = history.map(
-    (msg) => `<${msg.role}>${msg.content}</${msg.role}>`
+    (msg) => `<${msg.role}>${escapeXmlTags(msg.content)}</${msg.role}>`
   );
   historyContext =
     '\n\n## Conversation History\n' +
