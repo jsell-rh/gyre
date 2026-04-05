@@ -247,6 +247,18 @@
     prevTraceDataLen = curLen;
     prevLens = curLens;
   });
+  // Secondary guard: when lens changes to 'evaluative' and trace data already
+  // exists but the current evaluativeMetric isn't a trace metric, auto-switch.
+  // This catches edge cases where the primary $effect's prevLens tracking
+  // gets stale (e.g., trace data arrived on structural lens, then rapid lens toggles).
+  $effect(() => {
+    if (lens === 'evaluative' && !userExplicitlySelectedMetric) {
+      const hasTraces = (traceData?.spans?.length ?? 0) > 0;
+      if (hasTraces && !TRACE_METRICS.has(evaluativeMetric)) {
+        evaluativeMetric = 'span_duration';
+      }
+    }
+  });
   let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
   let srAnnouncement = $state(''); // Screen reader announcements via ARIA live region
 
@@ -769,9 +781,11 @@
     const spanById = new Map();
     for (const s of spans) spanById.set(s.span_id, s);
 
-    // Advance scrubber: normalize playback to ~5 seconds for 1x speed
-    // regardless of actual trace duration (microsecond or minute-long)
-    const normalizedDuration = 5.0; // seconds for full playback at 1x
+    // Advance scrubber: playback duration is proportional to actual trace duration.
+    // Convert totalDuration (microseconds) to seconds, then clamp to [0.5s, 30s]
+    // so very short traces don't flash by and very long traces don't drag.
+    const traceSeconds = totalDuration / 1_000_000;
+    const normalizedDuration = Math.max(0.5, Math.min(30.0, traceSeconds));
     const clampedSpeed = Math.max(0.25, Math.min(5.0, evalSpeed));
     const step = (dt / 1000) * clampedSpeed / normalizedDuration;
     evalScrubber = Math.min(1, evalScrubber + step);
@@ -787,6 +801,10 @@
       if (!span.graph_node_id || !span.parent_span_id) continue;
       const parent = spanById.get(span.parent_span_id);
       if (!parent?.graph_node_id) continue;
+
+      // Scope particles to drill level: only show particles where both
+      // endpoints are currently visible (in layoutNodeMap).
+      if (!layoutNodeMap.has(parent.graph_node_id) || !layoutNodeMap.has(span.graph_node_id)) continue;
 
       const spanStart = span.start_time;
       const spanEnd = span.start_time + span.duration_us;
