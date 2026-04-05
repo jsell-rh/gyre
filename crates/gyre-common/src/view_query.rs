@@ -226,6 +226,10 @@ impl ViewQuery {
         "producedby",
     ];
 
+    /// Known heat palette names.
+    const KNOWN_PALETTES: &'static [&'static str] =
+        &["blue-red", "green-yellow-red", "purple-orange"];
+
     /// Known heat metric strings.
     const KNOWN_HEAT_METRICS: &'static [&'static str] = &[
         "complexity",
@@ -525,6 +529,25 @@ impl ViewQuery {
         }
 
         errors
+    }
+
+    /// Return non-fatal warnings for the query. These do not block execution
+    /// but inform the caller that defaults will be substituted.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+
+        // Warn on unrecognized heat palette (query still works with default)
+        if let Some(ref heat) = self.emphasis.heat {
+            if !heat.palette.is_empty() && !Self::KNOWN_PALETTES.contains(&heat.palette.as_str()) {
+                warnings.push(format!(
+                    "Unknown heat palette '{}' — will use default 'blue-red'. Known palettes: {}",
+                    heat.palette,
+                    Self::KNOWN_PALETTES.join(", ")
+                ));
+            }
+        }
+
+        warnings
     }
 
     /// Known computed expression prefixes.
@@ -1035,10 +1058,14 @@ pub enum ExplorerClientMessage {
         canvas_state: CanvasState,
     },
     /// Save current view query.
+    /// When `scope` is `Some("workspace")`, the view is saved with
+    /// `repo_id = "__workspace__"` so it appears in workspace-level listings.
     SaveView {
         name: String,
         description: Option<String>,
         query: serde_json::Value,
+        #[serde(default)]
+        scope: Option<String>,
     },
     /// Load a saved view.
     LoadView { view_id: String },
@@ -1081,4 +1108,89 @@ pub struct SavedViewSummary {
     /// Whether this is a system-provided (non-deletable) view.
     #[serde(default)]
     pub is_system: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_query_with_heat(palette: &str) -> ViewQuery {
+        ViewQuery {
+            scope: Scope::All,
+            emphasis: Emphasis {
+                heat: Some(HeatConfig {
+                    metric: "complexity".to_string(),
+                    palette: palette.to_string(),
+                }),
+                ..Default::default()
+            },
+            edges: EdgeFilter::default(),
+            zoom: Zoom::default(),
+            annotation: ViewAnnotation::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        }
+    }
+
+    #[test]
+    fn test_valid_palette_no_warnings() {
+        for palette in ViewQuery::KNOWN_PALETTES {
+            let q = minimal_query_with_heat(palette);
+            assert!(
+                q.validate().is_empty(),
+                "valid palette should have no errors"
+            );
+            assert!(
+                q.warnings().is_empty(),
+                "known palette '{}' should produce no warnings",
+                palette
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_palette_produces_warning() {
+        let q = minimal_query_with_heat("viridis");
+        // Should NOT be an error (query still works)
+        assert!(
+            q.validate().is_empty(),
+            "unknown palette should not be an error"
+        );
+        // Should produce a warning
+        let warnings = q.warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("viridis"));
+        assert!(warnings[0].contains("blue-red"));
+    }
+
+    #[test]
+    fn test_default_palette_no_warning() {
+        let q = minimal_query_with_heat("blue-red");
+        assert!(q.warnings().is_empty());
+    }
+
+    #[test]
+    fn test_save_view_scope_field_deserialization() {
+        let json = r#"{"type":"save_view","name":"test","query":{},"scope":"workspace"}"#;
+        let msg: ExplorerClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ExplorerClientMessage::SaveView { scope, .. } => {
+                assert_eq!(scope.as_deref(), Some("workspace"));
+            }
+            _ => panic!("Expected SaveView"),
+        }
+    }
+
+    #[test]
+    fn test_save_view_scope_field_optional() {
+        let json = r#"{"type":"save_view","name":"test","query":{}}"#;
+        let msg: ExplorerClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ExplorerClientMessage::SaveView { scope, .. } => {
+                assert!(scope.is_none());
+            }
+            _ => panic!("Expected SaveView"),
+        }
+    }
 }
