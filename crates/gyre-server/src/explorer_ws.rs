@@ -1392,24 +1392,34 @@ async fn stream_text(
             .is_ok();
     }
 
-    // Large text block (from native LlmPort): send the first sentence
-    // immediately so the user sees content right away, then stream the rest
-    // in small chunks with short delays for natural display cadence.
+    // Large text block (from native LlmPort path): simulate streaming.
     //
-    // Find the end of the first sentence (period/newline/question mark/exclamation)
-    // or fall back to the first 100 chars at a word boundary.
+    // NOTE: Real streaming is not possible here because the LlmPort trait's
+    // `stream_complete` method doesn't support tool calling. The
+    // `complete_with_tools` method returns the full response at once.
+    // The SDK path (explorer-agent.mjs) does real streaming via the
+    // Claude Agent SDK.
+    //
+    // Strategy: send the first clause/sentence immediately (no delay) so the
+    // user sees content within milliseconds of the LLM response arriving,
+    // then drip the rest in small token-sized chunks (~60 chars) with minimal
+    // delays to approximate real streaming cadence.
+
+    // Find the end of the first clause (comma, period, newline, etc.)
+    // or fall back to ~60 chars at a word boundary. Using a shorter initial
+    // chunk gets content on screen faster.
     let first_chunk_end = {
-        let search_limit = text.len().min(200);
+        let search_limit = text.len().min(120);
         let mut end = None;
         for (i, ch) in text[..search_limit].char_indices() {
-            if i > 20 && (ch == '.' || ch == '\n' || ch == '?' || ch == '!') {
+            if i > 10 && (ch == '.' || ch == '\n' || ch == '?' || ch == '!' || ch == ',') {
                 end = Some(i + ch.len_utf8());
                 break;
             }
         }
         end.unwrap_or_else(|| {
-            // No sentence boundary found — break at word boundary near 100 chars
-            let target = text.len().min(100);
+            // No clause boundary found — break at word boundary near 60 chars
+            let target = text.len().min(60);
             let bytes = text.as_bytes();
             let mut pos = target;
             while pos > 0 && bytes[pos - 1] != b' ' && bytes[pos - 1] != b'\n' {
@@ -1439,19 +1449,20 @@ async fn stream_text(
         return false;
     }
 
-    // Stream the rest in larger chunks with minimal delays for faster display
-    const TARGET_CHUNK: usize = 200;
-    const CHUNK_DELAY_MS: u64 = 15;
+    // Stream the rest in small token-sized chunks for natural display.
+    // 60 chars ≈ 10-15 tokens, 8ms delay ≈ realistic inter-token timing.
+    const TARGET_CHUNK: usize = 60;
+    const CHUNK_DELAY_MS: u64 = 8;
     let mut start = first_chunk_end;
     let bytes = text.as_bytes();
     while start < bytes.len() {
-        // Small delay between chunks for natural cadence
         tokio::time::sleep(std::time::Duration::from_millis(CHUNK_DELAY_MS)).await;
 
         let end = (start + TARGET_CHUNK).min(bytes.len());
         let chunk_end = if end >= bytes.len() {
             bytes.len()
         } else {
+            // Break at word boundary to avoid splitting mid-word
             let mut pos = end;
             while pos > start && bytes[pos] != b' ' && bytes[pos] != b'\n' {
                 pos -= 1;
