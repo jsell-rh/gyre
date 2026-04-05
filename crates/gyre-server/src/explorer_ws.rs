@@ -2430,11 +2430,19 @@ async fn run_explorer_agent(
                     for b in blocks {
                         match b {
                             ContentBlock::Text { text } => parts.push(text.clone()),
-                            ContentBlock::ToolUse { name, .. } => {
+                            ContentBlock::ToolUse { name, input, .. } => {
                                 tool_names_used.push(name.clone());
+                                // Keep graph_query_dryrun inputs intact — the query
+                                // JSON is compact and essential for understanding
+                                // what the LLM explored in earlier turns.
+                                if name == "graph_query_dryrun" {
+                                    if let Ok(json_str) = serde_json::to_string(input) {
+                                        parts.push(format!("[tool call: {} {}]", name, json_str));
+                                    }
+                                }
                             }
                             ContentBlock::ToolResult { content, .. } => {
-                                // Include a longer snippet of tool results to preserve
+                                // Include a generous snippet of tool results to preserve
                                 // grounding data (node counts, names, warnings) that the
                                 // LLM needs for accurate claims in later turns.
                                 let snippet: String = content.chars().take(800).collect();
@@ -2449,10 +2457,31 @@ async fn run_explorer_agent(
                     parts.join(" ")
                 }
             };
-            // Extract first 200 chars of each message as a topic hint
+            // Extract the first complete sentence (up to 200 chars) of each
+            // user message as a topic hint. A sentence boundary gives more
+            // semantic context than a hard character cut.
             if msg.role == "user" && !text.is_empty() {
-                let snippet: String = text.chars().take(200).collect();
-                let snippet = snippet.replace('\n', " ");
+                let flat = text.replace('\n', " ");
+                let limit = flat.len().min(200);
+                let snippet = if let Some(pos) =
+                    flat[..limit].find(|c: char| c == '.' || c == '?' || c == '!')
+                {
+                    // Include the punctuation character
+                    flat[..=pos].to_string()
+                } else {
+                    // No sentence boundary found — take up to 200 chars at a
+                    // word boundary to avoid cutting mid-word.
+                    let chars: String = flat.chars().take(200).collect();
+                    if chars.len() < flat.len() {
+                        if let Some(last_space) = chars.rfind(' ') {
+                            format!("{}...", &chars[..last_space])
+                        } else {
+                            format!("{}...", chars)
+                        }
+                    } else {
+                        chars
+                    }
+                };
                 topics.push(snippet);
             }
         }
@@ -2656,8 +2685,10 @@ async fn run_explorer_agent(
                             // Unfixable warnings: inherent to the data source, not
                             // resolvable by query refinement. Skip to avoid wasting
                             // a self-check turn.
-                            const UNFIXABLE_PREFIXES: &[&str] =
-                                &["SHA-based diff is approximate", "Graph data truncated"];
+                            const UNFIXABLE_PREFIXES: &[&str] = &[
+                                "SHA-based diff shows an approximate",
+                                "Graph data truncated",
+                            ];
                             if UNFIXABLE_PREFIXES.iter().any(|p| w.starts_with(p)) {
                                 return false;
                             }
