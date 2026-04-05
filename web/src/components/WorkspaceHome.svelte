@@ -1196,7 +1196,9 @@
         </div>
       {/if}
 
-      <!-- ── Main content: single-column priority layout ──────── -->
+      <!-- ── Main content: two-column layout ──────────────────── -->
+      <div class="ws-two-col">
+        <div class="ws-col-primary">
 
           <!-- Action Needed (compact, dismissible) -->
           {#if !decisionsLoading && actionableNotifications.length > 0}
@@ -1382,6 +1384,9 @@
 
       <!-- Merge queue items are shown on individual repo cards -->
 
+        </div><!-- .ws-col-primary -->
+        <div class="ws-col-secondary">
+
           <!-- Recent Activity (collapsed when there's active work) -->
           <details class="activity-details" open={!activityCollapsed && activityEvents.length > 0} data-testid="section-activity">
             <summary class="activity-summary">
@@ -1458,6 +1463,9 @@
               {/if}
             {/if}
           </details>
+
+        </div><!-- .ws-col-secondary -->
+      </div><!-- .ws-two-col -->
 
     </div><!-- .focused-dashboard -->
   {/if}
@@ -1988,7 +1996,7 @@
   /* ── Two-column layout ──────────────────────────────────────── */
   .ws-two-col {
     display: grid;
-    grid-template-columns: 1fr 340px;
+    grid-template-columns: 1fr 300px;
     gap: var(--space-3);
     align-items: start;
   }
@@ -2002,27 +2010,25 @@
   .ws-col-primary {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-2);
     min-width: 0;
   }
 
   .ws-col-secondary {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-2);
     min-width: 0;
+    position: sticky;
+    top: var(--space-2);
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
   }
 
   .repo-cards-list {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    display: flex;
+    flex-direction: column;
     gap: var(--space-2);
-  }
-
-  @media (max-width: 768px) {
-    .repo-cards-list {
-      grid-template-columns: 1fr;
-    }
   }
 
   /* ── Workspace header ────────────────────────────────────────────── */
