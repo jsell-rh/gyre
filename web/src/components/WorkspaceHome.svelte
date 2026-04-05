@@ -582,11 +582,7 @@
   // ── Activity pagination ──────────────────────────────────────
   let activityLimit = $state(5);  // show enough activity to be useful
 
-  // ── Overview tab list limits (expandable) ───────────────────
-  let specsShowAll = $state(false);
-  let tasksShowAll = $state(false);
-  let mrsShowAll = $state(false);
-  let agentsShowAll = $state(false);
+  // (pipeline-detail list expansion removed — entities are browsed per-repo)
 
   // ── Repo card data ────────────────────────────────────────────────────
   // repoHealth(repo) function already defined above (line ~265)
@@ -1932,15 +1928,7 @@
   .mq-status-open { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent); }
   .mq-status-completed, .mq-status-merged { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 12%, transparent); }
 
-  /* When pipeline detail is open, connect pipeline bar to detail panel */
-  .pipeline-bar-expanded {
-    border-bottom-left-radius: 0;
-    border-bottom-right-radius: 0;
-    border-bottom-color: transparent;
-    margin-bottom: 0;
-  }
-
-  /* ── Pipeline detail panel (expands below pipeline bar) ──────── */
+  /* ── Pipeline detail panel (compact multi-repo navigator) ──────── */
   .pipeline-detail-compact {
     border: 1px solid var(--color-border);
     border-top: none;
@@ -2080,13 +2068,6 @@
   .pipeline-stage-active { color: var(--color-text); font-weight: 600; }
   .pipeline-stage-done { color: var(--color-success); }
   .pipeline-stage-alert { color: var(--color-danger); }
-  .pipeline-stage-selected {
-    background: var(--color-surface-elevated);
-    border-color: var(--color-primary);
-    color: var(--color-primary);
-    font-weight: 600;
-  }
-
   .pipeline-stage-count {
     font-family: var(--font-mono);
     font-weight: 700;
@@ -2372,204 +2353,7 @@
   }
   .gate-error-snippet:hover { background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
 
-  /* ── Agent cards (workspace overview) ────────────────────── */
-  .agents-list { display: flex; flex-direction: column; gap: var(--space-1); }
-  .agent-card-ws {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-    font-size: var(--text-xs);
-    transition: border-color var(--transition-fast), background var(--transition-fast);
-    width: 100%;
-  }
-  .agent-card-ws:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
-  .agent-card-ws-active, .agent-card-ws-running { border-left: 3px solid var(--color-success); }
-  .agent-card-ws-failed, .agent-card-ws-dead { border-left: 3px solid var(--color-danger); }
-  .agent-card-ws-completed, .agent-card-ws-idle { border-left: 3px solid var(--color-text-muted); }
-  .agent-card-header { display: flex; align-items: center; gap: var(--space-2); }
-  .agent-card-status { font-size: 11px; flex-shrink: 0; }
-  .agent-card-status-active, .agent-card-status-running { color: var(--color-success); }
-  .agent-card-status-completed, .agent-card-status-idle { color: var(--color-text-muted); }
-  .agent-card-status-failed, .agent-card-status-dead { color: var(--color-danger); }
-  .agent-card-name { font-weight: 600; color: var(--color-text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .agent-card-elapsed { font-family: var(--font-mono); font-size: 10px; color: var(--color-text-muted); flex-shrink: 0; }
-  .agent-card-context { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-secondary); font-size: 11px; }
-  .agent-card-spec { font-style: italic; }
-  .agent-card-repo { color: var(--color-text-muted); }
-  .agent-card-error { color: var(--color-danger); font-size: 10px; font-weight: 500; margin-top: 2px; }
-  .agent-card-hint { color: var(--color-text-muted); font-size: 10px; font-style: italic; margin-top: 2px; }
-  .agent-pulse {
-    display: inline-block;
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: var(--color-success);
-    animation: agent-pulse-anim 2s ease-in-out infinite;
-    margin-right: 2px;
-    vertical-align: middle;
-  }
-  @keyframes agent-pulse-anim {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
-  }
-
-  /* ── MR cards (workspace overview) ──────────────────────── */
-  .mrs-list { display: flex; flex-direction: column; gap: var(--space-1); }
-  .mr-card-ws {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-    font-size: var(--text-xs);
-    transition: border-color var(--transition-fast), background var(--transition-fast);
-    width: 100%;
-  }
-  .mr-card-ws:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
-  .mr-card-ws-merged { border-left: 3px solid var(--color-success); }
-  .mr-card-ws-open { border-left: 3px solid var(--color-warning); }
-  .mr-card-ws-closed { border-left: 3px solid var(--color-danger); }
-  .mr-card-header { display: flex; align-items: center; gap: var(--space-2); }
-  .mr-card-status { font-size: 11px; flex-shrink: 0; }
-  .mr-card-status-merged { color: var(--color-success); }
-  .mr-card-status-open { color: var(--color-warning); }
-  .mr-card-status-closed { color: var(--color-danger); }
-  .mr-card-title { font-weight: 600; color: var(--color-text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .diff-stat-inline {
-    display: inline-flex; align-items: center; gap: 2px;
-    background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm);
-    padding: 0 4px; cursor: pointer; font-family: var(--font-mono); font-size: 10px;
-    transition: all var(--transition-fast); flex-shrink: 0;
-  }
-  .diff-stat-inline:hover { background: var(--color-surface-elevated); border-color: var(--color-border); }
-  .mr-card-why { font-size: 10px; font-weight: 500; font-style: italic; padding: 0 var(--space-1); }
-  .mr-card-why-danger { color: var(--color-danger); }
-  .mr-card-why-success { color: var(--color-success); }
-  .mr-card-why-info { color: var(--color-text-muted); }
-  .mr-card-meta { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-muted); font-size: 11px; }
-  .mr-card-repo { font-weight: 500; color: var(--color-text-secondary); }
-  .mr-card-author { font-style: italic; }
-  .mr-card-spec { color: var(--color-text-secondary); }
-  .mr-card-time { flex-shrink: 0; }
-  .mr-card-footer { display: flex; flex-wrap: wrap; gap: var(--space-1); align-items: center; margin-top: 2px; }
-  .mr-card-queue {
-    font-size: 10px; font-weight: 600; padding: 1px 5px;
-    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
-    color: var(--color-warning); border-radius: var(--radius-sm);
-  }
-  .mr-card-sha { font-size: 10px; color: var(--color-text-muted); }
-
-  /* ── Task cards (workspace overview) ────────────────────── */
-  .tasks-list { display: flex; flex-direction: column; gap: var(--space-1); }
-  .task-card-ws {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-    font-size: var(--text-xs);
-    transition: border-color var(--transition-fast), background var(--transition-fast);
-    width: 100%;
-  }
-  .task-card-ws:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
-  .task-card-ws-in_progress { border-left: 3px solid var(--color-warning); }
-  .task-card-ws-blocked { border-left: 3px solid var(--color-danger); }
-  .task-card-ws-done { border-left: 3px solid var(--color-success); }
-  .task-card-ws-review { border-left: 3px solid var(--color-info); }
-  .task-card-header { display: flex; align-items: center; gap: var(--space-2); }
-  .task-card-status { font-size: 11px; flex-shrink: 0; }
-  .task-card-status-done { color: var(--color-success); }
-  .task-card-status-in_progress { color: var(--color-warning); }
-  .task-card-status-blocked { color: var(--color-danger); }
-  .task-card-status-review { color: var(--color-info); }
-  .task-card-title { font-weight: 600; color: var(--color-text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .task-card-meta { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-secondary); font-size: 11px; }
-  .task-card-why { font-style: italic; color: var(--color-text-muted); }
-  .task-card-agent { font-weight: 500; }
-  .task-card-footer { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-muted); font-size: 10px; }
-  .task-card-spec { font-style: italic; }
-  .task-card-repo { font-weight: 500; }
-
-  /* ── Merge queue banner ─────────────────────────────────── */
-  .merge-queue-banner {
-    padding: var(--space-2) var(--space-3);
-    background: color-mix(in srgb, var(--color-warning) 8%, var(--color-surface));
-    border: 1px solid color-mix(in srgb, var(--color-warning) 25%, var(--color-border));
-    border-radius: var(--radius);
-    margin-bottom: var(--space-2);
-  }
-  .queue-banner-icon { font-size: 14px; margin-right: var(--space-1); }
-  .queue-banner-text { font-size: var(--text-xs); font-weight: 600; color: var(--color-warning); }
-  .queue-banner-items { display: flex; flex-direction: column; gap: 2px; margin-top: var(--space-1); }
-  .queue-banner-item {
-    display: flex; align-items: center; gap: var(--space-1);
-    font-size: 11px; color: var(--color-text-secondary);
-    background: transparent; border: none; cursor: pointer;
-    font-family: inherit; text-align: left; padding: 2px 0;
-    transition: color var(--transition-fast);
-  }
-  .queue-banner-item:hover { color: var(--color-text); }
-  .queue-banner-pos { font-weight: 700; color: var(--color-warning); font-family: var(--font-mono); }
-  .queue-banner-title { font-weight: 500; }
-  .queue-banner-spec { color: var(--color-text-muted); font-style: italic; }
-
-  /* ── Spec cards (workspace overview) ─────────────────────── */
-  .specs-list { display: flex; flex-direction: column; gap: var(--space-1); }
-  .spec-card-ws {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: var(--space-2) var(--space-3);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-    font-size: var(--text-xs);
-    transition: border-color var(--transition-fast), background var(--transition-fast);
-    width: 100%;
-  }
-  .spec-card-ws:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
-  .spec-card-ws-pending { border-left: 3px solid var(--color-warning); }
-  .spec-card-ws-approved { border-left: 3px solid var(--color-success); }
-  .spec-card-ws-rejected { border-left: 3px solid var(--color-danger); }
-  .spec-card-ws-draft { border-left: 3px solid var(--color-text-muted); }
-  .spec-card-header { display: flex; align-items: center; gap: var(--space-2); }
-  .spec-card-icon { font-size: 11px; flex-shrink: 0; }
-  .spec-card-icon-approved { color: var(--color-success); }
-  .spec-card-icon-pending { color: var(--color-warning); }
-  .spec-card-icon-rejected { color: var(--color-danger); }
-  .spec-card-title { font-weight: 600; color: var(--color-text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .spec-card-actions { display: flex; gap: var(--space-1); flex-shrink: 0; }
-  .spec-card-action-status { font-size: 10px; font-weight: 600; flex-shrink: 0; }
-  .spec-card-action-approved { color: var(--color-success); }
-  .spec-card-action-rejected { color: var(--color-danger); }
-  .spec-card-meta { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-muted); font-size: 11px; }
-  .spec-card-repo { font-weight: 500; color: var(--color-text-secondary); }
-  .spec-card-why { font-style: italic; }
-  .spec-card-time { flex-shrink: 0; }
-  .spec-card-progress {
-    display: flex; gap: var(--space-2); margin-top: 2px;
-    font-size: 10px; color: var(--color-text-muted);
-  }
-  .spec-progress-item { font-family: var(--font-mono); }
+  /* (pipeline-detail entity cards removed — entities are browsed per-repo in RepoMode) */
 
   .activity-timeline-full {
     padding: var(--space-2) 0;
