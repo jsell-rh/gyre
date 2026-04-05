@@ -98,24 +98,33 @@ const options = {
   // Bypass permission prompts — this is a headless subprocess, not interactive.
   permissionMode: 'bypassPermissions',
   allowDangerouslySkipPermissions: true,
-  maxTurns: 9,
+  // Budget: 5 tool turns (graph exploration) + 3 refinement turns (self-check)
+  // + some margin for the SDK's internal bookkeeping = 12 total.
+  maxTurns: 12,
   // Disable session persistence — this is a one-shot subprocess.
   persistSession: false,
 };
 
 try {
   let fullText = '';
+  // Track what we've already streamed to avoid duplicating content
+  let streamedLength = 0;
 
   for await (const message of query({ prompt: fullPrompt, options })) {
     switch (message.type) {
       case 'assistant': {
         // Complete assistant message with content blocks.
-        // Extract text content from the message's content blocks.
+        // Extract text content and emit any not-yet-streamed portions.
         if (message.message?.content) {
           for (const block of message.message.content) {
             if (block.type === 'text') {
-              console.log(JSON.stringify({ type: 'text', content: block.text, done: false }));
               fullText += block.text;
+              // Only emit text that wasn't already streamed via content_block_delta
+              const unstreamed = fullText.substring(streamedLength);
+              if (unstreamed) {
+                console.log(JSON.stringify({ type: 'text', content: unstreamed, done: false }));
+                streamedLength = fullText.length;
+              }
             } else if (block.type === 'tool_use') {
               // Tool use block — signal refining status.
               console.log(JSON.stringify({ type: 'status', status: 'refining' }));
@@ -131,15 +140,27 @@ try {
         if (message.subtype === 'success' && message.result && !fullText) {
           fullText = message.result;
           console.log(JSON.stringify({ type: 'text', content: message.result, done: false }));
+          streamedLength = fullText.length;
         }
         break;
       }
 
-      // Ignore stream_event, system, tool_progress, tool_use_summary, etc.
-      // We use the complete 'assistant' messages rather than streaming deltas
-      // since we need the full text to parse view_query blocks.
-      default:
+      default: {
+        // Handle streaming events for real-time token delivery.
+        // The SDK may emit events with content_block_delta containing text tokens.
+        if (message.type === 'event' || message.type === 'stream_event') {
+          const event = message.event || message;
+          if (event?.type === 'content_block_delta' && event?.delta?.type === 'text_delta') {
+            const token = event.delta.text;
+            if (token) {
+              fullText += token;
+              streamedLength = fullText.length;
+              console.log(JSON.stringify({ type: 'text', content: token, done: false }));
+            }
+          }
+        }
         break;
+      }
     }
   }
 

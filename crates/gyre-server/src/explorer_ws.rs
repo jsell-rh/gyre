@@ -1056,27 +1056,20 @@ async fn send_status(
         .is_ok()
 }
 
-/// Stream text to the client in word-boundary chunks for natural display.
+/// Stream text to the client. When the SDK subprocess provides real token-level
+/// streaming (small chunks), messages are forwarded directly. For large text blocks
+/// from the native LlmPort path, chunks at word boundaries for natural display.
 /// Returns false if the client disconnected.
-///
-/// **Limitation**: This is "fake" streaming — the full LLM response is received
-/// first via `complete_with_tools()`, then chunked here for progressive display.
-/// The `LlmPort::stream_complete()` method supports true token-level streaming but
-/// does not support tool definitions, so it cannot be used for the agent loop.
-/// When/if `LlmPort` gains a `stream_complete_with_tools()` method, this function
-/// should be refactored to consume a real token stream instead.
 async fn stream_text(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     text: &str,
     done: bool,
 ) -> bool {
-    // Chunk the already-complete response at word boundaries for progressive display.
-    // Small chunks (~30 chars) to reduce perceived latency since we already have the
-    // full text. No artificial delay between chunks — just send as fast as the
-    // WebSocket will accept them.
-    const TARGET_CHUNK: usize = 30;
+    // If the text is already small (typical of real streaming tokens),
+    // forward it directly without re-chunking.
+    const CHUNK_THRESHOLD: usize = 80;
 
-    if text.len() <= TARGET_CHUNK || done {
+    if text.len() <= CHUNK_THRESHOLD || done {
         let msg = ExplorerServerMessage::Text {
             content: text.to_string(),
             done,
@@ -1089,23 +1082,23 @@ async fn stream_text(
             .is_ok();
     }
 
+    // Large text block (from native LlmPort): chunk at word boundaries
+    const TARGET_CHUNK: usize = 60;
     let mut start = 0;
     let bytes = text.as_bytes();
     while start < bytes.len() {
         let end = (start + TARGET_CHUNK).min(bytes.len());
-        // Find word boundary
         let chunk_end = if end >= bytes.len() {
             bytes.len()
         } else {
-            // Look backwards for a space
             let mut pos = end;
             while pos > start && bytes[pos] != b' ' && bytes[pos] != b'\n' {
                 pos -= 1;
             }
             if pos == start {
-                end // No space found, use the target
+                end
             } else {
-                pos + 1 // Include the space in this chunk
+                pos + 1
             }
         };
 
@@ -1122,7 +1115,7 @@ async fn stream_text(
             .await
             .is_err()
         {
-            return false; // Client disconnected
+            return false;
         }
         start = chunk_end;
     }
