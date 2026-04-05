@@ -1190,6 +1190,112 @@
             </section>
           {/if}
 
+          <!-- Specs Awaiting Review (primary human touchpoint) -->
+          {#if !specsLoading}
+            {@const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending')}
+            {#if pendingSpecs.length > 0}
+              <section class="ws-pending-specs-section" data-testid="section-pending-specs">
+                <h2 class="section-heading">Specs awaiting review <span class="pending-specs-badge">{pendingSpecs.length}</span></h2>
+                <div class="pending-specs-list">
+                  {#each pendingSpecs as spec (spec.path)}
+                    {@const specRepo = repoMap[spec.repo_id]}
+                    {@const actionState = specActionStates[spec.path]}
+                    <div class="pending-spec-item" class:pending-spec-resolved={actionState === 'approved' || actionState === 'rejected'}>
+                      <button class="pending-spec-body" onclick={() => nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id })}>
+                        <span class="pending-spec-name">{spec.path.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</span>
+                        <span class="pending-spec-meta">
+                          {#if specRepo}<span class="pending-spec-repo">{specRepo.name}</span>{/if}
+                          {#if spec.kind}<span class="pending-spec-kind">{spec.kind}</span>{/if}
+                          {#if spec.created_at ?? spec.synced_at}
+                            <span class="pending-spec-time">pushed {relTime(spec.created_at ?? spec.synced_at)}</span>
+                          {/if}
+                        </span>
+                      </button>
+                      <div class="pending-spec-actions">
+                        {#if actionState === 'loading'}
+                          <span class="decision-loading">...</span>
+                        {:else if actionState === 'approved'}
+                          <span class="pending-spec-done">Approved</span>
+                        {:else if actionState === 'rejected'}
+                          <span class="pending-spec-done">Rejected</span>
+                        {:else if actionState === 'error'}
+                          <span class="pending-spec-error">Failed</span>
+                        {:else}
+                          <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)}>Approve</button>
+                          <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)}>Reject</button>
+                        {/if}
+                      </div>
+                    </div>
+                  {/each}
+                </div>
+              </section>
+            {/if}
+          {/if}
+
+          <!-- Active Agents (live work indicator) -->
+          {#if !agentsLoading && wsAgents.filter(a => a.status === 'active').length > 0}
+            {@const activeList = wsAgents.filter(a => a.status === 'active')}
+            <section class="ws-active-agents" data-testid="section-active-agents">
+              <h2 class="section-heading"><span class="live-dot"></span> {activeList.length} agent{activeList.length !== 1 ? 's' : ''} working</h2>
+              <div class="active-agents-grid">
+                {#each activeList as agent (agent.id)}
+                  {@const agentRepo = repoMap[agent.repo_id]}
+                  <button class="active-agent-card" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
+                    <div class="active-agent-header">
+                      <span class="active-agent-name">{agent.name ?? formatId('agent', agent.id)}</span>
+                      {#if agent.spawned_at ?? agent.created_at}
+                        <span class="active-agent-time">{formatDuration(agent.spawned_at ?? agent.created_at)}</span>
+                      {/if}
+                    </div>
+                    <div class="active-agent-context">
+                      {#if agent.spec_path}
+                        <span class="active-agent-spec">{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>
+                      {/if}
+                      {#if agent.current_task_id ?? agent.task_id}
+                        <span class="active-agent-task">{entityName('task', agent.current_task_id ?? agent.task_id)}</span>
+                      {/if}
+                    </div>
+                    <div class="active-agent-actions">
+                      {#if agentRepo}<span class="active-agent-repo">{agentRepo.name}</span>{/if}
+                      <span class="active-agent-view">View logs</span>
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            </section>
+          {/if}
+
+          <!-- Merge Queue (items awaiting merge) -->
+          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
+            <section class="ws-merge-queue-section" data-testid="section-merge-queue">
+              <h2 class="section-heading">Merge Queue <span class="queue-count-badge">{mergeQueueItems.length}</span></h2>
+              <div class="merge-queue-list">
+                {#each mergeQueueItems as item, i (item.merge_request_id ?? item.mr_id ?? i)}
+                  {@const mrId = item.merge_request_id ?? item.mr_id}
+                  {@const mr = item._mr ?? {}}
+                  {@const mrRepo = repoMap[mr.repository_id ?? mr.repo_id]}
+                  <button class="merge-queue-item" onclick={() => nav('mr', mrId, { repo_id: mr.repository_id ?? mr.repo_id, title: item._title })}>
+                    <span class="queue-position">#{i + 1}</span>
+                    <div class="queue-item-info">
+                      <span class="queue-item-title">{item._title}</span>
+                      <span class="queue-item-meta">
+                        {#if item._branch}<span class="queue-item-branch">{item._branch}</span>{/if}
+                        {#if mrRepo}<span class="queue-item-repo">{mrRepo.name}</span>{/if}
+                        {#if item._spec_ref}<span class="queue-item-spec">{item._spec_ref.split('/').pop()?.replace(/\.md$/, '').replace(/@.*$/, '')}</span>{/if}
+                      </span>
+                    </div>
+                    {#if item._deps?.length > 0}
+                      <span class="queue-item-deps" title="Depends on {item._deps.length} other MR{item._deps.length !== 1 ? 's' : ''}">
+                        {item._deps.length} dep{item._deps.length !== 1 ? 's' : ''}
+                      </span>
+                    {/if}
+                    <span class="queue-item-status queue-item-status-{item._status ?? 'pending'}">{item._status === 'merged' ? 'Merged' : item._status === 'open' ? 'Open' : 'Queued'}</span>
+                  </button>
+                {/each}
+              </div>
+            </section>
+          {/if}
+
           <!-- Repos (primary content) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
@@ -1758,6 +1864,220 @@
   }
 
   /* ── Merge queue section ────────────────────────────────────── */
+  .ws-merge-queue-section {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .queue-count-badge {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-info, #1e90ff);
+    background: color-mix(in srgb, var(--color-info, #1e90ff) 10%, transparent);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    margin-left: var(--space-1);
+  }
+
+  .merge-queue-list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .merge-queue-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .merge-queue-item:last-child { border-bottom: none; }
+  .merge-queue-item:hover { background: var(--color-surface-elevated); }
+
+  .queue-position {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-text-muted);
+    width: 24px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .queue-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .queue-item-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .queue-item-meta {
+    display: flex;
+    gap: var(--space-2);
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .queue-item-branch {
+    font-family: var(--font-mono);
+    background: var(--color-surface-elevated);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .queue-item-repo {
+    font-weight: 600;
+  }
+
+  .queue-item-spec {
+    font-style: italic;
+  }
+
+  .queue-item-deps {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+
+  .queue-item-status {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+
+  .queue-item-status-open { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 10%, transparent); }
+  .queue-item-status-merged { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
+  .queue-item-status-pending { color: var(--color-text-muted); background: var(--color-surface-elevated); }
+
+  /* ── Pending specs section ──────────────────────────────────── */
+  .ws-pending-specs-section {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .pending-specs-badge {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-warning);
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    margin-left: var(--space-1);
+  }
+
+  .pending-specs-list {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid color-mix(in srgb, var(--color-warning) 25%, var(--color-border));
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .pending-spec-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0;
+    background: var(--color-surface);
+    border-bottom: 1px solid var(--color-border);
+    transition: opacity var(--transition-fast);
+  }
+
+  .pending-spec-item:last-child { border-bottom: none; }
+
+  .pending-spec-resolved { opacity: 0.5; }
+
+  .pending-spec-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+  }
+
+  .pending-spec-body:hover { background: var(--color-surface-elevated); }
+
+  .pending-spec-name {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pending-spec-meta {
+    display: flex;
+    gap: var(--space-2);
+    font-size: 10px;
+    color: var(--color-text-muted);
+  }
+
+  .pending-spec-repo {
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+
+  .pending-spec-kind {
+    background: var(--color-surface-elevated);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .pending-spec-actions {
+    display: flex;
+    gap: var(--space-1);
+    padding-right: var(--space-3);
+    flex-shrink: 0;
+  }
+
+  .pending-spec-done {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-success);
+  }
+
+  .pending-spec-error {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-danger);
+  }
   /* ── Pipeline detail panel (compact multi-repo navigator) ──────── */
   .pipeline-detail-compact {
     border: 1px solid var(--color-border);
