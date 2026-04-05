@@ -313,36 +313,81 @@ fn find_node_by_name<'a>(nodes: &[&'a GraphNode], name: &str) -> Option<&'a Grap
 }
 
 /// Find a node by name, returning whether the match was partial (not exact).
-/// Deterministic: exact match first, then shortest partial match with alphabetical tiebreak.
+/// Deterministic priority: exact match > case-sensitive prefix > case-insensitive prefix >
+/// case-sensitive substring > case-insensitive substring.
+/// When multiple nodes match at the same level, prefer the shorter qualified_name.
 fn find_node_by_name_with_match_type<'a>(
     nodes: &[&'a GraphNode],
     name: &str,
 ) -> Option<(&'a GraphNode, bool)> {
     let lower = name.to_lowercase();
-    // Exact match first (qualified_name then name).
+
+    // 1. Exact match (case-insensitive) on qualified_name or name.
     if let Some(exact) = nodes
         .iter()
         .find(|n| n.qualified_name.to_lowercase() == lower || n.name.to_lowercase() == lower)
     {
         return Some((exact, false));
     }
-    // Partial match fallback: pick shortest name match (most specific),
-    // with alphabetical tiebreak for determinism.
-    let mut candidates: Vec<&'a GraphNode> = nodes
+
+    // Helper: pick the candidate with the shortest qualified_name for determinism.
+    let pick_best = |candidates: &mut Vec<&'a GraphNode>| -> Option<&'a GraphNode> {
+        candidates.sort_by(|a, b| {
+            a.qualified_name
+                .len()
+                .cmp(&b.qualified_name.len())
+                .then_with(|| a.qualified_name.cmp(&b.qualified_name))
+        });
+        candidates.first().copied()
+    };
+
+    // 2. Case-sensitive prefix match on name or qualified_name.
+    let mut cs_prefix: Vec<&'a GraphNode> = nodes
+        .iter()
+        .filter(|n| n.name.starts_with(name) || n.qualified_name.starts_with(name))
+        .copied()
+        .collect();
+    if let Some(found) = pick_best(&mut cs_prefix) {
+        return Some((found, true));
+    }
+
+    // 3. Case-insensitive prefix match on name or qualified_name.
+    let mut ci_prefix: Vec<&'a GraphNode> = nodes
         .iter()
         .filter(|n| {
-            n.qualified_name.to_lowercase().contains(&lower)
-                || n.name.to_lowercase().contains(&lower)
+            n.name.to_lowercase().starts_with(&lower)
+                || n.qualified_name.to_lowercase().starts_with(&lower)
         })
         .copied()
         .collect();
-    candidates.sort_by(|a, b| {
-        a.name
-            .len()
-            .cmp(&b.name.len())
-            .then_with(|| a.qualified_name.cmp(&b.qualified_name))
-    });
-    candidates.first().map(|n| (*n, true))
+    if let Some(found) = pick_best(&mut ci_prefix) {
+        return Some((found, true));
+    }
+
+    // 4. Case-sensitive substring match on name or qualified_name.
+    let mut cs_substr: Vec<&'a GraphNode> = nodes
+        .iter()
+        .filter(|n| n.name.contains(name) || n.qualified_name.contains(name))
+        .copied()
+        .collect();
+    if let Some(found) = pick_best(&mut cs_substr) {
+        return Some((found, true));
+    }
+
+    // 5. Case-insensitive substring match on name or qualified_name.
+    let mut ci_substr: Vec<&'a GraphNode> = nodes
+        .iter()
+        .filter(|n| {
+            n.name.to_lowercase().contains(&lower)
+                || n.qualified_name.to_lowercase().contains(&lower)
+        })
+        .copied()
+        .collect();
+    if let Some(found) = pick_best(&mut ci_substr) {
+        return Some((found, true));
+    }
+
+    None
 }
 
 /// Edge types traversed for test reachability analysis.
@@ -762,7 +807,7 @@ fn resolve_scope_with_adjacency(
                 //     intermediate commits between from_commit and to_commit will
                 //     be missed unless their last_modified_sha still points to one
                 //     of the boundary commits.
-                //   - Prefix matching requires at least 4 hex characters to avoid
+                //   - Prefix matching requires at least 7 hex characters to avoid
                 //     false positives on short SHA fragments.
                 //
                 // For accurate range queries, prefer temporal diff with epoch
@@ -776,18 +821,14 @@ fn resolve_scope_with_adjacency(
                         .to_string(),
                 );
                 let sha_matches = |sha: &str, target: &str| -> bool {
-                    if target.is_empty() || target.len() < 4 {
-                        return false; // Require at least 4 chars to prevent overly broad matches
+                    if target.is_empty() || target.len() < 7 {
+                        return false; // Require at least 7 hex chars to prevent false positives
                     }
                     let sha_lower = sha.to_lowercase();
-                    // Prefix matching: short SHAs are prefixes of full SHAs.
-                    // Only match target as prefix of SHA (not bidirectional) unless
-                    // the SHA itself is shorter (e.g., abbreviated in node data).
-                    if sha_lower.len() >= target.len() {
-                        sha_lower.starts_with(target)
-                    } else {
-                        target.starts_with(&sha_lower)
-                    }
+                    // Proper prefix matching: the query target must be a prefix of the
+                    // node's SHA. Do NOT match the reverse direction (node SHA as prefix
+                    // of query) as that causes false positives with abbreviated node data.
+                    sha_lower.starts_with(target) || sha_lower == target
                 };
 
                 active_nodes
@@ -891,8 +932,8 @@ fn normalize_computed_expression(expr: &str) -> String {
                 result.push(chars[i]);
                 i += 1;
             }
-            // Skip whitespace before opening paren
-            while i < chars.len() && chars[i] == ' ' {
+            // Skip all ASCII whitespace before opening paren (space, tab, etc.)
+            while i < chars.len() && chars[i].is_ascii_whitespace() {
                 i += 1;
             }
             // If next char is '(', push it (we consumed the space)
@@ -1061,8 +1102,8 @@ fn resolve_computed_expression_inner(
                             }
                         }
                         // Trace-based metrics require OTLP runtime data.
-                        // Return 0.0 so nodes still appear in results, but warn that
-                        // comparisons are meaningless without live telemetry.
+                        // Return 0.0 so nodes still appear in results; a warning is
+                        // emitted below so callers know comparisons are meaningless.
                         "span_duration" | "span_count" | "error_rate" => Some(0.0),
                         _ => None,
                     };
@@ -1357,8 +1398,10 @@ fn resolve_computed_expression_inner(
             return code_nodes;
         }
 
-        // As a last resort, return spec nodes so the user can see what spec was queried
-        return spec_node_ids;
+        // No code nodes governed by this spec — return empty set rather than
+        // the spec node itself, which would be misleading.
+        // The caller should check the warnings for diagnostic information.
+        return HashSet::new();
     }
 
     // $reachable(node, [edge_types], direction, depth) — general BFS traversal primitive.
@@ -1492,6 +1535,9 @@ fn resolve_computed_expression_inner(
         }
         return HashSet::new();
     }
+    // NOTE: $test_fragility as a computed reference returns set membership (count > 0).
+    // The actual fragility count is populated in node_metrics during dry_run
+    // so that $where(test_fragility, '>', N) comparisons work with real counts.
 
     // Fallback: unrecognized expression — return empty set.
     // validate_computed_expression() should be called before resolution to catch these.
@@ -1752,6 +1798,44 @@ pub fn dry_run(
     let node_depths = scope_result.depths;
     warnings.extend(scope_result.warnings);
 
+    // Warn when trace-based metrics are referenced anywhere in the query.
+    // These metrics require OTLP runtime data that is not available in static
+    // graph analysis, so all values will be 0.0 and comparisons are meaningless.
+    {
+        let trace_metrics = ["span_duration", "span_count", "error_rate"];
+        let mut trace_in_use = false;
+        if let Scope::Filter {
+            computed: Some(ref expr),
+            ..
+        } = &query.scope
+        {
+            if trace_metrics.iter().any(|m| expr.contains(m)) {
+                trace_in_use = true;
+            }
+        }
+        if let Some(ref heat) = query.emphasis.heat {
+            if trace_metrics.contains(&heat.metric.as_str()) {
+                trace_in_use = true;
+            }
+        }
+        if let Some(ref badges) = query.emphasis.badges {
+            if let Some(ref metric) = badges.metric {
+                if trace_metrics.contains(&metric.as_str()) {
+                    trace_in_use = true;
+                }
+            }
+        }
+        if trace_in_use {
+            warnings.push(
+                "[warning] Trace metrics (span_duration, span_count, error_rate) require OTLP \
+                 runtime telemetry data which is not present in the static graph model. All trace \
+                 metric values are 0.0 and comparisons against them are meaningless. Use structural \
+                 metrics instead: complexity, churn, incoming_calls, test_coverage, risk_score."
+                    .to_string(),
+            );
+        }
+    }
+
     if result_set.is_empty() {
         let is_interactive = matches!(&query.scope, Scope::Focus { node, .. } if node == "$clicked" || node == "$selected");
         if is_interactive && selected_node_id.is_none() {
@@ -1926,17 +2010,39 @@ pub fn dry_run(
         });
     }
 
-    // Resolve callouts
+    // Resolve callouts — prefer exact match, then prefix, then substring (with warning)
     let mut callouts_resolved = 0;
     let mut callouts_unresolved = Vec::new();
     for callout in &query.callouts {
         let lower = callout.node.to_lowercase();
-        let found = node_map.values().any(|n| {
+        // 1. Exact match on name or qualified_name
+        let exact = node_map.values().any(|n| {
+            n.name.to_lowercase() == lower || n.qualified_name.to_lowercase() == lower
+        });
+        if exact {
+            callouts_resolved += 1;
+            continue;
+        }
+        // 2. Prefix match on name or qualified_name (name starts with the query)
+        let prefix = node_map.values().any(|n| {
+            n.name.to_lowercase().starts_with(&lower)
+                || n.qualified_name.to_lowercase().starts_with(&lower)
+        });
+        if prefix {
+            callouts_resolved += 1;
+            continue;
+        }
+        // 3. Substring match (fallback with warning)
+        let substring = node_map.values().any(|n| {
             n.qualified_name.to_lowercase().contains(&lower)
                 || n.name.to_lowercase().contains(&lower)
         });
-        if found {
+        if substring {
             callouts_resolved += 1;
+            warnings.push(format!(
+                "Callout node '{}' resolved via substring match — use the exact qualified_name for precision",
+                callout.node
+            ));
         } else {
             callouts_unresolved.push(callout.node.clone());
         }
@@ -2019,7 +2125,7 @@ pub fn dry_run(
     }
 
     // Compute per-node metric values for heat emphasis (reuses pre-built adjacency)
-    let node_metrics = if let Some(ref heat) = query.emphasis.heat {
+    let mut node_metrics = if let Some(ref heat) = query.emphasis.heat {
         // Warn about trace-based metrics that require OTLP runtime data
         match heat.metric.as_str() {
             "span_duration" | "span_count" | "error_rate" => {
@@ -2082,6 +2188,26 @@ pub fn dry_run(
     } else {
         HashMap::new()
     };
+
+    // Populate node_metrics with test_fragility counts when $test_fragility is
+    // used in a computed expression, so $where(test_fragility, '>', N) can
+    // compare actual counts rather than just boolean membership.
+    if let Scope::Filter {
+        computed: Some(ref expr),
+        ..
+    } = &query.scope
+    {
+        if expr.contains("$test_fragility") && !node_metrics.iter().any(|(_, v)| *v > 0.0) {
+            let active_nodes: Vec<&GraphNode> =
+                nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
+            let fragility_map =
+                compute_all_test_fragility(&active_nodes, &adjacency_outgoing, &adjacency_incoming);
+            for id in &result_set {
+                let count = fragility_map.get(id).copied().unwrap_or(0);
+                node_metrics.entry(id.clone()).or_insert(count as f64);
+            }
+        }
+    }
 
     DryRunResult {
         matched_nodes: result_set.len(),
@@ -2183,13 +2309,25 @@ pub fn compute_graph_summary(
     let (outgoing, _) = build_adjacency(edges);
     let test_functions = active_nodes.iter().filter(|n| n.test_node).count();
     let reachable = compute_test_reachable(&active_nodes, &outgoing);
+    // Include Functions, Methods, and Endpoints in test coverage denominator,
+    // matching what TestGaps scope considers as testable nodes.
     let total_functions = active_nodes
         .iter()
-        .filter(|n| n.node_type == NodeType::Function)
+        .filter(|n| {
+            matches!(
+                n.node_type,
+                NodeType::Function | NodeType::Method | NodeType::Endpoint
+            )
+        })
         .count();
     let reachable_count = active_nodes
         .iter()
-        .filter(|n| n.node_type == NodeType::Function && reachable.contains(&n.id.to_string()))
+        .filter(|n| {
+            matches!(
+                n.node_type,
+                NodeType::Function | NodeType::Method | NodeType::Endpoint
+            ) && reachable.contains(&n.id.to_string())
+        })
         .count();
 
     // Spec coverage stats
@@ -4186,15 +4324,25 @@ mod tests {
         n1.created_sha = "1111111111111111".to_string(); // different from from_commit
         let nodes = vec![n1];
         let edges = vec![];
-        // Short SHA prefix (6 chars) should match via prefix
-        let scope = Scope::Diff {
-            from_commit: "000000".to_string(),
+        // 6-char SHA prefix should NOT match (minimum 7 required)
+        let scope_short = Scope::Diff {
+            from_commit: "0000000".to_string(),
             to_commit: "abcdef".to_string(),
+        };
+        let result_short = resolve_scope(&scope_short, &nodes, &edges, None);
+        assert!(
+            !result_short.contains("n1"),
+            "6-char SHA prefix should not match (minimum 7 chars required)"
+        );
+        // 7-char SHA prefix should match via prefix
+        let scope = Scope::Diff {
+            from_commit: "0000000".to_string(),
+            to_commit: "abcdef1".to_string(),
         };
         let result = resolve_scope(&scope, &nodes, &edges, None);
         assert!(
             result.contains("n1"),
-            "6-char SHA prefix should match last_modified_sha"
+            "7-char SHA prefix should match last_modified_sha"
         );
     }
 
@@ -4388,7 +4536,7 @@ mod tests {
     fn test_normalize_tabs_and_spaces() {
         assert_eq!(
             normalize_computed_expression("$callers\t(Foo)"),
-            "$callers\t(Foo)" // tabs are not normalized (only spaces before paren)
+            "$callers(Foo)" // all ASCII whitespace before paren is normalized
         );
     }
 
@@ -4604,7 +4752,7 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_scope_sha_requires_min_4_chars() {
+    fn test_diff_scope_sha_requires_min_7_chars() {
         let mut node = make_node("n1", "A", NodeType::Function);
         node.last_modified_sha = "abcdef1234567890".to_string();
         node.created_sha = "1111111111111111".to_string();
@@ -4613,7 +4761,7 @@ mod tests {
         // Short SHA "ab" (2 chars) should not match
         let result = resolve_scope(
             &Scope::Diff {
-                from_commit: "0000".to_string(),
+                from_commit: "0000000".to_string(),
                 to_commit: "ab".to_string(),
             },
             &nodes,
@@ -4622,19 +4770,33 @@ mod tests {
         );
         assert!(
             !result.contains("n1"),
-            "2-char SHA should not match due to min 4-char requirement"
+            "2-char SHA should not match due to min 7-char requirement"
         );
-        // Full SHA prefix (4+ chars) should match
+        // 6-char SHA prefix should NOT match (minimum 7 required)
         let result2 = resolve_scope(
             &Scope::Diff {
-                from_commit: "0000".to_string(),
-                to_commit: "abcd".to_string(),
+                from_commit: "0000000".to_string(),
+                to_commit: "abcdef".to_string(),
             },
             &nodes,
             &edges,
             None,
         );
-        assert!(result2.contains("n1"), "4-char SHA prefix should match");
+        assert!(
+            !result2.contains("n1"),
+            "6-char SHA prefix should not match (minimum 7 chars required)"
+        );
+        // 7-char SHA prefix should match
+        let result3 = resolve_scope(
+            &Scope::Diff {
+                from_commit: "0000000".to_string(),
+                to_commit: "abcdef1".to_string(),
+            },
+            &nodes,
+            &edges,
+            None,
+        );
+        assert!(result3.contains("n1"), "7-char SHA prefix should match");
     }
 
     // ── Filter scope: computed + node_types combined ─────────────────────
