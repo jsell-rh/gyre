@@ -1018,26 +1018,26 @@
       <!-- ── Pipeline flow bar (compact) ──────────────────────────── -->
       {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
         <nav class="pipeline-bar" aria-label="Pipeline status">
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { wsTab = 'specs'; }} title="{pipelineSpecs.approved}/{pipelineSpecs.total} specs approved{pipelineSpecs.pending > 0 ? `, ${pipelineSpecs.pending} need approval` : ''}">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} class:pipeline-stage-selected={wsTab === 'specs'} onclick={() => { wsTab = wsTab === 'specs' ? null : 'specs'; }} title="{pipelineSpecs.approved}/{pipelineSpecs.total} specs approved{pipelineSpecs.pending > 0 ? `, ${pipelineSpecs.pending} need approval` : ''}">
             <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
             <span class="pipeline-stage-label">Specs</span>
             {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warning">{pipelineSpecs.pending}</span>{/if}
           </button>
           <span class="pipeline-arrow" aria-hidden="true">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-alert={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; }} title="{pipelineTasks.done}/{pipelineTasks.total} tasks done{pipelineTasks.in_progress > 0 ? `, ${pipelineTasks.in_progress} active` : ''}{pipelineTasks.blocked > 0 ? `, ${pipelineTasks.blocked} blocked` : ''}">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-alert={pipelineTasks.blocked > 0} class:pipeline-stage-selected={wsTab === 'tasks'} onclick={() => { wsTab = wsTab === 'tasks' ? null : 'tasks'; }} title="{pipelineTasks.done}/{pipelineTasks.total} tasks done{pipelineTasks.in_progress > 0 ? `, ${pipelineTasks.in_progress} active` : ''}{pipelineTasks.blocked > 0 ? `, ${pipelineTasks.blocked} blocked` : ''}">
             <span class="pipeline-stage-count">{pipelineTasks.total}</span>
             <span class="pipeline-stage-label">Tasks</span>
             {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked}</span>
             {:else if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineTasks.in_progress}</span>{/if}
           </button>
           <span class="pipeline-arrow" aria-hidden="true">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => { wsTab = 'agents'; }} title="{pipelineAgents.active} of {pipelineAgents.total} agents running">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} class:pipeline-stage-selected={wsTab === 'agents'} onclick={() => { wsTab = wsTab === 'agents' ? null : 'agents'; }} title="{pipelineAgents.active} of {pipelineAgents.total} agents running">
             <span class="pipeline-stage-count">{pipelineAgents.total}</span>
             <span class="pipeline-stage-label">Agents</span>
             {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active}</span>{/if}
           </button>
           <span class="pipeline-arrow" aria-hidden="true">→</span>
-          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-alert={pipelineMrs.failed_gates > 0} onclick={() => { wsTab = 'mrs'; }} title="{pipelineMrs.merged}/{pipelineMrs.total} MRs merged{pipelineMrs.open > 0 ? `, ${pipelineMrs.open} open` : ''}{pipelineMrs.failed_gates > 0 ? `, ${pipelineMrs.failed_gates} gate failures` : ''}">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-alert={pipelineMrs.failed_gates > 0} class:pipeline-stage-selected={wsTab === 'mrs'} onclick={() => { wsTab = wsTab === 'mrs' ? null : 'mrs'; }} title="{pipelineMrs.merged}/{pipelineMrs.total} MRs merged{pipelineMrs.open > 0 ? `, ${pipelineMrs.open} open` : ''}{pipelineMrs.failed_gates > 0 ? `, ${pipelineMrs.failed_gates} gate failures` : ''}">
             <span class="pipeline-stage-count">{pipelineMrs.total}</span>
             <span class="pipeline-stage-label">MRs</span>
             {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates}</span>
@@ -1045,7 +1045,7 @@
           </button>
           {#if mergeQueueItems.length > 0}
             <span class="pipeline-arrow" aria-hidden="true">→</span>
-            <button class="pipeline-stage pipeline-stage-active" onclick={() => { wsTab = 'mrs'; }} title="{mergeQueueItems.length} MR{mergeQueueItems.length !== 1 ? 's' : ''} in merge queue">
+            <button class="pipeline-stage pipeline-stage-active" onclick={() => { wsTab = wsTab === 'mrs' ? null : 'mrs'; }} title="{mergeQueueItems.length} MR{mergeQueueItems.length !== 1 ? 's' : ''} in merge queue">
               <span class="pipeline-stage-count">{mergeQueueItems.length}</span>
               <span class="pipeline-stage-label">Queue</span>
               <span class="pipeline-stage-badge pipeline-badge-active">{mergeQueueItems.length}</span>
@@ -2212,6 +2212,12 @@
   .pipeline-stage-active { color: var(--color-text); font-weight: 600; }
   .pipeline-stage-done { color: var(--color-success); }
   .pipeline-stage-alert { color: var(--color-danger); }
+  .pipeline-stage-selected {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
+    color: var(--color-primary);
+    font-weight: 600;
+  }
 
   .pipeline-stage-count {
     font-family: var(--font-mono);
