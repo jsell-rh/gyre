@@ -158,8 +158,16 @@ pub fn extract_call_graph(
     }
 
     // Build file → sorted vec of (line_start, line_end, node_id) for resolving reference sites.
+    // Only include function-like nodes — modules span entire files and would create
+    // invalid "Module calls Function" edges for references outside any function body.
     let mut file_functions: HashMap<String, Vec<(u32, u32, String)>> = HashMap::new();
-    for n in nodes.iter().filter(|n| n.deleted_at.is_none()) {
+    for n in nodes.iter().filter(|n| {
+        n.deleted_at.is_none()
+            && matches!(
+                n.node_type,
+                NodeType::Function | NodeType::Method | NodeType::Endpoint
+            )
+    }) {
         file_functions
             .entry(n.file_path.clone())
             .or_default()
@@ -1405,14 +1413,18 @@ fn try_go_callgraph_binary(
         .map(|n| (n.qualified_name.as_str(), n))
         .collect();
 
-    // Also build by name for simpler matching
-    let node_by_name: HashMap<&str, &GraphNode> = nodes
+    // Also build by name for simpler matching — use Vec to handle multiple
+    // methods with the same name on different types (e.g., FooService.Handle,
+    // BarService.Handle) which are common in Go.
+    let mut node_by_name: HashMap<&str, Vec<&GraphNode>> = HashMap::new();
+    for n in nodes
         .iter()
         .filter(|n| {
             n.deleted_at.is_none() && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
         })
-        .map(|n| (n.name.as_str(), n))
-        .collect();
+    {
+        node_by_name.entry(n.name.as_str()).or_default().push(n);
+    }
 
     // Build existing edge set for dedup
     let existing_set: HashSet<(String, String)> = existing_edges
@@ -1467,16 +1479,28 @@ fn try_go_callgraph_binary(
 fn resolve_go_node<'a>(
     qualified: &str,
     by_qname: &HashMap<&str, &'a GraphNode>,
-    by_name: &HashMap<&str, &'a GraphNode>,
+    by_name: &HashMap<&str, Vec<&'a GraphNode>>,
 ) -> Option<&'a GraphNode> {
-    // Direct qualified name match
+    // Direct qualified name match (most reliable)
     if let Some(n) = by_qname.get(qualified) {
         return Some(n);
     }
     // Try just the function/method part (after last '.')
     if let Some(short) = qualified.rsplit('.').next() {
-        if let Some(n) = by_name.get(short) {
-            return Some(n);
+        if let Some(candidates) = by_name.get(short) {
+            if candidates.len() == 1 {
+                return Some(candidates[0]);
+            }
+            // Multiple candidates: try matching by package path in qualified name
+            let pkg = qualified.rsplit('.').nth(1).unwrap_or("");
+            if let Some(best) = candidates
+                .iter()
+                .find(|n| n.qualified_name.contains(pkg) || n.file_path.contains(pkg))
+            {
+                return Some(best);
+            }
+            // Fall back to first candidate if disambiguation fails
+            return Some(candidates[0]);
         }
     }
     // Try TypeName.MethodName pattern
@@ -1485,8 +1509,8 @@ fn resolve_go_node<'a>(
         let method = parts[0];
         let type_name = parts[1];
         let combined = format!("{}.{}", type_name, method);
-        if let Some(n) = by_name.get(combined.as_str()) {
-            return Some(n);
+        if let Some(candidates) = by_name.get(combined.as_str()) {
+            return Some(candidates[0]);
         }
     }
     None
