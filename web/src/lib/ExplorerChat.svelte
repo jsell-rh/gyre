@@ -790,7 +790,7 @@
       {#each messages as msg, i (msg.id ?? msg.timestamp + '-' + i)}
         {#if contextCutoffIndex > 0 && i === contextCutoffIndex}
           <div class="context-divider" role="separator">
-            <span class="context-divider-text">Messages above this line are summarized in the AI's memory</span>
+            <span class="context-divider-text">Messages above are outside the AI's context window</span>
           </div>
         {/if}
         <div class="chat-message {msg.role}" class:error={msg.isError} class:warning={msg.isWarning} class:out-of-context={i < contextCutoffIndex}>
