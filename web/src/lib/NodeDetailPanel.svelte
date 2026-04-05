@@ -139,6 +139,46 @@
     }
   });
 
+  // Determine which moldable view to render based on node type
+  let moldableViewType = $derived.by(() => {
+    if (!node) return null;
+    switch (node.node_type) {
+      case 'type':
+      case 'table':
+      case 'component':
+        return 'type';
+      case 'interface':
+      case 'trait':
+        return 'trait';
+      case 'endpoint':
+        return 'endpoint';
+      case 'spec':
+        return 'spec';
+      default:
+        return null; // generic view
+    }
+  });
+
+  let moldableViewLabel = $derived.by(() => {
+    switch (moldableViewType) {
+      case 'type': return 'Type View';
+      case 'trait': return 'Trait View';
+      case 'endpoint': return 'Endpoint View';
+      case 'spec': return 'Spec View';
+      default: return null;
+    }
+  });
+
+  let moldableViewDescription = $derived.by(() => {
+    switch (moldableViewType) {
+      case 'type': return 'Fields, traits, consumers, and risk profile';
+      case 'trait': return 'Methods, implementors, and dependents';
+      case 'endpoint': return 'Route, handler flow, request/response shapes, and gates';
+      case 'spec': return 'Governed nodes, implementation completeness, and coverage';
+      default: return null;
+    }
+  });
+
   let visibilityBadge = $derived.by(() => {
     if (!node) return '';
     const v = (node.visibility ?? '').toLowerCase();
@@ -643,6 +683,29 @@
         <p class="detail-qualified">{node.qualified_name}</p>
       {/if}
     </div>
+
+    <!-- Moldable View Banner -->
+    {#if moldableViewLabel}
+      <div class="moldable-view-banner">
+        <div class="moldable-view-indicator">
+          <span class="moldable-view-icon">
+            {#if moldableViewType === 'type'}
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><rect x="2" y="2" width="12" height="12" rx="2"/><line x1="2" y1="6" x2="14" y2="6"/><line x1="2" y1="10" x2="14" y2="10"/></svg>
+            {:else if moldableViewType === 'trait'}
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><circle cx="8" cy="4" r="2.5"/><path d="M3 14 L8 8 L13 14"/></svg>
+            {:else if moldableViewType === 'endpoint'}
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M2 8h12M10 4l4 4-4 4"/></svg>
+            {:else if moldableViewType === 'spec'}
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M4 2h6l4 4v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M10 2v4h4"/></svg>
+            {/if}
+          </span>
+          <div class="moldable-view-text">
+            <span class="moldable-view-label">{moldableViewLabel}</span>
+            <span class="moldable-view-desc">{moldableViewDescription}</span>
+          </div>
+        </div>
+      </div>
+    {/if}
 
     <div class="detail-body">
       <!-- Location (all node types) -->
@@ -2740,5 +2803,53 @@
   @media (prefers-reduced-motion: reduce) {
     .risk-bar-fill { transition: none; }
     .common-flow-btn { transition: none; }
+  }
+
+  /* Moldable View Banner */
+  .moldable-view-banner {
+    padding: var(--space-2) var(--space-4);
+    background: rgba(15, 15, 26, 0.95);
+    border-bottom: 1px solid #334155;
+  }
+
+  .moldable-view-indicator {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  .moldable-view-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--color-primary) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
+    color: var(--color-primary);
+    flex-shrink: 0;
+  }
+
+  .moldable-view-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .moldable-view-label {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #e2e8f0;
+    font-family: var(--font-mono);
+  }
+
+  .moldable-view-desc {
+    font-size: 10px;
+    color: #94a3b8;
+    line-height: 1.3;
   }
 </style>
