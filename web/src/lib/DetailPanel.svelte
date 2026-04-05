@@ -4154,7 +4154,7 @@
                   <dt>Task</dt><dd><button class="entity-link" title={att.task_id} onclick={() => navigateTo('task', att.task_id)}>{entityName('task', att.task_id)}</button></dd>
                 {/if}
                 {#if att.repo_id}
-                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {att.repo_id}" onclick={() => copyId(att.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.repo_id); }}>{entityName('repo', att.repo_id)}</dd>
+                  <dt>Repo</dt><dd><CopyableId value={att.repo_id} label={entityName('repo', att.repo_id)} copyLabel="Repo ID" /></dd>
                 {/if}
                 {#if att.conversation_sha}
                   <dt>Conversation</dt>
@@ -4162,8 +4162,8 @@
                     <button class="att-reasoning-btn" title="View the agent's reasoning and tool calls that produced this code" onclick={() => { activeTab = 'ask-why'; }}>
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
                       View agent reasoning
-                      <code class="sha-badge mono">{att.conversation_sha.slice(0, 7)}</code>
                     </button>
+                    <CopyableId value={att.conversation_sha} variant="sha" copyLabel="Conversation SHA" />
                   </dd>
                 {/if}
                 {#if att.gate_results?.length > 0}
