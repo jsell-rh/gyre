@@ -15,6 +15,7 @@
   import { toastSuccess, toastError } from './toast.svelte.js';
   import { detectLang, highlightLine } from './syntaxHighlight.js';
   import { renderMarkdown } from './markdown.js';
+  import CopyableId from './CopyableId.svelte';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -1897,7 +1898,7 @@
                   </div>
                   {#if mr.merge_commit_sha}
                     <div class="status-journey-sha">
-                      <code class="sha-badge mono copyable" title="Click to copy: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 7)}</code>
+                      <CopyableId value={mr.merge_commit_sha} variant="sha" copyLabel="Merge SHA" icon />
                     </div>
                   {/if}
                 </div>
@@ -2218,7 +2219,7 @@
                 <div class="mr-merged-info">
                   <Badge value="merged" variant="success" />
                   {#if mr.merge_commit_sha}
-                    <code class="sha-badge mono copyable" title="Click to copy: {mr.merge_commit_sha}" onclick={() => copyId(mr.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.merge_commit_sha); }}>{mr.merge_commit_sha.slice(0, 7)}</code>
+                    <CopyableId value={mr.merge_commit_sha} variant="sha" copyLabel="Merge SHA" icon />
                   {/if}
                   {#if mr._commitSig}
                     <span class="sig-badge" title="Commit signed with {mr._commitSig.algorithm ?? 'unknown'}">
@@ -2593,7 +2594,7 @@
                     This agent's reasoning was recorded.
                     <button class="entity-link" onclick={() => { activeTab = 'ask-why'; }} title="View the agent's conversation and decision-making process">View Conversation →</button>
                   </p>
-                  <code class="sha-badge mono copyable" title="Click to copy conversation SHA: {ag.conversation_sha}" onclick={() => copyId(ag.conversation_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(ag.conversation_sha); }}>{ag.conversation_sha.slice(0, 12)}...</code>
+                  <CopyableId value={ag.conversation_sha} variant="sha" chars={12} copyLabel="Conversation SHA" icon />
                 </div>
               {/if}
 
@@ -3094,7 +3095,7 @@
                 <dt>{$t('detail_panel.kind')}</dt><dd>{sd.kind}</dd>
               {/if}
               {#if sd.current_sha}
-                <dt>{$t('detail_panel.sha')}</dt><dd><code class="sha-badge mono copyable" title="Click to copy: {sd.current_sha}" onclick={() => copyId(sd.current_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sd.current_sha); }}>{sd.current_sha.slice(0, 7)}</code></dd>
+                <dt>{$t('detail_panel.sha')}</dt><dd><CopyableId value={sd.current_sha} variant="sha" copyLabel="Spec SHA" icon /></dd>
               {/if}
               {#if sd.drift_status && sd.drift_status !== 'none'}
                 <dt>Drift</dt><dd><Badge value={sd.drift_status} variant={sd.drift_status === 'drifted' ? 'warning' : 'muted'} /></dd>
@@ -3818,7 +3819,7 @@
                 {@const specRef = commit._agentRecord?.spec_ref ?? commit.spec_ref}
                 <div class="commit-item">
                   <div class="commit-header">
-                    <code class="sha-badge mono copyable" title="Click to copy: {sha}" onclick={() => copyId(sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(sha); }}>{sha.slice(0, 7)}</code>
+                    <CopyableId value={sha} variant="sha" copyLabel="Commit SHA" />
                     <span class="commit-message">{commit.message ?? commit.summary ?? '—'}</span>
                   </div>
                   <div class="commit-meta">
@@ -4125,7 +4126,7 @@
                 {#if att.merge_commit_sha}
                   <dt>Merge commit</dt>
                   <dd>
-                    <code class="sha-badge mono copyable" title={att.merge_commit_sha} onclick={() => copyId(att.merge_commit_sha)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(att.merge_commit_sha); }}>{att.merge_commit_sha.slice(0, 7)}</code>
+                    <CopyableId value={att.merge_commit_sha} variant="sha" copyLabel="Merge SHA" icon />
                   </dd>
                 {/if}
                 {#if att.spec_ref}
@@ -4134,7 +4135,7 @@
                   <dt>Spec</dt>
                   <dd>
                     <button class="entity-link" title={att.spec_ref} onclick={() => navigateTo('spec', attSpecPath, { path: attSpecPath })}>{attSpecPath.split('/').pop()?.replace(/\.md$/, '')}</button>
-                    {#if attSpecSha}<code class="sha-badge mono" title="Pinned at spec version {attSpecSha}">@{attSpecSha.slice(0, 7)}</code>{/if}
+                    {#if attSpecSha}<CopyableId value={attSpecSha} variant="sha" label="@{attSpecSha.slice(0, 7)}" copyLabel="Spec SHA" />{/if}
                   </dd>
                 {/if}
                 {#if att.spec_fully_approved !== undefined}
