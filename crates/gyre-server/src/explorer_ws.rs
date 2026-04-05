@@ -1714,9 +1714,11 @@ async fn run_explorer_agent(
         // Path doesn't exist — reject rather than allow unchecked execution
         false
     };
+    // Use sdk_path_valid (which already checks existence via canonicalize())
+    // instead of re-checking sdk_path.exists() to prevent TOCTOU race.
     let use_sdk = sdk_path_valid
         && (std::env::var("GYRE_EXPLORER_SDK").unwrap_or_default() == "1"
-            || (sdk_path.exists() && state.llm.is_none()));
+            || state.llm.is_none());
     if use_sdk {
         // SECURITY: SDK path uses the server's master auth_token, not the user's.
         // Restrict to admin-only to prevent RBAC bypass (a read-only member would
