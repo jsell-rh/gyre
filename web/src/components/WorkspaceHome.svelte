@@ -1042,92 +1042,83 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Workspace header ──────── -->
+      <!-- ── Workspace header with integrated pipeline ──────── -->
       <header class="ws-header">
-        <div class="ws-header-main">
-          <div class="ws-header-top-row">
-            <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
-            <div class="ws-header-actions">
-              {#if budgetPct !== null}
-                <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
-                  <span class="ws-budget-bar"><span class="ws-budget-fill" style="width: {budgetPct}%"></span></span>
-                  <span class="ws-budget-label">{budgetPct}%</span>
-                </span>
-              {/if}
-              <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings (g s)">
-                <Icon name="settings" size={14} />
-                Settings
-              </button>
-              <button class="ws-header-link" onclick={() => goToAgentRules?.()} title="Agent rules (g a)">
-                <Icon name="spec" size={14} />
-                Agent Rules
-              </button>
-            </div>
+        <div class="ws-header-top-row">
+          <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
+          <div class="ws-header-actions">
+            {#if budgetPct !== null}
+              <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
+                <span class="ws-budget-bar"><span class="ws-budget-fill" style="width: {budgetPct}%"></span></span>
+                <span class="ws-budget-label">{budgetPct}%</span>
+              </span>
+            {/if}
+            <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings (g s)">
+              <Icon name="settings" size={14} />
+            </button>
+            <button class="ws-header-link" onclick={() => goToAgentRules?.()} title="Agent rules (g a)">
+              <Icon name="spec" size={14} />
+            </button>
           </div>
-          <!-- Status: one-line summary of what's happening -->
-          {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-            <p class="ws-header-status">{statusSentence}</p>
-          {:else if workspace.description}
-            <p class="ws-header-desc">{workspace.description}</p>
-          {/if}
         </div>
+        <!-- Integrated pipeline — compact flow embedded in header -->
+        {#if !specsLoading || !tasksLoading || !mrsLoading || !agentsLoading || specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
+        <div class="pipeline-hero" data-testid="pipeline-hero">
+          <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineSpecs.pending > 0} class:pipeline-hero-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} class:pipeline-hero-selected={expandedStage === 'specs'} onclick={() => toggleStage('specs')}>
+            <span class="pipeline-hero-count">{specs.length}</span>
+            <span class="pipeline-hero-label">Specs</span>
+            {#if pipelineSpecs.pending > 0}
+              <span class="pipeline-hero-badge pipeline-hero-badge-warn">{pipelineSpecs.pending} pending</span>
+            {:else if pipelineSpecs.approved > 0}
+              <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineSpecs.approved} approved</span>
+            {/if}
+          </button>
+          <span class="pipeline-hero-arrow">
+            <svg width="16" height="10" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineTasks.in_progress > 0} class:pipeline-hero-warn={pipelineTasks.blocked > 0} class:pipeline-hero-selected={expandedStage === 'tasks'} onclick={() => toggleStage('tasks')}>
+            <span class="pipeline-hero-count">{wsTasks.length}</span>
+            <span class="pipeline-hero-label">Tasks</span>
+            {#if pipelineTasks.in_progress > 0}
+              <span class="pipeline-hero-badge">{pipelineTasks.in_progress} active</span>
+            {:else if pipelineTasks.blocked > 0}
+              <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineTasks.blocked} blocked</span>
+            {/if}
+          </button>
+          <span class="pipeline-hero-arrow">
+            <svg width="16" height="10" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineAgents.active > 0} class:pipeline-hero-selected={expandedStage === 'agents'} onclick={() => toggleStage('agents')}>
+            <span class="pipeline-hero-count">{wsAgents.length}</span>
+            <span class="pipeline-hero-label">Agents</span>
+            {#if pipelineAgents.active > 0}
+              <span class="pipeline-hero-badge pipeline-hero-badge-ok"><span class="pipeline-hero-pulse"></span>{pipelineAgents.active} running</span>
+            {/if}
+          </button>
+          <span class="pipeline-hero-arrow">
+            <svg width="16" height="10" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <button class="pipeline-hero-stage" class:pipeline-hero-warn={pipelineMrs.failed_gates > 0} class:pipeline-hero-selected={expandedStage === 'mrs'} onclick={() => toggleStage('mrs')}>
+            <span class="pipeline-hero-count">{pipelineMrs.open + pipelineMrs.failed_gates}</span>
+            <span class="pipeline-hero-label">MRs</span>
+            {#if pipelineMrs.failed_gates > 0}
+              <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineMrs.failed_gates} failed</span>
+            {:else if pipelineMrs.open > 0}
+              <span class="pipeline-hero-badge">{pipelineMrs.open} open</span>
+            {/if}
+          </button>
+          <span class="pipeline-hero-arrow">
+            <svg width="16" height="10" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <button class="pipeline-hero-stage pipeline-hero-done-stage" class:pipeline-hero-done={pipelineMrs.merged > 0} onclick={() => toggleStage('mrs')}>
+            <span class="pipeline-hero-count">{pipelineMrs.merged}</span>
+            <span class="pipeline-hero-label">Merged</span>
+          </button>
+        </div>
+        {:else if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
+          <p class="ws-header-status">{statusSentence}</p>
+        {/if}
       </header>
-
-      <!-- ── Pipeline hero — always visible, shows the full lifecycle flow ── -->
-      {#if !specsLoading || !tasksLoading || !mrsLoading || !agentsLoading || specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
-      <div class="pipeline-hero" data-testid="pipeline-hero">
-        <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineSpecs.pending > 0} class:pipeline-hero-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} class:pipeline-hero-selected={expandedStage === 'specs'} onclick={() => toggleStage('specs')}>
-          <span class="pipeline-hero-count">{specs.length}</span>
-          <span class="pipeline-hero-label">Specs</span>
-          {#if pipelineSpecs.pending > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-warn">{pipelineSpecs.pending} pending</span>
-          {:else if pipelineSpecs.approved > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-ok">{pipelineSpecs.approved} approved</span>
-          {/if}
-        </button>
-        <span class="pipeline-hero-arrow">
-          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineTasks.in_progress > 0} class:pipeline-hero-warn={pipelineTasks.blocked > 0} class:pipeline-hero-selected={expandedStage === 'tasks'} onclick={() => toggleStage('tasks')}>
-          <span class="pipeline-hero-count">{wsTasks.length}</span>
-          <span class="pipeline-hero-label">Tasks</span>
-          {#if pipelineTasks.in_progress > 0}
-            <span class="pipeline-hero-badge">{pipelineTasks.in_progress} active</span>
-          {:else if pipelineTasks.blocked > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineTasks.blocked} blocked</span>
-          {/if}
-        </button>
-        <span class="pipeline-hero-arrow">
-          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        <button class="pipeline-hero-stage" class:pipeline-hero-active={pipelineAgents.active > 0} class:pipeline-hero-selected={expandedStage === 'agents'} onclick={() => toggleStage('agents')}>
-          <span class="pipeline-hero-count">{wsAgents.length}</span>
-          <span class="pipeline-hero-label">Agents</span>
-          {#if pipelineAgents.active > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-ok"><span class="pipeline-hero-pulse"></span>{pipelineAgents.active} running</span>
-          {/if}
-        </button>
-        <span class="pipeline-hero-arrow">
-          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        <button class="pipeline-hero-stage" class:pipeline-hero-warn={pipelineMrs.failed_gates > 0} class:pipeline-hero-selected={expandedStage === 'mrs'} onclick={() => toggleStage('mrs')}>
-          <span class="pipeline-hero-count">{pipelineMrs.open + pipelineMrs.failed_gates}</span>
-          <span class="pipeline-hero-label">MRs</span>
-          {#if pipelineMrs.failed_gates > 0}
-            <span class="pipeline-hero-badge pipeline-hero-badge-danger">{pipelineMrs.failed_gates} failed</span>
-          {:else if pipelineMrs.open > 0}
-            <span class="pipeline-hero-badge">{pipelineMrs.open} open</span>
-          {/if}
-        </button>
-        <span class="pipeline-hero-arrow">
-          <svg width="20" height="12" viewBox="0 0 20 12"><path d="M0 6h16m0 0l-4-4m4 4l-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </span>
-        <button class="pipeline-hero-stage pipeline-hero-done-stage" class:pipeline-hero-done={pipelineMrs.merged > 0} onclick={() => toggleStage('mrs')}>
-          <span class="pipeline-hero-count">{pipelineMrs.merged}</span>
-          <span class="pipeline-hero-label">Merged</span>
-        </button>
-      </div>
-      {/if}
 
       <!-- ── Pipeline stage popover — shows top items when a stage is clicked ── -->
       {#if expandedStage}
@@ -1202,13 +1193,6 @@
             </div>
             <p class="stage-popover-empty">All clear for this stage.</p>
           {/if}
-        </div>
-      {/if}
-
-      <!-- ── Briefing banner (subtle, under header) ──────────────── -->
-      {#if !briefingLoading && briefingData?.summary}
-        <div class="ws-briefing-banner">
-          <p class="ws-briefing-banner-text">{briefingData.summary}</p>
         </div>
       {/if}
 
@@ -1603,27 +1587,19 @@
     border-top: 1px solid var(--color-border);
   }
 
-  /* ── Pipeline hero — interactive flow visualization ─────────────── */
+  /* ── Pipeline hero — compact inline flow ─────────────── */
   .pipeline-hero {
     display: flex;
-    align-items: stretch;
+    align-items: center;
     gap: 0;
-    padding: var(--space-1);
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg, var(--radius));
     overflow-x: auto;
   }
 
   .pipeline-hero-stage {
     display: flex;
-    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 2px;
-    padding: var(--space-2) var(--space-3);
-    flex: 1;
-    min-width: 80px;
+    gap: 4px;
+    padding: var(--space-1) var(--space-2);
     background: transparent;
     border: 1px solid transparent;
     border-radius: var(--radius);
@@ -1631,16 +1607,16 @@
     font-family: var(--font-body);
     transition: all var(--transition-fast);
     position: relative;
+    white-space: nowrap;
   }
 
   .pipeline-hero-stage:hover {
     background: var(--color-surface-elevated);
     border-color: var(--color-border);
-    transform: translateY(-1px);
   }
 
   .pipeline-hero-count {
-    font-size: var(--text-lg, 18px);
+    font-size: var(--text-sm);
     font-weight: 800;
     font-family: var(--font-mono);
     color: var(--color-text-muted);
@@ -2113,8 +2089,8 @@
   .focused-dashboard {
     display: flex;
     flex-direction: column;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-5);
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-5);
     max-width: 1200px;
     margin: 0 auto;
     width: 100%;
@@ -2172,14 +2148,9 @@
   .ws-header {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-  }
-
-  .ws-header-main {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
+    gap: var(--space-1);
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
   }
 
   .ws-header-top-row {
