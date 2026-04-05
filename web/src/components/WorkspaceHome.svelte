@@ -1115,6 +1115,16 @@
       <!-- ── Main content: single-column layout ──────────────────── -->
       <div class="ws-main-content">
 
+          <!-- Workspace briefing (AI-generated summary of recent activity) -->
+          {#if !briefingLoading && briefingData?.summary}
+            <div class="ws-briefing" data-testid="section-briefing">
+              <div class="ws-briefing-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+              </div>
+              <p class="ws-briefing-text">{briefingData.summary}</p>
+            </div>
+          {/if}
+
           <!-- Action Needed (compact, dismissible) -->
           {#if !decisionsLoading && actionableNotifications.length > 0}
             {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
@@ -2583,6 +2593,30 @@
     margin: 0;
     line-height: 1.4;
     font-weight: 500;
+  }
+
+  .ws-briefing {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-left: 3px solid var(--color-info);
+    background: color-mix(in srgb, var(--color-info) 4%, var(--color-surface));
+    border-radius: 0 var(--radius) var(--radius) 0;
+  }
+
+  .ws-briefing-icon {
+    flex-shrink: 0;
+    color: var(--color-info);
+    margin-top: 1px;
+  }
+
+  .ws-briefing-text {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+    line-height: 1.5;
+    max-width: 800px;
   }
 
   .ws-briefing-banner {
