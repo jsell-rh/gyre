@@ -79,8 +79,9 @@
           return '#22c55e';
         }
       }
-      // Ambiguous: GovernedBy from different spec than heuristic spec_path
-      return '#22c55e'; // Still green — GovernedBy is the stronger signal
+      // Conflicting: GovernedBy points to different spec than heuristic spec_path
+      // Show amber to surface the governance conflict to the user
+      return '#eab308';
     }
     // Amber: spec_path present without GovernedBy edge — heuristic match only
     if (node.spec_path) return '#eab308';
@@ -388,6 +389,8 @@
     const toT = minT + (maxT - minT) * (timelineRange[1] / 100);
     const visibleIds = new Set();
     const ghostIds = new Set(); // Nodes outside range shown as ghosts
+    const ghostAdded = new Set(); // Nodes that will be added AFTER the selected range (future)
+    const ghostRemoved = new Set(); // Nodes that existed BEFORE the range but are gone/not yet visible
     const totalWithTime = nodes.filter(n => n.first_seen_at && !n.deleted_at).length;
     for (const n of nodes) {
       if (n.deleted_at) continue;
@@ -396,6 +399,17 @@
         visibleIds.add(n.id);
       } else if (n.first_seen_at) {
         ghostIds.add(n.id);
+        if (t > toT) {
+          ghostAdded.add(n.id); // Will be added in the future
+        } else {
+          ghostRemoved.add(n.id); // Existed before this range
+        }
+      }
+    }
+    // Nodes that were deleted during or after range
+    for (const n of nodes) {
+      if (n.deleted_at && n.first_seen_at && n.first_seen_at >= fromT && n.first_seen_at <= toT) {
+        ghostRemoved.add(n.id);
       }
     }
     // Collect key moment markers (spec approvals, milestone-like events)
@@ -444,7 +458,7 @@
       }
     }
     const isFullRange = timelineRange[0] === 0 && timelineRange[1] === 100;
-    return { visibleIds, ghostIds, minT, maxT, fromT, toT, totalWithTime, markers: dedupedMarkers.slice(0, 10), delta, isFullRange };
+    return { visibleIds, ghostIds, ghostAdded, ghostRemoved, minT, maxT, fromT, toT, totalWithTime, markers: dedupedMarkers.slice(0, 10), delta, isFullRange };
   });
 
   // Canvas-scoped search state
@@ -2401,7 +2415,9 @@
       drawNodeRecursive(root);
     }
 
-    // Draw timeline ghost outlines (dotted borders for filtered-out nodes)
+    // Draw timeline ghost outlines — directional coloring per spec:
+    // Green dotted = will be added after selected range (future nodes)
+    // Red dotted = existed before selected range or deleted (past nodes)
     if (timelineNodes && timelineNodes.ghostIds.size > 0) {
       for (const ghostId of timelineNodes.ghostIds) {
         const ln = layoutNodeMap.get(ghostId);
@@ -2411,13 +2427,26 @@
         const sh = ln.h * cam.zoom;
         if (sw < 6 || sh < 4) continue;
         const s = worldToScreen(ln.x, ln.y);
+        const isAdded = timelineNodes.ghostAdded?.has(ghostId);
+        const isRemoved = timelineNodes.ghostRemoved?.has(ghostId);
         ctx.save();
-        ctx.globalAlpha = 0.2;
-        ctx.strokeStyle = '#94a3b8';
+        ctx.globalAlpha = isAdded ? 0.25 : 0.18;
+        ctx.strokeStyle = isAdded ? '#22c55e' : isRemoved ? '#ef4444' : '#94a3b8';
         ctx.lineWidth = 1;
-        ctx.setLineDash([4, 3]);
+        ctx.setLineDash(isAdded ? [4, 3] : isRemoved ? [6, 2] : [4, 3]);
         roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, 3);
         ctx.stroke();
+        // Removed nodes get a strikethrough line
+        if (isRemoved && sw > 20) {
+          ctx.globalAlpha = 0.3;
+          ctx.strokeStyle = '#ef4444';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.moveTo(s.x - sw / 2 + 4, s.y);
+          ctx.lineTo(s.x + sw / 2 - 4, s.y);
+          ctx.stroke();
+        }
         ctx.setLineDash([]);
         ctx.restore();
       }

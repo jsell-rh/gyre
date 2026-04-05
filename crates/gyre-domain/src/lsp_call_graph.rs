@@ -1200,15 +1200,22 @@ pub fn extract_call_graph_go(
     repo_id: &Id,
     commit_sha: &str,
 ) -> LspCallGraphResult {
+    // Prefer the dedicated go-callgraph binary (uses golang.org/x/tools/go/callgraph CHA)
+    // which produces a complete call graph in a single pass — the gold standard per spec.
+    // Falls back to gopls LSP if the binary is not available.
+    if let Some(result) = try_go_callgraph_binary(repo_root, nodes, existing_edges, repo_id, commit_sha) {
+        return result;
+    }
+
     if !gopls_available() {
         return LspCallGraphResult {
             edges: Vec::new(),
-            errors: vec!["gopls not found — skipping Go LSP call graph".into()],
+            errors: vec!["Neither gyre-go-callgraph nor gopls found — skipping Go call graph".into()],
             definitions_queried: 0,
             new_edges_found: 0,
             total_definitions: 0,
             incomplete: false,
-            missing_toolchains: vec!["gopls".into()],
+            missing_toolchains: vec!["gyre-go-callgraph".into(), "gopls".into()],
         };
     }
 
@@ -1223,6 +1230,245 @@ pub fn extract_call_graph_go(
         "go",
         &[".go"],
     )
+}
+
+/// Try the dedicated go-callgraph binary (CHA-based, complete call graph).
+/// Returns None if the binary is not found, Some(result) otherwise.
+fn try_go_callgraph_binary(
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    existing_edges: &[GraphEdge],
+    repo_id: &Id,
+    _commit_sha: &str,
+) -> Option<LspCallGraphResult> {
+    // Look for the binary in scripts/go-callgraph/ relative to the executable,
+    // or in PATH as 'gyre-go-callgraph'.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let binary_candidates = [
+        exe_dir.as_ref().map(|d| d.join("scripts/go-callgraph/go-callgraph")),
+        Some(PathBuf::from("gyre-go-callgraph")),
+    ];
+
+    let binary_path = binary_candidates
+        .iter()
+        .flatten()
+        .find(|p| {
+            // Check if executable exists (for absolute paths) or is in PATH
+            if p.is_absolute() {
+                p.exists()
+            } else {
+                Command::new(p)
+                    .arg("--help")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok()
+            }
+        });
+
+    let binary_path = match binary_path {
+        Some(p) => p.clone(),
+        None => return None,
+    };
+
+    // Run the binary with the repo path (with manual timeout)
+    let mut child = match Command::new(&binary_path)
+        .arg(repo_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Some(LspCallGraphResult {
+                edges: Vec::new(),
+                errors: vec![format!("go-callgraph binary failed to spawn: {e}")],
+                definitions_queried: 0,
+                new_edges_found: 0,
+                total_definitions: 0,
+                incomplete: true,
+                missing_toolchains: Vec::new(),
+            });
+        }
+    };
+
+    // Wait with timeout
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = child.stdout.take().map(|mut s| {
+                    let mut buf = Vec::new();
+                    let _ = s.read_to_end(&mut buf);
+                    buf
+                }).unwrap_or_default();
+                let stderr = child.stderr.take().map(|mut s| {
+                    let mut buf = Vec::new();
+                    let _ = s.read_to_end(&mut buf);
+                    buf
+                }).unwrap_or_default();
+                break std::process::Output { status, stdout, stderr };
+            }
+            Ok(None) => {
+                if Instant::now() > deadline {
+                    let _ = child.kill();
+                    return Some(LspCallGraphResult {
+                        edges: Vec::new(),
+                        errors: vec!["go-callgraph timed out after 60s".into()],
+                        definitions_queried: 0,
+                        new_edges_found: 0,
+                        total_definitions: 0,
+                        incomplete: true,
+                        missing_toolchains: Vec::new(),
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Some(LspCallGraphResult {
+                    edges: Vec::new(),
+                    errors: vec![format!("go-callgraph wait error: {e}")],
+                    definitions_queried: 0,
+                    new_edges_found: 0,
+                    total_definitions: 0,
+                    incomplete: true,
+                    missing_toolchains: Vec::new(),
+                });
+            }
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Non-zero exit could mean no Go module found — fall back to gopls
+        if stderr.contains("no packages") || stderr.contains("go.mod") {
+            return None;
+        }
+        return Some(LspCallGraphResult {
+            edges: Vec::new(),
+            errors: vec![format!("go-callgraph exited with {}: {}", output.status, stderr.chars().take(500).collect::<String>())],
+            definitions_queried: 0,
+            new_edges_found: 0,
+            total_definitions: 0,
+            incomplete: true,
+            missing_toolchains: Vec::new(),
+        });
+    }
+
+    // Parse JSON output: [{"from": "pkg.Func", "to": "pkg.Other"}, ...]
+    #[derive(serde::Deserialize)]
+    struct GoCallEdge {
+        from: String,
+        to: String,
+    }
+
+    let call_edges: Vec<GoCallEdge> = match serde_json::from_slice(&output.stdout) {
+        Ok(edges) => edges,
+        Err(e) => {
+            return Some(LspCallGraphResult {
+                edges: Vec::new(),
+                errors: vec![format!("Failed to parse go-callgraph output: {e}")],
+                definitions_queried: 0,
+                new_edges_found: 0,
+                total_definitions: 0,
+                incomplete: true,
+                missing_toolchains: Vec::new(),
+            });
+        }
+    };
+
+    // Build node lookup by qualified name for matching
+    let node_by_qname: HashMap<&str, &GraphNode> = nodes
+        .iter()
+        .filter(|n| n.deleted_at.is_none() && !n.qualified_name.is_empty())
+        .map(|n| (n.qualified_name.as_str(), n))
+        .collect();
+
+    // Also build by name for simpler matching
+    let node_by_name: HashMap<&str, &GraphNode> = nodes
+        .iter()
+        .filter(|n| n.deleted_at.is_none() && matches!(n.node_type, NodeType::Function | NodeType::Endpoint))
+        .map(|n| (n.name.as_str(), n))
+        .collect();
+
+    // Build existing edge set for dedup
+    let existing_set: HashSet<(String, String)> = existing_edges
+        .iter()
+        .filter(|e| e.deleted_at.is_none() && e.edge_type == EdgeType::Calls)
+        .map(|e| (e.source_id.to_string(), e.target_id.to_string()))
+        .collect();
+
+    let mut new_edges = Vec::new();
+    let total_go_edges = call_edges.len();
+
+    for ge in &call_edges {
+        // Try to resolve from/to to graph nodes
+        let from_node = resolve_go_node(&ge.from, &node_by_qname, &node_by_name);
+        let to_node = resolve_go_node(&ge.to, &node_by_qname, &node_by_name);
+
+        if let (Some(from), Some(to)) = (from_node, to_node) {
+            let key = (from.id.to_string(), to.id.to_string());
+            if !existing_set.contains(&key) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                new_edges.push(GraphEdge {
+                    id: Id::new(&Uuid::new_v4().to_string()),
+                    repo_id: repo_id.clone(),
+                    source_id: from.id.clone(),
+                    target_id: to.id.clone(),
+                    edge_type: EdgeType::Calls,
+                    metadata: None,
+                    first_seen_at: now,
+                    last_seen_at: now,
+                    deleted_at: None,
+                });
+            }
+        }
+    }
+
+    let new_count = new_edges.len();
+    Some(LspCallGraphResult {
+        edges: new_edges,
+        errors: Vec::new(),
+        definitions_queried: total_go_edges,
+        new_edges_found: new_count,
+        total_definitions: total_go_edges,
+        incomplete: false,
+        missing_toolchains: Vec::new(),
+    })
+}
+
+/// Resolve a Go qualified name (e.g., "pkg/path.TypeName.MethodName") to a graph node.
+fn resolve_go_node<'a>(
+    qualified: &str,
+    by_qname: &HashMap<&str, &'a GraphNode>,
+    by_name: &HashMap<&str, &'a GraphNode>,
+) -> Option<&'a GraphNode> {
+    // Direct qualified name match
+    if let Some(n) = by_qname.get(qualified) {
+        return Some(n);
+    }
+    // Try just the function/method part (after last '.')
+    if let Some(short) = qualified.rsplit('.').next() {
+        if let Some(n) = by_name.get(short) {
+            return Some(n);
+        }
+    }
+    // Try TypeName.MethodName pattern
+    let parts: Vec<&str> = qualified.rsplitn(3, '.').collect();
+    if parts.len() >= 2 {
+        let method = parts[0];
+        let type_name = parts[1];
+        let combined = format!("{}.{}", type_name, method);
+        if let Some(n) = by_name.get(combined.as_str()) {
+            return Some(n);
+        }
+    }
+    None
 }
 
 /// Extract call graph from a TypeScript/JavaScript repository using typescript-language-server.
