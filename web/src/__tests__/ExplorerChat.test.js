@@ -1270,3 +1270,187 @@ describe('ExplorerChat session limits', () => {
     expect(isNearLimit).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Graph data freshness indicator tests
+// ---------------------------------------------------------------------------
+describe('Graph data freshness label', () => {
+  // Mirrors the graphFreshnessLabel derivation from ExplorerChat.svelte
+  function computeFreshnessLabel(graphDataAgeSecs, graphDataAgeUpdatedAt) {
+    if (graphDataAgeSecs == null || graphDataAgeUpdatedAt == null) return null;
+    const elapsed = Math.floor((Date.now() - graphDataAgeUpdatedAt) / 1000);
+    const totalSecs = graphDataAgeSecs + elapsed;
+    if (totalSecs < 5) return 'Graph data: just now';
+    if (totalSecs < 60) return `Graph data: ${totalSecs}s ago`;
+    const mins = Math.floor(totalSecs / 60);
+    if (mins < 60) return `Graph data: ${mins}m ago`;
+    return `Graph data: ${Math.floor(mins / 60)}h ago`;
+  }
+
+  it('returns null when no data available', () => {
+    expect(computeFreshnessLabel(null, null)).toBeNull();
+    expect(computeFreshnessLabel(10, null)).toBeNull();
+    expect(computeFreshnessLabel(null, Date.now())).toBeNull();
+  });
+
+  it('shows "just now" for very fresh data', () => {
+    expect(computeFreshnessLabel(0, Date.now())).toBe('Graph data: just now');
+    expect(computeFreshnessLabel(2, Date.now())).toBe('Graph data: just now');
+  });
+
+  it('shows seconds for data under 60s old', () => {
+    const label = computeFreshnessLabel(30, Date.now());
+    expect(label).toBe('Graph data: 30s ago');
+  });
+
+  it('shows minutes for data over 60s old', () => {
+    const label = computeFreshnessLabel(120, Date.now());
+    expect(label).toBe('Graph data: 2m ago');
+  });
+
+  it('shows hours for data over 60m old', () => {
+    const label = computeFreshnessLabel(3600, Date.now());
+    expect(label).toBe('Graph data: 1h ago');
+  });
+
+  it('accounts for local elapsed time since server report', () => {
+    // Server reported 10s ago, but that was 50s ago locally = 60s total = 1m
+    const updatedAt = Date.now() - 50000;
+    const label = computeFreshnessLabel(10, updatedAt);
+    expect(label).toBe('Graph data: 1m ago');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Status message with graph_data_age_secs
+// ---------------------------------------------------------------------------
+describe('Status message graph_data_age_secs handling', () => {
+  function handleStatus(state, msg) {
+    if (msg.status === 'thinking') state.status = 'thinking';
+    else if (msg.status === 'refining') state.status = 'refining';
+    else if (msg.status === 'ready') { state.status = 'ready'; state.agentPath = null; }
+    if (msg.agent_path) state.agentPath = msg.agent_path;
+    if (msg.graph_data_age_secs != null) {
+      state.graphDataAgeSecs = msg.graph_data_age_secs;
+      state.graphDataAgeUpdatedAt = Date.now();
+    }
+    return state;
+  }
+
+  it('captures graph_data_age_secs from status message', () => {
+    const state = { status: 'thinking', agentPath: null, graphDataAgeSecs: null, graphDataAgeUpdatedAt: null };
+    handleStatus(state, { type: 'status', status: 'ready', graph_data_age_secs: 45 });
+    expect(state.graphDataAgeSecs).toBe(45);
+    expect(state.graphDataAgeUpdatedAt).toBeGreaterThan(0);
+  });
+
+  it('ignores graph_data_age_secs when not present', () => {
+    const state = { status: 'ready', agentPath: null, graphDataAgeSecs: null, graphDataAgeUpdatedAt: null };
+    handleStatus(state, { type: 'status', status: 'thinking' });
+    expect(state.graphDataAgeSecs).toBeNull();
+    expect(state.graphDataAgeUpdatedAt).toBeNull();
+  });
+
+  it('updates graph_data_age_secs on subsequent status messages', () => {
+    const state = { status: 'ready', agentPath: null, graphDataAgeSecs: 10, graphDataAgeUpdatedAt: Date.now() - 5000 };
+    handleStatus(state, { type: 'status', status: 'ready', graph_data_age_secs: 0 });
+    expect(state.graphDataAgeSecs).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cache invalidation heuristic tests (mirrors server-side Rust logic)
+// ---------------------------------------------------------------------------
+describe('Cache invalidation heuristic', () => {
+  // Pure JS reimplementation of the two-tier invalidation strategy from
+  // explorer_ws.rs for testing purposes.
+  function shouldInvalidate(text, cacheAgeSeconds) {
+    const qLower = text.toLowerCase();
+
+    // Tier 1: strong freshness signals
+    const strongSignals = [
+      'what changed', 'after push', 'just pushed', 'just committed',
+      'just added', 'just created', 'just deleted', 'just removed',
+      'just modified', 'just updated', 'new code', 'refresh',
+      'reload graph', 'i added', 'i created', 'i deleted',
+      'i removed', 'i modified', 'i updated', 'i changed',
+      'recently added', 'recently created', 'recently changed',
+      'recently modified', 'recently deleted', 'recently removed',
+    ];
+    const strongMatch = strongSignals.some(kw => qLower.includes(kw));
+
+    // Tier 2: stale + entity + change word
+    const stale = cacheAgeSeconds > 60;
+    const entityWords = [
+      'endpoint', 'function', 'method', 'type', 'struct',
+      'module', 'interface', 'handler', 'route', 'api',
+      'class', 'trait', 'enum', 'component', 'service',
+    ];
+    const changeWords = [
+      'new', 'added', 'created', 'deleted', 'removed',
+      'modified', 'updated', 'changed', 'recent', 'latest',
+    ];
+    const tokens = qLower.split(/[^a-z0-9_]+/);
+    const hasEntity = entityWords.some(w => tokens.includes(w));
+    const hasChange = changeWords.some(w => tokens.includes(w));
+    const staleEntityMatch = stale && hasEntity && hasChange;
+
+    return strongMatch || staleEntityMatch;
+  }
+
+  // Strong signal tests
+  it('invalidates on "what changed"', () => {
+    expect(shouldInvalidate('What changed since my last push?', 5)).toBe(true);
+  });
+
+  it('invalidates on "refresh"', () => {
+    expect(shouldInvalidate('Please refresh the graph', 5)).toBe(true);
+  });
+
+  it('invalidates on "I added" regardless of cache age', () => {
+    expect(shouldInvalidate('I added a new handler', 0)).toBe(true);
+  });
+
+  it('invalidates on "just pushed"', () => {
+    expect(shouldInvalidate('I just pushed some changes', 0)).toBe(true);
+  });
+
+  // Tier 2: stale + entity + change word
+  it('invalidates stale cache with entity + change word', () => {
+    // "Show me the new endpoint I added" - cache is 90s old
+    expect(shouldInvalidate('Show me the new endpoint I added', 90)).toBe(true);
+  });
+
+  it('does NOT invalidate fresh cache with entity + change word (no strong signal)', () => {
+    // "new endpoint" has entity + change word but no strong signal phrase,
+    // and cache is only 30s old, so tier 2 should not trigger.
+    expect(shouldInvalidate('Show me the new endpoint', 30)).toBe(false);
+  });
+
+  // False positive reduction
+  it('does NOT invalidate on "What is the latest version of search?" with fresh cache', () => {
+    // "latest" is a change word but "search" is not an entity word, and cache is fresh
+    expect(shouldInvalidate('What is the latest version of search?', 10)).toBe(false);
+  });
+
+  it('does NOT invalidate on generic questions without change/entity words', () => {
+    expect(shouldInvalidate('How does authentication work?', 90)).toBe(false);
+  });
+
+  it('does NOT invalidate on entity word alone without change word', () => {
+    expect(shouldInvalidate('Show me the endpoint handlers', 90)).toBe(false);
+  });
+
+  it('does NOT invalidate on change word alone without entity word', () => {
+    expect(shouldInvalidate('What was recently done?', 90)).toBe(false);
+  });
+
+  // Edge cases
+  it('invalidates stale cache with "latest endpoint"', () => {
+    expect(shouldInvalidate('What is the latest endpoint?', 90)).toBe(true);
+  });
+
+  it('handles mixed case correctly', () => {
+    expect(shouldInvalidate('WHAT CHANGED in the code?', 5)).toBe(true);
+  });
+});

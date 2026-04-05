@@ -1094,7 +1094,13 @@ pub enum ExplorerServerMessage {
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_path: Option<String>,
+        /// Seconds since the graph data cache was last loaded/refreshed.
+        /// Included so the UI can show "Graph data from Xs ago".
+        #[serde(skip_serializing_if = "Option::is_none")]
+        graph_data_age_secs: Option<u64>,
     },
+    /// Non-fatal warning (e.g. deprecation notices).
+    Warning { message: String },
     /// Error.
     Error { message: String },
 }

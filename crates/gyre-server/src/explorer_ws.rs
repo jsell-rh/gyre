@@ -375,6 +375,26 @@ async fn handle_explorer_session(
 
     info!(repo_id = %repo_id, user = %auth.agent_id, "Explorer WebSocket session started");
 
+    // Send deprecation warning if client used ?token= query parameter auth.
+    if auth.deprecated_token_auth {
+        warn!(
+            repo_id = %repo_id,
+            user = %auth.agent_id,
+            "Explorer WS session using deprecated ?token= auth"
+        );
+        let warning = ExplorerServerMessage::Warning {
+            message: "Using deprecated ?token= auth. Please use ticket-based auth \
+                      (POST /api/v1/ws-ticket) for security. The ?token= parameter \
+                      leaks credentials in server logs and browser history."
+                .to_string(),
+        };
+        let _ = sender
+            .send(Message::Text(
+                serialize_msg(&warning).unwrap_or_default().into(),
+            ))
+            .await;
+    }
+
     // Cancellation channel: set to true to cancel the running agent query.
     let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
 
@@ -521,19 +541,86 @@ async fn handle_explorer_session(
                 // expect fresh data (e.g. after a push), force-invalidate regardless
                 // of TTL. Catches the common case where a user pushes code and
                 // immediately asks the explorer about changes.
+                //
+                // Two-tier strategy to reduce false positives:
+                // 1. Strong signals: multi-word phrases that unambiguously indicate
+                //    a desire for fresh data. Always invalidate.
+                // 2. Staleness + entity heuristic: if cache is >60s old AND the
+                //    message contains a code-entity word (function, endpoint, type,
+                //    module, etc.), refresh. This catches "Show me the new endpoint
+                //    I added" without false-positive on "What is the latest version
+                //    of search?" when the cache is still fresh.
                 {
                     let q_lower = text.to_lowercase();
-                    let freshness_keywords = [
+
+                    // Tier 1: strong freshness signals (multi-word or unambiguous)
+                    let strong_signals = [
                         "what changed",
                         "after push",
-                        "latest",
-                        "new code",
                         "just pushed",
                         "just committed",
+                        "just added",
+                        "just created",
+                        "just deleted",
+                        "just removed",
+                        "just modified",
+                        "just updated",
+                        "new code",
                         "refresh",
-                        "updated",
+                        "reload graph",
+                        "i added",
+                        "i created",
+                        "i deleted",
+                        "i removed",
+                        "i modified",
+                        "i updated",
+                        "i changed",
+                        "recently added",
+                        "recently created",
+                        "recently changed",
+                        "recently modified",
+                        "recently deleted",
+                        "recently removed",
                     ];
-                    if freshness_keywords.iter().any(|kw| q_lower.contains(kw)) {
+                    let strong_match = strong_signals.iter().any(|kw| q_lower.contains(kw));
+
+                    // Tier 2: time-based staleness + code-entity word.
+                    // Only triggers when cache is >60s old.
+                    let stale = cache_time.elapsed() > std::time::Duration::from_secs(60);
+                    let entity_words = [
+                        "endpoint",
+                        "function",
+                        "method",
+                        "type",
+                        "struct",
+                        "module",
+                        "interface",
+                        "handler",
+                        "route",
+                        "api",
+                        "class",
+                        "trait",
+                        "enum",
+                        "component",
+                        "service",
+                    ];
+                    let has_entity = entity_words.iter().any(|w| q_lower.contains(w));
+                    let change_words = [
+                        "new", "added", "created", "deleted", "removed", "modified", "updated",
+                        "changed", "recent", "latest",
+                    ];
+                    let has_change = change_words.iter().any(|w| {
+                        // Word-boundary match to avoid false positives like
+                        // "latest" matching inside unrelated sentences when cache
+                        // is fresh. We check that the word appears as a standalone
+                        // token (preceded/followed by non-alphanumeric or string boundary).
+                        q_lower
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .any(|token| token == *w)
+                    });
+                    let stale_entity_match = stale && has_entity && has_change;
+
+                    if strong_match || stale_entity_match {
                         cached_nodes = None;
                         cached_edges = None;
                         cache_time = std::time::Instant::now();
@@ -625,7 +712,9 @@ async fn handle_explorer_session(
                     }
                 }
 
-                send_status(&mut sender, "ready").await;
+                // Include graph data age so the UI can display freshness
+                let age = cache_time.elapsed().as_secs();
+                send_status_full(&mut sender, "ready", None, Some(age)).await;
             }
 
             ExplorerClientMessage::SaveView {
@@ -1252,9 +1341,19 @@ async fn send_status_with_path(
     status: &str,
     agent_path: Option<&str>,
 ) -> bool {
+    send_status_full(sender, status, agent_path, None).await
+}
+
+async fn send_status_full(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    status: &str,
+    agent_path: Option<&str>,
+    graph_data_age_secs: Option<u64>,
+) -> bool {
     let msg = ExplorerServerMessage::Status {
         status: status.to_string(),
         agent_path: agent_path.map(|s| s.to_string()),
+        graph_data_age_secs,
     };
     sender
         .send(Message::Text(
@@ -2570,6 +2669,7 @@ async fn run_explorer_agent(
         let status_msg = ExplorerServerMessage::Status {
             status: status_text.to_string(),
             agent_path: None,
+            graph_data_age_secs: None,
         };
         let _ = sender
             .send(Message::Text(
@@ -2885,6 +2985,7 @@ async fn run_explorer_agent(
             let status_msg = ExplorerServerMessage::Status {
                 status: "Synthesizing answer...".to_string(),
                 agent_path: None,
+                graph_data_age_secs: None,
             };
             let _ = sender
                 .send(Message::Text(

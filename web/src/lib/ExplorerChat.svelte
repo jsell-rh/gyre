@@ -11,6 +11,8 @@
     savedViews = [],
     onSavedViewsUpdate = () => {},
     graphHints = [],
+    graphNodes = [],
+    graphEdges = [],
   } = $props();
 
   // ── Spec path detection ─────────────────────────────────────────────────
@@ -22,6 +24,60 @@
     const matches = [...content.matchAll(SPEC_PATH_RE)];
     // Deduplicate
     return [...new Set(matches.map(m => m[1]))];
+  }
+
+  // ── Systematic spec linkage via GovernedBy edges ─────────────────────────
+  // Edge field accessors (match ExplorerCanvas conventions).
+  function edgeSrc(e) { return e.source_id ?? e.from_node_id ?? e.from; }
+  function edgeTgt(e) { return e.target_id ?? e.to_node_id ?? e.to; }
+  function edgeType(e) { return (e.edge_type ?? e.type ?? '').toLowerCase(); }
+
+  /**
+   * Given a view query, find unique spec paths that govern the scoped nodes
+   * by examining GovernedBy edges. Returns deduplicated spec paths.
+   */
+  function findGoverningSpecs(query) {
+    if (!query?.scope || !graphEdges?.length || !graphNodes?.length) return [];
+    // Determine which node IDs are in scope from the query
+    const scopeType = query.scope?.type ?? (typeof query.scope === 'string' ? query.scope : null);
+    let scopedNodeIds = new Set();
+    if (scopeType === 'focus' && query.scope.node) {
+      // Focus scope: the focal node and its neighbors
+      scopedNodeIds.add(query.scope.node);
+    } else if (scopeType === 'filter' && query.scope.node_types) {
+      // Filter scope: all nodes matching the type filter
+      for (const n of graphNodes) {
+        if (query.scope.node_types.includes(n.node_type)) {
+          scopedNodeIds.add(n.id);
+        }
+      }
+    } else if (scopeType === 'all' || !scopeType) {
+      // All scope: every node
+      for (const n of graphNodes) scopedNodeIds.add(n.id);
+    }
+    // If focus scope, also include depth-1 neighbors
+    if (scopeType === 'focus' && query.scope.node) {
+      for (const e of graphEdges) {
+        if (e.deleted_at) continue;
+        if (edgeSrc(e) === query.scope.node) scopedNodeIds.add(edgeTgt(e));
+        if (edgeTgt(e) === query.scope.node) scopedNodeIds.add(edgeSrc(e));
+      }
+    }
+    // Find GovernedBy edges whose source is in scope
+    const specPaths = new Set();
+    for (const e of graphEdges) {
+      if (e.deleted_at) continue;
+      if (edgeType(e) !== 'governed_by') continue;
+      const src = edgeSrc(e);
+      if (!scopedNodeIds.has(src)) continue;
+      // The target of a GovernedBy edge is the spec node; its name/label is the spec path
+      const tgt = edgeTgt(e);
+      // Look up the target node to get the spec path
+      const targetNode = graphNodes.find(n => n.id === tgt);
+      const specPath = targetNode?.name ?? targetNode?.label ?? tgt;
+      if (specPath) specPaths.add(specPath);
+    }
+    return [...specPaths];
   }
 
   // ── Constants ────────────────────────────────────────────────────────────
@@ -61,6 +117,8 @@
   let messagesEl = $state(null);
   let inputEl = $state(null);
   let streamingText = $state('');
+  let graphDataAgeSecs = $state(null); // Seconds since graph cache was loaded (from server status)
+  let graphDataAgeUpdatedAt = $state(null); // Local timestamp when we last received the age
   let streamingTimeout = null; // Auto-finalize after 65s of no chunks (server LLM timeout is 60s)
   let saveViewInputOpen = $state(false);
   let saveViewInputValue = $state('');
@@ -240,6 +298,9 @@
           messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: streamingText, timestamp: Date.now() }]);
         }
         streamingText = '';
+        // Systematic spec linkage: find specs governing the scoped nodes
+        // via GovernedBy edges, regardless of whether the LLM mentioned them.
+        const governedSpecs = findGoverningSpecs(query);
         // Add as assistant message with view query
         messages = capMessages([...messages, {
           id: nextMsgId++,
@@ -247,6 +308,7 @@
           content: msg.explanation ?? $t('explorer_chat.view_applied'),
           viewQuery: query,
           viewExplanation: msg.explanation ?? null,
+          governedSpecs,
           timestamp: Date.now(),
         }]);
         status = 'ready';
@@ -260,6 +322,11 @@
         else if (msg.status === 'ready') { status = 'ready'; agentPath = null; }
         // Capture agent_path indicator (sent with first "thinking" status)
         if (msg.agent_path) agentPath = msg.agent_path;
+        // Track graph data freshness from server
+        if (msg.graph_data_age_secs != null) {
+          graphDataAgeSecs = msg.graph_data_age_secs;
+          graphDataAgeUpdatedAt = Date.now();
+        }
         break;
       }
       case 'views': {
@@ -267,6 +334,12 @@
         if (msg.views) {
           onSavedViewsUpdate(msg.views);
         }
+        break;
+      }
+      case 'warning': {
+        const warnMsg = msg.message ?? 'Warning';
+        messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: `*${warnMsg}*`, timestamp: Date.now(), isWarning: true }]);
+        scrollToBottom();
         break;
       }
       case 'error': {
@@ -461,6 +534,32 @@
   // Messages before this index are "out of context" (summarized server-side).
   let contextCutoffIndex = $derived(Math.max(0, messages.length - CONTEXT_WINDOW_SIZE));
 
+  // ── Graph data freshness indicator ────────────────────────────────────
+  // Tick counter that increments every 10s to force re-derivation of the
+  // freshness label so it updates in real time ("30s ago" -> "40s ago").
+  let freshnessTick = $state(0);
+  let freshnessTimer = null;
+  $effect(() => {
+    if (graphDataAgeUpdatedAt != null) {
+      freshnessTimer = setInterval(() => { freshnessTick++; }, 10000);
+      return () => { clearInterval(freshnessTimer); freshnessTimer = null; };
+    }
+  });
+
+  let graphFreshnessLabel = $derived.by(() => {
+    // Reference freshnessTick to trigger re-computation
+    void freshnessTick;
+    if (graphDataAgeSecs == null || graphDataAgeUpdatedAt == null) return null;
+    // Total age = server-reported age + time elapsed since we received that report
+    const elapsed = Math.floor((Date.now() - graphDataAgeUpdatedAt) / 1000);
+    const totalSecs = graphDataAgeSecs + elapsed;
+    if (totalSecs < 5) return 'Graph data: just now';
+    if (totalSecs < 60) return `Graph data: ${totalSecs}s ago`;
+    const mins = Math.floor(totalSecs / 60);
+    if (mins < 60) return `Graph data: ${mins}m ago`;
+    return `Graph data: ${Math.floor(mins / 60)}h ago`;
+  });
+
   let statusLabel = $derived.by(() => {
     switch (status) {
       case 'connecting':   return $t('explorer_chat.status_connecting');
@@ -528,6 +627,7 @@
     ws = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (streamingTimeout) clearTimeout(streamingTimeout);
+    if (freshnessTimer) clearInterval(freshnessTimer);
     // Safety: $effect cleanup handles this, but onDestroy may fire first in edge cases
     document.removeEventListener('keydown', onKeyDown);
   });
@@ -543,6 +643,9 @@
         {statusLabel}
         {#if agentPath && (status === 'thinking' || status === 'refining')}
           <span class="agent-path-indicator">via {agentPath === 'sdk' ? 'Claude SDK' : 'native'}</span>
+        {/if}
+        {#if graphFreshnessLabel && status === 'ready'}
+          <span class="graph-freshness" title="Age of cached graph data used by the explorer">{graphFreshnessLabel}</span>
         {/if}
       </span>
     </div>
@@ -648,7 +751,7 @@
             <span class="context-divider-text">Messages above this line are summarized in the AI's memory</span>
           </div>
         {/if}
-        <div class="chat-message {msg.role}" class:error={msg.isError} class:out-of-context={i < contextCutoffIndex}>
+        <div class="chat-message {msg.role}" class:error={msg.isError} class:warning={msg.isWarning} class:out-of-context={i < contextCutoffIndex}>
           {#if i < contextCutoffIndex}
             <span class="out-of-context-label">out of context</span>
           {/if}
@@ -697,6 +800,25 @@
                 {/each}
               </div>
             {/if}
+          {/if}
+          {#if msg.governedSpecs?.length > 0 && onOpenSpec}
+            <div class="message-governed-by">
+              <span class="governed-by-label">Governed by:</span>
+              {#each msg.governedSpecs as specPath}
+                <button
+                  class="governed-by-btn"
+                  onclick={() => onOpenSpec(specPath)}
+                  title="Open {specPath} in spec editor"
+                  type="button"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="11" height="11" aria-hidden="true">
+                    <path d="M9 12l2 2 4-4"/>
+                    <circle cx="12" cy="12" r="10"/>
+                  </svg>
+                  {specPath.split('/').pop()}
+                </button>
+              {/each}
+            </div>
           {/if}
         </div>
       {/each}
@@ -1141,6 +1263,12 @@
     color: var(--color-danger);
   }
 
+  .chat-message.warning .message-content {
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+    border-color: color-mix(in srgb, var(--color-warning) 30%, transparent);
+    color: var(--color-warning);
+  }
+
   .message-meta {
     display: flex;
     align-items: center;
@@ -1300,6 +1428,48 @@
     opacity: 1;
   }
 
+  /* ── Governed-by spec references (systematic, from GovernedBy edges) ── */
+  .message-governed-by {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-top: var(--space-1);
+  }
+
+  .governed-by-label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .governed-by-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px var(--space-2);
+    background: color-mix(in srgb, var(--color-success) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-success) 30%, transparent);
+    border-radius: var(--radius);
+    color: var(--color-success);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .governed-by-btn:hover {
+    background: color-mix(in srgb, var(--color-success) 20%, transparent);
+    border-color: var(--color-success);
+  }
+
+  .governed-by-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
   /* ── Streaming indicator ─────────────────────────────────────────── */
   .streaming-indicator, .thinking-dots {
     display: inline-flex;
@@ -1364,6 +1534,15 @@
     opacity: 0.7;
     font-style: italic;
     margin-left: 2px;
+  }
+
+  .graph-freshness {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    opacity: 0.6;
+    margin-left: 6px;
+    white-space: nowrap;
+    cursor: help;
   }
 
   /* ── Input area ──────────────────────────────────────────────────── */
