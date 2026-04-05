@@ -1927,7 +1927,7 @@
                   <Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
                   <span class="status-explain" class:status-explain-danger={mr.status !== 'merged' && (mr._gateSummary?.failed > 0 || mr.has_conflicts)} class:status-explain-warn={mr.status === 'closed'}>{mrStatusExplain(mr)}</span>
                 </dd>
-                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('mr', entity.id)}</dd>
+                <dt>ID</dt><dd><CopyableId value={entity.id} label={sharedFormatId('mr', entity.id)} copyLabel="MR ID" icon /></dd>
                 {#if mr.description}
                   <dt>Description</dt><dd class="task-description">{mr.description}</dd>
                 {/if}
@@ -1959,10 +1959,10 @@
                   <dt>Agent</dt><dd><button class="entity-link mono" title={mr.agent_id} onclick={() => navigateTo('agent', mr.agent_id)}>{entityName('agent', mr.agent_id)}</button></dd>
                 {/if}
                 {#if mr.repository_id ?? mr.repo_id}
-                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {mr.repository_id ?? mr.repo_id}" onclick={() => copyId(mr.repository_id ?? mr.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.repository_id ?? mr.repo_id); }}>{entityName('repo', mr.repository_id ?? mr.repo_id)}</dd>
+                  <dt>Repo</dt><dd><CopyableId value={mr.repository_id ?? mr.repo_id} label={entityName('repo', mr.repository_id ?? mr.repo_id)} copyLabel="Repo ID" icon /></dd>
                 {/if}
                 {#if mr.author_id && mr.author_id !== mr.author_agent_id}
-                  <dt>Author</dt><dd class="mono copyable" title="Click to copy: {mr.author_id}" onclick={() => copyId(mr.author_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(mr.author_id); }}>{mr.author_id === 'human-reviewer' || mr.author_id === 'system' ? mr.author_id : entityName('agent', mr.author_id)}</dd>
+                  <dt>Author</dt><dd><CopyableId value={mr.author_id} label={mr.author_id === 'human-reviewer' || mr.author_id === 'system' ? mr.author_id : entityName('agent', mr.author_id)} copyLabel="Author ID" icon /></dd>
                 {/if}
                 {#if mr.task_id}
                   <dt>Task</dt><dd><button class="entity-link" title={mr.task_id} onclick={() => navigateTo('task', mr.task_id)}>{entityName('task', mr.task_id)}</button></dd>
@@ -2343,7 +2343,7 @@
                   <Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'idle' || ag.status === 'completed' ? 'info' : ag.status === 'failed' || ag.status === 'dead' ? 'danger' : ag.status === 'stopped' ? 'muted' : 'muted'} />
                   <span class="status-explain" class:status-explain-danger={ag.status === 'failed' || ag.status === 'dead'} class:status-explain-warn={ag.status === 'stopped'}>{agentStatusExplain(ag)}</span>
                 </dd>
-                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('agent', entity.id)}</dd>
+                <dt>ID</dt><dd><CopyableId value={entity.id} label={sharedFormatId('agent', entity.id)} copyLabel="Agent ID" icon /></dd>
                 {#if ag.agent_type}
                   <dt>Type</dt><dd>{ag.agent_type}</dd>
                 {/if}
@@ -2376,13 +2376,13 @@
                   <dt>Spec</dt><dd><button class="entity-link mono" title={ag.spec_path} onclick={() => navigateTo('spec', ag.spec_path, { path: ag.spec_path, repo_id: ag.repo_id })}>{ag.spec_path.split('/').pop()}</button></dd>
                 {/if}
                 {#if ag.repo_id}
-                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {ag.repo_id}" onclick={() => copyId(ag.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(ag.repo_id); }}>{entityName('repo', ag.repo_id)}</dd>
+                  <dt>Repo</dt><dd><CopyableId value={ag.repo_id} label={entityName('repo', ag.repo_id)} copyLabel="Repo ID" icon /></dd>
                 {/if}
                 {#if ag.mr_id}
                   <dt>MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{entityName('mr', ag.mr_id)}</button></dd>
                 {/if}
                 {#if ag.workspace_id}
-                  <dt>Workspace</dt><dd class="mono copyable" title="Click to copy: {ag.workspace_id}" onclick={() => copyId(ag.workspace_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(ag.workspace_id); }}>{entityName('workspace', ag.workspace_id)}</dd>
+                  <dt>Workspace</dt><dd><CopyableId value={ag.workspace_id} label={entityName('workspace', ag.workspace_id)} copyLabel="Workspace ID" icon /></dd>
                 {/if}
                 {#if ag.created_at}
                   <dt>Spawned</dt><dd>{fmtDate(ag.created_at)}</dd>
@@ -2402,7 +2402,7 @@
                 <div class="agent-container-info agent-conversation-link">
                   <span class="progress-section-label">Agent Reasoning</span>
                   <button class="entity-link" onclick={() => { activeTab = 'ask-why'; }} title="View the full conversation transcript of this agent's work">
-                    <code class="sha-badge mono">{ag.conversation_sha.slice(0, 7)}</code>
+                    <CopyableId value={ag.conversation_sha} variant="sha" copyLabel="Conversation SHA" />
                     <span class="att-conv-arrow">View agent reasoning transcript</span>
                   </button>
                   <p class="agent-conversation-desc">This agent's full LLM conversation is preserved for provenance and can be replayed.</p>
@@ -2673,7 +2673,7 @@
                   <Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} />
                   <span class="status-explain" class:status-explain-danger={tk.status === 'failed' || tk.status === 'blocked'} class:status-explain-warn={tk.status === 'cancelled'}>{taskStatusExplain(tk)}</span>
                 </dd>
-                <dt>ID</dt><dd class="mono copyable" title="Click to copy: {entity.id}" onclick={() => copyId(entity.id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(entity.id); }}>{sharedFormatId('task', entity.id)}</dd>
+                <dt>ID</dt><dd><CopyableId value={entity.id} label={sharedFormatId('task', entity.id)} copyLabel="Task ID" icon /></dd>
                 {#if tk.priority}
                   <dt>Priority</dt>
                   <dd>
@@ -2699,7 +2699,7 @@
                   <dt>Agent</dt><dd><button class="entity-link mono" title={tk.assigned_to} onclick={() => navigateTo('agent', tk.assigned_to)}>{entityName('agent', tk.assigned_to)}</button></dd>
                 {/if}
                 {#if tk.repo_id}
-                  <dt>Repo</dt><dd class="mono copyable" title="Click to copy: {tk.repo_id}" onclick={() => copyId(tk.repo_id)} role="button" tabindex="0" onkeydown={(e) => { if (e.key === 'Enter') copyId(tk.repo_id); }}>{entityName('repo', tk.repo_id)}</dd>
+                  <dt>Repo</dt><dd><CopyableId value={tk.repo_id} label={entityName('repo', tk.repo_id)} copyLabel="Repo ID" icon /></dd>
                 {/if}
                 {#if tk.labels?.length > 0}
                   <dt>Labels</dt><dd>{tk.labels.join(', ')}</dd>
@@ -2938,7 +2938,7 @@
           {:else}
             <dl class="entity-meta">
               <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
-              <dt>{$t('detail_panel.id')}</dt><dd class="mono" title={entity.id}>{sharedFormatId(entity.type, entity.id)}</dd>
+              <dt>{$t('detail_panel.id')}</dt><dd><CopyableId value={entity.id} label={sharedFormatId(entity.type, entity.id)} copyLabel="Node ID" icon /></dd>
               {#if entity.data?.status}
                 <dt>{$t('detail_panel.status')}</dt><dd>{entity.data.status}</dd>
               {/if}
