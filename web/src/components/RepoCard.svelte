@@ -27,6 +27,12 @@
     failedMrs = [],
     /** @type {Array} Merge queue items for this repo */
     queueItems = [],
+    /** @type {Array} Pending specs for this repo (for inline approve/reject) */
+    pendingSpecs = [],
+    /** @type {Function} Quick approve spec callback */
+    onApproveSpec = undefined,
+    /** @type {Function} Quick reject spec callback */
+    onRejectSpec = undefined,
     onclick = undefined,
     onStatClick = undefined,
   } = $props();
@@ -110,6 +116,27 @@
             {#if latestMr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{latestMr._gates.passed}</span>{/if}
             {#if latestMr._gates.failed > 0}<span class="gate-mini gate-mini-fail">✗{latestMr._gates.failed}</span>{/if}
           </span>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Pending specs inline — approve/reject without drilling down -->
+    {#if pendingSpecs.length > 0}
+      <div class="repo-pending-specs">
+        {#each pendingSpecs.slice(0, 2) as spec}
+          {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
+          <div class="repo-pending-spec" onclick={(e) => e.stopPropagation()}>
+            <button class="repo-pending-spec-name" onclick={(e) => { e.stopPropagation(); goToEntityDetail?.('spec', spec.path, { path: spec.path, repo_id: repo.id }); }} title="View spec: {specName}">
+              {specName}
+            </button>
+            <span class="repo-pending-spec-actions">
+              <button class="repo-spec-action repo-spec-approve" onclick={(e) => { e.stopPropagation(); onApproveSpec?.(spec); }} title="Approve this spec">Approve</button>
+              <button class="repo-spec-action repo-spec-reject" onclick={(e) => { e.stopPropagation(); onRejectSpec?.(spec); }} title="Reject this spec">Reject</button>
+            </span>
+          </div>
+        {/each}
+        {#if pendingSpecs.length > 2}
+          <span class="repo-pending-more">{pendingSpecs.length - 2} more pending</span>
         {/if}
       </div>
     {/if}
@@ -316,6 +343,88 @@
   .gate-mini-more { color: var(--color-text-muted); font-style: italic; }
 
   /* Merge queue strip */
+  /* Pending specs inline */
+  .repo-pending-specs {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-1) var(--space-2);
+    background: color-mix(in srgb, var(--color-warning) 6%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 20%, transparent);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+  }
+
+  .repo-pending-spec {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .repo-pending-spec-name {
+    flex: 1;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    font-weight: 500;
+    color: var(--color-text);
+    padding: 0;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .repo-pending-spec-name:hover {
+    color: var(--color-primary);
+    text-decoration: underline;
+  }
+
+  .repo-pending-spec-actions {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+
+  .repo-spec-action {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all var(--transition-fast);
+  }
+
+  .repo-spec-approve {
+    background: color-mix(in srgb, var(--color-success) 15%, transparent);
+    color: var(--color-success);
+  }
+
+  .repo-spec-approve:hover {
+    background: var(--color-success);
+    color: white;
+  }
+
+  .repo-spec-reject {
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    color: var(--color-danger);
+  }
+
+  .repo-spec-reject:hover {
+    background: var(--color-danger);
+    color: white;
+  }
+
+  .repo-pending-more {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
   .repo-queue-strip {
     display: flex;
     align-items: center;

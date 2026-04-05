@@ -1243,6 +1243,9 @@
                       failedMrs={wsMrs.filter(m => (m.repository_id ?? m.repo_id) === repo.id && m._gates?.failed > 0)}
                       specBreakdown={repoSpecBreakdown(repo)}
                       latestMr={repoLatestMr(repo)}
+                      pendingSpecs={specs.filter(s => s.repo_id === repo.id && (s.approval_status ?? s.status) === 'pending')}
+                      onApproveSpec={(spec) => quickApproveSpec(spec)}
+                      onRejectSpec={(spec) => quickRejectSpec(spec)}
                       queueItems={mergeQueueItems.filter(item => {
                         const mr = item._mr;
                         return (mr?.repository_id ?? mr?.repo_id) === repo.id;
