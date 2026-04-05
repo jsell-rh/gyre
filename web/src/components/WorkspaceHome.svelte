@@ -987,7 +987,7 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Workspace header (lean: name + status + actions) ──────── -->
+      <!-- ── Workspace header (lean: name + status sentence) ──────── -->
       <header class="ws-header">
         <div class="ws-header-top-row">
           <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
@@ -999,19 +999,7 @@
           {/if}
         </div>
         {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
-          {#if statusItems.length > 0}
-            <div class="ws-header-status-items">
-              {#each statusItems as item}
-                {@const singleRepo = repos.length === 1 ? repos[0] : null}
-                <button class="ws-status-chip ws-status-chip-{item.variant}" onclick={() => { if (singleRepo && item.tab) { onSelectRepo?.(singleRepo, item.tab); } else { wsTab = item.tab; } }}>
-                  <span class="ws-status-icon">{item.icon}</span>
-                  {item.text}
-                </button>
-              {/each}
-            </div>
-          {:else}
-            <p class="ws-header-status">{statusSentence}</p>
-          {/if}
+          <p class="ws-header-status">{statusSentence}</p>
         {/if}
       </header>
 
@@ -1071,7 +1059,6 @@
             <button class="pipeline-detail-close" onclick={() => { wsTab = null; }} title="Close" aria-label="Close panel">✕</button>
           </div>
           <div class="pipeline-detail-body">
-            <!-- Group by repo for quick navigation -->
             {#each repos as repo (repo.id)}
               {@const repoSpecs = wsTab === 'specs' ? specs.filter(s => s.repo_id === repo.id) : []}
               {@const repoTasksFiltered = wsTab === 'tasks' ? wsTasks.filter(t => t.repo_id === repo.id) : []}
@@ -1107,196 +1094,118 @@
         </div>
       {/if}
 
-      <!-- ── Main content: single-column layout ──────────────────── -->
-      <div class="ws-main-content">
+      <!-- ── Two-column layout: main (repos) + sidebar (status/activity) ──── -->
+      <div class="ws-two-col">
 
-          <!-- Action Needed (compact, dismissible) -->
-          {#if !decisionsLoading && actionableNotifications.length > 0}
-            {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
-            <section class="ws-decisions-section" class:decisions-danger={hasDangerDecision} data-testid="section-decisions">
-              <div class="decisions-header">
-                <h2 class="decisions-title">
-                  {actionableNotifications.length} item{actionableNotifications.length !== 1 ? 's need' : ' needs'} attention
-                </h2>
-                {#if actionableNotifications.length > 3}
-                  <button class="section-btn" onclick={() => showAllDecisions = !showAllDecisions}>
-                    {showAllDecisions ? 'Show less' : `Show all`}
-                  </button>
-                {/if}
-              </div>
-              <div class="decisions-list">
-                {#each (showAllDecisions ? actionableNotifications : actionableNotifications.slice(0, 3)) as n (n.id)}
-                  {@const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type}
-                  {@const body = getBody(n)}
-                  {@const aState = actionStates[n.id]}
-                  {@const severity = nt === 'gate_failure' || nt === 'agent_failed' ? 'danger' : nt === 'spec_approval' || nt === 'mr_needs_review' ? 'action' : 'warn'}
-                  <div class="decision-item decision-severity-{severity}" class:decision-resolved={aState?.success}>
-                    <div class="decision-icon decision-icon-{severity}">
-                      {TYPE_ICONS[nt] ?? '?'}
-                    </div>
-                    <button class="decision-body" onclick={() => {
-                      if (body.mr_id) nav('mr', body.mr_id, { repo_id: n.repo_id, _openTab: nt === 'gate_failure' ? 'gates' : undefined });
-                      else if (body.agent_id) nav('agent', body.agent_id, { repo_id: n.repo_id, _openTab: nt === 'agent_failed' ? 'history' : undefined });
-                      else if (body.task_id) nav('task', body.task_id, { repo_id: n.repo_id });
-                      else if (body.spec_path) {
-                        const sp = normalizeSpecPath(body.spec_path);
-                        nav('spec', sp, { path: sp, repo_id: n.repo_id });
-                      }
-                    }}>
-                      <span class="decision-type">{typeLabel(nt)}{#if n.repo_id && repoMap[n.repo_id]} · {repoMap[n.repo_id].name}{/if}</span>
-                      <span class="decision-title">{n.title ?? n.message ?? ''}</span>
-                      {#if nt === 'gate_failure' && body.gate_name}
-                        <span class="decision-detail">
-                          Gate "{body.gate_name}" failed{#if body.gate_type} ({body.gate_type.replace(/_/g, ' ')}){/if} — merge blocked
-                          {#if body.error}<code class="decision-error-preview">{body.error.split('\n')[0]?.slice(0, 100)}</code>{/if}
-                        </span>
-                      {:else if nt === 'gate_failure' && body.mr_id}
-                        <span class="decision-detail">Quality gate failed on {entityName('mr', body.mr_id)}</span>
-                      {:else if nt === 'agent_failed' && body.agent_name}
-                        <span class="decision-detail">Agent "{body.agent_name}" stopped — check logs for root cause</span>
-                      {:else if nt === 'agent_failed' && body.agent_id}
-                        <span class="decision-detail">{entityName('agent', body.agent_id)} encountered an error</span>
-                      {:else if nt === 'spec_approval' && body.spec_path}
-                        <span class="decision-detail">Agents cannot begin until "{body.spec_path.split('/').pop()?.replace(/\.md$/, '')}" is approved</span>
-                      {:else if nt === 'mr_needs_review' && body.mr_id}
-                        <span class="decision-detail">{entityName('mr', body.mr_id)} is ready for human review</span>
-                      {:else if nt === 'budget_warning'}
-                        <span class="decision-detail">Budget threshold exceeded — consider adjusting limits</span>
-                      {/if}
-                      {#if n.created_at}
-                        <span class="decision-time">{relTime(n.created_at)}</span>
-                      {/if}
-                    </button>
-                    <div class="decision-actions">
-                      {#if aState?.success}
-                        <span class="decision-done">{aState.message}</span>
-                      {:else if aState?.loading}
-                        <span class="decision-loading">...</span>
-                      {:else}
-                        {#if nt === 'spec_approval'}
-                          <button class="inline-action-btn inline-action-approve" onclick={() => handleApproveSpec(n)}>Approve</button>
-                          <button class="inline-action-btn inline-action-reject" onclick={() => handleRejectSpec(n)}>Reject</button>
-                        {:else if nt === 'gate_failure'}
-                          <button class="inline-action-btn inline-action-approve" onclick={() => handleRetry(n)}>Retry</button>
-                        {:else if nt === 'mr_needs_review'}
-                          <button class="inline-action-btn inline-action-approve" onclick={() => { const mrId = body.mr_id; if (mrId) nav('mr', mrId, { repo_id: n.repo_id }); }}>Review</button>
-                        {/if}
-                        <button class="inline-action-btn inline-action-reject" onclick={() => handleDismiss(n)} title="Dismiss">✕</button>
-                      {/if}
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            </section>
-          {/if}
+        <!-- ══ Main column: action items + repos ═════════════════════ -->
+        <div class="ws-main-content">
 
-          <!-- Specs Awaiting Review (primary human touchpoint) -->
-          {#if !specsLoading}
+          <!-- Action Needed: combined decisions + pending specs (compact) -->
+          {#if !decisionsLoading && !specsLoading}
             {@const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending')}
-            {#if pendingSpecs.length > 0}
-              <section class="ws-pending-specs-section" data-testid="section-pending-specs">
-                <h2 class="section-heading">Specs awaiting review <span class="pending-specs-badge">{pendingSpecs.length}</span></h2>
-                <div class="pending-specs-list">
-                  {#each pendingSpecs as spec (spec.path)}
-                    {@const specRepo = repoMap[spec.repo_id]}
-                    {@const actionState = specActionStates[spec.path]}
-                    <div class="pending-spec-item" class:pending-spec-resolved={actionState === 'approved' || actionState === 'rejected'}>
-                      <button class="pending-spec-body" onclick={() => nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id })}>
-                        <span class="pending-spec-name">{spec.path.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</span>
-                        <span class="pending-spec-meta">
-                          {#if specRepo}<span class="pending-spec-repo">{specRepo.name}</span>{/if}
-                          {#if spec.kind}<span class="pending-spec-kind">{spec.kind}</span>{/if}
-                          {#if spec.created_at ?? spec.synced_at}
-                            <span class="pending-spec-time">pushed {relTime(spec.created_at ?? spec.synced_at)}</span>
+            {@const allActionItems = [...actionableNotifications.map(n => ({ kind: 'notif', n })), ...pendingSpecs.map(s => ({ kind: 'spec', s }))]}
+            {#if allActionItems.length > 0}
+              {@const hasDangerDecision = actionableNotifications.some(n => { const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type; return nt === 'gate_failure' || nt === 'agent_failed'; })}
+              <section class="ws-decisions-section" class:decisions-danger={hasDangerDecision} data-testid="section-decisions">
+                <div class="decisions-header">
+                  <h2 class="decisions-title">
+                    {allActionItems.length} item{allActionItems.length !== 1 ? 's need' : ' needs'} your attention
+                  </h2>
+                  {#if allActionItems.length > 4}
+                    <button class="section-btn" onclick={() => showAllDecisions = !showAllDecisions}>
+                      {showAllDecisions ? 'Show less' : `Show all ${allActionItems.length}`}
+                    </button>
+                  {/if}
+                </div>
+                <div class="decisions-list">
+                  {#each (showAllDecisions ? allActionItems : allActionItems.slice(0, 4)) as item}
+                    {#if item.kind === 'notif'}
+                      {@const n = item.n}
+                      {@const nt = NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type}
+                      {@const body = getBody(n)}
+                      {@const aState = actionStates[n.id]}
+                      {@const severity = nt === 'gate_failure' || nt === 'agent_failed' ? 'danger' : nt === 'spec_approval' || nt === 'mr_needs_review' ? 'action' : 'warn'}
+                      <div class="decision-item decision-severity-{severity}" class:decision-resolved={aState?.success}>
+                        <div class="decision-icon decision-icon-{severity}">
+                          {TYPE_ICONS[nt] ?? '?'}
+                        </div>
+                        <button class="decision-body" onclick={() => {
+                          if (body.mr_id) nav('mr', body.mr_id, { repo_id: n.repo_id, _openTab: nt === 'gate_failure' ? 'gates' : undefined });
+                          else if (body.agent_id) nav('agent', body.agent_id, { repo_id: n.repo_id, _openTab: nt === 'agent_failed' ? 'history' : undefined });
+                          else if (body.task_id) nav('task', body.task_id, { repo_id: n.repo_id });
+                          else if (body.spec_path) {
+                            const sp = normalizeSpecPath(body.spec_path);
+                            nav('spec', sp, { path: sp, repo_id: n.repo_id });
+                          }
+                        }}>
+                          <span class="decision-type">{typeLabel(nt)}{#if n.repo_id && repoMap[n.repo_id]} · {repoMap[n.repo_id].name}{/if}</span>
+                          <span class="decision-title">{n.title ?? n.message ?? ''}</span>
+                          {#if nt === 'gate_failure' && body.gate_name}
+                            <span class="decision-detail">Gate "{body.gate_name}" failed{#if body.gate_type} ({body.gate_type.replace(/_/g, ' ')}){/if} — merge blocked</span>
+                          {:else if nt === 'gate_failure' && body.mr_id}
+                            <span class="decision-detail">Quality gate failed on {entityName('mr', body.mr_id)}</span>
+                          {:else if nt === 'agent_failed' && body.agent_name}
+                            <span class="decision-detail">Agent "{body.agent_name}" stopped — check logs</span>
+                          {:else if nt === 'spec_approval' && body.spec_path}
+                            <span class="decision-detail">Agents blocked until approved</span>
+                          {:else if nt === 'mr_needs_review'}
+                            <span class="decision-detail">Ready for human review</span>
+                          {:else if nt === 'budget_warning'}
+                            <span class="decision-detail">Budget threshold exceeded</span>
                           {/if}
-                        </span>
-                      </button>
-                      <div class="pending-spec-actions">
-                        {#if actionState === 'loading'}
-                          <span class="decision-loading">...</span>
-                        {:else if actionState === 'approved'}
-                          <span class="pending-spec-done">Approved</span>
-                        {:else if actionState === 'rejected'}
-                          <span class="pending-spec-done">Rejected</span>
-                        {:else if actionState === 'error'}
-                          <span class="pending-spec-error">Failed</span>
-                        {:else}
-                          <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)}>Approve</button>
-                          <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)}>Reject</button>
-                        {/if}
+                        </button>
+                        <div class="decision-actions">
+                          {#if aState?.success}
+                            <span class="decision-done">{aState.message}</span>
+                          {:else if aState?.loading}
+                            <span class="decision-loading">...</span>
+                          {:else}
+                            {#if nt === 'spec_approval'}
+                              <button class="inline-action-btn inline-action-approve" onclick={() => handleApproveSpec(n)}>Approve</button>
+                              <button class="inline-action-btn inline-action-reject" onclick={() => handleRejectSpec(n)}>Reject</button>
+                            {:else if nt === 'gate_failure'}
+                              <button class="inline-action-btn inline-action-approve" onclick={() => handleRetry(n)}>Retry</button>
+                            {:else if nt === 'mr_needs_review'}
+                              <button class="inline-action-btn inline-action-approve" onclick={() => { const mrId = body.mr_id; if (mrId) nav('mr', mrId, { repo_id: n.repo_id }); }}>Review</button>
+                            {/if}
+                            <button class="inline-action-btn inline-action-reject" onclick={() => handleDismiss(n)} title="Dismiss">✕</button>
+                          {/if}
+                        </div>
                       </div>
-                    </div>
+                    {:else}
+                      {@const spec = item.s}
+                      {@const specRepo = repoMap[spec.repo_id]}
+                      {@const actionState = specActionStates[spec.path]}
+                      <div class="decision-item decision-severity-action" class:decision-resolved={actionState === 'approved' || actionState === 'rejected'}>
+                        <div class="decision-icon decision-icon-action">!</div>
+                        <button class="decision-body" onclick={() => nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id })}>
+                          <span class="decision-type">Spec review{#if specRepo} · {specRepo.name}{/if}</span>
+                          <span class="decision-title">{spec.path.split('/').pop()?.replace(/\.md$/, '') ?? spec.path}</span>
+                          <span class="decision-detail">Agents blocked until approved{#if spec.created_at ?? spec.synced_at} · pushed {relTime(spec.created_at ?? spec.synced_at)}{/if}</span>
+                        </button>
+                        <div class="decision-actions">
+                          {#if actionState === 'loading'}
+                            <span class="decision-loading">...</span>
+                          {:else if actionState === 'approved'}
+                            <span class="decision-done">Approved</span>
+                          {:else if actionState === 'rejected'}
+                            <span class="decision-done">Rejected</span>
+                          {:else if actionState === 'error'}
+                            <span class="pending-spec-error">Failed</span>
+                          {:else}
+                            <button class="inline-action-btn inline-action-approve" onclick={(e) => quickApproveSpec(spec, e)}>Approve</button>
+                            <button class="inline-action-btn inline-action-reject" onclick={(e) => quickRejectSpec(spec, e)}>Reject</button>
+                          {/if}
+                        </div>
+                      </div>
+                    {/if}
                   {/each}
                 </div>
               </section>
             {/if}
           {/if}
 
-          <!-- Active Agents (live work indicator) -->
-          {#if !agentsLoading && wsAgents.filter(a => a.status === 'active').length > 0}
-            {@const activeList = wsAgents.filter(a => a.status === 'active')}
-            <section class="ws-active-agents" data-testid="section-active-agents">
-              <h2 class="section-heading"><span class="live-dot"></span> {activeList.length} agent{activeList.length !== 1 ? 's' : ''} working</h2>
-              <div class="active-agents-grid">
-                {#each activeList as agent (agent.id)}
-                  {@const agentRepo = repoMap[agent.repo_id]}
-                  <button class="active-agent-card" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
-                    <div class="active-agent-header">
-                      <span class="active-agent-name">{agent.name ?? formatId('agent', agent.id)}</span>
-                      {#if agent.spawned_at ?? agent.created_at}
-                        <span class="active-agent-time">{formatDuration(agent.spawned_at ?? agent.created_at)}</span>
-                      {/if}
-                    </div>
-                    <div class="active-agent-context">
-                      {#if agent.spec_path}
-                        <span class="active-agent-spec">{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>
-                      {/if}
-                      {#if agent.current_task_id ?? agent.task_id}
-                        <span class="active-agent-task">{entityName('task', agent.current_task_id ?? agent.task_id)}</span>
-                      {/if}
-                    </div>
-                    <div class="active-agent-actions">
-                      {#if agentRepo}<span class="active-agent-repo">{agentRepo.name}</span>{/if}
-                      <span class="active-agent-view">View logs</span>
-                    </div>
-                  </button>
-                {/each}
-              </div>
-            </section>
-          {/if}
-
-          <!-- Merge Queue (items awaiting merge) -->
-          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
-            <section class="ws-merge-queue-section" data-testid="section-merge-queue">
-              <h2 class="section-heading">Merge Queue <span class="queue-count-badge">{mergeQueueItems.length}</span></h2>
-              <div class="merge-queue-list">
-                {#each mergeQueueItems as item, i (item.merge_request_id ?? item.mr_id ?? i)}
-                  {@const mrId = item.merge_request_id ?? item.mr_id}
-                  {@const mr = item._mr ?? {}}
-                  {@const mrRepo = repoMap[mr.repository_id ?? mr.repo_id]}
-                  <button class="merge-queue-item" onclick={() => nav('mr', mrId, { repo_id: mr.repository_id ?? mr.repo_id, title: item._title })}>
-                    <span class="queue-position">#{i + 1}</span>
-                    <div class="queue-item-info">
-                      <span class="queue-item-title">{item._title}</span>
-                      <span class="queue-item-meta">
-                        {#if item._branch}<span class="queue-item-branch">{item._branch}</span>{/if}
-                        {#if mrRepo}<span class="queue-item-repo">{mrRepo.name}</span>{/if}
-                        {#if item._spec_ref}<span class="queue-item-spec">{item._spec_ref.split('/').pop()?.replace(/\.md$/, '').replace(/@.*$/, '')}</span>{/if}
-                      </span>
-                    </div>
-                    {#if item._deps?.length > 0}
-                      <span class="queue-item-deps" title="Depends on {item._deps.length} other MR{item._deps.length !== 1 ? 's' : ''}">
-                        {item._deps.length} dep{item._deps.length !== 1 ? 's' : ''}
-                      </span>
-                    {/if}
-                    <span class="queue-item-status queue-item-status-{item._status ?? 'pending'}">{item._status === 'merged' ? 'Merged' : item._status === 'open' ? 'Open' : 'Queued'}</span>
-                  </button>
-                {/each}
-              </div>
-            </section>
-          {/if}
-
-          <!-- Repos (primary content) -->
+          <!-- Repos (primary content — the main thing users interact with) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
               <h2 class="section-heading">Repositories</h2>
@@ -1393,79 +1302,82 @@
               {/if}
             </div>
           </section>
+        </div><!-- .ws-main-content -->
 
-          <!-- Recently Merged — celebrate shipped autonomous work -->
+        <!-- ══ Sidebar: live status + activity ═══════════════════════ -->
+        <aside class="ws-sidebar">
+
+          <!-- Active Agents (live work — most important sidebar widget) -->
+          {#if !agentsLoading && wsAgents.filter(a => a.status === 'active').length > 0}
+            {@const activeList = wsAgents.filter(a => a.status === 'active')}
+            <div class="sidebar-widget sidebar-widget-live" data-testid="section-active-agents">
+              <h3 class="sidebar-widget-title"><span class="live-dot"></span> {activeList.length} agent{activeList.length !== 1 ? 's' : ''} working</h3>
+              {#each activeList as agent (agent.id)}
+                {@const agentRepo = repoMap[agent.repo_id]}
+                <button class="sidebar-agent" onclick={() => nav('agent', agent.id, { repo_id: agent.repo_id, name: agent.name })}>
+                  <span class="sidebar-agent-name">{agent.name ?? formatId('agent', agent.id)}</span>
+                  <span class="sidebar-agent-meta">
+                    {#if agent.spec_path}<span>{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}</span>{/if}
+                    {#if agentRepo}<span class="sidebar-agent-repo">{agentRepo.name}</span>{/if}
+                    {#if agent.spawned_at ?? agent.created_at}<span class="sidebar-agent-time">{formatDuration(agent.spawned_at ?? agent.created_at)}</span>{/if}
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          <!-- Merge Queue -->
+          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
+            <div class="sidebar-widget" data-testid="section-merge-queue">
+              <h3 class="sidebar-widget-title">Merge Queue <span class="sidebar-count">{mergeQueueItems.length}</span></h3>
+              {#each mergeQueueItems.slice(0, 5) as item, i (item.merge_request_id ?? item.mr_id ?? i)}
+                {@const mrId = item.merge_request_id ?? item.mr_id}
+                {@const mr = item._mr ?? {}}
+                <button class="sidebar-queue-item" onclick={() => nav('mr', mrId, { repo_id: mr.repository_id ?? mr.repo_id, title: item._title })}>
+                  <span class="sidebar-queue-pos">#{i + 1}</span>
+                  <span class="sidebar-queue-title">{item._title}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          <!-- Recently Shipped -->
           {#if !mrsLoading}
             {@const recentlyMerged = wsMrs.filter(m => m.status === 'merged').sort((a, b) => (b.merged_at ?? b.updated_at ?? 0) - (a.merged_at ?? a.updated_at ?? 0)).slice(0, 5)}
             {#if recentlyMerged.length > 0}
-              <details class="ws-activity-details" open>
-                <summary class="ws-activity-summary">
-                  <h2 class="section-heading section-heading-inline">Recently Shipped</h2>
-                  <span class="activity-count-badge">{recentlyMerged.length}</span>
-                </summary>
-                <div class="recently-merged-list">
-                  {#each recentlyMerged as mr (mr.id)}
-                    {@const mrRepo = repoMap[mr.repository_id ?? mr.repo_id]}
-                    {@const specPath = mr.spec_ref?.split('@')[0]}
-                    {@const agentId = mr.author_agent_id ?? mr.agent_id}
-                    <button class="recently-merged-item" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })}>
-                      <div class="merged-item-main">
-                        <span class="merged-item-check">✓</span>
-                        <div class="merged-item-info">
-                          <span class="merged-item-title">{mr.title ?? 'Untitled'}</span>
-                          <span class="merged-item-meta">
-                            {#if specPath}
-                              <span class="merged-meta-spec">{specPath.split('/').pop()?.replace(/\.md$/, '')}</span>
-                              <span class="merged-meta-arrow">→</span>
-                            {/if}
-                            {#if agentId}
-                              <span class="merged-meta-agent">{entityName('agent', agentId)}</span>
-                              <span class="merged-meta-arrow">→</span>
-                            {/if}
-                            <span class="merged-meta-status">merged</span>
-                            {#if mr.merged_at ?? mr.updated_at}
-                              <span class="merged-meta-time">{relTime(mr.merged_at ?? mr.updated_at)}</span>
-                            {/if}
-                          </span>
-                        </div>
-                      </div>
-                      <div class="merged-item-right">
-                        {#if mr.diff_stats}
-                          <span class="merged-diff-stats">
-                            <span class="diff-ins-tiny">+{mr.diff_stats.insertions ?? 0}</span>
-                            <span class="diff-del-tiny">-{mr.diff_stats.deletions ?? 0}</span>
-                          </span>
-                        {/if}
-                        {#if mr._gates?.total > 0}
-                          <span class="merged-gates-mini" title="{mr._gates.passed}/{mr._gates.total} gates passed">
-                            ✓{mr._gates.passed}
-                          </span>
-                        {/if}
-                        {#if mrRepo}
-                          <span class="merged-repo-badge">{mrRepo.name}</span>
-                        {/if}
-                      </div>
-                    </button>
-                  {/each}
-                </div>
-              </details>
+              <div class="sidebar-widget">
+                <h3 class="sidebar-widget-title">Recently Shipped</h3>
+                {#each recentlyMerged as mr (mr.id)}
+                  {@const mrRepo = repoMap[mr.repository_id ?? mr.repo_id]}
+                  {@const specPath = mr.spec_ref?.split('@')[0]}
+                  <button class="sidebar-shipped-item" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })}>
+                    <span class="sidebar-shipped-check">✓</span>
+                    <div class="sidebar-shipped-info">
+                      <span class="sidebar-shipped-title">{mr.title ?? 'Untitled'}</span>
+                      <span class="sidebar-shipped-meta">
+                        {#if specPath}{specPath.split('/').pop()?.replace(/\.md$/, '')} →{/if}
+                        merged {relTime(mr.merged_at ?? mr.updated_at)}
+                        {#if mr.diff_stats}<span class="diff-ins-tiny">+{mr.diff_stats.insertions ?? 0}</span><span class="diff-del-tiny">-{mr.diff_stats.deletions ?? 0}</span>{/if}
+                      </span>
+                    </div>
+                    {#if mrRepo}<span class="sidebar-shipped-repo">{mrRepo.name}</span>{/if}
+                  </button>
+                {/each}
+              </div>
             {/if}
           {/if}
 
-          <!-- ── Activity feed (always visible, collapsible) ────── -->
+          <!-- Activity feed (compact timeline) -->
           {#if activityEvents.length > 0}
-            <details class="ws-activity-details" open>
-              <summary class="ws-activity-summary">
-                <h2 class="section-heading section-heading-inline">Activity</h2>
-                <span class="activity-count-badge">{activityEvents.length}</span>
-              </summary>
-              <div class="activity-timeline">
-                {#each activityEvents.slice(0, activityLimit) as event, i}
+            <div class="sidebar-widget">
+              <h3 class="sidebar-widget-title">Activity <span class="sidebar-count">{activityEvents.length}</span></h3>
+              <div class="sidebar-activity">
+                {#each activityEvents.slice(0, activityLimit) as event}
                   {@const variant = activityVariant(event)}
                   {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
                   {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
                   <button
-                    class="activity-item activity-item-clickable"
+                    class="sidebar-activity-item"
                     onclick={() => {
                       if (primaryType && primaryId) {
                         const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
@@ -1473,36 +1385,25 @@
                       }
                     }}
                   >
-                    <div class="activity-dot activity-dot-{variant}"></div>
-                    {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                    <div class="activity-content">
-                      <div class="activity-main-row">
-                        <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
-                        <span class="activity-label">{activityLabel(event)}</span>
-                        {#if event.repo_id && repoMap[event.repo_id]}<span class="activity-repo-badge">{repoMap[event.repo_id].name}</span>{/if}
-                        {#if event.timestamp ?? event.created_at}
-                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                        {/if}
-                      </div>
-                      {#if event.entity_name ?? event.title}
-                        <p class="activity-entity-name">{event.entity_name ?? event.title}</p>
-                      {/if}
-                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
-                      {/if}
-                    </div>
+                    <span class="sidebar-activity-dot sidebar-activity-dot-{variant}"></span>
+                    <span class="sidebar-activity-label">{activityLabel(event)}</span>
+                    {#if event.entity_name ?? event.title}
+                      <span class="sidebar-activity-entity">{event.entity_name ?? event.title}</span>
+                    {/if}
+                    <span class="sidebar-activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
                   </button>
                 {/each}
               </div>
               {#if activityEvents.length > activityLimit}
-                <button class="ws-overview-more-btn" onclick={() => { activityLimit = activityLimit <= 5 ? 30 : 5; }}>
-                  {activityLimit <= 5 ? `Show all ${activityEvents.length} events` : 'Show less'}
+                <button class="sidebar-more-btn" onclick={() => { activityLimit = activityLimit <= 5 ? 30 : 5; }}>
+                  {activityLimit <= 5 ? `Show all ${activityEvents.length}` : 'Show less'}
                 </button>
               {/if}
-            </details>
+            </div>
           {/if}
 
-      </div><!-- .ws-main-content -->
+        </aside>
+      </div><!-- .ws-two-col -->
 
     </div><!-- .focused-dashboard -->
   {/if}
@@ -1799,12 +1700,280 @@
     min-height: 0;
   }
 
-  /* ── Single-column main content ──────────────────────────────── */
+  /* ── Two-column layout: main + sidebar ────────────────────────── */
+  .ws-two-col {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: var(--space-4);
+    min-height: 0;
+  }
+
   .ws-main-content {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
     min-width: 0;
+  }
+
+  .ws-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  /* ── Sidebar widgets ──────────────────────────────────────────── */
+  .sidebar-widget {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .sidebar-widget-live {
+    border-color: color-mix(in srgb, var(--color-success) 30%, var(--color-border));
+    background: color-mix(in srgb, var(--color-success) 3%, var(--color-surface));
+  }
+
+  .sidebar-widget-title {
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .sidebar-count {
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    font-size: 10px;
+  }
+
+  /* Sidebar: agents */
+  .sidebar-agent {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+    width: 100%;
+  }
+
+  .sidebar-agent:hover { background: var(--color-surface-elevated); }
+
+  .sidebar-agent-name {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sidebar-agent-meta {
+    display: flex;
+    gap: var(--space-2);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    flex-wrap: wrap;
+  }
+
+  .sidebar-agent-repo { font-weight: 600; }
+  .sidebar-agent-time { color: var(--color-success); font-family: var(--font-mono); font-weight: 600; }
+
+  /* Sidebar: merge queue */
+  .sidebar-queue-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+    width: 100%;
+  }
+
+  .sidebar-queue-item:hover { background: var(--color-surface-elevated); }
+
+  .sidebar-queue-pos {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--color-text-muted);
+    width: 20px;
+    flex-shrink: 0;
+  }
+
+  .sidebar-queue-title {
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Sidebar: recently shipped */
+  .sidebar-shipped-item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+    width: 100%;
+  }
+
+  .sidebar-shipped-item:hover { background: var(--color-surface-elevated); }
+
+  .sidebar-shipped-check {
+    color: var(--color-success);
+    font-weight: 700;
+    font-size: var(--text-xs);
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .sidebar-shipped-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .sidebar-shipped-title {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sidebar-shipped-meta {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    display: flex;
+    gap: var(--space-1);
+    flex-wrap: wrap;
+  }
+
+  .sidebar-shipped-repo {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+    align-self: center;
+  }
+
+  /* Sidebar: activity */
+  .sidebar-activity {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .sidebar-activity-item {
+    display: grid;
+    grid-template-columns: 8px 1fr auto;
+    gap: var(--space-2);
+    align-items: baseline;
+    padding: 3px var(--space-2);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: background var(--transition-fast);
+    width: 100%;
+    font-size: 11px;
+  }
+
+  .sidebar-activity-item:hover { background: var(--color-surface-elevated); }
+
+  .sidebar-activity-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-top: 4px;
+    flex-shrink: 0;
+  }
+
+  .sidebar-activity-dot-success { background: var(--color-success); }
+  .sidebar-activity-dot-danger { background: var(--color-danger); }
+  .sidebar-activity-dot-warning { background: var(--color-warning); }
+  .sidebar-activity-dot-info { background: var(--color-info, #1e90ff); }
+  .sidebar-activity-dot-muted { background: var(--color-text-muted); }
+
+  .sidebar-activity-label {
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .sidebar-activity-entity {
+    display: none; /* shown on hover via parent */
+  }
+
+  .sidebar-activity-time {
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    font-size: 10px;
+  }
+
+  .sidebar-more-btn {
+    background: transparent;
+    border: none;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    padding: var(--space-1) 0;
+    text-align: center;
+    font-family: var(--font-body);
+  }
+
+  .sidebar-more-btn:hover { color: var(--color-primary); }
+
+  @media (max-width: 900px) {
+    .ws-two-col {
+      grid-template-columns: 1fr;
+    }
+    .ws-sidebar {
+      order: -1; /* Put status widgets above repos on mobile */
+    }
   }
 
   /* ── Unified pipeline tabs (replaces separate pipeline hero + entity tab bar) ── */
