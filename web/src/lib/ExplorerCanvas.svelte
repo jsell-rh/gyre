@@ -229,16 +229,21 @@
   // an explicit user choice (spec: evaluative data is overlaid, not replacing).
   const TRACE_METRICS = new Set(['span_duration', 'span_count', 'error_rate']);
   let prevTraceDataLen = $state(0);
+  let prevLens = $state(lens);
   $effect(() => {
     const curLen = traceData?.spans?.length ?? 0;
-    // Only auto-select span_duration when: (1) first trace data arrives,
-    // (2) user hasn't explicitly chosen a metric, AND (3) user is on the
-    // evaluative lens. This prevents overriding the user's context when
-    // they are working in structural lens and trace data happens to arrive.
-    if (curLen > 0 && prevTraceDataLen === 0 && !userExplicitlySelectedMetric && lens === 'evaluative') {
+    const curLens = lens;
+    // Auto-select span_duration when:
+    // (1a) First trace data arrives while on evaluative lens, OR
+    // (1b) User switches TO evaluative lens when trace data already exists
+    // (2) User hasn't explicitly chosen a metric
+    const firstTraceArrival = curLen > 0 && prevTraceDataLen === 0 && curLens === 'evaluative';
+    const switchedToEvaluative = curLens === 'evaluative' && prevLens !== 'evaluative' && curLen > 0;
+    if ((firstTraceArrival || switchedToEvaluative) && !userExplicitlySelectedMetric) {
       evaluativeMetric = 'span_duration';
     }
     prevTraceDataLen = curLen;
+    prevLens = curLens;
   });
   let observableBannerVisible = $state(false); // show "requires telemetry" banner for observable lens
   let srAnnouncement = $state(''); // Screen reader announcements via ARIA live region

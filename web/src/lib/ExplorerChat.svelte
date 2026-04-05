@@ -10,6 +10,7 @@
     onOpenSpec = null,
     savedViews = [],
     onSavedViewsUpdate = () => {},
+    graphHints = [],
   } = $props();
 
   // ── Spec path detection ─────────────────────────────────────────────────
@@ -602,16 +603,16 @@
         <p class="welcome-title">{$t('explorer_chat.welcome_title')}</p>
         <p class="welcome-desc">{$t('explorer_chat.welcome_desc')}</p>
         <div class="welcome-suggestions">
-          {#each [
-            { key: 'explorer_chat.suggestion_endpoints', fallback: 'What are the main API endpoints?' },
-            { key: 'explorer_chat.suggestion_dependencies', fallback: 'Show me the dependency graph' },
-            { key: 'explorer_chat.suggestion_complexity', fallback: 'Which types are most complex?' },
-          ] as suggestion}
+          {#each (graphHints.length > 0 ? graphHints : [
+            $t('explorer_chat.suggestion_endpoints', { default: 'What are the main API endpoints?' }),
+            $t('explorer_chat.suggestion_dependencies', { default: 'Show me the dependency graph' }),
+            $t('explorer_chat.suggestion_complexity', { default: 'Which types are most complex?' }),
+          ]) as suggestion}
             <button
               class="suggestion-btn"
-              onclick={() => { inputText = $t(suggestion.key, { default: suggestion.fallback }); inputEl?.focus(); }}
+              onclick={() => { inputText = suggestion; inputEl?.focus(); }}
               type="button"
-            >{$t(suggestion.key, { default: suggestion.fallback })}</button>
+            >{suggestion}</button>
           {/each}
         </div>
       </div>

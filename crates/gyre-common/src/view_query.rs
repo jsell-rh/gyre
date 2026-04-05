@@ -250,7 +250,10 @@ impl ViewQuery {
         // Bound depth fields to prevent DoS
         match &self.scope {
             Scope::Focus {
-                depth, node, edges, ..
+                depth,
+                node,
+                edges,
+                direction,
             } => {
                 if *depth > MAX_DEPTH {
                     errors.push(format!(
@@ -275,12 +278,20 @@ impl ViewQuery {
                         ));
                     }
                 }
+                // Validate direction
+                let valid_dirs = ["incoming", "outgoing", "both"];
+                if !valid_dirs.contains(&direction.as_str()) {
+                    errors.push(format!(
+                        "Invalid direction '{}' in Focus scope — must be one of: incoming, outgoing, both",
+                        direction
+                    ));
+                }
             }
             Scope::Concept {
                 expand_depth,
                 seed_nodes,
                 expand_edges,
-                ..
+                expand_direction,
             } => {
                 if *expand_depth > MAX_DEPTH {
                     errors.push(format!(
@@ -299,6 +310,13 @@ impl ViewQuery {
                             Self::KNOWN_EDGE_TYPES.join(", ")
                         ));
                     }
+                }
+                let valid_dirs = ["incoming", "outgoing", "both"];
+                if !valid_dirs.contains(&expand_direction.as_str()) {
+                    errors.push(format!(
+                        "Invalid expand_direction '{}' in Concept scope — must be one of: incoming, outgoing, both",
+                        expand_direction
+                    ));
                 }
             }
             Scope::Diff {
@@ -642,6 +660,43 @@ impl ViewQuery {
                             "$where operator '{}' not valid for string property '{}' — use = or !=",
                             parts[1], parts[0]
                         ));
+                    }
+                    // Validate known enum values for specific string properties
+                    if parts[0] == "node_type" {
+                        let known_types = [
+                            "function",
+                            "type",
+                            "interface",
+                            "trait",
+                            "module",
+                            "package",
+                            "endpoint",
+                            "table",
+                            "field",
+                            "constant",
+                            "component",
+                            "class",
+                            "enum",
+                            "enum_variant",
+                            "method",
+                            "spec",
+                        ];
+                        if !known_types.contains(&parts[2]) {
+                            errors.push(format!(
+                                "$where node_type value '{}' is not recognized — known types: {}",
+                                parts[2],
+                                known_types.join(", ")
+                            ));
+                        }
+                    } else if parts[0] == "visibility" {
+                        let known_vis = ["public", "private", "internal", "protected"];
+                        if !known_vis.contains(&parts[2]) {
+                            errors.push(format!(
+                                "$where visibility value '{}' is not recognized — known values: {}",
+                                parts[2],
+                                known_vis.join(", ")
+                            ));
+                        }
                     }
                 } else {
                     let known_ops = [">", ">=", "<", "<=", "==", "="];

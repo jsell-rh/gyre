@@ -50,6 +50,50 @@
   let explorerSavedViews = $state([]);
   let detailNode = $state(null);
 
+  // ── Dynamic welcome suggestions (vision.md Principle 6: challenge ceremony) ──
+  // Compute context-aware suggestions from the graph so the user doesn't need
+  // to figure out what to ask. Shows relevant insights for THIS specific repo.
+  let graphHints = $derived.by(() => {
+    const nodes = graph?.nodes ?? [];
+    const edges = graph?.edges ?? [];
+    if (nodes.length === 0) return [];
+
+    const hints = [];
+    const endpointCount = nodes.filter(n => n.node_type === 'endpoint').length;
+    const typeCount = nodes.filter(n => n.node_type === 'type' || n.node_type === 'interface').length;
+    const specPaths = new Set(nodes.filter(n => n.spec_path).map(n => n.spec_path));
+    const ungoverned = nodes.filter(n => !n.spec_path && (n.node_type === 'function' || n.node_type === 'type' || n.node_type === 'endpoint'));
+    const highComplexity = nodes.filter(n => (n.complexity ?? 0) > 20);
+    const highChurn = nodes.filter(n => (n.churn_count_30d ?? 0) > 10);
+    const testNodes = nodes.filter(n => n.test_node);
+
+    // Pick the most relevant suggestions based on repo state
+    if (endpointCount > 0) {
+      hints.push(`Show me the ${endpointCount} API endpoint${endpointCount !== 1 ? 's' : ''} and their handlers`);
+    }
+    if (ungoverned.length > 5) {
+      hints.push(`${ungoverned.length} elements have no governing spec — show me the risk`);
+    } else if (highComplexity.length > 0) {
+      hints.push(`${highComplexity.length} element${highComplexity.length !== 1 ? 's have' : ' has'} high complexity — which need attention?`);
+    }
+    if (highChurn.length > 0) {
+      hints.push(`What's changing most? ${highChurn.length} element${highChurn.length !== 1 ? 's' : ''} changed 10+ times recently`);
+    } else if (typeCount > 3) {
+      hints.push(`Show me the dependency graph between the ${typeCount} types`);
+    }
+    if (testNodes.length > 0 && testNodes.length < nodes.length / 2) {
+      hints.push('Which functions have no test coverage?');
+    }
+    if (hints.length === 0) {
+      // Fallback generic suggestions
+      hints.push('What are the main boundaries in this architecture?');
+      hints.push('Show me the dependency graph');
+      hints.push('Which types are most complex?');
+    }
+
+    return hints.slice(0, 3);
+  });
+
   // ── Breadcrumb URL deep-linking ──────────────────────────────────────
   // Encode breadcrumb path in URL hash using semantic names for readable URLs.
   // Format: #drill=name1/name2/name3 (human-readable, shareable)
@@ -1630,6 +1674,7 @@
                 onOpenSpec={(path) => openSpecEditor(path)}
                 savedViews={explorerSavedViews}
                 onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
+                {graphHints}
               />
             </div>
           </div>
