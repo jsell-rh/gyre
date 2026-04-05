@@ -625,7 +625,7 @@
   });
 
   // ── Activity pagination ──────────────────────────────────────
-  let activityLimit = $state(5);
+  let activityLimit = $state(5);  // compact by default, expandable
 
   // Collapse activity when there's active work happening
   let activityCollapsed = $derived(wsAgents.some(a => a.status === 'active') || wsTasks.some(t => t.status === 'in_progress'));
@@ -1034,21 +1034,8 @@
     { id: 'activity', label: 'Activity', count: activityEvents.length, isMeta: true },
   ]);
 
-  // ── Auto-expand most relevant entity tab ─────────────────────────────────
-  // Only auto-expand for critical items (gate failures, failed agents).
-  // Pending specs and active agents are visible in the action-needed section
-  // and repo cards — no need to also expand a separate panel for them.
-  $effect(() => {
-    if (activeEntityTab !== null) return;
-    if (specsLoading || tasksLoading || mrsLoading || agentsLoading) return;
-    const hasData = specs.length + wsTasks.length + wsMrs.length + wsAgents.length;
-    if (!hasData) return;
-    // Only auto-expand for critical failures that need immediate attention
-    if (pipelineMrs.failed_gates > 0) {
-      activeEntityTab = 'mrs';
-      expandedStage = 'mrs';
-    }
-  });
+  // No auto-expand — let the user click summary stats to drill down.
+  // Action items in the decisions banner already highlight critical issues.
 
   // ── Load all data when workspace changes ───────────────────────────────
   $effect(() => {
@@ -1301,42 +1288,37 @@
             </div>
           </section>
 
-      <!-- Merge queue items are shown on individual repo cards -->
+          <!-- ── Workspace summary strip ─────────────────────── -->
+          {#if specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
+            <div class="ws-summary-strip" data-testid="ws-summary-strip">
+              <button class="ws-summary-stat" onclick={() => { activeEntityTab = activeEntityTab === 'specs' ? null : 'specs'; }} class:ws-summary-active={activeEntityTab === 'specs'} class:ws-summary-attention={pipelineSpecs.pending > 0} title="{specs.length} specs — {pipelineSpecs.pending} pending approval">
+                <span class="ws-summary-count">{specs.length}</span>
+                <span class="ws-summary-label">Specs</span>
+                {#if pipelineSpecs.pending > 0}<span class="ws-summary-badge ws-summary-badge-warn">{pipelineSpecs.pending} pending</span>{/if}
+              </button>
+              <span class="ws-summary-arrow">→</span>
+              <button class="ws-summary-stat" onclick={() => { activeEntityTab = activeEntityTab === 'tasks' ? null : 'tasks'; }} class:ws-summary-active={activeEntityTab === 'tasks'} class:ws-summary-attention={pipelineTasks.blocked > 0} title="{wsTasks.length} tasks — {pipelineTasks.in_progress} in progress">
+                <span class="ws-summary-count">{wsTasks.length}</span>
+                <span class="ws-summary-label">Tasks</span>
+                {#if pipelineTasks.blocked > 0}<span class="ws-summary-badge ws-summary-badge-danger">{pipelineTasks.blocked} blocked</span>
+                {:else if pipelineTasks.in_progress > 0}<span class="ws-summary-badge ws-summary-badge-ok">{pipelineTasks.in_progress} active</span>{/if}
+              </button>
+              <span class="ws-summary-arrow">→</span>
+              <button class="ws-summary-stat" onclick={() => { activeEntityTab = activeEntityTab === 'agents' ? null : 'agents'; }} class:ws-summary-active={activeEntityTab === 'agents'} title="{wsAgents.length} agents — {pipelineAgents.active} running">
+                <span class="ws-summary-count">{wsAgents.length}</span>
+                <span class="ws-summary-label">Agents</span>
+                {#if pipelineAgents.active > 0}<span class="ws-summary-badge ws-summary-badge-ok"><span class="ws-summary-pulse"></span>{pipelineAgents.active} running</span>{/if}
+              </button>
+              <span class="ws-summary-arrow">→</span>
+              <button class="ws-summary-stat" onclick={() => { activeEntityTab = activeEntityTab === 'mrs' ? null : 'mrs'; }} class:ws-summary-active={activeEntityTab === 'mrs'} class:ws-summary-attention={pipelineMrs.failed_gates > 0} title="{wsMrs.length} MRs — {pipelineMrs.open} open, {pipelineMrs.merged} merged">
+                <span class="ws-summary-count">{wsMrs.length}</span>
+                <span class="ws-summary-label">MRs</span>
+                {#if pipelineMrs.failed_gates > 0}<span class="ws-summary-badge ws-summary-badge-danger">{pipelineMrs.failed_gates} failed</span>
+                {:else if pipelineMrs.merged > 0}<span class="ws-summary-badge ws-summary-badge-ok">{pipelineMrs.merged} merged</span>{/if}
+              </button>
+            </div>
 
-          <!-- ── Pipeline + Entity Tabs ─────────────────────── -->
-          {#if activeEntityTab || specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0}
-            <section class="ws-entity-tabs" data-testid="section-entity-tabs">
-              <div class="ws-pipeline-tabs" role="tablist" aria-label="Pipeline stages" data-testid="pipeline-hero">
-                {#each pipelineTabsData as tab, i}
-                  {#if i > 0 && i < 4}
-                    <span class="pipeline-tab-arrow" aria-hidden="true">→</span>
-                  {/if}
-                  {#if i === 4}
-                    <span class="pipeline-tab-spacer"></span>
-                  {/if}
-                  <button
-                    class="pipeline-tab"
-                    class:pipeline-tab-active={activeEntityTab === tab.id}
-                    class:pipeline-tab-attention={tab.attention}
-                    class:pipeline-tab-running={tab.active && !tab.attention}
-                    class:pipeline-tab-done={tab.done && !tab.attention && !tab.active}
-                    role="tab"
-                    aria-selected={activeEntityTab === tab.id}
-                    onclick={() => { activeEntityTab = activeEntityTab === tab.id ? null : tab.id; expandedStage = activeEntityTab; }}
-                    title={tab.badge ? `${tab.count} ${tab.label.toLowerCase()} — ${tab.badge}` : `${tab.count} ${tab.label.toLowerCase()}`}
-                  >
-                    <span class="pipeline-tab-count">{tab.count}</span>
-                    <span class="pipeline-tab-label">{tab.label}</span>
-                    {#if tab.badge}
-                      <span class="pipeline-tab-badge pipeline-tab-badge-{tab.badgeVariant}">
-                        {#if tab.pulse}<span class="pipeline-tab-pulse"></span>{/if}
-                        {tab.badge}
-                      </span>
-                    {/if}
-                  </button>
-                {/each}
-              </div>
-
+            <!-- Entity detail panels (shown when a summary stat is clicked) -->
               {#if activeEntityTab === 'specs'}
                 <div class="ws-entity-panel" data-testid="entity-panel-specs">
                   {#if specsLoading}
@@ -1596,56 +1578,55 @@
                     </div>
                   {/if}
                 </div>
-              {:else if activeEntityTab === 'activity'}
-                <div class="ws-entity-panel" data-testid="entity-panel-activity">
-                  {#if activityLoading}
-                    <p class="list-loading">Loading activity...</p>
-                  {:else if activityEvents.length === 0}
-                    <p class="entity-panel-empty">No recent activity.</p>
-                  {:else}
-                    <div class="activity-timeline activity-timeline-full">
-                      {#each activityEvents.slice(0, activityLimit) as event, i}
-                        {@const variant = activityVariant(event)}
-                        {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
-                        {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
-                        <button
-                          class="activity-item activity-item-clickable"
-                          onclick={() => {
-                            if (primaryType && primaryId) {
-                              const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
-                              nav(primaryType, primaryId, data);
-                            }
-                          }}
-                        >
-                          <div class="activity-dot activity-dot-{variant}"></div>
-                          {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
-                          <div class="activity-content">
-                            <div class="activity-main-row">
-                              <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
-                              <span class="activity-label">{activityLabel(event)}</span>
-                              {#if event.repo_id && repoMap[event.repo_id]}<span class="activity-repo-badge">{repoMap[event.repo_id].name}</span>{/if}
-                              {#if event.timestamp ?? event.created_at}
-                                <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
-                              {/if}
-                            </div>
-                            {#if event.entity_name ?? event.title}
-                              <p class="activity-entity-name">{event.entity_name ?? event.title}</p>
-                            {/if}
-                            {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
-                              <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
-                            {/if}
-                          </div>
-                        </button>
-                      {/each}
-                    </div>
-                    {#if activityEvents.length > activityLimit}
-                      <button class="show-more-btn" onclick={() => { activityLimit += 20; }}>
-                        Show more ({activityEvents.length - activityLimit} remaining)
-                      </button>
-                    {/if}
-                  {/if}
-                </div>
               {/if}
+          {/if}
+
+          <!-- ── Recent Activity ─────────────────────────────── -->
+          {#if !activityLoading && activityEvents.length > 0}
+            <section class="ws-activity-section" data-testid="section-activity">
+              <div class="section-header-row">
+                <h2 class="section-heading">Recent Activity</h2>
+                {#if activityEvents.length > 5}
+                  <button class="section-btn section-btn-compact" onclick={() => { activityLimit = activityLimit <= 5 ? 20 : 5; }}>
+                    {activityLimit <= 5 ? 'Show more' : 'Show less'}
+                  </button>
+                {/if}
+              </div>
+              <div class="activity-timeline">
+                {#each activityEvents.slice(0, activityLimit) as event, i}
+                  {@const variant = activityVariant(event)}
+                  {@const primaryType = event.entity_type ?? (event.agent_id ? 'agent' : event.mr_id ? 'mr' : event.task_id ? 'task' : event.spec_path ? 'spec' : null)}
+                  {@const primaryId = event.entity_id ?? event.agent_id ?? event.mr_id ?? event.task_id ?? event.spec_path ?? null}
+                  <button
+                    class="activity-item activity-item-clickable"
+                    onclick={() => {
+                      if (primaryType && primaryId) {
+                        const data = primaryType === 'spec' ? { path: event.spec_path, repo_id: event.repo_id } : { repo_id: event.repo_id };
+                        nav(primaryType, primaryId, data);
+                      }
+                    }}
+                  >
+                    <div class="activity-dot activity-dot-{variant}"></div>
+                    {#if i < Math.min(activityEvents.length, activityLimit) - 1}<div class="activity-line"></div>{/if}
+                    <div class="activity-content">
+                      <div class="activity-main-row">
+                        <span class="activity-icon"><Icon name={activityIconName(event)} size={11} /></span>
+                        <span class="activity-label">{activityLabel(event)}</span>
+                        {#if event.repo_id && repoMap[event.repo_id]}<span class="activity-repo-badge">{repoMap[event.repo_id].name}</span>{/if}
+                        {#if event.timestamp ?? event.created_at}
+                          <span class="activity-time">{relTime(event.timestamp ?? event.created_at)}</span>
+                        {/if}
+                      </div>
+                      {#if event.entity_name ?? event.title}
+                        <p class="activity-entity-name">{event.entity_name ?? event.title}</p>
+                      {/if}
+                      {#if event.description && event.description !== event.title && event.description !== event.entity_name && !event.description.startsWith('{')}
+                        <p class="activity-reason">{event.description.length > 120 ? event.description.slice(0, 117) + '...' : event.description}</p>
+                      {/if}
+                    </div>
+                  </button>
+                {/each}
+              </div>
             </section>
           {/if}
 
@@ -1688,6 +1669,95 @@
 </Modal>
 
 <style>
+  /* ═══ Workspace summary strip ═══════════════════════════════════════════ */
+  .ws-summary-strip {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow-x: auto;
+  }
+
+  .ws-summary-stat {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: var(--font-body);
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .ws-summary-stat:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+  }
+
+  .ws-summary-active {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 1px var(--color-primary);
+  }
+
+  .ws-summary-attention .ws-summary-count {
+    color: var(--color-warning);
+  }
+
+  .ws-summary-count {
+    font-size: var(--text-sm);
+    font-weight: 800;
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    line-height: 1;
+  }
+
+  .ws-summary-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .ws-summary-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--color-text-muted);
+    opacity: 0.3;
+    flex-shrink: 0;
+    padding: 0 4px;
+    font-size: var(--text-xs);
+  }
+
+  .ws-summary-badge {
+    font-size: 10px;
+    font-weight: 500;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .ws-summary-badge-warn { color: var(--color-warning); font-weight: 600; }
+  .ws-summary-badge-danger { color: var(--color-danger); font-weight: 600; }
+  .ws-summary-badge-ok { color: var(--color-success); font-weight: 600; }
+
+  .ws-summary-pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: pipeline-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
   /* ═══ Pipeline flow sections ═══════════════════════════════════════════ */
   .pipeline-flow {
     display: flex;
@@ -1977,7 +2047,8 @@
     flex-direction: column;
   }
 
-  .activity-section {
+  .activity-section,
+  .ws-activity-section {
     display: flex;
     flex-direction: column;
   }
