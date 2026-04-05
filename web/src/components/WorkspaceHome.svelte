@@ -43,6 +43,9 @@
     decisionsCount = 0,
   } = $props();
 
+  // ── Workspace overview tab state ────────────────────────────────────────
+  let wsTab = $state(null); // null = collapsed, 'specs' | 'tasks' | 'mrs' | 'agents' | 'budget'
+
   // ── Create Workspace form state ───────────────────────────────────────
   let createWsOpen = $state(false);
   let createWsForm = $state({ name: '', description: '' });
@@ -1006,6 +1009,38 @@
         {/if}
       </header>
 
+      <!-- ── Pipeline flow bar ─────────────────────────────────────── -->
+      {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && (specs.length > 0 || wsTasks.length > 0 || wsAgents.length > 0 || wsMrs.length > 0)}
+        <nav class="pipeline-bar" aria-label="Pipeline status">
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineSpecs.pending > 0} class:pipeline-stage-done={pipelineSpecs.approved > 0 && pipelineSpecs.pending === 0} onclick={() => { wsTab = 'specs'; }} title="{pipelineSpecs.total} specs — {pipelineSpecs.approved} approved, {pipelineSpecs.pending} pending">
+            <span class="pipeline-stage-count">{pipelineSpecs.total}</span>
+            <span class="pipeline-stage-label">Specs</span>
+            {#if pipelineSpecs.pending > 0}<span class="pipeline-stage-badge pipeline-badge-warning">{pipelineSpecs.pending} pending</span>{/if}
+          </button>
+          <span class="pipeline-arrow" aria-hidden="true">→</span>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineTasks.in_progress > 0} class:pipeline-stage-alert={pipelineTasks.blocked > 0} onclick={() => { wsTab = 'tasks'; }} title="{pipelineTasks.total} tasks — {pipelineTasks.in_progress} in progress, {pipelineTasks.blocked} blocked">
+            <span class="pipeline-stage-count">{pipelineTasks.total}</span>
+            <span class="pipeline-stage-label">Tasks</span>
+            {#if pipelineTasks.in_progress > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineTasks.in_progress} active</span>{/if}
+            {#if pipelineTasks.blocked > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineTasks.blocked} blocked</span>{/if}
+          </button>
+          <span class="pipeline-arrow" aria-hidden="true">→</span>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineAgents.active > 0} onclick={() => { wsTab = 'agents'; }} title="{pipelineAgents.total} agents — {pipelineAgents.active} active">
+            <span class="pipeline-stage-count">{pipelineAgents.total}</span>
+            <span class="pipeline-stage-label">Agents</span>
+            {#if pipelineAgents.active > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineAgents.active} running</span>{/if}
+          </button>
+          <span class="pipeline-arrow" aria-hidden="true">→</span>
+          <button class="pipeline-stage" class:pipeline-stage-active={pipelineMrs.open > 0} class:pipeline-stage-alert={pipelineMrs.failed_gates > 0} onclick={() => { wsTab = 'mrs'; }} title="{pipelineMrs.total} MRs — {pipelineMrs.open} open, {pipelineMrs.merged} merged">
+            <span class="pipeline-stage-count">{pipelineMrs.total}</span>
+            <span class="pipeline-stage-label">MRs</span>
+            {#if pipelineMrs.failed_gates > 0}<span class="pipeline-stage-badge pipeline-badge-danger">{pipelineMrs.failed_gates} failed</span>
+            {:else if pipelineMrs.open > 0}<span class="pipeline-stage-badge pipeline-badge-active">{pipelineMrs.open} open</span>
+            {:else if pipelineMrs.merged > 0}<span class="pipeline-stage-badge pipeline-badge-success">{pipelineMrs.merged} merged</span>{/if}
+          </button>
+        </nav>
+      {/if}
+
       <!-- ── Main content: single-column layout ──────────────────── -->
       <div class="ws-main-content">
 
@@ -1193,6 +1228,184 @@
               {/if}
             </div>
           </section>
+
+          <!-- ── Workspace overview tabs ────────────────────────── -->
+          {#if wsTab}
+            <section class="ws-overview-section" data-testid="section-overview">
+              <div class="ws-overview-tabs" role="tablist">
+                {#each [
+                  { id: 'specs', label: 'Specs', count: specs.length },
+                  { id: 'tasks', label: 'Tasks', count: wsTasks.length },
+                  { id: 'mrs', label: 'Merge Requests', count: wsMrs.length },
+                  { id: 'agents', label: 'Agents', count: wsAgents.length },
+                  { id: 'budget', label: 'Budget', count: null },
+                ] as tab}
+                  <button class="ws-overview-tab" class:ws-overview-tab-active={wsTab === tab.id} role="tab" aria-selected={wsTab === tab.id} onclick={() => { wsTab = wsTab === tab.id ? null : tab.id; }}>
+                    {tab.label}{#if tab.count != null} <span class="ws-overview-tab-count">{tab.count}</span>{/if}
+                  </button>
+                {/each}
+              </div>
+
+              <div class="ws-overview-content">
+                {#if wsTab === 'specs'}
+                  {#if specs.length === 0}
+                    <p class="ws-overview-empty">No specs yet. Push specs to your repos to start the autonomous pipeline.</p>
+                  {:else}
+                    <table class="ws-overview-table">
+                      <thead><tr><th>Status</th><th>Spec</th><th>Repo</th><th>Updated</th><th></th></tr></thead>
+                      <tbody>
+                        {#each specs.slice(0, 20) as spec}
+                          {@const status = spec.approval_status ?? spec.status ?? 'pending'}
+                          {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
+                          <tr class="ws-overview-row" onclick={() => nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id })} tabindex="0" role="button">
+                            <td><span class="ws-status-dot ws-status-{status}">{SPEC_STATUS_ICONS[status] ?? '?'}</span> {status}</td>
+                            <td class="cell-title">{specName}</td>
+                            <td class="cell-mono">{#if spec.repo_id && repoMap[spec.repo_id]}{repoMap[spec.repo_id].name}{/if}</td>
+                            <td class="cell-time">{relTime(spec.updated_at ?? spec.created_at)}</td>
+                            <td class="cell-action">
+                              {#if status === 'pending'}
+                                <button class="inline-action-btn inline-action-approve" onclick={(e) => { e.stopPropagation(); quickApproveSpec(spec, e); }}>Approve</button>
+                              {/if}
+                            </td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                    {#if specs.length > 20}<p class="ws-overview-more">{specs.length - 20} more specs not shown</p>{/if}
+                  {/if}
+
+                {:else if wsTab === 'tasks'}
+                  {#if wsTasks.length === 0}
+                    <p class="ws-overview-empty">No tasks. Tasks are auto-created when specs are approved.</p>
+                  {:else}
+                    <table class="ws-overview-table">
+                      <thead><tr><th>Status</th><th>Title</th><th>Priority</th><th>Spec</th><th>Agent</th><th>Updated</th></tr></thead>
+                      <tbody>
+                        {#each wsTasks.slice(0, 20) as task}
+                          <tr class="ws-overview-row" onclick={() => nav('task', task.id, task)} tabindex="0" role="button">
+                            <td><span class="ws-status-dot ws-status-{task.status}">{task.status === 'done' ? '✓' : task.status === 'in_progress' ? '◉' : task.status === 'blocked' ? '✗' : '○'}</span> {task.status?.replace(/_/g, ' ')}</td>
+                            <td class="cell-title">{task.title ?? 'Untitled'}</td>
+                            <td>{task.priority ?? ''}</td>
+                            <td class="cell-mono">{#if task.spec_path}{task.spec_path.split('/').pop()?.replace(/\.md$/, '')}{/if}</td>
+                            <td class="cell-mono">{#if task.assigned_to}{entityName('agent', task.assigned_to)}{/if}</td>
+                            <td class="cell-time">{relTime(task.updated_at ?? task.created_at)}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  {/if}
+
+                {:else if wsTab === 'mrs'}
+                  {#if wsMrs.length === 0}
+                    <p class="ws-overview-empty">No merge requests. MRs are created when agents complete implementation.</p>
+                  {:else}
+                    <table class="ws-overview-table">
+                      <thead><tr><th>Status</th><th>Title</th><th>Branch</th><th>Gates</th><th>Repo</th><th>Created</th></tr></thead>
+                      <tbody>
+                        {#each wsMrs.slice(0, 20) as mr}
+                          {@const mrStatus = mr.status ?? 'open'}
+                          <tr class="ws-overview-row" onclick={() => nav('mr', mr.id, { ...mr, repo_id: mr.repository_id ?? mr.repo_id })} tabindex="0" role="button">
+                            <td><span class="ws-status-dot ws-status-{mrStatus}">{mrStatus === 'merged' ? '✓' : mrStatus === 'closed' ? '✗' : '○'}</span> {mrStatus}</td>
+                            <td class="cell-title">{mr.title ?? 'Untitled'}</td>
+                            <td class="cell-mono">{mr.source_branch ?? ''}</td>
+                            <td>
+                              {#if mr._gates?.details?.length > 0}
+                                <span class="gate-names-ws">
+                                  {#each mr._gates.details.slice(0, 3) as g}
+                                    <button class="gate-badge-ws gate-badge-ws-{g.status}" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, _openTab: 'gates' }); }} title="{g.name}: {g.status}{g.gate_type ? ' (' + g.gate_type.replace(/_/g, ' ') + ')' : ''}{g.output ? '\n' + g.output.split('\n')[0]?.slice(0, 80) : ''}">
+                                      <span class="gate-badge-ws-icon">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
+                                      <span class="gate-badge-ws-name">{g.name}</span>
+                                    </button>
+                                  {/each}
+                                </span>
+                              {:else if mr._gates}
+                                <span class="gate-summary">
+                                  {#if mr._gates.passed > 0}<span class="gate-mini gate-mini-pass">✓{mr._gates.passed}</span>{/if}
+                                  {#if mr._gates.failed > 0}<span class="gate-mini gate-mini-fail">✗{mr._gates.failed}</span>{/if}
+                                </span>
+                              {/if}
+                            </td>
+                            <td class="cell-mono">{#if (mr.repository_id ?? mr.repo_id) && repoMap[mr.repository_id ?? mr.repo_id]}{repoMap[mr.repository_id ?? mr.repo_id].name}{/if}</td>
+                            <td class="cell-time">{relTime(mr.created_at)}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  {/if}
+
+                {:else if wsTab === 'agents'}
+                  {#if wsAgents.length === 0}
+                    <p class="ws-overview-empty">No agents. Agents are spawned when tasks are assigned.</p>
+                  {:else}
+                    <table class="ws-overview-table">
+                      <thead><tr><th>Status</th><th>Name</th><th>Task</th><th>Spec</th><th>Repo</th><th>Started</th></tr></thead>
+                      <tbody>
+                        {#each wsAgents.slice(0, 20) as agent}
+                          {@const agentStatus = agent.status ?? 'unknown'}
+                          <tr class="ws-overview-row" onclick={() => nav('agent', agent.id, agent)} tabindex="0" role="button">
+                            <td><span class="ws-status-dot ws-status-{agentStatus}">{agentStatus === 'active' || agentStatus === 'running' ? '◉' : agentStatus === 'completed' || agentStatus === 'idle' ? '✓' : agentStatus === 'failed' || agentStatus === 'dead' ? '✗' : '○'}</span> {agentStatus}</td>
+                            <td class="cell-title">{agent.name ?? formatId('agent', agent.id)}</td>
+                            <td class="cell-mono">{#if agent.task_id ?? agent.current_task_id}{entityName('task', agent.task_id ?? agent.current_task_id)}{/if}</td>
+                            <td class="cell-mono">{#if agent.spec_path}{agent.spec_path.split('/').pop()?.replace(/\.md$/, '')}{/if}</td>
+                            <td class="cell-mono">{#if agent.repo_id && repoMap[agent.repo_id]}{repoMap[agent.repo_id].name}{/if}</td>
+                            <td class="cell-time">{relTime(agent.created_at ?? agent.spawned_at)}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  {/if}
+
+                {:else if wsTab === 'budget'}
+                  <div class="ws-budget-panel">
+                    {#if budgetData}
+                      <div class="budget-stats-grid">
+                        <div class="budget-stat">
+                          <span class="budget-stat-label">Daily token limit</span>
+                          <span class="budget-stat-value">{budgetData.max_tokens_per_day?.toLocaleString() ?? 'No limit'}</span>
+                        </div>
+                        <div class="budget-stat">
+                          <span class="budget-stat-label">Tokens used today</span>
+                          <span class="budget-stat-value">{budgetData.tokens_used_today?.toLocaleString() ?? '0'}</span>
+                        </div>
+                        <div class="budget-stat">
+                          <span class="budget-stat-label">Max concurrent agents</span>
+                          <span class="budget-stat-value">{budgetData.max_concurrent_agents ?? 'No limit'}</span>
+                        </div>
+                        <div class="budget-stat">
+                          <span class="budget-stat-label">Daily cost limit</span>
+                          <span class="budget-stat-value">{budgetData.max_cost_per_day != null ? `$${budgetData.max_cost_per_day.toFixed(2)}` : 'No limit'}</span>
+                        </div>
+                        {#if budgetData.cost_today != null}
+                          <div class="budget-stat">
+                            <span class="budget-stat-label">Cost today</span>
+                            <span class="budget-stat-value">${budgetData.cost_today.toFixed(2)}</span>
+                          </div>
+                        {/if}
+                      </div>
+                    {:else}
+                      <p class="ws-overview-empty">No budget configured for this workspace.</p>
+                    {/if}
+                    {#if costData}
+                      <div class="budget-cost-summary">
+                        <h4 class="budget-cost-heading">Cost Summary</h4>
+                        <div class="budget-stats-grid">
+                          {#if costData.total_compute != null}
+                            <div class="budget-stat"><span class="budget-stat-label">Compute</span><span class="budget-stat-value">${costData.total_compute.toFixed(2)}</span></div>
+                          {/if}
+                          {#if costData.total_llm != null}
+                            <div class="budget-stat"><span class="budget-stat-label">LLM</span><span class="budget-stat-value">${costData.total_llm.toFixed(2)}</span></div>
+                          {/if}
+                          {#if costData.total_storage != null}
+                            <div class="budget-stat"><span class="budget-stat-label">Storage</span><span class="budget-stat-value">${costData.total_storage.toFixed(2)}</span></div>
+                          {/if}
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            </section>
+          {/if}
 
           <!-- ── Recent Activity ─────────────────────────────── -->
           {#if !activityLoading && activityEvents.length > 0}
@@ -1537,6 +1750,201 @@
     font-style: italic;
   }
 
+  /* ── Pipeline flow bar ───────────────────────────────────────── */
+  .pipeline-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow-x: auto;
+  }
+
+  .pipeline-stage {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    border: 1px solid transparent;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .pipeline-stage:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+  }
+
+  .pipeline-stage-active { color: var(--color-text); font-weight: 600; }
+  .pipeline-stage-done { color: var(--color-success); }
+  .pipeline-stage-alert { color: var(--color-danger); }
+
+  .pipeline-stage-count {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: var(--text-sm);
+    color: inherit;
+  }
+
+  .pipeline-stage-label { font-weight: 500; }
+
+  .pipeline-stage-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+    line-height: 1.5;
+  }
+
+  .pipeline-badge-warning { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 12%, transparent); }
+  .pipeline-badge-active { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 12%, transparent); }
+  .pipeline-badge-success { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 12%, transparent); }
+  .pipeline-badge-danger { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 12%, transparent); }
+
+  .pipeline-arrow {
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    flex-shrink: 0;
+    opacity: 0.5;
+  }
+
+  /* ── Workspace overview tabs ────────────────────────────────── */
+  .ws-overview-section {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface);
+    overflow: hidden;
+  }
+
+  .ws-overview-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--color-border);
+    overflow-x: auto;
+  }
+
+  .ws-overview-tab {
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    transition: all var(--transition-fast);
+  }
+
+  .ws-overview-tab:hover { color: var(--color-text); background: var(--color-surface-elevated); }
+  .ws-overview-tab-active { color: var(--color-primary); border-bottom-color: var(--color-primary); font-weight: 600; }
+
+  .ws-overview-tab-count {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--color-text-muted);
+    margin-left: 2px;
+  }
+
+  .ws-overview-content {
+    padding: var(--space-2);
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  .ws-overview-empty {
+    text-align: center;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    padding: var(--space-4);
+    margin: 0;
+  }
+
+  .ws-overview-more {
+    text-align: center;
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    padding: var(--space-2);
+    margin: 0;
+    font-style: italic;
+  }
+
+  .ws-overview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-xs);
+  }
+
+  .ws-overview-table th {
+    text-align: left;
+    padding: var(--space-1) var(--space-2);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    border-bottom: 1px solid var(--color-border);
+    white-space: nowrap;
+  }
+
+  .ws-overview-table td {
+    padding: var(--space-1) var(--space-2);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border) 50%, transparent);
+    vertical-align: middle;
+  }
+
+  .ws-overview-row {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .ws-overview-row:hover { background: var(--color-surface-elevated); }
+
+  .ws-status-dot {
+    display: inline-block;
+    margin-right: 3px;
+    font-size: 10px;
+  }
+
+  .ws-status-approved, .ws-status-merged, .ws-status-done, .ws-status-completed, .ws-status-idle { color: var(--color-success); }
+  .ws-status-pending, .ws-status-open, .ws-status-in_progress, .ws-status-active, .ws-status-running { color: var(--color-warning); }
+  .ws-status-rejected, .ws-status-closed, .ws-status-blocked, .ws-status-failed, .ws-status-dead { color: var(--color-danger); }
+  .ws-status-draft, .ws-status-backlog, .ws-status-spawning, .ws-status-unknown { color: var(--color-text-muted); }
+
+  .cell-title { font-weight: 500; color: var(--color-text); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell-mono { font-family: var(--font-mono); font-size: 10px; color: var(--color-text-muted); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell-time { font-size: 10px; color: var(--color-text-muted); white-space: nowrap; }
+  .cell-action { white-space: nowrap; }
+
+  /* ── Budget panel ──────────────────────────────────────────── */
+  .ws-budget-panel { padding: var(--space-2); }
+
+  .budget-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: var(--space-2);
+  }
+
+  .budget-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2);
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius-sm);
+  }
+
+  .budget-stat-label { font-size: 10px; color: var(--color-text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+  .budget-stat-value { font-size: var(--text-sm); font-weight: 700; font-family: var(--font-mono); color: var(--color-text); }
+
+  .budget-cost-summary { margin-top: var(--space-3); }
+  .budget-cost-heading { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-secondary); margin: 0 0 var(--space-2) 0; }
+
   .priority-pill {
     font-size: var(--text-xs);
     font-weight: 600;
@@ -1552,6 +1960,17 @@
     display: inline-flex;
     gap: 2px;
   }
+
+  .gate-mini {
+    font-weight: 600;
+    padding: 0 3px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .gate-mini-pass { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 8%, transparent); }
+  .gate-mini-fail { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
 
   /* Workspace gate badges (named, clickable) */
   .gate-names-ws { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
