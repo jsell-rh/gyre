@@ -742,9 +742,10 @@ describe('ExplorerCanvas — lens switching', () => {
     expect(structural?.classList.contains('active')).toBe(true);
   });
 
-  it('evaluative lens renders metric selector', () => {
+  it('evaluative lens renders metric selector when trace data exists', () => {
+    const traceData = { spans: [{ span_id: 's1', graph_node_id: 'n1', duration_us: 100 }] };
     const { container } = render(ExplorerCanvas, {
-      props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
+      props: { nodes: NODES, edges: EDGES, lens: 'evaluative', traceData },
     });
     expect(container.querySelector('.eval-metric-group')).toBeTruthy();
     const evalBtns = container.querySelectorAll('.eval-metric-group .tb-btn-sm');
@@ -756,6 +757,18 @@ describe('ExplorerCanvas — lens switching', () => {
       props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
     });
     expect(container.querySelector('.eval-no-trace')).toBeTruthy();
+  });
+
+  it('evaluative lens does not show structural metrics (complexity, churn, etc.)', () => {
+    const traceData = { spans: [{ span_id: 's1', graph_node_id: 'n1', duration_us: 100 }] };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: NODES, edges: EDGES, lens: 'evaluative', traceData },
+    });
+    const btnTexts = Array.from(container.querySelectorAll('.eval-metric-group .tb-btn-sm')).map(b => b.textContent);
+    expect(btnTexts).not.toContain('Complexity');
+    expect(btnTexts).not.toContain('Churn');
+    expect(btnTexts).not.toContain('Call Count');
+    expect(btnTexts).not.toContain('Test Coverage');
   });
 
   it('evaluative lens shows playback controls with trace data', () => {
@@ -931,9 +944,10 @@ describe('ExplorerCanvas — canvas search', () => {
 });
 
 describe('ExplorerCanvas — evaluative lens', () => {
-  it('renders evaluative metric buttons when lens is evaluative', () => {
+  it('renders evaluative metric buttons when lens is evaluative with trace data', () => {
+    const traceData = { spans: [{ span_id: 's1', graph_node_id: 'n1', duration_us: 100 }] };
     const { container } = render(ExplorerCanvas, {
-      props: { nodes: NODES, edges: EDGES, lens: 'evaluative' },
+      props: { nodes: NODES, edges: EDGES, lens: 'evaluative', traceData },
     });
     const evalBtns = container.querySelectorAll('.eval-metric-group .tb-btn-sm');
     expect(evalBtns.length).toBeGreaterThanOrEqual(1);

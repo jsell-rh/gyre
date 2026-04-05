@@ -218,7 +218,7 @@
   let contextMenu = $state(null); // { x, y, node }
 
   // Evaluative lens metric mode — defaults to trace-based when data exists
-  let evaluativeMetric = $state('complexity'); // 'complexity' | 'churn' | 'incoming_calls' | 'test_coverage' | 'span_duration' | 'span_count' | 'error_rate'
+  let evaluativeMetric = $state('span_duration'); // 'span_duration' | 'span_count' | 'error_rate' (evaluative = behavioral/trace metrics only)
   let userExplicitlySelectedMetric = $state(false); // Track if user made an explicit choice
   // Auto-select trace metric ONLY on initial trace data arrival, NEVER override
   // an explicit user choice (spec: evaluative data is overlaid, not replacing).
@@ -466,10 +466,10 @@
     const markers = [];
     for (const n of nodes) {
       if (n.spec_approved_at && n.spec_approved_at >= minT && n.spec_approved_at <= maxT) {
-        markers.push({ time: n.spec_approved_at, label: `Spec: ${n.name ?? '?'}`, pct: ((n.spec_approved_at - minT) / (maxT - minT)) * 100 });
+        markers.push({ time: n.spec_approved_at, label: `Spec: ${n.name ?? '?'}`, kind: 'spec', pct: ((n.spec_approved_at - minT) / (maxT - minT)) * 100 });
       }
       if (n.milestone_completed_at && n.milestone_completed_at >= minT && n.milestone_completed_at <= maxT) {
-        markers.push({ time: n.milestone_completed_at, label: `Milestone: ${n.name ?? '?'}`, pct: ((n.milestone_completed_at - minT) / (maxT - minT)) * 100 });
+        markers.push({ time: n.milestone_completed_at, label: `Milestone: ${n.name ?? '?'}`, kind: 'milestone', pct: ((n.milestone_completed_at - minT) / (maxT - minT)) * 100 });
       }
     }
     // Deduplicate markers that are very close together
@@ -600,14 +600,12 @@
     return m;
   });
 
-  // Centralized metric value accessor for evaluative lens
+  // Centralized metric value accessor for evaluative lens (trace-based metrics only)
   function getNodeMetricValue(metric, node) {
     if (!node) return 0;
-    if (metric === 'incoming_calls') return incomingCallCounts.get(node.id) ?? 0;
-    if (metric === 'complexity') return node.complexity ?? 0;
-    if (metric === 'churn' || metric === 'churn_count_30d') return node.churn_count_30d ?? node.churn ?? 0;
-    if (metric === 'test_coverage') return (node.test_coverage ?? 0) * 100;
-    // Trace-based metrics (requires nodeSpanStats)
+    // Evaluative lens only supports behavioral/trace metrics per spec.
+    // Structural metrics (complexity, churn, incoming_calls, test_coverage)
+    // belong in the structural lens heat map.
     if (metric === 'span_duration') {
       const stats = nodeSpanStats.get(node.id);
       return stats ? stats.meanDuration : 0;
@@ -3133,7 +3131,10 @@
     roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
     ctx.stroke();
 
-    // Evaluative lens overlay: semi-transparent heat color on top of structural
+    // Evaluative lens overlay: semi-transparent heat fill on top of structural.
+    // Per spec: "structural topology is always visible underneath. Evaluative data
+    // is overlaid, not replacing." — only fill is tinted; the structural spec border
+    // (green/amber/red) drawn above remains untouched.
     const evalColor = evaluativeNodeColor(n?.id, n);
     if (evalColor && !qColor) {
       ctx.save();
@@ -3141,11 +3142,12 @@
       ctx.fillStyle = evalColor;
       roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
       ctx.fill();
-      // Evaluative border glow
-      ctx.globalAlpha = 0.6;
+      // Inner glow ring — inset so the structural spec border remains visible
+      ctx.globalAlpha = 0.45;
       ctx.strokeStyle = evalColor;
-      ctx.lineWidth = 2;
-      roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
+      ctx.lineWidth = 1.5;
+      const inset = borderWidth + 1;
+      roundRect(ctx, s.x - sw / 2 + inset, s.y - sh / 2 + inset, sw - inset * 2, sh - inset * 2, Math.max(0, r - inset));
       ctx.stroke();
       ctx.restore();
     }
@@ -3223,12 +3225,8 @@
       if (evalColor && n && sw > 50 && sh > 30) {
         let metricVal = 0;
         let metricLabel = '';
-        if (evaluativeMetric === 'incoming_calls') { metricVal = incomingCallCounts.get(n.id) ?? 0; metricLabel = `${metricVal} calls`; }
-        else if (evaluativeMetric === 'complexity') { metricVal = n.complexity ?? 0; metricLabel = `cx:${metricVal}`; }
-        else if (evaluativeMetric === 'churn' || evaluativeMetric === 'churn_count_30d') { metricVal = n.churn_count_30d ?? n.churn ?? 0; metricLabel = `${metricVal} churn`; }
-        else if (evaluativeMetric === 'test_coverage') { metricVal = Math.round((n.test_coverage ?? 0) * 100); metricLabel = `${metricVal}% cov`; }
-        // Trace-based metrics from span data
-        else if (evaluativeMetric === 'span_duration') {
+        // Evaluative lens only shows trace-based (behavioral) metrics
+        if (evaluativeMetric === 'span_duration') {
           const stats = nodeSpanStats.get(n.id);
           if (stats) { metricVal = stats.meanDuration; metricLabel = metricVal < 1000 ? `${Math.round(metricVal)}\u00B5s` : `${(metricVal / 1000).toFixed(1)}ms`; }
         }
@@ -3401,14 +3399,20 @@
       let lineWidth = 1.2;
 
       // Edge thickness by frequency:
-      // Evaluative: use OTLP trace span frequency
+      // Evaluative: use OTLP trace span frequency — proportional thickness per spec
       // Structural: use call edge count (how many callers reference a target)
       if (lens === 'evaluative' && traceEdgeFrequency.size > 0) {
         const freqKey = `${srcId}->${tgtId}`;
         const freq = traceEdgeFrequency.get(freqKey) ?? 0;
         if (freq > 0) {
-          lineWidth = 1.5 + (freq / traceMaxFreq) * 4;
-          edgeAlpha = Math.max(alpha, 0.6);
+          // Scale from 1.5 (min traced) up to 6 (max frequency)
+          lineWidth = 1.5 + (freq / traceMaxFreq) * 4.5;
+          edgeAlpha = Math.max(alpha, 0.6 + (freq / traceMaxFreq) * 0.3);
+          color = '#60a5fa'; // highlight traced edges in blue
+        } else {
+          // Edges not in trace data: thin and faded to emphasize traced paths
+          lineWidth = 0.5;
+          edgeAlpha = alpha * 0.25;
         }
       } else if (et === 'calls') {
         // In structural lens, thicken high-traffic edges by incoming call count
@@ -5204,8 +5208,8 @@
         {#if timelineNodes?.markers?.length}
           <div class="timeline-markers" aria-hidden="true">
             {#each timelineNodes.markers as marker}
-              <div class="timeline-marker" style="left: {marker.pct}%" title={marker.label}>
-                <div class="timeline-marker-line"></div>
+              <div class="timeline-marker timeline-marker-{marker.kind}" style="left: {marker.pct}%" title={marker.label}>
+                <div class="timeline-marker-dot"></div>
                 <div class="timeline-marker-label">{marker.label}</div>
               </div>
             {/each}
@@ -5544,22 +5548,37 @@
     appearance: auto; cursor: pointer;
   }
   .timeline-markers {
-    position: absolute; top: -14px; left: 0; right: 0; height: 12px;
+    position: absolute; top: -8px; left: 0; right: 0; height: 20px;
     pointer-events: none;
   }
   .timeline-marker {
     position: absolute; top: 0; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center;
   }
-  .timeline-marker-line {
-    width: 2px; height: 30px; background: #fbbf24; opacity: 0.6;
-    margin: 0 auto;
+  .timeline-marker-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #fbbf24; border: 1.5px solid rgba(15,15,26,0.9);
+    box-shadow: 0 0 4px rgba(251,191,36,0.4);
+    flex-shrink: 0;
+  }
+  .timeline-marker-spec .timeline-marker-dot {
+    background: #4ade80;
+    box-shadow: 0 0 4px rgba(74,222,128,0.4);
+  }
+  .timeline-marker-milestone .timeline-marker-dot {
+    background: #60a5fa;
+    box-shadow: 0 0 4px rgba(96,165,250,0.4);
   }
   .timeline-marker-label {
-    font-size: 8px; color: #fbbf24; font-family: 'SF Mono', Menlo, monospace;
-    white-space: nowrap; text-align: center; opacity: 0.8;
+    font-size: 8px; color: #94a3b8; font-family: 'SF Mono', Menlo, monospace;
+    white-space: nowrap; text-align: center; opacity: 0;
     max-width: 80px; overflow: hidden; text-overflow: ellipsis;
-    pointer-events: auto;
+    pointer-events: auto; transition: opacity 0.15s;
+    margin-top: 2px;
   }
+  .timeline-marker-spec .timeline-marker-label { color: #4ade80; }
+  .timeline-marker-milestone .timeline-marker-label { color: #60a5fa; }
+  .timeline-marker:hover .timeline-marker-label { opacity: 1; }
   .timeline-count {
     font-size: 10px; color: #64748b; font-family: 'SF Mono', Menlo, monospace;
     white-space: nowrap; min-width: 160px; text-align: right;
