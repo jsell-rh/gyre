@@ -1079,14 +1079,17 @@ async fn send_status(
 
 /// Stream text to the client. When the SDK subprocess provides real token-level
 /// streaming (small chunks), messages are forwarded directly. For large text blocks
-/// from the native LlmPort path, chunks at word boundaries for natural display.
+/// from the native LlmPort path (which returns the entire response at once after
+/// LLM inference), this function sends the first sentence immediately so the user
+/// sees something right away instead of nothing for 3-15 seconds, then streams the
+/// rest in small chunks with short delays for a natural display cadence.
 /// Returns false if the client disconnected.
 async fn stream_text(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     text: &str,
     done: bool,
 ) -> bool {
-    // If the text is already small (typical of real streaming tokens),
+    // If the text is already small (typical of real streaming tokens from SDK),
     // forward it directly without re-chunking.
     const CHUNK_THRESHOLD: usize = 80;
 
@@ -1103,11 +1106,58 @@ async fn stream_text(
             .is_ok();
     }
 
-    // Large text block (from native LlmPort): chunk at word boundaries
+    // Large text block (from native LlmPort): send the first sentence
+    // immediately so the user sees content right away, then stream the rest
+    // in small chunks with short delays for natural display cadence.
+    //
+    // Find the end of the first sentence (period/newline/question mark/exclamation)
+    // or fall back to the first 100 chars at a word boundary.
+    let first_chunk_end = {
+        let search_limit = text.len().min(200);
+        let mut end = None;
+        for (i, ch) in text[..search_limit].char_indices() {
+            if i > 20 && (ch == '.' || ch == '\n' || ch == '?' || ch == '!') {
+                end = Some(i + ch.len_utf8());
+                break;
+            }
+        }
+        end.unwrap_or_else(|| {
+            // No sentence boundary found — break at word boundary near 100 chars
+            let target = text.len().min(100);
+            let bytes = text.as_bytes();
+            let mut pos = target;
+            while pos > 0 && bytes[pos - 1] != b' ' && bytes[pos - 1] != b'\n' {
+                pos -= 1;
+            }
+            if pos == 0 { target } else { pos }
+        })
+    };
+
+    // Send the first chunk immediately (no delay)
+    let first_chunk = &text[..first_chunk_end];
+    let msg = ExplorerServerMessage::Text {
+        content: first_chunk.to_string(),
+        done: false,
+    };
+    if sender
+        .send(Message::Text(
+            serialize_msg(&msg).unwrap_or_default().into(),
+        ))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+
+    // Stream the rest in small chunks with short delays
     const TARGET_CHUNK: usize = 60;
-    let mut start = 0;
+    const CHUNK_DELAY_MS: u64 = 30;
+    let mut start = first_chunk_end;
     let bytes = text.as_bytes();
     while start < bytes.len() {
+        // Small delay between chunks for natural cadence
+        tokio::time::sleep(std::time::Duration::from_millis(CHUNK_DELAY_MS)).await;
+
         let end = (start + TARGET_CHUNK).min(bytes.len());
         let chunk_end = if end >= bytes.len() {
             bytes.len()
