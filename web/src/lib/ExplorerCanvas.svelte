@@ -97,6 +97,11 @@
     field_of: '#94a3b8',
     routes_to: '#f97316',
     governed_by: '#fbbf24',
+    renders: '#a78bfa',       // purple-400
+    persists_to: '#2dd4bf',   // teal-400
+    produced_by: '#fb923c',   // orange-400
+    returns: '#38bdf8',       // sky-400
+    contains: '#cbd5e1',      // slate-300
   };
 
   // ── Edge field normalization helpers ──────────────────────────────────
@@ -3002,15 +3007,14 @@
     const r = Math.min(6, sw * 0.08);
     roundRect(ctx, s.x - sw / 2, s.y - sh / 2, sw, sh, r);
 
-    // Fill — spec coverage as PRIMARY color in structural lens (green=governed, amber=suggested, red=no spec)
+    // Fill — spec coverage is ALWAYS the base color (green=governed, amber=suggested, red=no spec).
+    // Per spec: "The structural topology is always visible underneath. Evaluative data is overlaid."
     const qColor = queryNodeColor(ln);
     const isHeatMap = !!activeQuery?.emphasis?.heat?.metric;
+
+    // Base fill: always show spec governance coloring (structural lens always visible)
     let fillColor = 'rgba(20,28,48,0.9)';
-    if (isHeatMap && qColor) {
-      // Heat map mode: use the heat color as the primary fill with strong alpha
-      fillColor = qColor + 'cc'; // ~80% alpha
-    } else if (lens === 'structural' && !qColor) {
-      // Check precomputed GovernedBy index (O(1) instead of O(E))
+    if (!qColor || !isHeatMap) {
       const hasGovEdge = n?.id && governedByIndex.has(n.id);
       if (n?.spec_path || hasGovEdge) {
         fillColor = 'rgba(34,197,94,0.30)';                             // green (has spec)
@@ -3021,6 +3025,10 @@
         else if (conf === 'low') fillColor = 'rgba(249,115,22,0.20)';   // orange
         else fillColor = 'rgba(239,68,68,0.18)';                        // red (no spec)
       }
+    }
+    if (isHeatMap && qColor) {
+      // Heat map / evaluative overlay: blend heat color over the structural base
+      fillColor = qColor + 'cc'; // ~80% alpha — structural border still visible
     }
     ctx.fillStyle = fillColor;
     ctx.fill();
