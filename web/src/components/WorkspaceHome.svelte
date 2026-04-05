@@ -1006,6 +1006,20 @@
         </div>
         {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
           <p class="ws-header-status">{statusSentence}</p>
+          {#if statusItems.length > 0}
+            <div class="ws-status-badges">
+              {#each statusItems as item}
+                <button class="ws-status-badge ws-status-badge-{item.variant}" onclick={() => {
+                  if (item.tab === 'specs' || item.tab === 'tasks' || item.tab === 'mrs' || item.tab === 'agents') {
+                    wsTab = item.tab;
+                  }
+                }} title={item.text}>
+                  <span class="ws-status-badge-icon">{item.icon}</span>
+                  {item.text}
+                </button>
+              {/each}
+            </div>
+          {/if}
         {/if}
       </header>
 
@@ -2134,6 +2148,38 @@
     max-width: 700px;
     line-height: 1.4;
   }
+
+  .ws-status-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .ws-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+  }
+
+  .ws-status-badge:hover { border-color: var(--color-border); background: var(--color-surface-elevated); }
+
+  .ws-status-badge-icon { font-weight: 700; }
+
+  .ws-status-badge-danger { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 6%, transparent); }
+  .ws-status-badge-warning { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 6%, transparent); }
+  .ws-status-badge-success { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 6%, transparent); }
+  .ws-status-badge-info { color: var(--color-info, #1e90ff); background: color-mix(in srgb, var(--color-info, #1e90ff) 6%, transparent); }
+  .ws-status-badge-muted { color: var(--color-text-muted); }
 
   /* ── Budget indicator ─────────────────────────────────────────────── */
   .ws-budget-indicator {
