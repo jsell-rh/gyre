@@ -867,8 +867,16 @@ fn extract_call_graph_via_lsp(
     }
 
     // Build file → sorted vec of (line_start, line_end, node_id)
+    // Only include function-like nodes — modules span entire files and would create
+    // invalid "Module calls Function" edges for references outside any function body.
     let mut file_functions: HashMap<String, Vec<(u32, u32, String)>> = HashMap::new();
-    for n in nodes.iter().filter(|n| n.deleted_at.is_none()) {
+    for n in nodes.iter().filter(|n| {
+        n.deleted_at.is_none()
+            && matches!(
+                n.node_type,
+                NodeType::Function | NodeType::Method | NodeType::Endpoint
+            )
+    }) {
         if !matches_ext(&n.file_path) {
             continue;
         }
@@ -1433,14 +1441,17 @@ fn try_go_callgraph_binary(
         .map(|n| (n.qualified_name.as_str(), n))
         .collect();
 
-    // Also build by name for simpler matching — use Vec to handle multiple
-    // methods with the same name on different types (e.g., FooService.Handle,
-    // BarService.Handle) which are common in Go.
+    // Also build by qualified_name for fallback matching — keying by
+    // qualified_name avoids collisions between methods with the same short
+    // name on different types (e.g., FooService.Handle vs BarService.Handle).
     let mut node_by_name: HashMap<&str, Vec<&GraphNode>> = HashMap::new();
     for n in nodes.iter().filter(|n| {
         n.deleted_at.is_none() && matches!(n.node_type, NodeType::Function | NodeType::Endpoint)
     }) {
-        node_by_name.entry(n.name.as_str()).or_default().push(n);
+        node_by_name
+            .entry(n.qualified_name.as_str())
+            .or_default()
+            .push(n);
     }
 
     // Build existing edge set for dedup
@@ -1493,6 +1504,7 @@ fn try_go_callgraph_binary(
 }
 
 /// Resolve a Go qualified name (e.g., "pkg/path.TypeName.MethodName") to a graph node.
+/// `by_name` is keyed by qualified_name so we suffix-match instead of exact-lookup.
 fn resolve_go_node<'a>(
     qualified: &str,
     by_qname: &HashMap<&str, &'a GraphNode>,
@@ -1502,12 +1514,23 @@ fn resolve_go_node<'a>(
     if let Some(n) = by_qname.get(qualified) {
         return Some(n);
     }
-    // Try just the function/method part (after last '.')
+    // Also try direct lookup in by_name (exact qualified_name match)
+    if let Some(candidates) = by_name.get(qualified) {
+        return Some(candidates[0]);
+    }
+    // Try suffix matching: collect nodes whose qualified_name ends with the
+    // short function/method name (after last '.').
     if let Some(short) = qualified.rsplit('.').next() {
-        if let Some(candidates) = by_name.get(short) {
-            if candidates.len() == 1 {
-                return Some(candidates[0]);
-            }
+        let suffix = format!(".{}", short);
+        let candidates: Vec<&GraphNode> = by_name
+            .iter()
+            .filter(|(qn, _)| **qn == short || qn.ends_with(&suffix))
+            .flat_map(|(_, nodes)| nodes.iter().copied())
+            .collect();
+        if candidates.len() == 1 {
+            return Some(candidates[0]);
+        }
+        if candidates.len() > 1 {
             // Multiple candidates: try matching by package path in qualified name
             let pkg = qualified.rsplit('.').nth(1).unwrap_or("");
             if let Some(best) = candidates
@@ -1526,7 +1549,13 @@ fn resolve_go_node<'a>(
         let method = parts[0];
         let type_name = parts[1];
         let combined = format!("{}.{}", type_name, method);
-        if let Some(candidates) = by_name.get(combined.as_str()) {
+        let suffix = format!(".{}", combined);
+        let candidates: Vec<&GraphNode> = by_name
+            .iter()
+            .filter(|(qn, _)| **qn == combined.as_str() || qn.ends_with(&suffix))
+            .flat_map(|(_, nodes)| nodes.iter().copied())
+            .collect();
+        if !candidates.is_empty() {
             return Some(candidates[0]);
         }
     }

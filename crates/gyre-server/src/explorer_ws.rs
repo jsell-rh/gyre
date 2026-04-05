@@ -184,6 +184,20 @@ async fn handle_explorer_session(
     // Per-user concurrent session limit (prevents unbounded LLM cost).
     // Key includes tenant_id to prevent cross-tenant interference.
     let session_user = format!("{}:{}", auth.tenant_id, auth.agent_id);
+    // Guard: decrement on drop (even if we return early or panic below).
+    // Defined before the increment so the guard can be created immediately after.
+    struct SessionGuard(String);
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(count) = sessions.get_mut(&self.0) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    sessions.remove(&self.0);
+                }
+            }
+        }
+    }
     let session_allowed = {
         let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
         let count = sessions.entry(session_user.clone()).or_default();
@@ -208,19 +222,7 @@ async fn handle_explorer_session(
             .await;
         return;
     }
-    // Guard: decrement on drop (even if we return early below)
-    struct SessionGuard(String);
-    impl Drop for SessionGuard {
-        fn drop(&mut self) {
-            let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(count) = sessions.get_mut(&self.0) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    sessions.remove(&self.0);
-                }
-            }
-        }
-    }
+    // Create guard immediately after increment so any subsequent panic decrements.
     let _session_guard = SessionGuard(session_user);
 
     // Verify the user has access to this repo via workspace → tenant chain.
@@ -630,6 +632,7 @@ async fn handle_explorer_session(
                 name,
                 description,
                 query,
+                scope,
             } => {
                 // Rate limit: max 10 SaveView/DeleteView ops per 60 seconds
                 let now_view = std::time::Instant::now();
@@ -688,6 +691,10 @@ async fn handle_explorer_session(
                                 .await;
                             continue;
                         }
+                        // Log non-fatal warnings (e.g. unknown palette) but don't block save
+                        for w in parsed.warnings() {
+                            info!(repo_id = %repo_id, "SaveView warning: {}", w);
+                        }
                     }
                     Err(e) => {
                         let err = ExplorerServerMessage::Error {
@@ -705,9 +712,16 @@ async fn handle_explorer_session(
                 // Use workspace_id cached from session start to avoid TOCTOU.
                 let workspace_id = repo_workspace_id.to_string();
                 let now = crate::api::now_secs();
+                // When scope is "workspace", save the view as workspace-scoped
+                // so it appears in workspace-level view listings.
+                let effective_repo_id = if scope.as_deref() == Some("workspace") {
+                    "__workspace__".to_string()
+                } else {
+                    repo_id.clone()
+                };
                 let view = SavedView {
                     id: crate::api::new_id(),
-                    repo_id: Id::new(&repo_id),
+                    repo_id: Id::new(&effective_repo_id),
                     workspace_id: Id::new(&workspace_id),
                     tenant_id: Id::new(&auth.tenant_id),
                     name,
@@ -2577,7 +2591,8 @@ async fn run_explorer_agent(
                 {
                     // Validate query before dry-run to prevent malformed queries
                     let validation_errors = query.validate();
-                    if !validation_errors.is_empty() {
+                    let validation_warnings = query.warnings();
+                    if !validation_errors.is_empty() || !validation_warnings.is_empty() {
                         let mut dr = gyre_domain::view_query_resolver::dry_run(
                             &query,
                             &nodes,
@@ -2586,6 +2601,9 @@ async fn run_explorer_agent(
                         );
                         for err in validation_errors {
                             dr.warnings.push(format!("Validation: {}", err));
+                        }
+                        for w in validation_warnings {
+                            dr.warnings.push(format!("Warning: {}", w));
                         }
                         Some(dr)
                     } else {
@@ -3443,10 +3461,24 @@ This shows all callers of TaskPort."#;
                 name,
                 description,
                 query,
+                scope,
             } => {
                 assert_eq!(name, "My View");
                 assert_eq!(description.as_deref(), Some("A test view"));
                 assert_eq!(query["scope"]["type"], "all");
+                assert!(scope.is_none());
+            }
+            _ => panic!("Expected SaveView variant"),
+        }
+    }
+
+    #[test]
+    fn test_save_view_message_with_workspace_scope() {
+        let msg_json = r#"{"type":"save_view","name":"WS View","query":{"scope":{"type":"all"}},"scope":"workspace"}"#;
+        let msg: ExplorerClientMessage = serde_json::from_str(msg_json).unwrap();
+        match msg {
+            ExplorerClientMessage::SaveView { scope, .. } => {
+                assert_eq!(scope.as_deref(), Some("workspace"));
             }
             _ => panic!("Expected SaveView variant"),
         }
