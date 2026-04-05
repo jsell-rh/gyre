@@ -203,7 +203,7 @@ pub fn system_default_views() -> Vec<(&'static str, &'static str, &'static str)>
         (
             "Ungoverned Risk",
             "Complex nodes without spec governance — highest value targets for spec authoring",
-            r##"{"scope":{"type":"filter","computed":"$intersect($where(complexity, '>', 10), $diff($where(node_type, '=', 'function'), $test_reachable))"},"emphasis":{"highlight":{"matched":{"color":"#ef4444","label":"Needs spec"}},"dim_unmatched":0.08},"zoom":"fit","annotation":{"title":"Ungoverned risk","description":"{{count}} complex, untested nodes without spec — start here"}}"##,
+            r##"{"scope":{"type":"filter","computed":"$intersect($where(complexity, '>', 10), $ungoverned)"},"emphasis":{"highlight":{"matched":{"color":"#ef4444","label":"Needs spec"}},"dim_unmatched":0.08},"zoom":"fit","annotation":{"title":"Ungoverned risk","description":"{{count}} complex nodes without spec governance — start here"}}"##,
         ),
     ]
 }

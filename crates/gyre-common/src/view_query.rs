@@ -305,33 +305,38 @@ impl ViewQuery {
                 if to_commit.is_empty() {
                     errors.push("Diff scope 'to_commit' must not be empty".to_string());
                 }
-                // Non-temporal SHAs need at least 4 hex chars
-                if !from_commit.starts_with('~') && !from_commit.is_empty() {
-                    if from_commit.len() < 4 {
+                // Validate commit references: accept SHA prefixes (4+ hex chars),
+                // ~epoch temporal references, branch names (alphanumeric + -_./),
+                // and special refs like HEAD
+                fn validate_commit_ref(s: &str, field: &str, errors: &mut Vec<String>) {
+                    if s.starts_with('~') {
+                        return; // Temporal reference
+                    }
+                    if s.is_empty() {
+                        return; // Caught above
+                    }
+                    // Accept: SHA hex prefixes (4+ hex chars), branch names, HEAD, tags
+                    let is_hex = s.chars().all(|c| c.is_ascii_hexdigit());
+                    if is_hex && s.len() < 4 {
                         errors.push(format!(
-                            "Diff from_commit '{}' too short — need at least 4 hex characters for SHA prefix matching",
-                            from_commit
+                            "Diff {} '{}' too short — need at least 4 hex characters for SHA prefix matching",
+                            field, s
                         ));
-                    } else if !from_commit.chars().all(|c| c.is_ascii_hexdigit()) {
+                        return;
+                    }
+                    // Accept branch names, tags, HEAD — must be alphanumeric + -_./~^
+                    let is_valid_ref = s
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_./~^".contains(c));
+                    if !is_valid_ref {
                         errors.push(format!(
-                            "Diff from_commit '{}' contains non-hex characters — use hex SHA prefix or ~epoch for temporal diff",
-                            from_commit
+                            "Diff {} '{}' contains invalid characters — use SHA prefix, branch name, tag, HEAD, or ~epoch",
+                            field, s
                         ));
                     }
                 }
-                if !to_commit.starts_with('~') && !to_commit.is_empty() {
-                    if to_commit.len() < 4 {
-                        errors.push(format!(
-                            "Diff to_commit '{}' too short — need at least 4 hex characters for SHA prefix matching",
-                            to_commit
-                        ));
-                    } else if !to_commit.chars().all(|c| c.is_ascii_hexdigit()) {
-                        errors.push(format!(
-                            "Diff to_commit '{}' contains non-hex characters — use hex SHA prefix or ~epoch for temporal diff",
-                            to_commit
-                        ));
-                    }
-                }
+                validate_commit_ref(from_commit, "from_commit", &mut errors);
+                validate_commit_ref(to_commit, "to_commit", &mut errors);
                 if from_commit == to_commit && !from_commit.is_empty() {
                     errors.push(format!(
                         "Diff from_commit and to_commit are identical ('{}') — diff will be empty",
@@ -504,6 +509,7 @@ impl ViewQuery {
         "$selected",
         "$test_unreachable",
         "$test_reachable",
+        "$ungoverned",
         "$where(",
         "$intersect(",
         "$union(",
@@ -546,7 +552,7 @@ impl ViewQuery {
             .iter()
             .any(|p| expr.starts_with(p))
         {
-            errors.push(format!("Unknown computed expression: '{}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $intersect, $union, $diff", expr));
+            errors.push(format!("Unknown computed expression: '{}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $ungoverned, $intersect, $union, $diff", expr));
             return;
         }
 

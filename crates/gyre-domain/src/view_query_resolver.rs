@@ -1282,6 +1282,35 @@ fn resolve_computed_expression_inner(
         return spec_node_ids;
     }
 
+    // $ungoverned — nodes with no GovernedBy edge and no spec_path set.
+    // Useful for finding code that needs spec governance.
+    if trimmed == "$ungoverned" {
+        // Collect all nodes that are targets of GovernedBy edges (i.e., governed)
+        let mut governed_ids: HashSet<String> = HashSet::new();
+        for edge in edges
+            .iter()
+            .filter(|e| e.deleted_at.is_none() && e.edge_type == EdgeType::GovernedBy)
+        {
+            governed_ids.insert(edge.source_id.to_string());
+        }
+        // Also consider nodes with a spec_path as governed
+        for n in active_nodes.iter() {
+            if n.spec_path.is_some() {
+                governed_ids.insert(n.id.to_string());
+            }
+        }
+        // Return nodes that are NOT governed and are code nodes (not specs/modules)
+        return active_nodes
+            .iter()
+            .filter(|n| {
+                !governed_ids.contains(&n.id.to_string())
+                    && n.node_type != NodeType::Spec
+                    && n.node_type != NodeType::Module
+            })
+            .map(|n| n.id.to_string())
+            .collect();
+    }
+
     // $test_fragility(node) — set membership test: returns {node} if the node's
     // test_fragility count > 0. For scalar comparisons (e.g., filtering nodes with
     // fragility above a threshold), use $where(test_fragility, '>', N) instead.
@@ -1370,6 +1399,7 @@ pub fn validate_computed_expression(expr: &str) -> Option<String> {
         "$selected",
         "$test_unreachable",
         "$test_reachable",
+        "$ungoverned",
         "$where(",
         "$intersect(",
         "$union(",
@@ -1387,7 +1417,7 @@ pub fn validate_computed_expression(expr: &str) -> Option<String> {
 
     if !known_prefixes.iter().any(|p| trimmed.starts_with(p)) {
         return Some(format!(
-            "Unrecognized expression: '{trimmed}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $intersect, $union, $diff, $test_unreachable, $test_reachable, $clicked, $selected"
+            "Unrecognized expression: '{trimmed}'. Known: $where, $callers, $callees, $implementors, $fields, $descendants, $ancestors, $governed_by, $test_fragility, $reachable, $intersect, $union, $diff, $test_unreachable, $test_reachable, $ungoverned, $clicked, $selected"
         ));
     }
 
