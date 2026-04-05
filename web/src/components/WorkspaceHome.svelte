@@ -1374,9 +1374,11 @@
                             <td class="cell-title">{mr.title ?? 'Untitled'}</td>
                             <td class="cell-diff">
                               {#if ds}
-                                <span class="diff-ins-tiny">+{ds.insertions ?? 0}</span>
-                                <span class="diff-del-tiny">-{ds.deletions ?? 0}</span>
-                                <span class="diff-files-tiny">{ds.files_changed ?? 0} file{(ds.files_changed ?? 0) !== 1 ? 's' : ''}</span>
+                                <button class="diff-stat-clickable" onclick={(e) => { e.stopPropagation(); nav('mr', mr.id, { ...mr, repo_id: mr.repository_id ?? mr.repo_id, _openTab: 'diff' }); }} title="View code diff">
+                                  <span class="diff-ins-tiny">+{ds.insertions ?? 0}</span>
+                                  <span class="diff-del-tiny">-{ds.deletions ?? 0}</span>
+                                  <span class="diff-files-tiny">{ds.files_changed ?? 0}f</span>
+                                </button>
                               {/if}
                             </td>
                             <td>
@@ -2154,8 +2156,22 @@
   .cell-time { font-size: 10px; color: var(--color-text-muted); white-space: nowrap; }
   .cell-action { white-space: nowrap; }
   .cell-diff { white-space: nowrap; font-family: var(--font-mono); font-size: 10px; }
-  .diff-ins-tiny { color: var(--color-success); margin-right: 2px; }
-  .diff-del-tiny { color: var(--color-danger); margin-right: 4px; }
+  .diff-stat-clickable {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 1px 4px;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    transition: all var(--transition-fast);
+  }
+  .diff-stat-clickable:hover { background: var(--color-surface-elevated); border-color: var(--color-border); }
+  .diff-ins-tiny { color: var(--color-success); }
+  .diff-del-tiny { color: var(--color-danger); }
   .diff-files-tiny { color: var(--color-text-muted); }
 
   /* ── Budget panel ──────────────────────────────────────────── */
