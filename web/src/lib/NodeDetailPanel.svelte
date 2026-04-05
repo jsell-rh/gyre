@@ -1534,7 +1534,9 @@
         {#if node.spec_path || relationships.governedBy}
           <div class="detail-section">
             <h4 class="detail-section-title">Spec</h4>
-            <p class="detail-spec">{node.spec_path ?? relationships.governedBy}</p>
+            <button class="detail-spec-button" onclick={() => onNavigate({ id: node.spec_path ?? relationships.governedBy, name: node.spec_path ?? relationships.governedBy, node_type: 'spec' })} type="button">
+              {node.spec_path ?? relationships.governedBy}
+            </button>
           </div>
         {/if}
 
