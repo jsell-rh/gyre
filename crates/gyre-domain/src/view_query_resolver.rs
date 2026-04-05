@@ -92,6 +92,22 @@ pub struct GraphSummary {
     /// and nodes with complexity > p90 and low coverage
     #[serde(default)]
     pub risk_indicators: Vec<String>,
+    /// Anomaly summary: quick counts of high-complexity nodes, orphan functions, untested nodes
+    #[serde(default)]
+    pub anomaly_summary: AnomalySummary,
+    /// Count of nodes modified in the last 7 days (based on last_modified_at)
+    #[serde(default)]
+    pub recent_changes_7d: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AnomalySummary {
+    /// Functions with complexity > 20
+    pub high_complexity_count: usize,
+    /// Functions with no incoming calls and no outgoing calls (orphans)
+    pub orphan_function_count: usize,
+    /// Functions not reachable from any test node
+    pub untested_function_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2280,6 +2296,51 @@ pub fn compute_graph_summary(
         }
     }
 
+    // Anomaly summary: quick counts for common questions
+    let high_complexity_count = active_nodes
+        .iter()
+        .filter(|n| {
+            matches!(n.node_type, NodeType::Function | NodeType::Method)
+                && n.complexity.unwrap_or(0) > 20
+        })
+        .count();
+
+    // Orphan functions: functions with no incoming or outgoing call edges
+    let functions_with_calls: HashSet<String> = active_edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Calls)
+        .flat_map(|e| vec![e.source_id.to_string(), e.target_id.to_string()])
+        .collect();
+    let orphan_function_count = active_nodes
+        .iter()
+        .filter(|n| {
+            matches!(n.node_type, NodeType::Function | NodeType::Method)
+                && !n.test_node
+                && !functions_with_calls.contains(&n.id.to_string())
+        })
+        .count();
+
+    let untested_function_count = total_functions.saturating_sub(reachable_count);
+
+    let anomaly_summary = AnomalySummary {
+        high_complexity_count,
+        orphan_function_count,
+        untested_function_count,
+    };
+
+    // Recent changes: nodes modified in the last 7 days
+    let seven_days_ago = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.saturating_sub(7 * 24 * 3600)
+    };
+    let recent_changes_7d = active_nodes
+        .iter()
+        .filter(|n| n.last_modified_at > seven_days_ago)
+        .count();
+
     GraphSummary {
         repo_id: repo_id.to_string(),
         node_counts,
@@ -2300,6 +2361,8 @@ pub fn compute_graph_summary(
         spec_coverage_pct,
         test_coverage_pct,
         risk_indicators,
+        anomaly_summary,
+        recent_changes_7d,
     }
 }
 
