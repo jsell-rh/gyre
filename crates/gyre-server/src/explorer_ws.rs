@@ -3315,6 +3315,14 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 - $clicked = alias for an interactive mode — use in "focus" scope to create click-to-explore views where each click re-runs the query from the clicked node
 - In practice, both resolve to the same node ID at query time. The difference is intent: $clicked implies the query should be re-evaluated on future clicks.
 
+## Available Tools
+- graph_summary: Returns a condensed summary of the repo's knowledge graph including node/edge counts, top types, top functions, modules, test/spec coverage, and risk indicators.
+- graph_query_dryrun: Dry-run a view query against the knowledge graph. Returns matched node count, names, and warnings. Always validate queries before sending.
+- graph_nodes: Query graph nodes by ID, name pattern, or node type. Returns up to 50 nodes with details.
+- graph_edges: Query graph edges by source/target node ID or edge type. Returns up to 100 edges.
+- node_provenance: Returns creation and modification history for a specific node, including commit SHAs, authors, and timestamps. Use this to answer questions about who created/modified code and when.
+- search: Full-text search across the knowledge graph. Searches node names, qualified names, doc comments, file paths, and spec paths.
+
 ## Workflow
 1. Repository context is pre-loaded below — skip graph_summary unless you need detailed rankings or updated counts
 2. If you need specific nodes, call graph_nodes with a name_pattern
