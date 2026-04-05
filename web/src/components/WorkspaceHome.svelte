@@ -1054,10 +1054,10 @@
               </span>
             {/if}
             <button class="ws-header-link" onclick={() => goToWorkspaceSettings?.()} title="Workspace settings (g s)">
-              <Icon name="settings" size={14} />
+              <Icon name="settings" size={14} /> Settings
             </button>
             <button class="ws-header-link" onclick={() => goToAgentRules?.()} title="Agent rules (g a)">
-              <Icon name="spec" size={14} />
+              <Icon name="spec" size={14} /> Rules
             </button>
           </div>
         </div>
