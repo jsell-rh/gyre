@@ -193,9 +193,9 @@ describe('WorkspaceHome — basic rendering', () => {
 
   it('shows key sections when workspace is set', () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    // Streamlined layout: Repos, Entity/Activity tabs (PipelineOverview removed)
+    // Single-column layout: Repos + Activity (collapsed)
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="browse-panel"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="section-activity"]')).toBeTruthy();
   });
 });
 
