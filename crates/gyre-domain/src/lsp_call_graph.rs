@@ -748,6 +748,27 @@ pub fn detect_language(repo_root: &Path) -> RepoLanguage {
     }
 }
 
+/// Detect ALL languages present in a polyglot repository.
+pub fn detect_all_languages(repo_root: &Path) -> Vec<RepoLanguage> {
+    let mut languages = Vec::new();
+    if repo_root.join("Cargo.toml").is_file() {
+        languages.push(RepoLanguage::Rust);
+    }
+    if repo_root.join("go.mod").is_file() {
+        languages.push(RepoLanguage::Go);
+    }
+    if repo_root.join("pyproject.toml").is_file()
+        || repo_root.join("setup.py").is_file()
+        || repo_root.join("requirements.txt").is_file()
+    {
+        languages.push(RepoLanguage::Python);
+    }
+    if repo_root.join("tsconfig.json").is_file() || repo_root.join("package.json").is_file() {
+        languages.push(RepoLanguage::TypeScript);
+    }
+    languages
+}
+
 /// Check if pyright is available.
 pub fn pyright_available() -> bool {
     Command::new("pyright-langserver")
@@ -1250,7 +1271,79 @@ pub fn extract_call_graph_auto(
     repo_id: &Id,
     commit_sha: &str,
 ) -> LspCallGraphResult {
-    match detect_language(repo_root) {
+    // Detect ALL languages in polyglot repos and extract from each independently.
+    // This ensures a Rust+TypeScript repo (like Gyre) gets call edges from both.
+    let languages = detect_all_languages(repo_root);
+    if languages.is_empty() {
+        return LspCallGraphResult {
+            edges: Vec::new(),
+            errors: vec!["Unknown language — no LSP call graph extractor available".into()],
+            definitions_queried: 0,
+            new_edges_found: 0,
+            total_definitions: 0,
+            incomplete: false,
+            missing_toolchains: vec![],
+        };
+    }
+
+    // Single language — fast path (avoid edge deduplication overhead)
+    if languages.len() == 1 {
+        return extract_call_graph_for_language(
+            languages[0],
+            repo_root,
+            nodes,
+            existing_edges,
+            repo_id,
+            commit_sha,
+        );
+    }
+
+    // Multiple languages — merge results
+    let mut combined = LspCallGraphResult {
+        edges: Vec::new(),
+        errors: Vec::new(),
+        definitions_queried: 0,
+        new_edges_found: 0,
+        total_definitions: 0,
+        incomplete: false,
+        missing_toolchains: Vec::new(),
+    };
+
+    // Accumulate edges from all existing + previously extracted to avoid duplicates
+    let mut all_edges = existing_edges.to_vec();
+
+    for lang in &languages {
+        let result = extract_call_graph_for_language(
+            *lang,
+            repo_root,
+            nodes,
+            &all_edges,
+            repo_id,
+            commit_sha,
+        );
+        // Merge into combined edges, extending the edge set for subsequent extractors
+        all_edges.extend(result.edges.iter().cloned());
+        combined.edges.extend(result.edges);
+        combined.errors.extend(result.errors);
+        combined.definitions_queried += result.definitions_queried;
+        combined.new_edges_found += result.new_edges_found;
+        combined.total_definitions += result.total_definitions;
+        combined.incomplete |= result.incomplete;
+        combined.missing_toolchains.extend(result.missing_toolchains);
+    }
+
+    combined
+}
+
+fn extract_call_graph_for_language(
+    lang: RepoLanguage,
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    existing_edges: &[GraphEdge],
+    repo_id: &Id,
+    commit_sha: &str,
+) -> LspCallGraphResult {
+    match lang {
         RepoLanguage::Rust => {
             extract_call_graph(repo_root, nodes, existing_edges, repo_id, commit_sha)
         }
