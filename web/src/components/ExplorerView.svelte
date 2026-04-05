@@ -787,18 +787,23 @@
   // The effective graph passed to canvas: either time-filtered or full
   let effectiveGraph = $derived(timelineFilteredGraph ?? graph);
 
-  // Single effect for repo change: reset state then load dependencies.
-  // Using a single effect avoids Svelte 5 scheduling race where the reset
-  // effect could execute after the load effect on the same tick.
+  // Reset insights on repo change; lazy-load when panel expanded (Vision Principle 2:
+  // "Right Context, Not More Context" — don't fetch data the user hasn't asked to see)
   $effect(() => {
     if (!selectedRepoId) return;
-    // Reset
     repoDeps = null;
     repoRisks = null;
     graphTypes = null;
     graphModules = null;
     graphTimeline = null;
-    // Load
+  });
+
+  // Lazy-load insights data only when the panel is expanded
+  let insightsLoadedFor = $state('');
+  $effect(() => {
+    if (insightsCollapsed || !selectedRepoId) return;
+    if (insightsLoadedFor === selectedRepoId) return; // already loaded
+    insightsLoadedFor = selectedRepoId;
     repoDepsLoading = true;
     repoRisksLoading = true;
     const currentRepoId = selectedRepoId;

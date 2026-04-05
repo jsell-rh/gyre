@@ -183,9 +183,11 @@
 
   // Evaluative lens metric mode — defaults to trace-based when data exists
   let evaluativeMetric = $state('complexity'); // 'complexity' | 'churn' | 'incoming_calls' | 'test_coverage' | 'span_duration' | 'span_count' | 'error_rate'
-  // Auto-select trace metric when trace data becomes available
+  // Auto-select trace metric when trace data becomes available and user hasn't
+  // explicitly chosen a trace metric (auto-upgrade from any structural metric)
+  const TRACE_METRICS = new Set(['span_duration', 'span_count', 'error_rate']);
   $effect(() => {
-    if (traceData?.spans?.length > 0 && evaluativeMetric === 'complexity') {
+    if (traceData?.spans?.length > 0 && !TRACE_METRICS.has(evaluativeMetric)) {
       evaluativeMetric = 'span_duration';
     }
   });

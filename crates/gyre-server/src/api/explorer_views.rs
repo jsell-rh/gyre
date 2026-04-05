@@ -492,13 +492,17 @@ pub async fn generate_explorer_view(
             ApiError::Internal(e)
         })?;
 
-    // Charge budget: record as llm_query cost entry.
+    // Charge budget: estimate token cost from prompt size.
+    // The LlmPort doesn't return actual usage, so we estimate:
+    // ~4 chars per token for English, plus response overhead (~500 tokens).
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let estimated_tokens = (estimated_input + 500) as f64;
     let cost_entry = CostEntry::new(
         new_id(),
         Id::new(caller.agent_id.clone()),
         None,
         "llm_query",
-        1.0,
+        estimated_tokens,
         "tokens",
         now_secs(),
     );

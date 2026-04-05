@@ -422,6 +422,7 @@ async fn handle_explorer_session(
                     &mut cached_nodes,
                     &mut cached_edges,
                     &auth,
+                    &repo_workspace_id,
                 )
                 .await
                 {
@@ -1178,6 +1179,7 @@ async fn run_explorer_agent_sdk(
     canvas_state: &gyre_common::view_query::CanvasState,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     conversation_history: &mut Vec<ConversationMessage>,
+    workspace_id: &Id,
 ) -> anyhow::Result<()> {
     let server_url = format!(
         "http://localhost:{}",
@@ -1190,7 +1192,9 @@ async fn run_explorer_agent_sdk(
     // server-level graph access via the subprocess).
     let token = &state.auth_token;
     let system_prompt = build_system_prompt();
-    let model = std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+    // Use workspace-scoped model resolution for consistent model selection
+    let (model, _) =
+        crate::llm_helpers::resolve_llm_model(state, workspace_id, "explorer-agent").await;
 
     // Serialize conversation history for the SDK, preserving tool call context
     let history_json: Vec<serde_json::Value> = conversation_history
@@ -1673,6 +1677,7 @@ async fn run_explorer_agent(
     cached_nodes: &mut Option<Vec<gyre_common::graph::GraphNode>>,
     cached_edges: &mut Option<Vec<gyre_common::graph::GraphEdge>>,
     auth: &AuthenticatedAgent,
+    workspace_id: &Id,
 ) -> anyhow::Result<()> {
     // Check if SDK-based explorer agent should be used.
     // Per spec: Claude Agent SDK is the default path. The SDK provides the
@@ -1739,6 +1744,7 @@ async fn run_explorer_agent(
                 canvas_state,
                 sender,
                 conversation_history,
+                workspace_id,
             )
             .await;
         }
@@ -1762,7 +1768,8 @@ async fn run_explorer_agent(
         }
     };
 
-    let model = std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+    let (model, _) =
+        crate::llm_helpers::resolve_llm_model(state, workspace_id, "explorer-agent").await;
     let llm_port = llm.for_model(&model);
 
     // Load graph data (cached across messages in the session).
