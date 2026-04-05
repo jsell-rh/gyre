@@ -573,7 +573,7 @@
   });
 
   // ── Activity pagination ──────────────────────────────────────
-  let activityLimit = $state(5);  // compact by default, expandable
+  let activityLimit = $state(3);  // compact by default, expandable
 
   // ── Repo card data ────────────────────────────────────────────────────
   // repoHealth(repo) function already defined above (line ~265)
@@ -978,34 +978,10 @@
   {:else}
     <div class="focused-dashboard">
 
-      <!-- ── Workspace header ──────── -->
+      <!-- ── Workspace header (lean: name + status + actions) ──────── -->
       <header class="ws-header">
         <div class="ws-header-top-row">
           <h1 class="ws-header-name">{workspace.name ?? workspace.slug ?? 'Workspace'}</h1>
-          <!-- Compact pipeline counters — one-glance workspace health -->
-          {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading && (specs.length + wsTasks.length + wsMrs.length + wsAgents.length > 0)}
-            <div class="ws-header-stats">
-              <span class="ws-hstat" class:ws-hstat-warn={pipelineSpecs.pending > 0} title="{specs.length} specs — {pipelineSpecs.pending} pending">
-                <span class="ws-hstat-num">{specs.length}</span> specs
-              </span>
-              <span class="ws-hstat" title="{wsTasks.length} tasks — {pipelineTasks.in_progress} active">
-                <span class="ws-hstat-num">{wsTasks.length}</span> tasks
-              </span>
-              {#if pipelineAgents.active > 0}
-                <span class="ws-hstat ws-hstat-live" title="{pipelineAgents.active} agents running">
-                  <span class="ws-hstat-pulse"></span>
-                  <span class="ws-hstat-num">{pipelineAgents.active}</span> running
-                </span>
-              {:else}
-                <span class="ws-hstat" title="{wsAgents.length} total agents">
-                  <span class="ws-hstat-num">{wsAgents.length}</span> agents
-                </span>
-              {/if}
-              <span class="ws-hstat" class:ws-hstat-danger={pipelineMrs.failed_gates > 0} title="{wsMrs.length} MRs — {pipelineMrs.open} open, {pipelineMrs.merged} merged">
-                <span class="ws-hstat-num">{wsMrs.length}</span> MRs
-              </span>
-            </div>
-          {/if}
           <div class="ws-header-actions">
             {#if budgetPct !== null}
               <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
@@ -1025,7 +1001,6 @@
             {/if}
           </div>
         </div>
-        <!-- Status sentence — concise summary of workspace state -->
         {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
           <p class="ws-header-status">{statusSentence}</p>
         {/if}
@@ -1218,53 +1193,6 @@
               {/if}
             </div>
           </section>
-
-          <!-- ── Merge Queue (workspace-wide) ────────────────── -->
-          {#if !mergeQueueLoading && mergeQueueItems.length > 0}
-            <section class="ws-merge-queue" data-testid="section-merge-queue">
-              <div class="section-header-row">
-                <h2 class="section-heading">Merge Queue</h2>
-                <span class="section-count">{mergeQueueItems.length} item{mergeQueueItems.length !== 1 ? 's' : ''}</span>
-              </div>
-              <div class="merge-queue-list">
-                {#each mergeQueueItems.slice(0, 5) as item, i}
-                  {@const mrId = item.merge_request_id ?? item.mr_id}
-                  {@const mr = item._mr ?? {}}
-                  {@const repoId = mr.repository_id ?? mr.repo_id}
-                  {@const gateDetails = mr._gates?.details ?? []}
-                  <button class="queue-entry" onclick={() => nav('mr', mrId, { repo_id: repoId, title: mr.title })}>
-                    <span class="queue-position">#{i + 1}</span>
-                    <div class="queue-entry-info">
-                      <span class="queue-entry-title">{item._title ?? 'Untitled MR'}</span>
-                      <span class="queue-entry-meta">
-                        {#if repoId && repoMap[repoId]}<span class="ec-chip">{repoMap[repoId].name}</span>{/if}
-                        {#if item._branch}<span class="ec-chip ec-chip-mono">{item._branch}</span>{/if}
-                        {#if item._spec_ref}
-                          {@const specPath = item._spec_ref.split('@')[0]}
-                          <span class="ec-chip ec-chip-spec">{specPath.split('/').pop()?.replace(/\.md$/, '')}</span>
-                        {/if}
-                      </span>
-                    </div>
-                    {#if gateDetails.length > 0}
-                      <span class="queue-gates">
-                        {#each gateDetails.slice(0, 3) as g}
-                          <span class="ec-gate-chip ec-gate-{g.status}" title="{g.name}">{g.status === 'passed' ? '✓' : g.status === 'failed' ? '✗' : '○'}</span>
-                        {/each}
-                      </span>
-                    {/if}
-                    {#if item._deps?.length > 0}
-                      <span class="queue-deps" title="Waiting on {item._deps.length} dependency">
-                        <Icon name="link" size={10} /> {item._deps.length}
-                      </span>
-                    {/if}
-                  </button>
-                {/each}
-                {#if mergeQueueItems.length > 5}
-                  <p class="entity-panel-overflow">{mergeQueueItems.length - 5} more in queue</p>
-                {/if}
-              </div>
-            </section>
-          {/if}
 
           <!-- ── Recent Activity ─────────────────────────────── -->
           {#if !activityLoading && activityEvents.length > 0}
