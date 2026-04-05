@@ -1006,12 +1006,24 @@
               </span>
             </div>
           {/if}
-          {#if budgetPct !== null}
-            <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
-              <span class="ws-budget-bar"><span class="ws-budget-fill" style="width: {budgetPct}%"></span></span>
-              <span class="ws-budget-label">{budgetPct}%</span>
-            </span>
-          {/if}
+          <div class="ws-header-actions">
+            {#if budgetPct !== null}
+              <span class="ws-budget-indicator" class:ws-budget-warn={budgetPct > 70} class:ws-budget-danger={budgetPct > 90} title="Budget: {budgetPct}% of daily token limit used">
+                <span class="ws-budget-bar"><span class="ws-budget-fill" style="width: {budgetPct}%"></span></span>
+                <span class="ws-budget-label">{budgetPct}%</span>
+              </span>
+            {/if}
+            {#if goToWorkspaceSettings}
+              <button class="ws-settings-btn" onclick={goToWorkspaceSettings} title="Workspace settings" aria-label="Workspace settings">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              </button>
+            {/if}
+            {#if goToAgentRules}
+              <button class="ws-settings-btn" onclick={goToAgentRules} title="Agent rules" aria-label="Agent rules">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+              </button>
+            {/if}
+          </div>
         </div>
         <!-- Status sentence — concise summary of workspace state -->
         {#if !specsLoading && !tasksLoading && !mrsLoading && !agentsLoading}
@@ -1818,6 +1830,33 @@
   @keyframes hstat-pulse {
     0%, 100% { opacity: 1; transform: scale(1); }
     50% { opacity: 0.4; transform: scale(0.7); }
+  }
+
+  .ws-header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .ws-settings-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    color: var(--color-text-muted);
+    transition: all var(--transition-fast);
+  }
+
+  .ws-settings-btn:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+    color: var(--color-text);
   }
 
   .ws-header-desc {
