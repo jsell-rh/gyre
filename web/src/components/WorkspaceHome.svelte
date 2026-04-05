@@ -1312,26 +1312,63 @@
                   {#if specs.length === 0}
                     <p class="ws-overview-empty">No specs yet. Push specs to your repos to start the autonomous pipeline.</p>
                   {:else}
-                    <table class="ws-overview-table">
-                      <thead><tr><th>Status</th><th>Spec</th><th>Repo</th><th>Updated</th><th></th></tr></thead>
-                      <tbody>
-                        {#each specs.slice(0, 20) as spec}
-                          {@const status = spec.approval_status ?? spec.status ?? 'pending'}
-                          {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
-                          <tr class="ws-overview-row" onclick={() => nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id })} tabindex="0" role="button">
-                            <td><span class="ws-status-dot ws-status-{status}">{SPEC_STATUS_ICONS[status] ?? '?'}</span> {status}</td>
-                            <td class="cell-title">{specName}</td>
-                            <td class="cell-mono">{#if spec.repo_id && repoMap[spec.repo_id]}{repoMap[spec.repo_id].name}{/if}</td>
-                            <td class="cell-time">{relTime(spec.updated_at ?? spec.created_at)}</td>
-                            <td class="cell-action">
-                              {#if status === 'pending'}
+                    {@const pendingSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'pending')}
+                    {@const approvedSpecs = specs.filter(s => (s.approval_status ?? s.status) === 'approved')}
+                    {@const otherSpecs = specs.filter(s => !['pending', 'approved'].includes(s.approval_status ?? s.status ?? ''))}
+                    {@const sortedSpecs = [...pendingSpecs, ...approvedSpecs, ...otherSpecs]}
+                    <div class="specs-list">
+                      {#each sortedSpecs.slice(0, 20) as spec (spec.path)}
+                        {@const status = spec.approval_status ?? spec.status ?? 'pending'}
+                        {@const specName = spec.title ?? spec.path?.split('/').pop()?.replace(/\.md$/, '') ?? 'Untitled'}
+                        {@const repoName = (spec.repo_id && repoMap[spec.repo_id]) ? repoMap[spec.repo_id].name : null}
+                        {@const specTasks = wsTasks.filter(t => t.spec_path === spec.path)}
+                        {@const specMrs = wsMrs.filter(m => m.spec_ref?.startsWith(spec.path))}
+                        {@const actionState = specActionStates[spec.path]}
+                        <button class="spec-card-ws spec-card-ws-{status}" onclick={() => nav('spec', spec.path, { path: spec.path, repo_id: spec.repo_id })} tabindex="0">
+                          <div class="spec-card-header">
+                            <span class="spec-card-icon spec-card-icon-{status}">{SPEC_STATUS_ICONS[status] ?? '?'}</span>
+                            <span class="spec-card-title">{specName}</span>
+                            {#if status === 'pending' && !actionState}
+                              <span class="spec-card-actions">
                                 <button class="inline-action-btn inline-action-approve" onclick={(e) => { e.stopPropagation(); quickApproveSpec(spec, e); }}>Approve</button>
+                                <button class="inline-action-btn inline-action-reject" onclick={(e) => { e.stopPropagation(); quickRejectSpec(spec, e); }}>Reject</button>
+                              </span>
+                            {:else if actionState === 'loading'}
+                              <span class="spec-card-action-status">...</span>
+                            {:else if actionState === 'approved'}
+                              <span class="spec-card-action-status spec-card-action-approved">Approved</span>
+                            {:else if actionState === 'rejected'}
+                              <span class="spec-card-action-status spec-card-action-rejected">Rejected</span>
+                            {/if}
+                          </div>
+                          <div class="spec-card-meta">
+                            {#if repoName}<span class="spec-card-repo">{repoName}</span>{/if}
+                            {#if status === 'pending'}
+                              <span class="spec-card-why">Agents cannot start until approved</span>
+                            {:else if status === 'approved' && specTasks.length === 0}
+                              <span class="spec-card-why">Approved — awaiting task creation</span>
+                            {:else if status === 'approved' && specTasks.some(t => t.status === 'in_progress')}
+                              <span class="spec-card-why">Being implemented by {specTasks.filter(t => t.status === 'in_progress').length} agent{specTasks.filter(t => t.status === 'in_progress').length !== 1 ? 's' : ''}</span>
+                            {:else if status === 'approved' && specMrs.some(m => m.status === 'merged')}
+                              <span class="spec-card-why">Fully implemented and merged</span>
+                            {:else if status === 'rejected'}
+                              <span class="spec-card-why">Rejected — revise and re-push</span>
+                            {/if}
+                            <span class="spec-card-time">{relTime(spec.updated_at ?? spec.created_at)}</span>
+                          </div>
+                          {#if specTasks.length > 0 || specMrs.length > 0}
+                            <div class="spec-card-progress">
+                              {#if specTasks.length > 0}
+                                <span class="spec-progress-item">{specTasks.filter(t => t.status === 'done').length}/{specTasks.length} tasks done</span>
                               {/if}
-                            </td>
-                          </tr>
-                        {/each}
-                      </tbody>
-                    </table>
+                              {#if specMrs.length > 0}
+                                <span class="spec-progress-item">{specMrs.filter(m => m.status === 'merged').length}/{specMrs.length} MRs merged</span>
+                              {/if}
+                            </div>
+                          {/if}
+                        </button>
+                      {/each}
+                    </div>
                     {#if specs.length > 20}<p class="ws-overview-more">{specs.length - 20} more specs not shown</p>{/if}
                   {/if}
 
@@ -2438,6 +2475,48 @@
   .task-card-footer { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-muted); font-size: 10px; }
   .task-card-spec { font-style: italic; }
   .task-card-repo { font-weight: 500; }
+
+  /* ── Spec cards (workspace overview) ─────────────────────── */
+  .specs-list { display: flex; flex-direction: column; gap: var(--space-1); }
+  .spec-card-ws {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+    width: 100%;
+  }
+  .spec-card-ws:hover { border-color: var(--color-border-strong); background: var(--color-surface-elevated); }
+  .spec-card-ws-pending { border-left: 3px solid var(--color-warning); }
+  .spec-card-ws-approved { border-left: 3px solid var(--color-success); }
+  .spec-card-ws-rejected { border-left: 3px solid var(--color-danger); }
+  .spec-card-ws-draft { border-left: 3px solid var(--color-text-muted); }
+  .spec-card-header { display: flex; align-items: center; gap: var(--space-2); }
+  .spec-card-icon { font-size: 11px; flex-shrink: 0; }
+  .spec-card-icon-approved { color: var(--color-success); }
+  .spec-card-icon-pending { color: var(--color-warning); }
+  .spec-card-icon-rejected { color: var(--color-danger); }
+  .spec-card-title { font-weight: 600; color: var(--color-text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .spec-card-actions { display: flex; gap: var(--space-1); flex-shrink: 0; }
+  .spec-card-action-status { font-size: 10px; font-weight: 600; flex-shrink: 0; }
+  .spec-card-action-approved { color: var(--color-success); }
+  .spec-card-action-rejected { color: var(--color-danger); }
+  .spec-card-meta { display: flex; flex-wrap: wrap; gap: var(--space-1); color: var(--color-text-muted); font-size: 11px; }
+  .spec-card-repo { font-weight: 500; color: var(--color-text-secondary); }
+  .spec-card-why { font-style: italic; }
+  .spec-card-time { flex-shrink: 0; }
+  .spec-card-progress {
+    display: flex; gap: var(--space-2); margin-top: 2px;
+    font-size: 10px; color: var(--color-text-muted);
+  }
+  .spec-progress-item { font-family: var(--font-mono); }
 
   .activity-timeline-full {
     padding: var(--space-2) 0;
