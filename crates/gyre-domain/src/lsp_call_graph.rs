@@ -561,7 +561,9 @@ fn extract_rust_route_edges(
     now: u64,
 ) -> Vec<GraphEdge> {
     let mut edges = Vec::new();
-    let route_methods = ["get", "post", "put", "delete", "patch", "head", "options", "route"];
+    let route_methods = [
+        "get", "post", "put", "delete", "patch", "head", "options", "route",
+    ];
 
     // Group function nodes by file path for efficient scanning
     let mut nodes_by_file: HashMap<&str, Vec<&GraphNode>> = HashMap::new();
@@ -1609,7 +1611,9 @@ fn try_go_callgraph_binary(
     let (lock, cvar) = &*pair;
     let timeout = Duration::from_secs(60);
     let guard = lock.lock().unwrap();
-    let (mut guard, wait_result) = cvar.wait_timeout_while(guard, timeout, |o| o.is_none()).unwrap();
+    let (mut guard, wait_result) = cvar
+        .wait_timeout_while(guard, timeout, |o| o.is_none())
+        .unwrap();
 
     let output = if wait_result.timed_out() && guard.is_none() {
         // The child is still running in the wait_thread; we cannot kill it

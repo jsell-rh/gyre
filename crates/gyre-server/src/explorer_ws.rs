@@ -433,7 +433,8 @@ async fn handle_explorer_session(
     let mut queued_messages: Vec<ExplorerClientMessage> = Vec::new();
     // Replay buffer: queued messages are moved here after agent completes,
     // then drained at the top of the main loop before reading from the WebSocket.
-    let mut replay_buffer: std::collections::VecDeque<ExplorerClientMessage> = std::collections::VecDeque::new();
+    let mut replay_buffer: std::collections::VecDeque<ExplorerClientMessage> =
+        std::collections::VecDeque::new();
 
     // Ping/pong keepalive: keeps connections alive through proxies/load balancers.
     // Track last pong to detect dead connections (2 missed pongs = dead).
@@ -742,7 +743,9 @@ async fn handle_explorer_session(
                 };
 
                 // If the agent loaded fresh graph data, reset cache_time now.
-                if cached_nodes.is_some() && cache_time.elapsed() > std::time::Duration::from_secs(30) {
+                if cached_nodes.is_some()
+                    && cache_time.elapsed() > std::time::Duration::from_secs(30)
+                {
                     cache_time = std::time::Instant::now();
                 }
 
@@ -1292,7 +1295,9 @@ async fn handle_explorer_session(
                 let workspace_view_id = Id::new("__workspace__");
                 let (repo_views, ws_views) = tokio::join!(
                     state.saved_views.list_by_repo_and_tenant(&rid, &tenant_id),
-                    state.saved_views.list_by_repo_and_tenant(&workspace_view_id, &tenant_id),
+                    state
+                        .saved_views
+                        .list_by_repo_and_tenant(&workspace_view_id, &tenant_id),
                 );
                 match repo_views {
                     Ok(mut views) => {
@@ -3052,7 +3057,8 @@ async fn run_explorer_agent(
                 if let Some(ref cached) = cached_graph_summary {
                     cached.clone()
                 } else {
-                    let computed = execute_tool(tc, repo_id, nodes, edges, selected_node_id, state).await;
+                    let computed =
+                        execute_tool(tc, repo_id, nodes, edges, selected_node_id, state).await;
                     *cached_graph_summary = Some(computed.clone());
                     computed
                 }

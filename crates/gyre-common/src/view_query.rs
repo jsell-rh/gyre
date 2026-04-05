@@ -1014,9 +1014,15 @@ impl ViewQuery {
                 return false;
             }
             let args = &s[paren_start..paren_end];
-            return args
-                .chars()
-                .all(|c| c.is_ascii_digit() || c == ',' || c == ' ' || c == '.' || c == '%' || c == '-' || c == '/');
+            return args.chars().all(|c| {
+                c.is_ascii_digit()
+                    || c == ','
+                    || c == ' '
+                    || c == '.'
+                    || c == '%'
+                    || c == '-'
+                    || c == '/'
+            });
         }
         // Named CSS colors — only accept known names, not arbitrary strings
         let lower = s.to_ascii_lowercase();

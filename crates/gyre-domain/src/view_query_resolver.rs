@@ -2016,9 +2016,9 @@ pub fn dry_run(
     for callout in &query.callouts {
         let lower = callout.node.to_lowercase();
         // 1. Exact match on name or qualified_name
-        let exact = node_map.values().any(|n| {
-            n.name.to_lowercase() == lower || n.qualified_name.to_lowercase() == lower
-        });
+        let exact = node_map
+            .values()
+            .any(|n| n.name.to_lowercase() == lower || n.qualified_name.to_lowercase() == lower);
         if exact {
             callouts_resolved += 1;
             continue;
@@ -3948,7 +3948,10 @@ mod tests {
         let query = ViewQuery {
             scope: Scope::All,
             emphasis: Default::default(),
-            edges: gyre_common::view_query::EdgeFilter { filter: vec![], exclude: vec![] },
+            edges: gyre_common::view_query::EdgeFilter {
+                filter: vec![],
+                exclude: vec![],
+            },
             zoom: Default::default(),
             annotation: Default::default(),
             groups: vec![],
