@@ -102,6 +102,20 @@ const MIN_MESSAGE_INTERVAL_MS: u64 = 1000;
 /// WebSocket ping interval in seconds (keeps connections alive through proxies).
 const WS_PING_INTERVAL_SECS: u64 = 30;
 
+/// POST /api/v1/ws-ticket — Issue a short-lived, single-use ticket for WebSocket auth.
+///
+/// Browser WebSocket API cannot send custom headers. Instead of leaking the
+/// real auth token in a ?token= query parameter (visible in logs, browser
+/// history, proxy caches), we issue a ticket: a 30-second, single-use opaque
+/// token. The client connects with ?ticket=<ticket> instead.
+pub async fn issue_ws_ticket(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+) -> impl IntoResponse {
+    let ticket = state.ws_tickets.issue(auth);
+    axum::Json(json!({ "ticket": ticket }))
+}
+
 pub async fn explorer_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -2794,6 +2808,12 @@ Specs are first-class entities in the knowledge graph (Vision Principle 3). They
 8. Refine if dry-run returns warnings
 9. When the user's intent is ambiguous or could match multiple interpretations, ASK a clarifying question rather than silently picking one interpretation. For example: "Did you mean the SearchService type or the search_service module?" or "Are you looking for test coverage gaps or call-graph structure?" — engaging the human's judgment is the whole point.
 10. Surface signal, not noise: default to views that reveal what's architecturally significant (boundaries, interfaces, uncovered specs) rather than showing everything. Right context > all context.
+
+## Feedback Loop Support (Vision Principle 5: Observe → Understand → Decide → Encode → Execute)
+- When you identify a problem (ungoverned code, missing test coverage, coupling issues), don't just show it — suggest what the user could do about it
+- If a node lacks spec governance, suggest creating a spec: "This area would benefit from a spec. Click the spec badge on [NodeName] to create one."
+- If you see structural issues, frame them as spec-level decisions: "Consider whether [Module] should depend on [OtherModule], and encode that decision in a boundary spec."
+- Help the user move from Understand → Decide → Encode, not just Observe → Understand
 
 ## Output Format
 - Conversational explanation (what it shows, what's interesting, what to look at)

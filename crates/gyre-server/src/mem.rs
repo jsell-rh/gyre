@@ -2875,6 +2875,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
+        ws_tickets: crate::auth::WsTicketStore::new(),
     })
 }
 

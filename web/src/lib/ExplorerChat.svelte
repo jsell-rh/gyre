@@ -71,7 +71,7 @@
   }
 
   // ── WebSocket connection ─────────────────────────────────────────────────
-  function connect() {
+  async function connect() {
     if (ws) {
       ws.onclose = null;
       ws.close();
@@ -94,17 +94,31 @@
       }]);
       return;
     }
-    // SECURITY NOTE: Browser WebSocket API does not support custom headers,
-    // so auth token is passed via query parameter. This means the token may
-    // appear in server access logs, proxy logs, and browser history.
-    // Mitigations: (1) server strips token from access logs, (2) TLS encrypts
-    // the URL in transit. Preferred future approach: ticket-based auth
-    // (POST /api/v1/explorer/ticket → short-lived single-use ticket → WS ?ticket=).
-    // Derive WebSocket base from current page URL (works for CDN, proxy, and direct)
-    // Uses document.baseURI to respect <base href> if set, falling back to location.
+    // Ticket-based WebSocket auth: exchange Bearer token for a short-lived,
+    // single-use ticket to avoid leaking the real token in WebSocket URLs
+    // (which appear in server logs, proxy logs, and browser history).
     const base = new URL('/api/v1/', document.baseURI || window.location.href);
+    let ticket;
+    try {
+      const ticketResp = await fetch(`${base.href}ws-ticket`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!ticketResp.ok) throw new Error(`Ticket request failed: ${ticketResp.status}`);
+      const ticketData = await ticketResp.json();
+      ticket = ticketData.ticket;
+    } catch (err) {
+      console.error('[ExplorerChat] Failed to obtain WS ticket:', err);
+      status = 'error';
+      messages = capMessages([...messages, {
+        id: nextMsgId++, role: 'assistant',
+        content: 'Failed to authenticate WebSocket connection. Please try again.',
+        timestamp: Date.now(),
+      }]);
+      return;
+    }
     const wsBase = `${protocol}//${base.host}${base.pathname}`;
-    const url = `${wsBase}repos/${repoId}/explorer?token=${encodeURIComponent(token)}`;
+    const url = `${wsBase}repos/${repoId}/explorer?ticket=${encodeURIComponent(ticket)}`;
     const socket = new WebSocket(url);
 
     socket.onopen = () => {

@@ -373,6 +373,9 @@ pub struct AppState {
     pub user_tokens: Arc<dyn gyre_ports::UserTokenRepository>,
     /// Aggregated judgment ledger for user activity history (HSI §12).
     pub judgment_ledger: Arc<dyn gyre_ports::JudgmentLedgerRepository>,
+    /// WebSocket ticket store: short-lived, single-use tokens for WS auth.
+    /// Replaces the insecure ?token= query parameter pattern.
+    pub ws_tickets: auth::WsTicketStore,
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -609,6 +612,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/.well-known/jwks.json", get(oidc::jwks))
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
+        // WebSocket ticket endpoint: issues short-lived, single-use tokens.
+        // Prevents leaking real auth tokens in WebSocket URL query parameters.
+        .route("/api/v1/ws-ticket", post(explorer_ws::issue_ws_ticket))
         // Explorer WebSocket (explorer-implementation.md).
         // WebSocket upgrades cannot go through body-reading ABAC middleware,
         // so auth + repo-scoped tenant checks are enforced inside the handler.
@@ -985,6 +991,7 @@ pub fn build_state(
             dyn gyre_ports::JudgmentLedgerRepository,
             mem::MemJudgmentLedgerRepository
         ),
+        ws_tickets: auth::WsTicketStore::new(),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
                 Ok(factory) => Some(Arc::new(factory) as Arc<dyn gyre_ports::LlmPortFactory>),

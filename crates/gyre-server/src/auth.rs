@@ -238,6 +238,7 @@ pub(crate) fn hash_api_key(key: &str) -> String {
 }
 
 /// Resolved principal injected by the auth extractor.
+#[derive(Clone)]
 pub struct AuthenticatedAgent {
     pub agent_id: String,
     /// Present when auth was performed via JWT or API key.
@@ -399,8 +400,22 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        // Check Authorization header first, then fall back to ?token= query param
-        // (needed for WebSocket connections where browser API doesn't support headers).
+        // 0. Check for single-use WS ticket first (?ticket= query param).
+        //    Tickets are short-lived (30s), single-use, and don't expose the
+        //    real auth token in URLs/logs/browser history.
+        if let Some(ticket) = parts.uri.query().and_then(|q| {
+            q.split('&')
+                .find(|p| p.starts_with("ticket="))
+                .map(|p| &p[7..])
+        }) {
+            if let Some(auth) = state.ws_tickets.consume(ticket) {
+                return Ok(auth);
+            }
+            return Err((StatusCode::UNAUTHORIZED, "Invalid or expired ticket").into_response());
+        }
+
+        // Check Authorization header first, then fall back to ?token= query param.
+        // DEPRECATED: ?token= leaks credentials to logs/history. Use ?ticket= instead.
         let token = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
@@ -911,6 +926,77 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
 // AuthenticatedAgent directly; ABAC middleware enforces admin-only access
 // via the admin-all-operations built-in policy.
 
+// -- WebSocket ticket-based auth -----------------------------------------------
+//
+// Browser WebSocket API does not support custom headers. Instead of passing
+// the real auth token in a query parameter (which leaks to logs, browser
+// history, and proxy caches), we issue short-lived, single-use tickets.
+//
+// Flow:
+//   1. Client calls POST /api/v1/ws-ticket with Bearer token in header
+//   2. Server returns { "ticket": "<random>" } (valid 30 s, single use)
+//   3. Client connects to WS with ?ticket=<random>
+//   4. Server validates and consumes the ticket atomically
+
+/// TTL for WebSocket tickets (30 seconds).
+const WS_TICKET_TTL_SECS: u64 = 30;
+/// Maximum tickets in the store (prevents DoS via ticket flooding).
+const WS_TICKET_MAX: usize = 10_000;
+
+/// A single-use WebSocket auth ticket.
+#[derive(Clone)]
+pub struct WsTicketEntry {
+    /// The resolved identity for this ticket.
+    pub auth: AuthenticatedAgent,
+    /// When the ticket was created (monotonic).
+    pub created: std::time::Instant,
+}
+
+/// Thread-safe ticket store with automatic GC.
+#[derive(Clone, Default)]
+pub struct WsTicketStore {
+    tickets: Arc<std::sync::Mutex<HashMap<String, WsTicketEntry>>>,
+}
+
+impl WsTicketStore {
+    pub fn new() -> Self {
+        Self {
+            tickets: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Issue a new ticket for the given authenticated identity.
+    /// Returns the opaque ticket string.
+    pub fn issue(&self, auth: AuthenticatedAgent) -> String {
+        let ticket = uuid::Uuid::new_v4().to_string();
+        let mut store = self.tickets.lock().unwrap_or_else(|e| e.into_inner());
+        // GC expired tickets and enforce cap
+        let now = std::time::Instant::now();
+        store.retain(|_, v| now.duration_since(v.created).as_secs() < WS_TICKET_TTL_SECS);
+        if store.len() >= WS_TICKET_MAX {
+            // Drop oldest entries
+            let mut entries: Vec<_> = store.drain().collect();
+            entries.sort_by_key(|(_, v)| v.created);
+            entries.truncate(WS_TICKET_MAX / 2);
+            store.extend(entries);
+        }
+        store.insert(ticket.clone(), WsTicketEntry { auth, created: now });
+        ticket
+    }
+
+    /// Consume a ticket: returns the auth identity if valid, removes it atomically.
+    /// Returns None if expired, already used, or not found.
+    pub fn consume(&self, ticket: &str) -> Option<AuthenticatedAgent> {
+        let mut store = self.tickets.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = store.remove(ticket)?;
+        let age = std::time::Instant::now().duration_since(entry.created);
+        if age.as_secs() >= WS_TICKET_TTL_SECS {
+            return None; // Expired
+        }
+        Some(entry.auth)
+    }
+}
+
 // -- Tests --------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1027,7 +1113,8 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    use super::{test_helpers::*, AuthenticatedAgent};
+    use super::{test_helpers::*, AuthenticatedAgent, WsTicketStore};
+    use gyre_domain::UserRole;
 
     async fn authenticated_handler(
         AuthenticatedAgent { agent_id, .. }: AuthenticatedAgent,
@@ -1917,5 +2004,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_ws_ticket_issue_and_consume() {
+        let store = WsTicketStore::new();
+        let auth = AuthenticatedAgent {
+            agent_id: "test-user".to_string(),
+            user_id: None,
+            roles: vec![UserRole::Admin],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+        };
+        let ticket = store.issue(auth);
+        assert!(!ticket.is_empty());
+
+        // First consume succeeds
+        let result = store.consume(&ticket);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().agent_id, "test-user");
+
+        // Second consume fails (single-use)
+        assert!(store.consume(&ticket).is_none());
+    }
+
+    #[test]
+    fn test_ws_ticket_invalid_ticket() {
+        let store = WsTicketStore::new();
+        assert!(store.consume("nonexistent-ticket").is_none());
+    }
+
+    #[test]
+    fn test_ws_ticket_does_not_expose_real_token() {
+        let store = WsTicketStore::new();
+        let auth = AuthenticatedAgent {
+            agent_id: "test-user".to_string(),
+            user_id: None,
+            roles: vec![UserRole::Admin],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+        };
+        let ticket = store.issue(auth);
+        // Ticket is a UUID, not a Bearer token or API key
+        assert!(ticket.len() == 36, "Ticket should be a UUID format");
+        assert!(!ticket.starts_with("ey"), "Ticket must not be a JWT");
     }
 }

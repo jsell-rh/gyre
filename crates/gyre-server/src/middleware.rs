@@ -296,6 +296,7 @@ mod tests {
             user_notification_prefs: base.user_notification_prefs.clone(),
             user_tokens: base.user_tokens.clone(),
             judgment_ledger: base.judgment_ledger.clone(),
+            ws_tickets: base.ws_tickets.clone(),
             meta_specs: base.meta_specs.clone(),
             meta_spec_bindings: base.meta_spec_bindings.clone(),
         });
