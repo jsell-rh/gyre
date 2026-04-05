@@ -195,6 +195,7 @@
 
   let selectedNodeId = $state(null);
   let selectedEdgeId = $state(null); // "srcId->tgtId" key of clicked edge
+  let selectedEdgeDetail = $state(null); // { source, target, edgeType, screenX, screenY } for floating panel
   let hoveredEdgeId = $state(null); // "srcId->tgtId" key of hovered edge
   let multiSelectedIds = $state(new Set()); // Shift+Click multi-select for concept creation
   let hoveredNodeId = $state(null);
@@ -221,6 +222,7 @@
 
   // Context menu state
   let contextMenu = $state(null); // { x, y, node }
+  let ctxMoreOpen = $state(false); // whether "More..." submenu is expanded
 
   // Evaluative lens metric mode — defaults to trace-based when data exists
   let evaluativeMetric = $state('span_duration'); // 'span_duration' | 'span_count' | 'error_rate' (evaluative = behavioral/trace metrics only)
@@ -1289,19 +1291,10 @@
     }
 
     // Layout actual graph nodes (functions, types, etc.) as leaf cells
-    // Compute effective weight for a node: combines complexity and churn
-    // to fulfill the spec's "size indicates complexity or churn" requirement.
+    // Compute effective weight for a node: complexity is the primary sizing
+    // signal.  Spec: "node size reflects complexity."
     function nodeWeight(n) {
-      const complexity = n.complexity ?? 0;
-      const churn = n.churn_count_30d ?? n.churn ?? 0;
-      const descendants = descendantCounts.get(n.id) ?? 1;
-      const lineCount = n.line_end && n.line_start ? (n.line_end - n.line_start + 1) : 0;
-      // Spec: "Size indicates complexity or churn."
-      // Weighted sum: complexity is primary, churn is secondary signal,
-      // line count is tertiary (proxy for complexity when metric is missing).
-      // Add 1 baseline so even trivial nodes get visible cells.
-      const signal = complexity * 2 + churn + (lineCount > 0 ? Math.log2(lineCount + 1) : 0);
-      return Math.max(1, signal > 0 ? signal + 1 : descendants);
+      return Math.max(1, n.complexity || 1);
     }
 
     function layoutLeafNodes(graphNodes, x, y, w, h, parentLn, depth) {
@@ -3126,19 +3119,17 @@
     }
 
     // Border — colored by spec confidence, width scaled by churn
-    // Spec: "border thickness reflects churn" — discrete buckets:
-    //   0 → 1px (stable), 1-5 → 2px, 6-15 → 3px, 16+ → 4px (hot)
+    // Spec: "border thickness reflects churn" — continuous scale capped at 4px
     let borderColor = ln.id === selectedNodeId ? '#ef4444' : isMultiSelected ? '#a78bfa' : specBorderColor(n);
-    const churn = n?.churn_count_30d ?? 0;
-    const churnWidth = churn === 0 ? 1 : churn <= 5 ? 2 : churn <= 15 ? 3 : 4;
-    let borderWidth = ln.id === selectedNodeId ? 2 : churnWidth;
+    const churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3);
+    let borderWidth = ln.id === selectedNodeId ? 2 : churnThickness;
     if (qColor && ln.id !== selectedNodeId) {
       if (isHeatMap) {
         // Heat map mode: keep spec governance border color (structural info)
         // but add a subtle inner glow with the heat color. The heat fill is
         // applied above; spec border remains visible per spec requirement
         // "structural topology is always visible underneath."
-        borderWidth = churnWidth;
+        borderWidth = churnThickness;
         // Draw a thin inner border with heat color for visual emphasis
         ctx.save();
         ctx.strokeStyle = qColor;
@@ -4054,6 +4045,7 @@
         multiSelectedIds = new Set();
       }
       selectedEdgeId = null;
+      selectedEdgeDetail = null;
       selectedNodeId = hit.id;
       trackInteraction(`click:${hit.node.name ?? hit.node.id}(${hit.node.node_type})`);
       canvasState = {
@@ -4131,8 +4123,25 @@
         };
         onNodeDetail(edgeInfo);
         selectedEdgeId = `${edgeSrc(edgeHit.edge)}->${edgeTgt(edgeHit.edge)}`;
+        // Compute midpoint screen position for the floating edge detail panel
+        const srcLn = layoutNodeMap.get(edgeSrc(edgeHit.edge));
+        const tgtLn = layoutNodeMap.get(edgeTgt(edgeHit.edge));
+        const rect = canvasEl?.getBoundingClientRect();
+        const containerRect = containerEl?.getBoundingClientRect();
+        if (srcLn && tgtLn && rect && containerRect) {
+          const ss = worldToScreen(srcLn.x, srcLn.y);
+          const ts = worldToScreen(tgtLn.x, tgtLn.y);
+          selectedEdgeDetail = {
+            source: edgeHit.source,
+            target: edgeHit.target,
+            edgeType: edgeHit.edgeType,
+            screenX: (ss.x + ts.x) / 2 + (rect.left - containerRect.left),
+            screenY: (ss.y + ts.y) / 2 + (rect.top - containerRect.top),
+          };
+        }
       } else {
         selectedEdgeId = null;
+        selectedEdgeDetail = null;
         selectedNodeId = null;
         canvasState = { ...canvasState, selectedNode: null };
         onNodeDetail(null);
@@ -4243,6 +4252,7 @@
     if (!contextMenu) return;
     const node = contextMenu.node;
     contextMenu = null;
+    ctxMoreOpen = false;
     if (action === 'trace') {
       // Trace from here: show causal flow using Calls + RoutesTo edges.
       // Depth 15 to capture full reachable subgraph while staying responsive.
@@ -4416,6 +4426,7 @@
       if (breadcrumb.length > 0) {
         breadcrumb = [];
         selectedEdgeId = null;
+        selectedEdgeDetail = null;
         selectedNodeId = null;
         canvasState = { ...canvasState, selectedNode: null, breadcrumb: [] };
         onNodeDetail(null);
@@ -5064,37 +5075,32 @@
         <canvas bind:this={minimapEl} style="width: {MINIMAP_W}px; height: {MINIMAP_H}px" onclick={onMinimapClick} onmousedown={onMinimapMouseDown}></canvas>
       </div>
 
-      <!-- Context menu — organized per system-explorer.md §1:
-           Primary: View spec, View provenance, View history, Open in code
-           Secondary (collapsible): Trace, Blast radius, Drill into -->
+      <!-- Context menu — 4 primary actions per spec:
+           View spec, View provenance, Blast radius, Open in code
+           Secondary (collapsible "More..."): Trace, History, Drill into, Create spec -->
       {#if contextMenu}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="ctx-menu-backdrop" onclick={() => { contextMenu = null; }} oncontextmenu={(e) => { e.preventDefault(); contextMenu = null; }}></div>
+        <div class="ctx-menu-backdrop" onclick={() => { contextMenu = null; ctxMoreOpen = false; }} oncontextmenu={(e) => { e.preventDefault(); contextMenu = null; ctxMoreOpen = false; }}></div>
         <div class="ctx-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px" role="menu">
           <div class="ctx-menu-header">
             <span class="ctx-node-type">{contextMenu.node.node_type}</span>
             <span class="ctx-node-name">{contextMenu.node.name}</span>
           </div>
           <div class="ctx-sep"></div>
-          <!-- Primary actions (spec §1): View spec, provenance, history, code -->
+          <!-- Primary actions: View spec, View provenance, Blast radius, Open in code -->
           {#if contextMenu.node.spec_path}
             <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('spec')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
               View spec
-            </button>
-          {:else}
-            <button class="ctx-item ctx-item-subtle" role="menuitem" onclick={() => contextMenuAction('create_spec')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
-              Create spec
             </button>
           {/if}
           <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('provenance')}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
             View provenance
           </button>
-          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('history')}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-            View history
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('blast')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+            Blast radius
           </button>
           {#if contextMenu.node.file_path}
             <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('open_in_code')}>
@@ -5103,20 +5109,54 @@
             </button>
           {/if}
           <div class="ctx-sep"></div>
-          <!-- Analysis actions -->
-          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('blast')}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
-            Blast radius
+          <!-- Secondary actions in collapsible "More..." -->
+          <button class="ctx-more-toggle" onclick={() => { ctxMoreOpen = !ctxMoreOpen; }} aria-expanded={ctxMoreOpen}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+              {#if ctxMoreOpen}<polyline points="18 15 12 9 6 15"/>{:else}<polyline points="6 9 12 15 18 9"/>{/if}
+            </svg>
+            More...
           </button>
-          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-            Trace from here
-          </button>
-          {#if (treeData.parentToChildren.get(contextMenu.node.id) ?? []).length > 0}
-            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('drill')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>
-              Drill into
-            </button>
+          {#if ctxMoreOpen}
+            <div class="ctx-submenu">
+              <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                Trace from here
+              </button>
+              <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('history')}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                View history
+              </button>
+              {#if (treeData.parentToChildren.get(contextMenu.node.id) ?? []).length > 0}
+                <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('drill')}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>
+                  Drill into
+                </button>
+              {/if}
+              {#if !contextMenu.node.spec_path}
+                <button class="ctx-item ctx-item-subtle" role="menuitem" onclick={() => contextMenuAction('create_spec')}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+                  Create spec
+                </button>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      <!-- Edge detail floating panel -->
+      {#if selectedEdgeDetail}
+        <div class="edge-detail-panel" style="left: {selectedEdgeDetail.screenX}px; top: {selectedEdgeDetail.screenY}px">
+          <div class="edge-detail-header">
+            <span class="edge-detail-type">{(selectedEdgeDetail.edgeType ?? '').replace(/_/g, ' ')}</span>
+            <button class="edge-detail-close" onclick={() => { selectedEdgeId = null; selectedEdgeDetail = null; }} aria-label="Close">&times;</button>
+          </div>
+          <div class="edge-detail-relationship">
+            <span class="edge-detail-node">{selectedEdgeDetail.source?.name ?? '?'}</span>
+            <span class="edge-detail-arrow">&rarr;</span>
+            <span class="edge-detail-node">{selectedEdgeDetail.target?.name ?? '?'}</span>
+          </div>
+          {#if selectedEdgeDetail.source?.file_path}
+            <code class="edge-detail-path">{selectedEdgeDetail.source.file_path}{selectedEdgeDetail.source.line_start ? `:${selectedEdgeDetail.source.line_start}` : ''}</code>
           {/if}
         </div>
       {/if}
@@ -5491,6 +5531,54 @@
   .ctx-item-subtle { color: #64748b; font-style: italic; }
   .ctx-item svg { flex-shrink: 0; color: #64748b; }
   .ctx-item:hover svg { color: #94a3b8; }
+  .ctx-more-toggle {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; padding: 8px 12px; border: none; border-radius: 6px;
+    background: transparent; color: #64748b; font-size: 12px;
+    cursor: pointer; transition: background 0.1s;
+    font-family: system-ui, -apple-system, sans-serif;
+    text-align: left;
+  }
+  .ctx-more-toggle:hover { background: #1e293b; color: #94a3b8; }
+  .ctx-more-toggle svg { flex-shrink: 0; }
+  .ctx-submenu { padding-left: 8px; }
+
+  /* Edge detail floating panel */
+  .edge-detail-panel {
+    position: absolute; z-index: 35; min-width: 180px; max-width: 300px;
+    background: rgba(15, 15, 26, 0.95); border: 1px solid #334155;
+    border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(16px);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    transform: translate(-50%, -100%) translateY(-12px);
+    pointer-events: auto;
+  }
+  .edge-detail-header {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;
+  }
+  .edge-detail-type {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px; color: #f59e0b;
+  }
+  .edge-detail-close {
+    background: none; border: none; color: #64748b; cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 0 2px;
+  }
+  .edge-detail-close:hover { color: #e2e8f0; }
+  .edge-detail-relationship {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    margin-bottom: 4px;
+  }
+  .edge-detail-node {
+    font-size: 13px; font-weight: 600; color: #e2e8f0;
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+  .edge-detail-arrow { color: #64748b; font-size: 14px; }
+  .edge-detail-path {
+    display: block; font-size: 11px; color: #64748b;
+    font-family: 'SF Mono', Menlo, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    margin-top: 4px;
+  }
 
   /* Canvas search overlay */
   .canvas-search {

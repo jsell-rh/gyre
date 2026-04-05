@@ -680,6 +680,7 @@ impl ViewQuery {
                             "enum_variant",
                             "method",
                             "spec",
+                            "test",
                         ];
                         if !known_types.contains(&parts[2]) {
                             errors.push(format!(
@@ -695,6 +696,15 @@ impl ViewQuery {
                                 "$where visibility value '{}' is not recognized — known values: {}",
                                 parts[2],
                                 known_vis.join(", ")
+                            ));
+                        }
+                    } else if parts[0] == "spec_confidence" {
+                        let known_conf = ["high", "medium", "low", "none"];
+                        if !known_conf.contains(&parts[2]) {
+                            errors.push(format!(
+                                "$where spec_confidence value '{}' is not recognized — known values: {}",
+                                parts[2],
+                                known_conf.join(", ")
                             ));
                         }
                     }
