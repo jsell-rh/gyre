@@ -115,35 +115,36 @@
       </div>
     {/if}
 
-    <!-- Compact stats footer — clickable counts for quick navigation -->
-    <div class="repo-card-stats-footer">
-      {#if stats.specs > 0}
-        <button class="repo-stat-chip" class:repo-stat-warning={specBreakdown?.pending > 0} onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending approval)` : ''}">
-          <span class="repo-stat-num">{stats.specs}</span> specs{#if specBreakdown?.pending > 0} <span class="repo-stat-badge">{specBreakdown.pending} pending</span>{/if}
+    <!-- Pipeline flow — shows where this repo is in the autonomous cycle -->
+    {#if stats.specs > 0 || stats.tasks > 0 || stats.agents > 0 || stats.mrs > 0}
+      <div class="repo-pipeline-flow">
+        <button class="repo-flow-stage" class:repo-flow-active={specBreakdown?.pending > 0} class:repo-flow-done={stats.specs > 0 && !specBreakdown?.pending} onclick={(e) => handleStatClick('specs', e)} title="{stats.specs} spec{stats.specs !== 1 ? 's' : ''}{specBreakdown?.pending ? ` (${specBreakdown.pending} pending)` : ''}">
+          <span class="repo-flow-count" class:repo-flow-warn={specBreakdown?.pending > 0}>{stats.specs}</span>
+          <span class="repo-flow-label">specs</span>
         </button>
-      {/if}
-      {#if stats.tasks > 0}
-        <button class="repo-stat-chip" onclick={(e) => handleStatClick('tasks', e)} title="{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}">
-          <span class="repo-stat-num">{stats.tasks}</span> tasks
+        <span class="repo-flow-arrow">→</span>
+        <button class="repo-flow-stage" class:repo-flow-active={stats.tasks > 0} onclick={(e) => handleStatClick('tasks', e)} title="{stats.tasks} task{stats.tasks !== 1 ? 's' : ''}">
+          <span class="repo-flow-count">{stats.tasks}</span>
+          <span class="repo-flow-label">tasks</span>
         </button>
-      {/if}
-      {#if stats.mrs > 0}
-        <button class="repo-stat-chip" class:repo-stat-danger={stats.failedGates > 0} onclick={(e) => handleStatClick('mrs', e)} title="{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{stats.failedGates > 0 ? ` — ${stats.failedGates} gate failures` : ''}">
-          <span class="repo-stat-num">{stats.mrs}</span> MRs
+        <span class="repo-flow-arrow">→</span>
+        <button class="repo-flow-stage" class:repo-flow-active={stats.agents > 0} onclick={(e) => handleStatClick('agents', e)} title="{stats.agents} active agent{stats.agents !== 1 ? 's' : ''}">
+          <span class="repo-flow-count" class:repo-flow-live={stats.agents > 0}>{stats.agents}</span>
+          <span class="repo-flow-label">agents</span>
         </button>
-      {/if}
-      {#if stats.agents > 0}
-        <button class="repo-stat-chip repo-stat-live" onclick={(e) => handleStatClick('agents', e)} title="{stats.agents} active agent{stats.agents !== 1 ? 's' : ''}">
-          <span class="repo-stat-num">{stats.agents}</span> agents
+        <span class="repo-flow-arrow">→</span>
+        <button class="repo-flow-stage" class:repo-flow-active={stats.openMrs > 0} class:repo-flow-alert={stats.failedGates > 0} onclick={(e) => handleStatClick('mrs', e)} title="{stats.mrs} MR{stats.mrs !== 1 ? 's' : ''}{stats.failedGates > 0 ? ` (${stats.failedGates} gate failures)` : ''}">
+          <span class="repo-flow-count" class:repo-flow-danger={stats.failedGates > 0}>{stats.mrs}</span>
+          <span class="repo-flow-label">MRs</span>
         </button>
-      {/if}
-      <button class="repo-stat-chip repo-stat-code" onclick={(e) => handleStatClick('code', e)} title="Browse code and agent provenance">
-        code
-      </button>
-      <button class="repo-stat-chip repo-stat-settings" onclick={(e) => handleStatClick('settings', e)} title="Gates, policies, and repo settings" aria-label="Repo settings">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="12" height="12" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-      </button>
-    </div>
+        <button class="repo-flow-stage repo-flow-stage-code" onclick={(e) => handleStatClick('code', e)} title="Browse code">
+          <span class="repo-flow-label">code</span>
+        </button>
+        <button class="repo-flow-stage repo-flow-stage-settings" onclick={(e) => handleStatClick('settings', e)} title="Repo settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="11" height="11" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -313,57 +314,79 @@
   .gate-mini-pending { color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text-muted) 8%, transparent); }
   .gate-mini-more { color: var(--color-text-muted); font-style: italic; }
 
-  /* (inline pending specs and merge queue removed — shown on workspace home instead) */
-
-  /* Compact stats footer */
-  .repo-card-stats-footer {
+  /* Pipeline flow — mini pipeline showing repo's autonomous cycle stage */
+  .repo-pipeline-flow {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    gap: 2px;
     margin-top: var(--space-1);
     padding-top: var(--space-1);
     border-top: 1px solid var(--color-border);
   }
 
-  .repo-stat-chip {
-    display: inline-flex;
+  .repo-flow-stage {
+    display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 3px;
+    gap: 0;
     padding: 1px 6px;
     background: transparent;
     border: none;
     border-radius: var(--radius-sm);
     cursor: pointer;
     font-family: var(--font-body);
-    font-size: 11px;
-    color: var(--color-text-muted);
     transition: all var(--transition-fast);
+    min-width: 32px;
   }
 
-  .repo-stat-chip:hover {
+  .repo-flow-stage:hover {
     background: var(--color-surface-elevated);
-    color: var(--color-primary);
   }
 
-  .repo-stat-num {
+  .repo-flow-stage.repo-flow-active {
+    background: color-mix(in srgb, var(--color-primary) 5%, transparent);
+  }
+
+  .repo-flow-stage.repo-flow-done .repo-flow-count {
+    color: var(--color-success);
+  }
+
+  .repo-flow-stage.repo-flow-alert .repo-flow-count {
+    color: var(--color-danger);
+  }
+
+  .repo-flow-count {
+    font-size: var(--text-sm);
     font-weight: 700;
     font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+    line-height: 1;
   }
 
-  .repo-stat-danger { color: var(--color-danger); }
-  .repo-stat-danger .repo-stat-num { color: var(--color-danger); }
-  .repo-stat-warning { color: var(--color-warning); }
-  .repo-stat-warning .repo-stat-num { color: var(--color-warning); }
-  .repo-stat-live { color: var(--color-success); }
-  .repo-stat-live .repo-stat-num { color: var(--color-success); }
-  .repo-stat-code { color: var(--color-text-muted); font-style: italic; }
-  .repo-stat-settings { color: var(--color-text-muted); margin-left: auto; }
-  .repo-stat-badge {
+  .repo-flow-count.repo-flow-warn { color: var(--color-warning); }
+  .repo-flow-count.repo-flow-live { color: var(--color-success); }
+  .repo-flow-count.repo-flow-danger { color: var(--color-danger); }
+
+  .repo-flow-label {
     font-size: 9px;
-    font-weight: 600;
-    padding: 0 4px;
-    border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
-    color: var(--color-warning);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    line-height: 1;
+  }
+
+  .repo-flow-arrow {
+    color: var(--color-text-muted);
+    font-size: 9px;
+    opacity: 0.5;
+    flex-shrink: 0;
+  }
+
+  .repo-flow-stage-code {
+    margin-left: auto;
+  }
+
+  .repo-flow-stage-settings {
+    color: var(--color-text-muted);
   }
 </style>
