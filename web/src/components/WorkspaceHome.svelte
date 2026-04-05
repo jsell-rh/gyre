@@ -1183,6 +1183,43 @@
             </section>
           {/if}
 
+          <!-- Active Agents (prominent when work is happening) -->
+          {#if !agentsLoading}
+            {@const activeAgentList = wsAgents.filter(a => a.status === 'active' || a.status === 'running')}
+            {#if activeAgentList.length > 0}
+              <section class="ws-active-agents" data-testid="section-active-agents">
+                <div class="section-header-row">
+                  <h2 class="section-heading">
+                    <span class="live-dot"></span>
+                    {activeAgentList.length} Agent{activeAgentList.length !== 1 ? 's' : ''} Working
+                  </h2>
+                </div>
+                <div class="active-agents-grid">
+                  {#each activeAgentList as agent}
+                    {@const elapsedSec = agent.created_at ? Math.round(Date.now() / 1000 - agent.created_at) : null}
+                    {@const specName = agent.spec_path?.split('/').pop()?.replace(/\.md$/, '')}
+                    <button class="active-agent-card" onclick={() => nav('agent', agent.id, agent)}>
+                      <div class="active-agent-header">
+                        <span class="active-agent-name">{agent.name ?? formatId('agent', agent.id)}</span>
+                        {#if elapsedSec != null}
+                          <span class="active-agent-time">{elapsedSec < 60 ? `${elapsedSec}s` : elapsedSec < 3600 ? `${Math.round(elapsedSec / 60)}m` : `${Math.round(elapsedSec / 3600)}h`}</span>
+                        {/if}
+                      </div>
+                      <div class="active-agent-context">
+                        {#if specName}<span class="active-agent-spec" title={agent.spec_path}>{specName}</span>{/if}
+                        {#if agent.task_id ?? agent.current_task_id}<span class="active-agent-task">{entityName('task', agent.task_id ?? agent.current_task_id)}</span>{/if}
+                      </div>
+                      <div class="active-agent-actions">
+                        {#if agent.repo_id && repoMap[agent.repo_id]}<span class="active-agent-repo">{repoMap[agent.repo_id].name}</span>{/if}
+                        <span class="active-agent-view">View →</span>
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+              </section>
+            {/if}
+          {/if}
+
           <!-- Repos (primary content) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
@@ -1807,6 +1844,103 @@
     padding: var(--space-2) 0;
     margin: 0;
     font-style: italic;
+  }
+
+  /* ── Active agents section ──────────────────────────────────── */
+  .ws-active-agents {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .live-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    animation: hstat-pulse 2s ease-in-out infinite;
+    margin-right: 2px;
+    vertical-align: middle;
+  }
+
+  .active-agents-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: var(--space-2);
+  }
+
+  .active-agent-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--color-success) 3%, var(--color-surface));
+    border: 1px solid color-mix(in srgb, var(--color-success) 20%, var(--color-border));
+    border-left: 3px solid var(--color-success);
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    transition: all var(--transition-fast);
+    width: 100%;
+  }
+
+  .active-agent-card:hover {
+    border-color: var(--color-success);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .active-agent-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .active-agent-name {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .active-agent-time {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-success);
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .active-agent-context {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .active-agent-spec { font-style: italic; }
+  .active-agent-task { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .active-agent-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-1);
+    font-size: 10px;
+  }
+
+  .active-agent-repo {
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .active-agent-view {
+    color: var(--color-primary);
+    font-weight: 600;
   }
 
   /* ── Merge queue section ────────────────────────────────────── */
