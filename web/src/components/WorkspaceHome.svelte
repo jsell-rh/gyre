@@ -1394,6 +1394,64 @@
             </div>
           </section>
 
+          <!-- Recently Merged — celebrate shipped autonomous work -->
+          {#if !mrsLoading}
+            {@const recentlyMerged = wsMrs.filter(m => m.status === 'merged').sort((a, b) => (b.merged_at ?? b.updated_at ?? 0) - (a.merged_at ?? a.updated_at ?? 0)).slice(0, 5)}
+            {#if recentlyMerged.length > 0}
+              <details class="ws-activity-details" open>
+                <summary class="ws-activity-summary">
+                  <h2 class="section-heading section-heading-inline">Recently Shipped</h2>
+                  <span class="activity-count-badge">{recentlyMerged.length}</span>
+                </summary>
+                <div class="recently-merged-list">
+                  {#each recentlyMerged as mr (mr.id)}
+                    {@const mrRepo = repoMap[mr.repository_id ?? mr.repo_id]}
+                    {@const specPath = mr.spec_ref?.split('@')[0]}
+                    {@const agentId = mr.author_agent_id ?? mr.agent_id}
+                    <button class="recently-merged-item" onclick={() => nav('mr', mr.id, { repo_id: mr.repository_id ?? mr.repo_id, title: mr.title })}>
+                      <div class="merged-item-main">
+                        <span class="merged-item-check">✓</span>
+                        <div class="merged-item-info">
+                          <span class="merged-item-title">{mr.title ?? 'Untitled'}</span>
+                          <span class="merged-item-meta">
+                            {#if specPath}
+                              <span class="merged-meta-spec">{specPath.split('/').pop()?.replace(/\.md$/, '')}</span>
+                              <span class="merged-meta-arrow">→</span>
+                            {/if}
+                            {#if agentId}
+                              <span class="merged-meta-agent">{entityName('agent', agentId)}</span>
+                              <span class="merged-meta-arrow">→</span>
+                            {/if}
+                            <span class="merged-meta-status">merged</span>
+                            {#if mr.merged_at ?? mr.updated_at}
+                              <span class="merged-meta-time">{relTime(mr.merged_at ?? mr.updated_at)}</span>
+                            {/if}
+                          </span>
+                        </div>
+                      </div>
+                      <div class="merged-item-right">
+                        {#if mr.diff_stats}
+                          <span class="merged-diff-stats">
+                            <span class="diff-ins-tiny">+{mr.diff_stats.insertions ?? 0}</span>
+                            <span class="diff-del-tiny">-{mr.diff_stats.deletions ?? 0}</span>
+                          </span>
+                        {/if}
+                        {#if mr._gates?.total > 0}
+                          <span class="merged-gates-mini" title="{mr._gates.passed}/{mr._gates.total} gates passed">
+                            ✓{mr._gates.passed}
+                          </span>
+                        {/if}
+                        {#if mrRepo}
+                          <span class="merged-repo-badge">{mrRepo.name}</span>
+                        {/if}
+                      </div>
+                    </button>
+                  {/each}
+                </div>
+              </details>
+            {/if}
+          {/if}
+
           <!-- ── Activity feed (always visible, collapsible) ────── -->
           {#if activityEvents.length > 0}
             <details class="ws-activity-details" open>
@@ -2078,6 +2136,130 @@
     font-weight: 600;
     color: var(--color-danger);
   }
+
+  /* ── Recently merged section ────────────────────────────────── */
+  .recently-merged-list {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-1) 0;
+  }
+
+  .recently-merged-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border) 50%, transparent);
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    width: 100%;
+    transition: background var(--transition-fast);
+  }
+
+  .recently-merged-item:last-child { border-bottom: none; }
+  .recently-merged-item:hover { background: var(--color-surface-elevated); }
+
+  .merged-item-main {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    flex: 1;
+    min-width: 0;
+  }
+
+  .merged-item-check {
+    color: var(--color-success);
+    font-weight: 700;
+    font-size: var(--text-sm);
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .merged-item-info {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .merged-item-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .merged-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--color-text-muted);
+    overflow: hidden;
+  }
+
+  .merged-meta-spec {
+    font-style: italic;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .merged-meta-agent {
+    font-family: var(--font-mono);
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .merged-meta-arrow { color: var(--color-text-muted); }
+  .merged-meta-status { color: var(--color-success); font-weight: 600; }
+  .merged-meta-time { white-space: nowrap; }
+
+  .merged-item-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .merged-diff-stats {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    display: flex;
+    gap: 3px;
+  }
+
+  .merged-gates-mini {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-success);
+    background: color-mix(in srgb, var(--color-success) 8%, transparent);
+    padding: 0 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .merged-repo-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+  }
+
+  .diff-ins-tiny { color: var(--color-success); font-weight: 600; }
+  .diff-del-tiny { color: var(--color-danger); font-weight: 600; }
   /* ── Pipeline detail panel (compact multi-repo navigator) ──────── */
   .pipeline-detail-compact {
     border: 1px solid var(--color-border);
