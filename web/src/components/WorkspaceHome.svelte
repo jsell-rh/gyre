@@ -1199,9 +1199,9 @@
             <section class="ws-activity-section" data-testid="section-activity">
               <div class="section-header-row">
                 <h2 class="section-heading">Recent Activity</h2>
-                {#if activityEvents.length > 5}
-                  <button class="section-btn section-btn-compact" onclick={() => { activityLimit = activityLimit <= 5 ? 20 : 5; }}>
-                    {activityLimit <= 5 ? 'Show more' : 'Show less'}
+                {#if activityEvents.length > 3}
+                  <button class="section-btn section-btn-compact" onclick={() => { activityLimit = activityLimit <= 3 ? 15 : 3; }}>
+                    {activityLimit <= 3 ? `Show all (${activityEvents.length})` : 'Show less'}
                   </button>
                 {/if}
               </div>
