@@ -4757,17 +4757,24 @@
     scheduleRedraw();
   });
 
-  // View query zoom directive: auto-zoom to fit highlighted nodes after query is applied
+  // View query zoom directive: auto-zoom to fit highlighted nodes ONCE when
+  // the query is first applied. Without the lastZoomedQuery guard, this effect
+  // re-fires on every queryMatchedIds/layoutNodes change (e.g. semantic zoom
+  // revealing new nodes), overriding the user's manual pan/zoom.
+  let lastZoomedQuery = null;
   $effect(() => {
-    if (!activeQuery?.zoom) return;
+    if (!activeQuery?.zoom) { lastZoomedQuery = null; return; }
+    // Skip if we already zoomed for this exact query instance
+    if (activeQuery === lastZoomedQuery) return;
     // Handle { level: N } zoom
     if (typeof activeQuery.zoom === 'object' && activeQuery.zoom.level != null) {
       targetCam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, activeQuery.zoom.level));
+      lastZoomedQuery = activeQuery;
       scheduleRedraw();
       return;
     }
-    if (activeQuery.zoom === 'current') return;
-    if (activeQuery.zoom !== 'fit') return;
+    if (activeQuery.zoom === 'current') { lastZoomedQuery = activeQuery; return; }
+    if (activeQuery.zoom !== 'fit') { lastZoomedQuery = activeQuery; return; }
     if (!queryMatchedIds || queryMatchedIds.size === 0) return;
     // Find bounding box of all matched nodes in layout
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -4785,6 +4792,7 @@
     const mw = maxX - minX, mh = maxY - minY;
     const fitZoom = Math.min(W / (mw || 1), H / (mh || 1)) * 0.8;
     targetCam = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom: Math.min(fitZoom, MAX_ZOOM) };
+    lastZoomedQuery = activeQuery;
     scheduleRedraw();
   });
 
