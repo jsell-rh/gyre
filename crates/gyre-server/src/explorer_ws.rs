@@ -121,7 +121,9 @@ fn max_sessions_per_user() -> usize {
 
 /// Max tool-use turns (LLM calls for graph exploration before generating a view query).
 /// This is separate from the refinement budget so they don't compete.
-const MAX_TOOL_TURNS: usize = 5;
+/// 8 turns allows enough exploration for large graphs (5000+ nodes) where the
+/// agent needs several queries to find the right nodes before building a view.
+const MAX_TOOL_TURNS: usize = 8;
 
 /// Max refinement-only turns (view query self-check loop).
 /// Per spec: 3 dedicated refinement turns for the self-check loop.
@@ -3129,11 +3131,22 @@ async fn run_explorer_agent(
                     serialize_msg(&status_msg).unwrap_or_default().into(),
                 ))
                 .await;
-            // Force one final response without tools so the LLM synthesizes
+            // Force one final response without tools so the LLM synthesizes.
+            // Add a nudge to ensure a view query is emitted, not just text.
+            let mut final_history = conversation_history.clone();
+            final_history.push(ConversationMessage {
+                role: "user".to_string(),
+                content: ConversationContent::Text(
+                    "You've reached the exploration limit. Based on everything you've gathered so far, \
+                     produce your best <view_query> now with a brief explanation. \
+                     Use the nodes and edges you've already discovered — do not apologize or say you need more data."
+                        .to_string(),
+                ),
+            });
             let final_response = llm_port
                 .complete_with_tools(
                     &system_prompt,
-                    &conversation_history,
+                    &final_history,
                     &[], // no tools → forces text-only response
                     Some(4096),
                 )
@@ -3705,8 +3718,8 @@ This shows all callers of TaskPort."#;
     #[test]
     fn test_max_agent_turns() {
         assert_eq!(
-            MAX_TOOL_TURNS, 5,
-            "Tool-use budget: 5 turns for graph exploration"
+            MAX_TOOL_TURNS, 8,
+            "Tool-use budget: 8 turns for graph exploration"
         );
         assert_eq!(
             MAX_REFINEMENT_TURNS, 3,
@@ -3963,8 +3976,8 @@ Done."#;
 
     #[test]
     fn test_max_total_turns_matches_spec() {
-        // 5 tool-use turns + 3 dedicated refinement turns = 8 max LLM calls
-        assert_eq!(MAX_TOOL_TURNS, 5, "Max tool-use turns should be 5");
+        // 8 tool-use turns + 3 dedicated refinement turns = 11 max LLM calls
+        assert_eq!(MAX_TOOL_TURNS, 8, "Max tool-use turns should be 8");
         assert_eq!(
             MAX_REFINEMENT_TURNS, 3,
             "Max refinement turns should be 3 per spec (dedicated, not shared)"
@@ -4245,8 +4258,8 @@ Attempt 2:
         // The agent loop uses two independent budgets. Verify the total.
         let total = MAX_TOOL_TURNS + MAX_REFINEMENT_TURNS;
         assert_eq!(
-            total, 8,
-            "Total agent loop budget should be 8 (5 tool + 3 refinement)"
+            total, 11,
+            "Total agent loop budget should be 11 (8 tool + 3 refinement)"
         );
         // Tool turns and refinement turns must both be > 0
         assert!(MAX_TOOL_TURNS > 0, "Must allow at least 1 tool turn");
