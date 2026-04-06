@@ -179,7 +179,19 @@
   }
 
   // ── WebSocket connection ─────────────────────────────────────────────────
+  // Debounce rapid connect() calls (e.g., from component re-mounts or effect
+  // re-runs). Without this, the same tab can fire dozens of connects in a
+  // second, each evicting the previous session and flooding the chat.
+  let lastConnectAttempt = 0;
+  const CONNECT_DEBOUNCE_MS = 2000;
+
   async function connect() {
+    const now = Date.now();
+    if (now - lastConnectAttempt < CONNECT_DEBOUNCE_MS) {
+      return; // Skip — too soon after the last attempt
+    }
+    lastConnectAttempt = now;
+
     if (ws) {
       ws.onclose = null;
       ws.close();
@@ -388,12 +400,14 @@
         const errorMsg = msg.message ?? $t('explorer_chat.error_occurred');
         messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: errorMsg, timestamp: Date.now(), isError: true }]);
         streamingText = '';
-        // Session limit or message limit — mark as disconnected/error to prevent
-        // auto-reconnect loop (which would just hit the same limit again).
+        // Terminal session errors — prevent auto-reconnect to avoid loops.
+        // "Session replaced" is sent by the server when a newer connection from
+        // the same user evicts this one. Reconnecting would just evict the new
+        // session, creating an infinite eviction loop.
         if (errorMsg.includes('Session message limit')) {
           status = 'disconnected';
           if (ws) { ws.onclose = null; ws.close(); ws = null; }
-        } else if (errorMsg.includes('concurrent explorer sessions')) {
+        } else if (errorMsg.includes('concurrent explorer sessions') || errorMsg.includes('Session replaced')) {
           status = 'error';
           if (ws) { ws.onclose = null; ws.close(); ws = null; }
         } else {
