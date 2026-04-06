@@ -356,6 +356,16 @@ pub async fn delete_repo(
     }
 
     state.repos.delete(&repo.id).await?;
+
+    // Clean up the git directory on disk to prevent stale directories from
+    // blocking future repo/mirror creation with the same workspace + name.
+    let path = std::path::Path::new(&repo.path);
+    if path.exists() {
+        if let Err(e) = tokio::fs::remove_dir_all(path).await {
+            tracing::warn!(repo_id = %id, path = %repo.path, "Failed to remove repo directory on delete: {e}");
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -443,6 +453,16 @@ pub async fn create_mirror_repo(
         updated_at: now,
     };
     state.repos.create(&repo).await?;
+
+    // Clean up any stale directory left by a previously deleted repo with the same
+    // workspace + name. Without this, `git clone --mirror` fails with "already exists".
+    let path = std::path::Path::new(&repo_path);
+    if path.exists() {
+        tracing::info!("Removing stale repo directory before mirror clone: {repo_path}");
+        if let Err(e) = tokio::fs::remove_dir_all(path).await {
+            tracing::warn!("Failed to remove stale directory {repo_path}: {e}");
+        }
+    }
 
     // Clone the remote as a bare mirror; log on failure but don't block the response.
     if let Err(e) = state.git_ops.clone_mirror(&url, &repo_path).await {
