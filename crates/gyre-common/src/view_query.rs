@@ -1057,13 +1057,79 @@ pub struct CanvasState {
 }
 
 /// Structured record of a user interaction on the canvas.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Accepts both structured objects `{"action":"click","node":"Foo"}` and
+/// plain strings `"click:Foo(function)"` for backwards compatibility.
+#[derive(Debug, Clone, Serialize)]
 pub struct InteractionRecord {
     pub action: String,
     #[serde(default)]
     pub node: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for InteractionRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct InteractionVisitor;
+        impl<'de> de::Visitor<'de> for InteractionVisitor {
+            type Value = InteractionRecord;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string or an InteractionRecord object")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<InteractionRecord, E> {
+                // Parse "action:node(detail)" or just "action:node" or plain "action"
+                if let Some((action, rest)) = v.split_once(':') {
+                    let (node, detail) = if let Some(paren) = rest.find('(') {
+                        let node = &rest[..paren];
+                        let detail = rest[paren + 1..].trim_end_matches(')');
+                        (Some(node.to_string()), Some(detail.to_string()))
+                    } else {
+                        (Some(rest.to_string()), None)
+                    };
+                    Ok(InteractionRecord {
+                        action: action.to_string(),
+                        node,
+                        detail,
+                    })
+                } else {
+                    Ok(InteractionRecord {
+                        action: v.to_string(),
+                        node: None,
+                        detail: None,
+                    })
+                }
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<InteractionRecord, A::Error> {
+                #[derive(serde::Deserialize)]
+                struct Inner {
+                    action: String,
+                    #[serde(default)]
+                    node: Option<String>,
+                    #[serde(default)]
+                    detail: Option<String>,
+                }
+                let inner = Inner::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(InteractionRecord {
+                    action: inner.action,
+                    node: inner.node,
+                    detail: inner.detail,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(InteractionVisitor)
+    }
 }
 
 // ── WebSocket Protocol Messages ──────────────────────────────────────────────
