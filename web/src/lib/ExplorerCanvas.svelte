@@ -907,7 +907,15 @@
       if (!parentToChildren.has(parentId)) parentToChildren.set(parentId, []);
       parentToChildren.get(parentId).push(childId);
     }
-    return { childToParent, parentToChildren, nodeById };
+    // Multi-key lookup: name, qualified_name, and id all resolve to the node.
+    // First-match wins (id takes priority, then qualified_name, then name).
+    const nodeByAnyKey = new Map();
+    for (const n of nodes) {
+      if (n.id && !nodeByAnyKey.has(n.id)) nodeByAnyKey.set(n.id, n);
+      if (n.qualified_name && !nodeByAnyKey.has(n.qualified_name)) nodeByAnyKey.set(n.qualified_name, n);
+      if (n.name && !nodeByAnyKey.has(n.name)) nodeByAnyKey.set(n.name, n);
+    }
+    return { childToParent, parentToChildren, nodeById, nodeByAnyKey };
   });
 
   // Descendant counts (recursive)
@@ -2416,7 +2424,7 @@
         // Find bounding box of all nodes in this group
         let gMinX = Infinity, gMinY = Infinity, gMaxX = -Infinity, gMaxY = -Infinity;
         for (const name of groupNodeNames) {
-          const n = nodes.find(nd => nd.name === name || nd.qualified_name === name || nd.id === name);
+          const n = treeData.nodeByAnyKey.get(name);
           if (!n) continue;
           const ln = layoutNodeMap.get(n.id);
           if (!ln) continue;
@@ -2702,7 +2710,7 @@
       for (let i = 0; i < activeQuery.narrative.length; i++) {
         const step = activeQuery.narrative[i];
         const stepNode = step.node ?? step.node_name;
-        const n = nodes.find(n => n.name === stepNode || n.qualified_name === stepNode);
+        const n = treeData.nodeByAnyKey.get(stepNode);
         if (!n) continue;
         const ln = layoutNodeMap.get(n.id);
         if (!ln) continue;

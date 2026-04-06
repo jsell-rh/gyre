@@ -371,6 +371,18 @@
         break;
       }
       case 'status': {
+        // When a new thinking/refining turn starts, finalize any accumulated
+        // streaming text from the previous turn as a "thinking" message
+        // (visually distinct from the final response).
+        if ((msg.status === 'thinking' || msg.status === 'refining') && streamingText.trim()) {
+          if (streamingTimeout) { clearTimeout(streamingTimeout); streamingTimeout = null; }
+          messages = capMessages([...messages, {
+            id: nextMsgId++, role: 'assistant', content: streamingText,
+            timestamp: Date.now(), isThinking: true,
+          }]);
+          streamingText = '';
+          scrollToBottom();
+        }
         if (msg.status === 'thinking') status = 'thinking';
         else if (msg.status === 'refining') status = 'refining';
         else if (msg.status === 'ready') { status = 'ready'; agentPath = null; }
@@ -811,12 +823,12 @@
             <span class="context-divider-text">Messages above are outside the AI's context window</span>
           </div>
         {/if}
-        <div class="chat-message {msg.role}" class:error={msg.isError} class:warning={msg.isWarning} class:out-of-context={i < contextCutoffIndex}>
+        <div class="chat-message {msg.role}" class:error={msg.isError} class:warning={msg.isWarning} class:thinking={msg.isThinking} class:out-of-context={i < contextCutoffIndex}>
           {#if i < contextCutoffIndex}
             <span class="out-of-context-label">out of context</span>
           {/if}
           <div class="message-meta">
-            <span class="message-role">{msg.role === 'user' ? $t('explorer_chat.you') : $t('explorer_chat.assistant')}</span>
+            <span class="message-role">{msg.role === 'user' ? $t('explorer_chat.you') : $t('explorer_chat.assistant')}{#if msg.isThinking} <span class="thinking-label">(thinking)</span>{/if}</span>
             <span class="message-time">{formatTime(msg.timestamp)}</span>
           </div>
           <div class="message-content">
@@ -1327,6 +1339,20 @@
     background: color-mix(in srgb, var(--color-warning) 10%, transparent);
     border-color: color-mix(in srgb, var(--color-warning) 30%, transparent);
     color: var(--color-warning);
+  }
+
+  .chat-message.thinking {
+    opacity: 0.55;
+  }
+  .chat-message.thinking .message-content {
+    font-size: 0.82em;
+    border-left: 2px solid color-mix(in srgb, var(--color-text-muted) 40%, transparent);
+    padding-left: 8px;
+  }
+  .thinking-label {
+    font-style: italic;
+    color: var(--color-text-muted);
+    font-size: 0.85em;
   }
 
   .message-meta {
