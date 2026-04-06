@@ -2493,7 +2493,7 @@
       // Full (> 2.0): + fields, constants, enum variants — every detail
       if (!isTreeGroup && ln.node) {
         const nt = ln.node.node_type ?? '';
-        const isQueryMatched = activeQuery && matchedNodes?.has(ln.node.id);
+        const isQueryMatched = activeQuery && queryMatchedIds?.has(ln.node.id);
         // Always show query-matched nodes regardless of zoom
         if (!isQueryMatched) {
           if (cam.zoom < 0.3 && !['package', 'module'].includes(nt)) return;
