@@ -11,7 +11,9 @@
 //! - Tables (`diesel::table!` macros)
 //! - Spec governance (`// spec: <path>` comments)
 
-use crate::extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
+use crate::extractor::{
+    shallow_scan_for_marker, ExtractionError, ExtractionResult, LanguageExtractor,
+};
 use gyre_common::{
     graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility},
     Id,
@@ -38,6 +40,7 @@ impl LanguageExtractor for RustExtractor {
 
     fn detect(&self, repo_root: &Path) -> bool {
         repo_root.join("Cargo.toml").is_file()
+            || shallow_scan_for_marker(repo_root, |d| d.join("Cargo.toml").is_file())
     }
 
     fn extract(&self, repo_root: &Path, commit_sha: &str) -> ExtractionResult {

@@ -7,7 +7,9 @@
 //! - Methods (`def` inside a class body)
 //! - Endpoints (decorated with Flask/FastAPI route decorators)
 
-use crate::extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
+use crate::extractor::{
+    shallow_scan_for_marker, ExtractionError, ExtractionResult, LanguageExtractor,
+};
 use crate::tree_sitter_utils::parse_source;
 use gyre_common::{
     graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility},
@@ -31,8 +33,16 @@ const ROUTE_METHODS: &[&str] = &[
 /// Python language extractor.
 ///
 /// Detects repositories with `pyproject.toml`, `setup.py`, or `requirements.txt`
-/// at the root and walks all `.py` files to extract architectural knowledge.
+/// at the root (or in an immediate subdirectory for monorepo layouts) and walks
+/// all `.py` files to extract architectural knowledge.
 pub struct PythonExtractor;
+
+/// Check for Python project markers at the given path.
+fn has_python_markers(dir: &Path) -> bool {
+    dir.join("pyproject.toml").is_file()
+        || dir.join("setup.py").is_file()
+        || dir.join("requirements.txt").is_file()
+}
 
 impl LanguageExtractor for PythonExtractor {
     fn name(&self) -> &str {
@@ -40,9 +50,7 @@ impl LanguageExtractor for PythonExtractor {
     }
 
     fn detect(&self, repo_root: &Path) -> bool {
-        repo_root.join("pyproject.toml").is_file()
-            || repo_root.join("setup.py").is_file()
-            || repo_root.join("requirements.txt").is_file()
+        has_python_markers(repo_root) || shallow_scan_for_marker(repo_root, has_python_markers)
     }
 
     fn extract(&self, repo_root: &Path, commit_sha: &str) -> ExtractionResult {

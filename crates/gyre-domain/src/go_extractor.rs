@@ -11,7 +11,9 @@
 //! Example: module `github.com/org/myapp`, package `api`, type `Server`
 //! → `github.com/org/myapp/api.Server`
 
-use crate::extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
+use crate::extractor::{
+    shallow_scan_for_marker, ExtractionError, ExtractionResult, LanguageExtractor,
+};
 use crate::tree_sitter_utils::parse_source;
 use gyre_common::{
     graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility},
@@ -39,6 +41,7 @@ impl LanguageExtractor for GoExtractor {
 
     fn detect(&self, repo_root: &Path) -> bool {
         repo_root.join("go.mod").is_file()
+            || shallow_scan_for_marker(repo_root, |d| d.join("go.mod").is_file())
     }
 
     fn extract(&self, repo_root: &Path, commit_sha: &str) -> ExtractionResult {
