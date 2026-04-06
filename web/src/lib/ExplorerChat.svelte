@@ -388,9 +388,13 @@
         const errorMsg = msg.message ?? $t('explorer_chat.error_occurred');
         messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: errorMsg, timestamp: Date.now(), isError: true }]);
         streamingText = '';
-        // Session limit reached — mark as disconnected so user knows to reconnect
+        // Session limit or message limit — mark as disconnected/error to prevent
+        // auto-reconnect loop (which would just hit the same limit again).
         if (errorMsg.includes('Session message limit')) {
           status = 'disconnected';
+          if (ws) { ws.onclose = null; ws.close(); ws = null; }
+        } else if (errorMsg.includes('concurrent explorer sessions')) {
+          status = 'error';
           if (ws) { ws.onclose = null; ws.close(); ws = null; }
         } else {
           status = 'ready';

@@ -93,10 +93,21 @@ async fn maybe_send_ping(
     Ok(())
 }
 
-/// Global per-user concurrent session counter, keyed by (tenant_id, agent_id)
-/// to prevent cross-tenant interference.
+/// Monotonic session ID counter for ordering sessions (oldest-first eviction).
+static SESSION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Per-session slot: stores a unique ID and a shutdown signal so we can evict
+/// the oldest session when a new connection arrives at the limit.
+struct SessionSlot {
+    id: u64,
+    /// Signalled to ask this session to shut down (eviction by newer session).
+    shutdown: Arc<tokio::sync::Notify>,
+}
+
+/// Global per-user session tracker, keyed by (tenant_id, agent_id).
 /// Uses std::sync::Mutex for Drop compatibility (Drop cannot be async).
-static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, usize>>> =
+/// Each user has a Vec of active SessionSlots, ordered oldest-first.
+static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<SessionSlot>>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Maximum concurrent explorer sessions per user.
@@ -183,47 +194,53 @@ async fn handle_explorer_session(
 
     // Per-user concurrent session limit (prevents unbounded LLM cost).
     // Key includes tenant_id to prevent cross-tenant interference.
+    // When the limit is reached, the oldest session is evicted (signalled to close)
+    // rather than rejecting the new connection. This handles zombie sessions from
+    // unclean disconnects (browser crash, tab close, navigation) gracefully.
     let session_user = format!("{}:{}", auth.tenant_id, auth.agent_id);
-    // Guard: decrement on drop (even if we return early or panic below).
-    // Defined before the increment so the guard can be created immediately after.
-    struct SessionGuard(String);
+    let session_id = SESSION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+
+    // Guard: remove this session's slot on drop (even if we return early or panic).
+    struct SessionGuard {
+        user_key: String,
+        session_id: u64,
+    }
     impl Drop for SessionGuard {
         fn drop(&mut self) {
             let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(count) = sessions.get_mut(&self.0) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    sessions.remove(&self.0);
+            if let Some(slots) = sessions.get_mut(&self.user_key) {
+                slots.retain(|s| s.id != self.session_id);
+                if slots.is_empty() {
+                    sessions.remove(&self.user_key);
                 }
             }
         }
     }
-    let session_allowed = {
+
+    {
         let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-        let count = sessions.entry(session_user.clone()).or_default();
-        if *count >= max_sessions_per_user() {
-            false
-        } else {
-            *count += 1;
-            true
+        let slots = sessions.entry(session_user.clone()).or_default();
+        // Evict oldest sessions if at the limit.
+        while slots.len() >= max_sessions_per_user() {
+            let evicted = slots.remove(0);
+            info!(
+                user = %session_user,
+                evicted_session = evicted.id,
+                "Explorer WS: evicting oldest session to make room for new connection"
+            );
+            evicted.shutdown.notify_one();
         }
-    };
-    if !session_allowed {
-        let err = ExplorerServerMessage::Error {
-            message: format!(
-                "Too many concurrent explorer sessions (max {}). Close an existing session first.",
-                max_sessions_per_user()
-            ),
-        };
-        let _ = sender
-            .send(Message::Text(
-                serialize_msg(&err).unwrap_or_default().into(),
-            ))
-            .await;
-        return;
+        slots.push(SessionSlot {
+            id: session_id,
+            shutdown: Arc::clone(&shutdown_notify),
+        });
     }
-    // Create guard immediately after increment so any subsequent panic decrements.
-    let _session_guard = SessionGuard(session_user);
+    // Create guard immediately after registration so any subsequent panic cleans up.
+    let _session_guard = SessionGuard {
+        user_key: session_user,
+        session_id,
+    };
 
     // Verify the user has access to this repo via workspace → tenant chain.
     let rid = Id::new(&repo_id);
@@ -466,6 +483,16 @@ async fn handle_explorer_session(
                         }
                     }
                 }
+                _ = shutdown_notify.notified() => {
+                    // Evicted by a newer session from the same user.
+                    info!(user = %auth.agent_id, "Explorer WS: session evicted by newer connection");
+                    let _ = sender.send(Message::Text(
+                        serialize_msg(&ExplorerServerMessage::Error {
+                            message: "Session replaced by a newer connection.".to_string(),
+                        }).unwrap_or_default().into(),
+                    )).await;
+                    break;
+                }
                 _ = ping_interval.tick() => {
                     // Check for dead connection (no pong received within timeout)
                     if last_pong.lock().unwrap().elapsed() > pong_timeout {
@@ -701,6 +728,16 @@ async fn handle_explorer_session(
                         last_pong.clone(),
                         pong_timeout,
                     ) => result,
+                    _ = shutdown_notify.notified() => {
+                        // Evicted by newer session during agent execution.
+                        info!(user = %auth.agent_id, "Explorer WS: session evicted during agent run");
+                        let _ = sender.send(Message::Text(
+                            serialize_msg(&ExplorerServerMessage::Error {
+                                message: "Session replaced by a newer connection.".to_string(),
+                            }).unwrap_or_default().into(),
+                        )).await;
+                        break;
+                    }
                     _ = async {
                         // Listen for Cancel messages while the agent is running.
                         // View CRUD messages (SaveView, DeleteView, LoadView, ListViews)

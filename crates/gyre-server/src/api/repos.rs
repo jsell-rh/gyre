@@ -447,6 +447,35 @@ pub async fn create_mirror_repo(
     // Clone the remote as a bare mirror; log on failure but don't block the response.
     if let Err(e) = state.git_ops.clone_mirror(&url, &repo_path).await {
         tracing::warn!("clone_mirror failed for {repo_path}: {e}");
+    } else {
+        // Trigger immediate graph extraction after successful clone so the
+        // architecture tab is populated without waiting for the 60s sync cycle.
+        let extract_repo_id = repo.id.to_string();
+        let extract_path = repo_path.clone();
+        let graph_store = Arc::clone(&state.graph_store);
+        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+        let default_ref = format!("refs/heads/{}", repo.default_branch);
+        tokio::spawn(async move {
+            if let Ok(output) = tokio::process::Command::new(&git_bin)
+                .args(["-C", &extract_path, "rev-parse", &default_ref])
+                .output()
+                .await
+            {
+                if output.status.success() {
+                    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    crate::graph_extraction::extract_and_store_graph(
+                        &extract_path,
+                        &extract_repo_id,
+                        &sha,
+                        graph_store,
+                        &git_bin,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+            }
+        });
     }
 
     Ok((
