@@ -204,6 +204,23 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing MR response")
     }
 
+    /// GET /api/v1/workspaces — list all accessible workspaces.
+    pub async fn list_workspaces(&self) -> Result<Vec<serde_json::Value>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/workspaces", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list workspaces failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing workspaces response")
+    }
+
     /// Resolve a workspace slug to its ID. Returns the first match.
     pub async fn resolve_workspace_slug(&self, slug: &str) -> Result<String> {
         let resp = self
@@ -326,34 +343,81 @@ impl GyreClient {
         Ok(())
     }
 
-    /// GET /api/v1/repos/:id/graph or GET /api/v1/workspaces/:id/graph
-    pub async fn get_graph(
+    /// GET /api/v1/repos/:id/graph/concept/:name or
+    /// GET /api/v1/workspaces/:id/graph/concept/:name
+    ///
+    /// Uses the dedicated concept search endpoints which filter by name pattern
+    /// server-side (the generic /graph endpoints ignore the concept query param).
+    pub async fn get_graph_concept(
         &self,
         concept: &str,
         repo_id: Option<&str>,
         workspace_id: Option<&str>,
     ) -> Result<serde_json::Value> {
+        // Percent-encode the concept for use as a URL path segment.
+        // Concept names are typically identifiers (e.g., "UserRepository"), but
+        // we encode spaces and special characters for safety.
+        let encoded_concept: String = concept
+            .chars()
+            .map(|c| match c {
+                'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+                _ => format!("%{:02X}", c as u32),
+            })
+            .collect();
         let url = if let Some(rid) = repo_id {
-            format!("{}/api/v1/repos/{rid}/graph", self.base_url)
+            format!(
+                "{}/api/v1/repos/{rid}/graph/concept/{encoded_concept}",
+                self.base_url
+            )
         } else if let Some(wid) = workspace_id {
-            format!("{}/api/v1/workspaces/{wid}/graph", self.base_url)
+            format!(
+                "{}/api/v1/workspaces/{wid}/graph/concept/{encoded_concept}",
+                self.base_url
+            )
         } else {
-            anyhow::bail!("either --repo or --workspace is required for explore");
+            anyhow::bail!("either repo_id or workspace_id must be provided for concept search");
         };
         let resp = self
             .client
             .get(&url)
             .header("Authorization", self.auth_header())
-            .query(&[("concept", concept)])
             .send()
             .await
             .context("connecting to Gyre server")?;
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
-            anyhow::bail!("get graph failed (HTTP {status}): {text}");
+            anyhow::bail!("get graph concept failed (HTTP {status}): {text}");
         }
         serde_json::from_str(&text).context("parsing graph response")
+    }
+
+    /// Resolve a repo name to its ID within a workspace.
+    /// Lists repos in the workspace and matches by name.
+    pub async fn resolve_repo_name(&self, workspace_id: &str, repo_name: &str) -> Result<String> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/workspaces/{workspace_id}/repos",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list workspace repos failed (HTTP {status}): {text}");
+        }
+        let repos: Vec<serde_json::Value> =
+            serde_json::from_str(&text).context("parsing repos response")?;
+        repos
+            .iter()
+            .find(|r| r["name"].as_str() == Some(repo_name))
+            .and_then(|r| r["id"].as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("no repo found with name '{repo_name}' in workspace"))
     }
 
     /// GET /api/v1/merge-requests/:id/timeline
