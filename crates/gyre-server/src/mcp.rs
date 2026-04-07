@@ -209,7 +209,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "gyre_record_activity",
-                "description": "Record an activity event in the Gyre activity feed.",
+                "description": "Record an activity event in the Gyre activity feed. Per-kind fields: TOOL_CALL_START requires tool_name; TOOL_CALL_END requires tool_name and duration_ms; TEXT_MESSAGE_CONTENT requires content; STATE_CHANGED requires new_state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -224,7 +224,14 @@ fn tool_definitions() -> Value {
                             ],
                             "description": "AG-UI typed event type"
                         },
-                        "description": { "type": "string", "description": "Human-readable event description" }
+                        "description": { "type": "string", "description": "Human-readable event description" },
+                        "tool_name": { "type": "string", "description": "Tool name (required for TOOL_CALL_START and TOOL_CALL_END)" },
+                        "duration_ms": { "type": "integer", "description": "Tool call duration in milliseconds (required for TOOL_CALL_END)" },
+                        "task_id": { "type": "string", "description": "Associated task ID (optional, for RUN_STARTED and RUN_FINISHED)" },
+                        "content": { "type": "string", "description": "Text content (required for TEXT_MESSAGE_CONTENT)" },
+                        "role": { "type": "string", "description": "Message role (optional, for TEXT_MESSAGE_CONTENT)" },
+                        "old_state": { "type": "string", "description": "Previous state (optional, for STATE_CHANGED)" },
+                        "new_state": { "type": "string", "description": "New state (required for STATE_CHANGED)" }
                     },
                     "required": ["agent_id", "event_type", "description"]
                 }
@@ -744,7 +751,8 @@ async fn handle_record_activity(
     args: &Value,
     auth: &AuthenticatedAgent,
 ) -> Value {
-    use gyre_common::message::MessageKind;
+    use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     let agent_id = match get_str(args, "agent_id") {
         Some(a) => a.to_string(),
@@ -770,30 +778,100 @@ async fn handle_record_activity(
         _ => MessageKind::StateChanged, // Fallback for unknown/custom event types.
     };
 
-    // Derive workspace from the caller's agent record.
+    // Derive workspace and tenant from the caller's agent record.
     let caller_agent_id = Id::new(&auth.agent_id);
-    let ws_id = match state.agents.find_by_id(&caller_agent_id).await {
-        Ok(Some(a)) => a.workspace_id,
+    let (ws_id, tenant_id) = match state.agents.find_by_id(&caller_agent_id).await {
+        Ok(Some(a)) => (a.workspace_id, Id::new(&auth.tenant_id)),
         Ok(None) => {
-            // Fallback: use agent_id from args if auth agent not found (e.g. global token).
-            gyre_common::Id::new("default")
+            // Fallback for global token auth: use default workspace/tenant.
+            (Id::new("default"), Id::new(&auth.tenant_id))
         }
-        Err(_) => gyre_common::Id::new("default"),
+        Err(_) => (Id::new("default"), Id::new(&auth.tenant_id)),
     };
 
-    let event_id = uuid::Uuid::new_v4().to_string();
-    state.emit_telemetry(
-        ws_id,
+    // Build per-kind payload per message-bus.md §Payload Schemas.
+    let payload = match event_type_str {
+        "TOOL_CALL_START" => {
+            let tool_name = get_str(args, "tool_name")
+                .unwrap_or(&description)
+                .to_string();
+            serde_json::json!({
+                "agent_id": agent_id,
+                "tool_name": tool_name,
+            })
+        }
+        "TOOL_CALL_END" => {
+            let tool_name = get_str(args, "tool_name")
+                .unwrap_or(&description)
+                .to_string();
+            let duration_ms = args
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            serde_json::json!({
+                "agent_id": agent_id,
+                "tool_name": tool_name,
+                "duration_ms": duration_ms,
+            })
+        }
+        "RUN_STARTED" | "RUN_FINISHED" => {
+            let task_id = get_str(args, "task_id").map(|s| s.to_string());
+            serde_json::json!({
+                "agent_id": agent_id,
+                "task_id": task_id,
+            })
+        }
+        "TEXT_MESSAGE_CONTENT" => {
+            let content = get_str(args, "content").unwrap_or(&description).to_string();
+            let role = get_str(args, "role").map(|s| s.to_string());
+            serde_json::json!({
+                "agent_id": agent_id,
+                "content": content,
+                "role": role,
+            })
+        }
+        "STATE_CHANGED" | _ => {
+            let old_state = get_str(args, "old_state").map(|s| s.to_string());
+            let new_state = get_str(args, "new_state")
+                .unwrap_or(&description)
+                .to_string();
+            serde_json::json!({
+                "agent_id": agent_id,
+                "old_state": old_state,
+                "new_state": new_state,
+            })
+        }
+    };
+
+    // Derive origin from auth context per message-bus.md §Message Envelope origin table.
+    // Agent JWT → MessageOrigin::Agent(sub claim), not Server.
+    let from = MessageOrigin::Agent(Id::new(&auth.agent_id));
+
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let msg_id = Id::new(uuid::Uuid::new_v4().to_string());
+
+    // Construct Message directly instead of using emit_telemetry, so that
+    // origin and tenant_id reflect the calling agent (F5 fix).
+    let msg = Message {
+        id: msg_id.clone(),
+        tenant_id,
+        from,
+        workspace_id: Some(ws_id.clone()),
+        to: Destination::Workspace(ws_id),
         kind,
-        Some(serde_json::json!({
-            "event_id": event_id,
-            "agent_id": agent_id,
-            "event_type": event_type_str,
-            "description": description,
-            "timestamp": now_secs(),
-        })),
-    );
-    tool_result(format!("Recorded activity event {event_id}"))
+        payload: Some(payload),
+        created_at,
+        signature: None, // Telemetry tier is unsigned.
+        key_id: None,
+        acknowledged: false,
+    };
+    state.telemetry_buffer.push(msg.clone());
+    let _ = state.message_broadcast_tx.send(msg);
+
+    tool_result(format!("Recorded activity event {}", msg_id))
 }
 
 async fn handle_agent_heartbeat(state: &AppState, args: &Value) -> Value {
@@ -3345,6 +3423,202 @@ mod tests {
                 "record_activity should succeed for {event_type}: {json}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_record_activity_uses_agent_origin_and_tenant() {
+        // F5: verify that record_activity messages use MessageOrigin::Agent,
+        // not Server, and use the caller's tenant_id.
+        let state = test_state();
+        // Global token auth maps to agent_id "system", so create agent with that id.
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-f5");
+        state.agents.create(&agent).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 90,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "system",
+                        "event_type": "RUN_STARTED",
+                        "description": "test origin"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "record_activity failed: {json}"
+        );
+
+        // Verify the telemetry buffer message has agent origin, not server.
+        let msgs = state.telemetry_buffer.list_since(&Id::new("ws-f5"), 0, 100);
+        assert!(!msgs.is_empty(), "telemetry buffer should have messages");
+        let msg = &msgs[0];
+        match &msg.from {
+            gyre_common::message::MessageOrigin::Agent(id) => {
+                // Global token auth maps to agent_id "system".
+                assert_eq!(id.to_string(), "system");
+            }
+            other => panic!("expected MessageOrigin::Agent, got {:?}", other),
+        }
+        // tenant_id should come from auth context, not hardcoded.
+        assert_eq!(msg.tenant_id.to_string(), "default"); // test auth uses default tenant
+    }
+
+    #[tokio::test]
+    async fn mcp_record_activity_per_kind_payload_schemas() {
+        // F6: verify that per-kind payloads conform to message-bus.md §Payload Schemas.
+        let state = test_state();
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-f6");
+        state.agents.create(&agent).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+
+        // Test TOOL_CALL_START — should have agent_id + tool_name.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 91,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "system",
+                        "event_type": "TOOL_CALL_START",
+                        "description": "fallback tool name",
+                        "tool_name": "grep"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        // Test TOOL_CALL_END — should have agent_id + tool_name + duration_ms.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 92,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "system",
+                        "event_type": "TOOL_CALL_END",
+                        "description": "grep completed",
+                        "tool_name": "grep",
+                        "duration_ms": 42
+                    }
+                }
+            }),
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        // Test TEXT_MESSAGE_CONTENT — should have agent_id + content.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 93,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "system",
+                        "event_type": "TEXT_MESSAGE_CONTENT",
+                        "description": "some text",
+                        "content": "hello world",
+                        "role": "assistant"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        // Test STATE_CHANGED — should have agent_id + new_state.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 94,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "system",
+                        "event_type": "STATE_CHANGED",
+                        "description": "thinking",
+                        "old_state": "idle",
+                        "new_state": "thinking"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        // Verify stored telemetry payloads have per-kind fields.
+        let msgs = state.telemetry_buffer.list_since(&Id::new("ws-f6"), 0, 100);
+        assert!(
+            msgs.len() >= 4,
+            "expected 4+ telemetry messages, got {}",
+            msgs.len()
+        );
+
+        // Check TOOL_CALL_START payload.
+        let tool_start = msgs
+            .iter()
+            .find(|m| matches!(m.kind, gyre_common::message::MessageKind::ToolCallStart))
+            .expect("ToolCallStart message");
+        let p = tool_start.payload.as_ref().unwrap();
+        assert_eq!(p["tool_name"], "grep");
+        assert_eq!(p["agent_id"], "system");
+
+        // Check TOOL_CALL_END payload.
+        let tool_end = msgs
+            .iter()
+            .find(|m| matches!(m.kind, gyre_common::message::MessageKind::ToolCallEnd))
+            .expect("ToolCallEnd message");
+        let p = tool_end.payload.as_ref().unwrap();
+        assert_eq!(p["tool_name"], "grep");
+        assert_eq!(p["duration_ms"], 42);
+
+        // Check TEXT_MESSAGE_CONTENT payload.
+        let text_msg = msgs
+            .iter()
+            .find(|m| {
+                matches!(
+                    m.kind,
+                    gyre_common::message::MessageKind::TextMessageContent
+                )
+            })
+            .expect("TextMessageContent message");
+        let p = text_msg.payload.as_ref().unwrap();
+        assert_eq!(p["content"], "hello world");
+        assert_eq!(p["role"], "assistant");
+
+        // Check STATE_CHANGED payload.
+        let state_changed = msgs
+            .iter()
+            .find(|m| matches!(m.kind, gyre_common::message::MessageKind::StateChanged))
+            .expect("StateChanged message");
+        let p = state_changed.payload.as_ref().unwrap();
+        assert_eq!(p["new_state"], "thinking");
+        assert_eq!(p["old_state"], "idle");
     }
 
     #[test]
