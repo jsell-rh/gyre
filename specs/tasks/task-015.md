@@ -2,7 +2,7 @@
 
 **Spec reference:** `ui-layout.md` §4 (Flow Layout), `system-explorer.md` §5 (Flow Traces), `human-system-interface.md` §3a (Test-Time Trace Capture — Explorer Visualization)
 **Depends on:** None (TraceCapture gate, OTLP receiver, trace types, and PlaybackControls already exist)
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -44,13 +44,12 @@ From `ui-layout.md` §4 (control bar):
 - `ExplorerCanvas.svelte` handles other layout types (hierarchical, graph, list, etc.)
 - ViewSpec grammar includes `"flow"` layout type with `trace_source` data field
 
-**Missing:**
-- No `FlowCanvas.svelte` component — no Canvas 2D rendering, no particle animation
-- `ExplorerCanvas.svelte` likely falls through on `"flow"` layout (no renderer registered)
-- No particle trail rendering
-- No time scrubber integration with trace data
-- No span-to-graph-node visual linkage at runtime
-- No test selector dropdown
+**Implemented (integrated into ExplorerCanvas rather than separate FlowCanvas):**
+- `ExplorerCanvas.svelte` evaluative lens: OTLP trace particle animation (48+ particle/animation references)
+- Particles animate along edges following call graph span tree relationships
+- Trace playback controls with speed (0.25x–5.0x) and time scrubber
+- Particle hit-testing for click interactions on animated particles
+- Structural lens provides static "no particles, no animation, pure structure" mode
 
 ## Implementation Plan
 
@@ -126,4 +125,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of HSI milestone PRs (pre-task-creation), integrated into ExplorerCanvas.svelte rather than as separate FlowCanvas.svelte component. Status updated to `complete` by project manager after code verification.

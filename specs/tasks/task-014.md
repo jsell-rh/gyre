@@ -2,7 +2,7 @@
 
 **Spec reference:** `system-explorer.md` §9 (Executable Spec Assertions)
 **Depends on:** None (consumes existing knowledge graph and spec content)
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -25,10 +25,11 @@ From `system-explorer.md` §9:
 
 ## Current State
 
-- `crates/gyre-domain/src/spec_assertions.rs` exists with assertion types defined
-- `crates/gyre-server/src/api/spec_assertions.rs` exists with an endpoint
-- `crates/gyre-server/src/graph_extraction.rs` references assertion checking
-- However, the actual assertion parsing (extracting `gyre:assert` HTML comments from markdown) and knowledge graph checking are stubbed — the endpoint returns placeholder results
+All requirements implemented during HSI milestone:
+- `crates/gyre-domain/src/spec_assertions.rs` — full parser for `<!-- gyre:assert ... -->` HTML comments with subject types (Module, Type, Endpoint, Function) and predicates (depends_on, NOT depends_on, has_implementors, governed_by, calls, NOT calls, test_coverage, complexity, churn, field_count)
+- `crates/gyre-server/src/api/spec_assertions.rs` — REST endpoint returning real pass/fail results (no stubs)
+- `crates/gyre-server/src/graph_extraction.rs` — push-triggered assertion checking wired as Step 6b, creates `SpecAssertionFailure` notifications on failure
+- Evaluation runs `spec_assertions::parse_assertions` → `spec_assertions::evaluate_assertions` against knowledge graph nodes/edges
 
 ## Implementation Plan
 
@@ -89,4 +90,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of HSI milestone PRs (pre-task-creation). Status updated to `complete` by project manager after code verification.
