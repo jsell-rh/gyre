@@ -392,6 +392,9 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_agent_complete` | Signal task completion (opens MR, cleans worktree) |
 | `gyre_search` | Full-text search across all entities (`q`, `entity_type`, `workspace_id`, `limit` params) (M22.7) |
 | `gyre_analytics_query` | Decision-support analytics (`query_type`: `usage`\|`compare`\|`top`); wraps the three M23 analytics endpoints (M23) |
+| `gyre_message_send` | Send a Directed or Custom message to an agent/workspace. Params: `to` (destination), `kind`, `payload`, `tier`. Derives workspace from agent JWT. |
+| `gyre_message_poll` | Poll own inbox for Directed messages. Params: `after_ts`, `after_id`, `limit`, `unacked_only`. Derives agent_id from JWT. |
+| `gyre_message_ack` | Acknowledge a received message. Params: `message_id`. Derives agent_id from JWT. |
 
 Example MCP `initialize` call:
 ```json

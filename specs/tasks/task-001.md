@@ -1,7 +1,7 @@
 # TASK-001: MCP Message Bus Tools (message.send, message.poll, message.ack)
 
 **Spec reference:** `message-bus.md` §MCP Integration  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -77,4 +77,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(mcp): add message bus tools (send, poll, ack) — TASK-001`

@@ -333,6 +333,72 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "gyre_message_send",
+                "description": "Send a Directed or Custom message to an agent or workspace in the same workspace. Wraps POST /api/v1/workspaces/:workspace_id/messages.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "to": {
+                            "type": "object",
+                            "description": "Destination: {\"agent\": \"<id>\"} or {\"workspace\": \"<id>\"}"
+                        },
+                        "kind": {
+                            "type": "string",
+                            "description": "MessageKind string (e.g. task_assignment, review_request, status_update, escalation, or a custom kind)"
+                        },
+                        "payload": {
+                            "type": "object",
+                            "description": "Optional structured payload for the message"
+                        },
+                        "tier": {
+                            "type": "string",
+                            "enum": ["directed", "event"],
+                            "description": "For Custom kinds: 'directed' to opt into ack-based delivery (default: event)"
+                        }
+                    },
+                    "required": ["to", "kind"]
+                }
+            },
+            {
+                "name": "gyre_message_poll",
+                "description": "Poll own inbox for new Directed messages. Wraps GET /api/v1/agents/:id/messages. Derives agent_id from JWT.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "after_ts": {
+                            "type": "number",
+                            "description": "Return messages with created_at > after_ts (default 0)"
+                        },
+                        "after_id": {
+                            "type": "string",
+                            "description": "Composite cursor: return messages after (after_ts, after_id)"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Max messages to return (default 100, max 1000)"
+                        },
+                        "unacked_only": {
+                            "type": "boolean",
+                            "description": "If true, return only unacknowledged messages (crash recovery mode)"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "gyre_message_ack",
+                "description": "Acknowledge a received message. Wraps PUT /api/v1/agents/:id/messages/:message_id/ack. Derives agent_id from JWT.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "message_id": {
+                            "type": "string",
+                            "description": "ID of the message to acknowledge"
+                        }
+                    },
+                    "required": ["message_id"]
+                }
+            },
+            {
                 "name": "graph_summary",
                 "description": "Get a condensed summary of a repo's knowledge graph: node/edge counts, top types by fields, top functions by calls, modules, test coverage stats.",
                 "inputSchema": {
@@ -1217,6 +1283,304 @@ async fn handle_search(state: &AppState, args: &Value) -> Value {
     }
 }
 
+// ── Message bus MCP tools ────────────────────────────────────────────────────
+
+async fn handle_message_send(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+    use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, MessageTier};
+
+    // Parse destination.
+    let to_value = match args.get("to") {
+        Some(v) => v,
+        None => return tool_error("missing required field: to"),
+    };
+    let to = match parse_mcp_destination(to_value) {
+        Ok(d) => d,
+        Err(msg) => return tool_error(msg),
+    };
+
+    // Parse kind.
+    let kind_str = match get_str(args, "kind") {
+        Some(k) => k,
+        None => return tool_error("missing required field: kind"),
+    };
+    let kind: MessageKind =
+        match serde_json::from_value(serde_json::Value::String(kind_str.to_string())) {
+            Ok(k) => k,
+            Err(_) => return tool_error(format!("unknown message kind: {kind_str}")),
+        };
+
+    // server_only check: MCP agents cannot send server-only kinds.
+    if kind.server_only() {
+        return tool_error(format!(
+            "kind '{}' can only be sent by the server",
+            kind_str
+        ));
+    }
+
+    // Determine effective tier.
+    let effective_tier = if let MessageKind::Custom(_) = &kind {
+        if get_str(args, "tier") == Some("directed") {
+            MessageTier::Directed
+        } else {
+            MessageTier::Event
+        }
+    } else {
+        kind.tier()
+    };
+
+    // Derive workspace from agent identity.
+    let agent_id = Id::new(&auth.agent_id);
+    let agent = match state.agents.find_by_id(&agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return tool_error(format!("agent {} not found", auth.agent_id)),
+        Err(e) => return tool_error(format!("failed to lookup agent: {e}")),
+    };
+    let ws_id = agent.workspace_id.clone();
+
+    // Validate destination constraints.
+    match (&effective_tier, &to) {
+        (MessageTier::Directed, Destination::Workspace(_)) => {
+            return tool_error("Directed tier requires Agent destination, not Workspace");
+        }
+        (MessageTier::Directed, Destination::Broadcast) => {
+            return tool_error("Directed tier requires Agent destination, not Broadcast");
+        }
+        (MessageTier::Telemetry, Destination::Agent(_)) => {
+            return tool_error("Telemetry tier cannot target Agent destination");
+        }
+        _ => {}
+    }
+
+    // Same-workspace constraint for Agent destination.
+    if let Destination::Agent(ref target_id) = to {
+        let target = match state.agents.find_by_id(target_id).await {
+            Ok(Some(a)) => a,
+            Ok(None) => return tool_error(format!("target agent {} not found", target_id)),
+            Err(e) => return tool_error(format!("failed to lookup target agent: {e}")),
+        };
+        if target.workspace_id != ws_id {
+            return tool_error(format!(
+                "target agent {} is not in the same workspace",
+                target_id
+            ));
+        }
+
+        // Queue depth check for Directed tier.
+        if effective_tier == MessageTier::Directed {
+            let unacked = state.messages.count_unacked(target_id).await.unwrap_or(0);
+            if unacked >= state.agent_inbox_max {
+                return tool_error(format!(
+                    "agent {} inbox is full ({} unacked messages)",
+                    target_id, unacked
+                ));
+            }
+        }
+    }
+
+    // Workspace destination must match sender's workspace.
+    if let Destination::Workspace(ref dest_ws) = to {
+        if *dest_ws != ws_id {
+            return tool_error("workspace destination must match sender's workspace");
+        }
+    }
+
+    let from = MessageOrigin::Agent(agent_id);
+    let created_at = now_ms();
+    let msg_id = Id::new(uuid::Uuid::new_v4().to_string());
+
+    let workspace_id_opt = if matches!(to, Destination::Broadcast) {
+        None
+    } else {
+        Some(ws_id.clone())
+    };
+
+    let mut msg = Message {
+        id: msg_id.clone(),
+        tenant_id: Id::new(&auth.tenant_id),
+        from,
+        workspace_id: workspace_id_opt,
+        to,
+        kind,
+        payload: args.get("payload").cloned(),
+        created_at,
+        signature: None,
+        key_id: None,
+        acknowledged: false,
+    };
+
+    // Sign Directed and Event tier.
+    if effective_tier != MessageTier::Telemetry {
+        let (sig, kid) = sign_mcp_message(state, &msg);
+        msg.signature = Some(sig);
+        msg.key_id = Some(kid);
+    }
+
+    // Persist Directed and Event tier.
+    if effective_tier != MessageTier::Telemetry && !matches!(msg.to, Destination::Broadcast) {
+        if let Err(e) = state.messages.store(&msg).await {
+            return tool_error(format!("failed to store message: {e}"));
+        }
+    }
+
+    // Dispatch to consumers.
+    let _ = state.message_dispatch_tx.try_send(msg.clone());
+
+    tool_result(format!("Message sent: id={}, kind={}", msg_id, kind_str,))
+}
+
+/// Sign a message with the server's Ed25519 key (same algorithm as REST handler).
+fn sign_mcp_message(state: &AppState, msg: &gyre_common::message::Message) -> (String, String) {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    let (from_type, from_id) = match &msg.from {
+        gyre_common::message::MessageOrigin::Server => ("server", "".to_string()),
+        gyre_common::message::MessageOrigin::Agent(id) => ("agent", id.as_str().to_string()),
+        gyre_common::message::MessageOrigin::User(id) => ("user", id.as_str().to_string()),
+    };
+    let (to_type, to_id) = match &msg.to {
+        gyre_common::message::Destination::Agent(id) => ("agent", id.as_str().to_string()),
+        gyre_common::message::Destination::Workspace(id) => ("workspace", id.as_str().to_string()),
+        gyre_common::message::Destination::Broadcast => ("broadcast", "".to_string()),
+    };
+    let ws_id = msg
+        .workspace_id
+        .as_ref()
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_default();
+
+    let payload_json = msg
+        .payload
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default())
+        .unwrap_or_default();
+
+    let mut hasher = Sha256::new();
+    hasher.update(payload_json.as_bytes());
+    let payload_hash = format!("{:x}", hasher.finalize());
+
+    let sign_input = format!(
+        "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        msg.id.as_str(),
+        from_type,
+        from_id,
+        ws_id,
+        to_type,
+        to_id,
+        msg.kind.as_str(),
+        payload_hash,
+        msg.created_at,
+    );
+
+    let sig_bytes = state.agent_signing_key.sign_bytes(sign_input.as_bytes());
+    let sig_b64 = B64.encode(&sig_bytes);
+    (sig_b64, state.agent_signing_key.kid.clone())
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn parse_mcp_destination(
+    v: &serde_json::Value,
+) -> Result<gyre_common::message::Destination, String> {
+    if let Some(obj) = v.as_object() {
+        if let Some(agent_id) = obj.get("agent").and_then(|v| v.as_str()) {
+            return Ok(gyre_common::message::Destination::Agent(Id::new(agent_id)));
+        }
+        if let Some(ws_id) = obj.get("workspace").and_then(|v| v.as_str()) {
+            return Ok(gyre_common::message::Destination::Workspace(Id::new(ws_id)));
+        }
+    }
+    if v.as_str() == Some("broadcast") {
+        return Ok(gyre_common::message::Destination::Broadcast);
+    }
+    Err("invalid 'to': expected {\"agent\": \"<id>\"} or {\"workspace\": \"<id>\"}".to_string())
+}
+
+async fn handle_message_poll(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+    // Derive agent_id from auth context.
+    let agent_id = Id::new(&auth.agent_id);
+
+    // Verify agent exists.
+    match state.agents.find_by_id(&agent_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return tool_error(format!("agent {} not found", auth.agent_id)),
+        Err(e) => return tool_error(format!("failed to lookup agent: {e}")),
+    }
+
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100)
+        .min(1000) as usize;
+
+    let unacked_only = args
+        .get("unacked_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let messages = if unacked_only {
+        state.messages.list_unacked(&agent_id, limit).await
+    } else {
+        let after_ts = args.get("after_ts").and_then(|v| v.as_u64()).unwrap_or(0);
+        let after_id = get_str(args, "after_id").map(Id::new);
+        state
+            .messages
+            .list_after(&agent_id, after_ts, after_id.as_ref(), limit)
+            .await
+    };
+
+    match messages {
+        Ok(msgs) => {
+            let items: Vec<serde_json::Value> = msgs
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id.to_string(),
+                        "from": m.from,
+                        "kind": m.kind.as_str(),
+                        "payload": m.payload,
+                        "created_at": m.created_at,
+                        "acknowledged": m.acknowledged,
+                    })
+                })
+                .collect();
+            tool_result(format!(
+                "{} message(s):\n{}",
+                items.len(),
+                serde_json::to_string_pretty(&items).unwrap_or_default()
+            ))
+        }
+        Err(e) => tool_error(format!("failed to poll messages: {e}")),
+    }
+}
+
+async fn handle_message_ack(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+    let message_id = match get_str(args, "message_id") {
+        Some(id) => id.to_string(),
+        None => return tool_error("missing required field: message_id"),
+    };
+
+    let agent_id = Id::new(&auth.agent_id);
+    let mid = Id::new(&message_id);
+
+    // Verify agent exists.
+    match state.agents.find_by_id(&agent_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return tool_error(format!("agent {} not found", auth.agent_id)),
+        Err(e) => return tool_error(format!("failed to lookup agent: {e}")),
+    }
+
+    match state.messages.acknowledge(&mid, &agent_id).await {
+        Ok(()) => tool_result(format!("Message {} acknowledged", message_id)),
+        Err(e) => tool_error(format!("failed to ack message: {e}")),
+    }
+}
+
 // ── Explorer graph MCP tools ──────────────────────────────────────────────────
 
 async fn handle_graph_summary(state: &AppState, args: &Value) -> Value {
@@ -1701,6 +2065,8 @@ pub async fn mcp_handler(
                     | "gyre_agent_heartbeat"
                     | "gyre_agent_complete"
                     | "conversation_upload"
+                    | "gyre_message_send"
+                    | "gyre_message_ack"
             );
             if needs_write && !has_role_at_least(&auth.roles, UserRole::Agent) {
                 return Json(JsonRpcResponse::err(
@@ -1772,6 +2138,9 @@ pub async fn mcp_handler(
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
                 "gyre_search" => handle_search(&state, &args).await,
                 "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
+                "gyre_message_send" => handle_message_send(&state, &args, &auth).await,
+                "gyre_message_poll" => handle_message_poll(&state, &args, &auth).await,
+                "gyre_message_ack" => handle_message_ack(&state, &args, &auth).await,
                 "graph_summary" => handle_graph_summary(&state, &args).await,
                 "graph_query_dryrun" => handle_graph_query_dryrun(&state, &args).await,
                 "graph_nodes" => handle_graph_nodes(&state, &args).await,
@@ -2552,6 +2921,328 @@ mod tests {
         assert_eq!(payload["decisions"].as_array().unwrap().len(), 1);
         assert_eq!(payload["uncertainties"].as_array().unwrap().len(), 1);
         assert_eq!(payload["conversation_sha"], "abc123");
+    }
+
+    // ── message bus MCP tools ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_tools_list_includes_message_tools() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 70,
+                "method": "tools/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            names.contains(&"gyre_message_send"),
+            "missing gyre_message_send"
+        );
+        assert!(
+            names.contains(&"gyre_message_poll"),
+            "missing gyre_message_poll"
+        );
+        assert!(
+            names.contains(&"gyre_message_ack"),
+            "missing gyre_message_ack"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_requires_agent() {
+        // Sending a message requires an agent to exist
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 71,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "target-agent"},
+                        "kind": "task_assignment"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // system agent doesn't exist in test state → error
+        assert!(json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_directed_succeeds() {
+        let state = test_state();
+        // Create sender agent (test-token maps to agent_id "system")
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-mcp");
+        state.agents.create(&sender).await.unwrap();
+        // Create target agent in same workspace
+        let mut target = gyre_domain::Agent::new(Id::new("agent-target"), "target", 0);
+        target.workspace_id = Id::new("ws-mcp");
+        state.agents.create(&target).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 72,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-target"},
+                        "kind": "task_assignment",
+                        "payload": {"task_id": "TASK-99"}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "message send should succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Message sent"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_cross_workspace_rejected() {
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-a");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-other-ws"), "other", 0);
+        target.workspace_id = Id::new("ws-b");
+        state.agents.create(&target).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 73,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-other-ws"},
+                        "kind": "task_assignment"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not in the same workspace"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_server_only_rejected() {
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-so");
+        state.agents.create(&sender).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 74,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"workspace": "ws-so"},
+                        "kind": "agent_created"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("server"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_poll_returns_messages() {
+        let state = test_state();
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-poll");
+        state.agents.create(&agent).await.unwrap();
+
+        // Store a message for the agent.
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+        let msg = Message {
+            id: Id::new("poll-msg-1"),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-poll")),
+            to: Destination::Agent(Id::new("system")),
+            kind: MessageKind::TaskAssignment,
+            payload: Some(json!({"task_id": "T-1"})),
+            created_at: 5_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 75,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_poll",
+                    "arguments": {
+                        "after_ts": 0,
+                        "limit": 10
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "poll should succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("1 message(s)"));
+        assert!(text.contains("poll-msg-1"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_poll_unacked_only() {
+        let state = test_state();
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-unack");
+        state.agents.create(&agent).await.unwrap();
+
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+        let msg = Message {
+            id: Id::new("unack-msg-1"),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-unack")),
+            to: Destination::Agent(Id::new("system")),
+            kind: MessageKind::ReviewRequest,
+            payload: None,
+            created_at: 1_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 76,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_poll",
+                    "arguments": {
+                        "unacked_only": true
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("1 message(s)"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_ack_succeeds() {
+        let state = test_state();
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-ack");
+        state.agents.create(&agent).await.unwrap();
+
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+        let msg = Message {
+            id: Id::new("ack-mcp-1"),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-ack")),
+            to: Destination::Agent(Id::new("system")),
+            kind: MessageKind::TaskAssignment,
+            payload: None,
+            created_at: 2_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 77,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_ack",
+                    "arguments": {
+                        "message_id": "ack-mcp-1"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "ack should succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("acknowledged"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_ack_missing_id_returns_error() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 78,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_ack",
+                    "arguments": {}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
     }
 
     #[test]
