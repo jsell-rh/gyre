@@ -23,6 +23,10 @@ Flaws include:
 - Business logic in adapters (should be in `gyre-domain`)
 - Missing error handling at system boundaries
 
+High-value verification targets (historically error-prone):
+- **Spec-signature drift:** When a spec defines a CLI command, API endpoint, or tool with a specific signature, verify the implementation matches *literally* — parameter optionality (`[brackets]` = optional = `Option<T>`), positional vs flag, semantics (`<name>` vs raw ID), flat vs subcommand structure, and absence of invented required parameters. This is the single most common flaw class.
+- **Silent parameter drops:** When client code sends query parameters to a server endpoint, verify the handler actually extracts them. Query params not in the handler's `Query<T>` extractor are silently ignored — the code compiles, tests pass, but results are wrong/unfiltered.
+
 Flaws do NOT include:
 - Style preferences not backed by a spec
 - "Could be better" suggestions without a spec violation
