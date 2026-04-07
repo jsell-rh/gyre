@@ -289,6 +289,64 @@ if [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
     fi
 fi
 
+# --- Check 9: Stale doc comments on client functions ---
+# Detect doc comments on client.rs functions that reference response shapes
+# or terms not found in the function body.  This catches the pattern where a
+# fix changes the data shape but leaves the doc comment describing the old one
+# (e.g., "DiffOps" after the function was changed to return {"text": "..."}).
+#
+# Strategy: for each `/// ...` + `pub async fn` pair in client.rs, extract
+# key domain nouns from the doc comment, then verify each appears somewhere
+# in the function body (until the next `pub async fn` or EOF).
+if [ -f "$CLI_CLIENT" ]; then
+    # Extract function blocks: doc comment line(s) + function name + body
+    # We look for specific high-signal terms in doc comments that name
+    # response shapes, data structures, or endpoint-specific nouns.
+    # These terms are more likely to go stale after fixes.
+    SHAPE_TERMS="DiffOp\|GateTrace\|timeline\|BriefingItem\|NotificationResponse"
+
+    # Find doc comment lines containing shape terms
+    DOC_HITS=$(grep -n "/// .*\($SHAPE_TERMS\)" "$CLI_CLIENT" 2>/dev/null || true)
+    if [ -n "$DOC_HITS" ]; then
+        while IFS= read -r hit; do
+            [ -z "$hit" ] && continue
+            DOC_LINE=$(echo "$hit" | cut -d: -f1)
+            DOC_TEXT=$(echo "$hit" | cut -d: -f2-)
+            # Extract the matched term(s)
+            for term in DiffOp GateTrace timeline BriefingItem NotificationResponse; do
+                if echo "$DOC_TEXT" | grep -qi "$term" 2>/dev/null; then
+                    # Find the function this doc comment belongs to (next pub fn line)
+                    FN_LINE=$(sed -n "$((DOC_LINE + 1)),\$p" "$CLI_CLIENT" 2>/dev/null | \
+                        grep -n 'pub async fn\|pub fn' | head -1 || true)
+                    if [ -n "$FN_LINE" ]; then
+                        FN_LINENUM=$((DOC_LINE + $(echo "$FN_LINE" | cut -d: -f1)))
+                        FN_NAME=$(echo "$FN_LINE" | grep -oP 'fn \K\w+' || true)
+                        # Find the end of this function (next pub fn or EOF)
+                        FN_END=$(sed -n "$((FN_LINENUM + 1)),\$p" "$CLI_CLIENT" 2>/dev/null | \
+                            grep -n 'pub async fn\|pub fn' | head -1 | cut -d: -f1 || true)
+                        if [ -z "$FN_END" ]; then
+                            FN_END=$(wc -l < "$CLI_CLIENT")
+                        else
+                            FN_END=$((FN_LINENUM + FN_END - 1))
+                        fi
+                        # Check if the term appears in the function body
+                        BODY=$(sed -n "${FN_LINENUM},${FN_END}p" "$CLI_CLIENT" 2>/dev/null || true)
+                        if ! echo "$BODY" | grep -qi "$term" 2>/dev/null; then
+                            echo "CLI-SPEC PARITY: Doc comment references '$term' but term not found in function body"
+                            echo "  $CLI_CLIENT:$DOC_LINE: $DOC_TEXT"
+                            echo "  Function: $FN_NAME (line $FN_LINENUM)"
+                            echo "  The doc comment may be stale after a prior fix changed the response shape."
+                            echo "  Fix: Update the doc comment to describe the current behavior."
+                            echo ""
+                            FAIL=1
+                        fi
+                    fi
+                fi
+            done
+        done <<< "$DOC_HITS"
+    fi
+fi
+
 if [ "$FAIL" -eq 0 ]; then
     echo "CLI-spec parity lint passed."
 fi
