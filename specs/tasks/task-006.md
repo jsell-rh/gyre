@@ -21,7 +21,7 @@ Phase 1 introduces key binding and signed input production in audit-only mode:
    - Returns the `KeyBinding` document
    - ABAC: per-handler auth (user-scoped)
 
-2. **Extend spec approval** — Amend `POST /api/v1/specs/approve`:
+2. **Extend spec approval** — Amend `POST /api/v1/specs/:path/approve`:
    - Accept optional `output_constraints` and `scope` fields in request body
    - Require valid `KeyBinding` (look up by user_id)
    - Create `SignedInput` with signed content hash

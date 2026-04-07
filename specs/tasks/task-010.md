@@ -57,12 +57,12 @@ And these tools:
 
 3. **`trace://` resource** — Add to `resource_definitions()` and `handle_resources_read()`:
    - URI template: `trace://{mr_id}`
-   - Wraps `GET /api/v1/merge-requests/:id/timeline`
-   - Returns SDLC timeline JSON (spec triggers, agent spawns, pushes, gates, merges)
+   - Wraps `GET /api/v1/merge-requests/:id/trace`
+   - Returns GateTrace JSON (spans, root_spans, service_graph, commit_sha, gate_run_id)
 
 4. **`graph.concept` tool** — Add tool definition:
    - Parameters: `concept` (string), `repo_id` (optional), `workspace_id` (optional), `depth` (optional, default 2)
-   - When `repo_id` provided: wraps `GET /api/v1/repos/:id/graph?concept=<name>`
+   - When `repo_id` provided: wraps `GET /api/v1/repos/:id/graph/concept/<name>`
    - When `workspace_id` provided: wraps `GET /api/v1/workspaces/:id/graph/concept/:name`
    - Returns matching graph nodes with type, name, qualified_name, spec linkage
 

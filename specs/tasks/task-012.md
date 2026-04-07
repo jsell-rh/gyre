@@ -16,13 +16,17 @@ From `ui-layout.md` §3:
 
 ## Current State
 
-The `specs/assist` handler (`crates/gyre-server/src/api/specs_assist.rs`) is explicitly stubbed:
-- Comment: "The LLM call is stubbed — a simulated diff is produced from the instruction"
-- Returns a hardcoded diff based on the instruction text, not an actual LLM response
-- The `LlmPort` infrastructure exists (`gyre-ports/src/llm.rs`) with `complete`, `predict_json`, and `stream_complete` methods
-- The Vertex AI adapter exists (`gyre-adapters/src/llm/rig_vertexai.rs`) with working Claude/Gemini support
-- The rate limiter and model resolution are already wired in the handler
-- Prompt template infrastructure exists (`llm_defaults.rs` has `PROMPT_SPECS_ASSIST`)
+The `specs/assist` handler (`crates/gyre-server/src/api/specs_assist.rs`) makes **real LLM calls** via `LlmPort::stream_complete`, but response parsing and context enrichment are incomplete:
+- Real streaming LLM call through `LlmPort` (not simulated) ✓
+- SSE streaming with `partial` and `complete` events ✓
+- Rate limiting (10 req/60s per user/workspace) ✓
+- Prompt template loading and variable substitution ✓
+- 503 when LLM unavailable ✓
+- **Missing:** Response format is `{text: full_text}`, not `{diff, explanation}` as spec requires
+- **Missing:** No knowledge graph context included in prompt (spec says "reads current spec + knowledge graph context")
+- **Missing:** No `event: error` for invalid LLM output
+- **Missing:** No explicit handling of new spec creation (nonexistent path + draft_content)
+- **Stale comment** at file top still says "stubbed LLM" — should be updated
 
 ## Implementation Plan
 
