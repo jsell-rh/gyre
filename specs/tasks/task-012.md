@@ -1,0 +1,80 @@
+# TASK-012: Specs Assist Real LLM Integration
+
+**Spec reference:** `ui-layout.md` §3 (LLM-Assisted Spec Editing), `human-system-interface.md` §3 (Explorer)
+**Depends on:** None (LlmPort infrastructure exists; TASK-011 is for save, not assist)
+**Progress:** `not-started`
+
+## Spec Excerpt
+
+From `ui-layout.md` §3:
+
+> `POST /api/v1/repos/:repo_id/specs/assist` — request: `{spec_path, instruction, draft_content?: string}`, response: `{diff: [{op: "add"|"remove"|"replace", path: string, content: string}], explanation}`.
+
+> The LLM reads the current spec + knowledge graph context.
+
+> **Streaming:** All responses stream via Server-Sent Events (SSE). Events: `event: partial` (incremental text chunks for `explanation`), `event: complete` (final complete JSON response).
+
+## Current State
+
+The `specs/assist` handler (`crates/gyre-server/src/api/specs_assist.rs`) is explicitly stubbed:
+- Comment: "The LLM call is stubbed — a simulated diff is produced from the instruction"
+- Returns a hardcoded diff based on the instruction text, not an actual LLM response
+- The `LlmPort` infrastructure exists (`gyre-ports/src/llm.rs`) with `complete`, `predict_json`, and `stream_complete` methods
+- The Vertex AI adapter exists (`gyre-adapters/src/llm/rig_vertexai.rs`) with working Claude/Gemini support
+- The rate limiter and model resolution are already wired in the handler
+- Prompt template infrastructure exists (`llm_defaults.rs` has `PROMPT_SPECS_ASSIST`)
+
+## Implementation Plan
+
+1. **Load spec content from the repo:**
+   - Read the current spec at `spec_path` from the repo's default branch via `GitOpsPort`
+   - If `draft_content` is provided, use it instead of the committed spec
+
+2. **Build the LLM prompt:**
+   - Load the prompt template from `llm_defaults.rs` (or from git `specs/prompts/specs-assist.md` if it exists in the repo)
+   - Substitute `{{spec_path}}`, `{{draft_content}}`, `{{instruction}}` variables
+   - Include knowledge graph context: query graph nodes governed by this spec for structural context
+
+3. **Call `LlmPort::stream_complete`:**
+   - Use `state.llm` factory with the workspace's configured model
+   - Stream the response as SSE events (`partial` for explanation, `complete` for final JSON)
+   - Parse the LLM's response into the `{diff, explanation}` format
+   - Validate the diff ops (`add`/`remove`/`replace`, valid `path` strings)
+
+4. **Handle edge cases:**
+   - `spec_path` does not exist + no `draft_content` → 404
+   - `spec_path` does not exist + `draft_content` provided → new spec creation (only `add` ops)
+   - LLM returns invalid JSON → send `event: error` with explanation
+   - LLM unavailable (`state.llm` is None) → return 503
+
+5. **Add tests:**
+   - Mock LLM returning valid diff → verify SSE events
+   - Mock LLM returning invalid JSON → verify error event
+   - Verify rate limiting (existing test may cover this)
+   - Verify `draft_content` override behavior
+
+## Acceptance Criteria
+
+- [ ] `POST /api/v1/repos/:repo_id/specs/assist` calls through `LlmPort` (not simulated)
+- [ ] Response streams as SSE: `partial` events for explanation, `complete` event with `{diff, explanation}`
+- [ ] Prompt includes spec content and knowledge graph context
+- [ ] `draft_content` overrides committed spec content when provided
+- [ ] New spec creation (nonexistent path + draft_content) works
+- [ ] Invalid LLM output produces an `event: error` response
+- [ ] Tests verify integration with mock LLM
+
+## Agent Instructions
+
+When working on this task:
+1. Update the progress field above to `in-progress`
+2. Read `crates/gyre-server/src/api/specs_assist.rs` for the current handler
+3. Read `crates/gyre-ports/src/llm.rs` for the LlmPort trait
+4. Read `crates/gyre-server/src/llm_defaults.rs` for prompt templates
+5. Read `crates/gyre-server/src/llm_helpers.rs` for model resolution
+6. Read `crates/gyre-server/src/api/explorer_views.rs` for a working example of LLM + SSE streaming
+7. Replace the stub with a real LLM call, following the pattern in `explorer_views.rs`
+8. On completion, update progress to `ready-for-review` and list git commits below
+
+## Git Commits
+
+_(none yet)_
