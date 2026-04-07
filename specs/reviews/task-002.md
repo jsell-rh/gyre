@@ -1,7 +1,7 @@
 # Review: TASK-002 — CLI HSI Parity Commands
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R2)  
+**Date:** 2026-04-07 (R3)  
 **Verdict:** needs-revision
 
 ---
@@ -45,3 +45,9 @@
 - [x] [process-revision-complete] **F9 — `gyre explore --repo <name>` without `--workspace` hard-fails; spec allows it.**  
   HSI §11 defines `gyre explore <concept> [--repo <name>]` — `--repo` is optional and standalone; the spec signature has no `--workspace` parameter. The implementation (main.rs:667–672) bails with `"--repo requires --workspace"` when `--repo` is given without `--workspace`. The `spec assist` command (main.rs:776–800) already demonstrates git-remote inference when explicit flags are omitted — `explore` should use the same pattern. When `--repo` is given without `--workspace`, either infer the workspace from the git remote or search all workspaces for a repo matching the name.  
   **Files:** `crates/gyre-cli/src/main.rs:667-672`.
+
+## R3 Findings
+
+- [ ] **F10 — `gyre inbox resolve <id>` sends no JSON body; server requires `Json<ResolveRequest>`.**  
+  The client method `resolve_notification` (client.rs:327–344) sends a POST request with no body and no `Content-Type: application/json` header. The server handler `resolve_notification` (users.rs:371–394) uses `Json(req): Json<ResolveRequest>` as a required Axum extractor. Axum's `Json` extractor rejects requests without a valid JSON body with a 400 or 415 status. As a result, `gyre inbox resolve <id>` will **fail at runtime every invocation**. Fix: the client must send an empty JSON object body (e.g., `.json(&serde_json::json!({}))`) to satisfy the extractor, since `ResolveRequest.action_taken` is `Option<String>` and will default to `None`.  
+  **Files:** `crates/gyre-cli/src/client.rs:327-344` (missing `.json(...)` call), `crates/gyre-server/src/api/users.rs:371-375` (requires `Json<ResolveRequest>`).
