@@ -202,6 +202,93 @@ if [ -f "$CLI_CLIENT" ] && [ -f "$SERVER_MOD" ]; then
     fi
 fi
 
+# --- Check 8: POST/PUT/PATCH without JSON body when server expects Json<T> ---
+# Detect client POST/PUT/PATCH calls that never chain .json(...) but whose
+# server handler expects a Json<T> extractor.  A POST without a body to a
+# handler with Json<T> fails at runtime every invocation (400/415).
+if [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
+    # Strategy:
+    #  1. Find POST/PUT/PATCH blocks in client.rs (between .post/.put/.patch and .send()).
+    #  2. For each block, extract the endpoint path.
+    #  3. Check if the block includes .json( — if not, look up the server handler.
+    #  4. If the handler has Json<T> in its signature, flag it.
+
+    # Extract method+endpoint pairs for POST/PUT/PATCH calls that lack .json(
+    # We look for sequences like:
+    #   .post(format!("{}/api/v1/...", ...))
+    #   ...
+    #   .send()
+    # where no .json( appears between the HTTP method and .send().
+
+    # Use awk to find POST/PUT/PATCH blocks without .json(
+    # Handles multi-line format!() blocks where the endpoint path is on a
+    # different line than the .post() call.
+    BODYLESS_POSTS=$(awk '
+        /\.(post|put|patch)\(/ {
+            method_line = NR
+            in_block = 1
+            has_json = 0
+            endpoint = ""
+            collecting_ep = 1
+        }
+        in_block && collecting_ep {
+            if (match($0, /api\/v1\/[^"]+/)) {
+                endpoint = substr($0, RSTART, RLENGTH)
+                collecting_ep = 0
+            }
+        }
+        in_block && /\.json\(/ { has_json = 1 }
+        in_block && /\.send\(/ {
+            if (!has_json && endpoint != "") {
+                print method_line ":" endpoint
+            }
+            in_block = 0
+            endpoint = ""
+            collecting_ep = 0
+        }
+    ' "$CLI_CLIENT" 2>/dev/null || true)
+
+    if [ -n "$BODYLESS_POSTS" ]; then
+        while IFS= read -r entry; do
+            [ -z "$entry" ] && continue
+            LINE=$(echo "$entry" | cut -d: -f1)
+            EP=$(echo "$entry" | cut -d: -f2-)
+
+            # Derive the handler function name from the route.
+            # Normalize the client endpoint to match the server route format:
+            #   client: api/v1/notifications/{id}/resolve
+            #   server: /api/v1/notifications/:id/resolve
+            ROUTE_PATTERN=$(echo "$EP" | sed 's|{[^}]*}|:[^/]*|g')
+
+            # Search server API files for a handler with Json< in its signature
+            # that matches this endpoint path.
+            # Look for the route in mod.rs first to find the handler name.
+            # Find the line number of the matching route, then look at the next
+            # line for the handler name (Axum style: .route("path", post(handler))).
+            ROUTE_LINENUM=$(grep -n "$ROUTE_PATTERN" "$SERVER_MOD" 2>/dev/null | head -1 | cut -d: -f1 || true)
+            HANDLER=""
+            if [ -n "$ROUTE_LINENUM" ]; then
+                # Handler may be on the same line or the next line
+                HANDLER=$(sed -n "${ROUTE_LINENUM},$((ROUTE_LINENUM + 2))p" "$SERVER_MOD" 2>/dev/null | \
+                    grep -oP '(post|put|patch|delete|get)\(\K\w+' | head -1 || true)
+            fi
+
+            if [ -n "$HANDLER" ]; then
+                # Check if the handler function signature includes Json<
+                HAS_JSON_EXTRACTOR=$(grep -A 5 "fn $HANDLER" "$SERVER_API_DIR"/*.rs 2>/dev/null | grep 'Json<' || true)
+                if [ -n "$HAS_JSON_EXTRACTOR" ]; then
+                    echo "CLI-SPEC PARITY: Client POST/PUT/PATCH sends no JSON body but server handler expects Json<T>"
+                    echo "  $CLI_CLIENT:$LINE: /$EP"
+                    echo "  Server handler '$HANDLER' requires a Json<T> extractor — request will fail at runtime (400/415)."
+                    echo "  Fix: Add .json(&serde_json::json!({})) or .json(&payload) to the request builder."
+                    echo ""
+                    FAIL=1
+                fi
+            fi
+        done <<< "$BODYLESS_POSTS"
+    fi
+fi
+
 if [ "$FAIL" -eq 0 ]; then
     echo "CLI-spec parity lint passed."
 fi

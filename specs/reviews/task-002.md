@@ -48,6 +48,6 @@
 
 ## R3 Findings
 
-- [ ] **F10 — `gyre inbox resolve <id>` sends no JSON body; server requires `Json<ResolveRequest>`.**  
+- [ ] [process-revision-complete] **F10 — `gyre inbox resolve <id>` sends no JSON body; server requires `Json<ResolveRequest>`.**  
   The client method `resolve_notification` (client.rs:327–344) sends a POST request with no body and no `Content-Type: application/json` header. The server handler `resolve_notification` (users.rs:371–394) uses `Json(req): Json<ResolveRequest>` as a required Axum extractor. Axum's `Json` extractor rejects requests without a valid JSON body with a 400 or 415 status. As a result, `gyre inbox resolve <id>` will **fail at runtime every invocation**. Fix: the client must send an empty JSON object body (e.g., `.json(&serde_json::json!({}))`) to satisfy the extractor, since `ResolveRequest.action_taken` is `Option<String>` and will default to `None`.  
   **Files:** `crates/gyre-cli/src/client.rs:327-344` (missing `.json(...)` call), `crates/gyre-server/src/api/users.rs:371-375` (requires `Json<ResolveRequest>`).
