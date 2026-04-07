@@ -332,6 +332,7 @@ impl GyreClient {
                 self.base_url
             ))
             .header("Authorization", self.auth_header())
+            .json(&serde_json::json!({}))
             .send()
             .await
             .context("connecting to Gyre server")?;

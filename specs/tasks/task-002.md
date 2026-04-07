@@ -2,7 +2,7 @@
 
 **Spec reference:** `human-system-interface.md` §11 (CLI/MCP Parity Constraint)  
 **Depends on:** None (consumes existing REST endpoints)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [specs/reviews/task-002.md](../reviews/task-002.md)
 
 ## Spec Excerpt
@@ -88,3 +88,4 @@ When working on this task:
 - `feat(cli): add 6 HSI parity commands — briefing, inbox, explore, trace, spec assist, divergence`
 - `fix(cli): address R1 review findings — spec-signature conformance for all 6 HSI commands`
 - `fix(cli): address R2 review findings — notification_type filter, trace endpoint, repo inference`
+- `fix(cli): address R3 finding — send JSON body for inbox resolve POST`
