@@ -32,6 +32,14 @@ repos:
         types_or: [rust, toml, yaml, markdown]
         pass_filenames: true
 
+      - id: cli-spec-parity
+        name: CLI spec parity
+        description: Detect CLI-spec signature drift, silent param drops, wrong endpoints
+        entry: scripts/check-cli-spec-parity.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

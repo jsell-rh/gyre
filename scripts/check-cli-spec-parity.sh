@@ -107,6 +107,101 @@ if [ -n "$SPEC_ASSIST_REPO_ID" ]; then
     done <<< "$SPEC_ASSIST_REPO_ID"
 fi
 
+# --- Check 5: Invented parameter dependencies ---
+# Look for bail!/anyhow::bail! messages that say "--X requires --Y" or similar.
+# These indicate invented constraints between optional parameters.
+# Flag them for manual spec review.
+INVENTED_DEPS=$(grep -n 'bail!.*--.*requires' "$CLI_MAIN" 2>/dev/null || true)
+if [ -n "$INVENTED_DEPS" ]; then
+    while IFS= read -r line; do
+        echo "CLI-SPEC PARITY: Possible invented parameter dependency — verify against spec"
+        echo "  $CLI_MAIN:$line"
+        echo "  If spec defines both parameters as independently optional, this is a violation."
+        echo "  Fix: Infer missing context (git remote, config, global search) instead of requiring another flag."
+        echo ""
+        FAIL=1
+    done <<< "$INVENTED_DEPS"
+fi
+
+# --- Check 6: Client query params not in server Query extractor structs ---
+# Detect query parameter names sent by client.rs that do not appear in any
+# query extractor struct in the server API. We target structs whose names
+# match *Params or *Query (both naming conventions are used for Axum
+# Query<T> extractors), excluding *Response and *Request structs.
+# A param that exists in a response struct but not an extractor struct
+# is still silently dropped.
+CLI_CLIENT="crates/gyre-cli/src/client.rs"
+SERVER_API_DIR="crates/gyre-server/src/api"
+
+if [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
+    # Extract query param names from client.rs: .query(&[("param_name", ...)])
+    CLIENT_PARAMS=$(grep -oP '\.query\(&\[\("(\K[^"]+)' "$CLI_CLIENT" 2>/dev/null | sort -u || true)
+
+    if [ -n "$CLIENT_PARAMS" ]; then
+        # Extract field names from *Params and *Query structs.
+        # Strategy: find "struct Xxx(Params|Query)" blocks, then extract pub field
+        # names within the next ~20 lines (until closing brace).
+        PARAMS_FIELDS=""
+        while IFS= read -r params_line; do
+            PARAMS_FILE=$(echo "$params_line" | cut -d: -f1)
+            PARAMS_LINENUM=$(echo "$params_line" | cut -d: -f2)
+            # Extract pub field names from the struct body — stop at closing brace.
+            FIELDS=$(sed -n "${PARAMS_LINENUM},\$p" "$PARAMS_FILE" 2>/dev/null | \
+                sed '/^}/q' | \
+                grep -oP 'pub\s+\K\w+(?=\s*:)' || true)
+            if [ -n "$FIELDS" ]; then
+                PARAMS_FIELDS="${PARAMS_FIELDS}${FIELDS}"$'\n'
+            fi
+        done < <(grep -rn 'struct \w*\(Params\|Query\)\b' "$SERVER_API_DIR"/*.rs 2>/dev/null | \
+            grep -v 'Request\|Response' || true)
+
+        PARAMS_FIELDS=$(echo "$PARAMS_FIELDS" | sort -u)
+
+        while IFS= read -r param; do
+            [ -z "$param" ] && continue
+            if ! echo "$PARAMS_FIELDS" | grep -qx "$param" 2>/dev/null; then
+                echo "CLI-SPEC PARITY: Client sends query param '$param' but no server Query extractor struct has this field"
+                echo "  $CLI_CLIENT: .query(&[(\"$param\", ...)])"
+                echo "  The server will silently ignore this parameter — results will be wrong/unfiltered."
+                echo "  Fix: Add '$param' field to the appropriate server Query/Params struct."
+                echo ""
+                FAIL=1
+            fi
+        done <<< "$CLIENT_PARAMS"
+    fi
+fi
+
+# --- Check 7: CLI endpoint URL vs server route registration ---
+# Detect endpoint URLs in client.rs that don't match any route in mod.rs.
+SERVER_MOD="crates/gyre-server/src/api/mod.rs"
+if [ -f "$CLI_CLIENT" ] && [ -f "$SERVER_MOD" ]; then
+    # Extract URL path patterns from client.rs (after base_url):
+    # e.g., /api/v1/merge-requests/{mr_id}/timeline
+    CLIENT_ENDPOINTS=$(grep -oP '"\{\}/api/v1/\K[^"]+' "$CLI_CLIENT" 2>/dev/null | \
+        sed 's/{[^}]*}/:param/g' | sort -u || true)
+
+    if [ -n "$CLIENT_ENDPOINTS" ]; then
+        # Extract registered routes from mod.rs
+        SERVER_ROUTES=$(grep -oP '"/api/v1/\K[^"]+' "$SERVER_MOD" 2>/dev/null | \
+            sed 's/:[^/]*/:param/g' | sort -u || true)
+
+        while IFS= read -r endpoint; do
+            [ -z "$endpoint" ] && continue
+            if ! echo "$SERVER_ROUTES" | grep -qxF "$endpoint" 2>/dev/null; then
+                # Get the original line for context
+                ORIG=$(grep -n "api/v1/$endpoint" "$CLI_CLIENT" 2>/dev/null | head -1 || true)
+                # Undo param substitution for display
+                echo "CLI-SPEC PARITY: Client calls endpoint path that doesn't match any server route"
+                echo "  $CLI_CLIENT: /api/v1/$endpoint"
+                echo "  No matching route found in $SERVER_MOD"
+                echo "  Fix: Verify the endpoint URL against the spec and server route registration."
+                echo ""
+                FAIL=1
+            fi
+        done <<< "$CLIENT_ENDPOINTS"
+    fi
+fi
+
 if [ "$FAIL" -eq 0 ]; then
     echo "CLI-spec parity lint passed."
 fi

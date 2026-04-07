@@ -25,7 +25,9 @@ Flaws include:
 
 High-value verification targets (historically error-prone):
 - **Spec-signature drift:** When a spec defines a CLI command, API endpoint, or tool with a specific signature, verify the implementation matches *literally* — parameter optionality (`[brackets]` = optional = `Option<T>`), positional vs flag, semantics (`<name>` vs raw ID), flat vs subcommand structure, and absence of invented required parameters. This is the single most common flaw class.
-- **Silent parameter drops:** When client code sends query parameters to a server endpoint, verify the handler actually extracts them. Query params not in the handler's `Query<T>` extractor are silently ignored — the code compiles, tests pass, but results are wrong/unfiltered.
+- **Silent parameter drops:** When client code sends query parameters to a server endpoint, verify the handler actually extracts them. Query params not in the handler's `Query<T>` extractor are silently ignored — the code compiles, tests pass, but results are wrong/unfiltered. For each `.query(&[("param_name", ...)])` in client code, grep the server's `Query<T>` struct to confirm the field exists.
+- **Task-vs-spec endpoint discrepancy:** Task files may contain transcription errors in endpoint URLs. When verifying a CLI command, check the *spec's* stated endpoint URL against the *actual* server route registration in `gyre-server/src/api/mod.rs`. Do not assume the task file's endpoint is correct — verify it independently.
+- **Invented parameter dependencies:** Check for code that requires one optional parameter when another is given (e.g., `"--repo requires --workspace"`) when the spec defines them as independent optional flags. Grep for `bail!("--` patterns and verify each dependency against the spec signature.
 
 Flaws do NOT include:
 - Style preferences not backed by a spec

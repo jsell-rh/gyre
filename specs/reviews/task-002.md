@@ -34,14 +34,14 @@
 
 ## R2 Findings
 
-- [ ] **F7 — `gyre divergence` filter silently dropped: `notification_type` not in server's `NotificationParams`.**  
+- [x] [process-revision-complete] **F7 — `gyre divergence` filter silently dropped: `notification_type` not in server's `NotificationParams`.**  
   The `gyre divergence` command calls `get_notifications(..., Some("ConflictingInterpretations"))` (main.rs:848), which sends `notification_type=ConflictingInterpretations` as a query parameter to `GET /api/v1/users/me/notifications` (client.rs:294). However, the server's `NotificationParams` struct (users.rs:246–252) does not include a `notification_type` field — it only has `workspace_id`, `min_priority`, `max_priority`, `limit`, and `offset`. The `notification_type` query parameter is **silently ignored** by the Axum `Query<NotificationParams>` extractor. As a result, `gyre divergence` returns **all** notifications regardless of type, not just `ConflictingInterpretations` alerts. Fix: add `notification_type: Option<String>` to `NotificationParams` and filter by it in `list_for_user` (or add a new port method with a type filter).  
   **Files:** `crates/gyre-cli/src/client.rs:294`, `crates/gyre-server/src/api/users.rs:246-252`.
 
-- [ ] **F8 — `gyre trace` calls `/timeline` endpoint; spec requires `/trace`.**  
+- [x] [process-revision-complete] **F8 — `gyre trace` calls `/timeline` endpoint; spec requires `/trace`.**  
   HSI §11 defines `gyre trace <mr-id>` with MCP equivalent `Resource: trace://<mr-id>`. The spec at line 484 and line 557 of `human-system-interface.md` explicitly states: "`GET /api/v1/merge-requests/:id/trace` REST endpoint (returns the `GateTrace` struct as JSON for CLI/MCP consumption per §11)". The CLI calls `/api/v1/merge-requests/{mr_id}/timeline` instead (client.rs:429), which returns SDLC activity events — a different data shape entirely. The output formatter (main.rs:737–758) also expects the timeline response format (an `events` array) rather than the `GateTrace` format (fields: `spans`, `root_spans`, `service_graph`, `commit_sha`, `gate_run_id`). Both the endpoint URL and the output formatter must be updated.  
   **Files:** `crates/gyre-cli/src/client.rs:429` (wrong endpoint), `crates/gyre-cli/src/main.rs:737-758` (wrong response format).
 
-- [ ] **F9 — `gyre explore --repo <name>` without `--workspace` hard-fails; spec allows it.**  
+- [x] [process-revision-complete] **F9 — `gyre explore --repo <name>` without `--workspace` hard-fails; spec allows it.**  
   HSI §11 defines `gyre explore <concept> [--repo <name>]` — `--repo` is optional and standalone; the spec signature has no `--workspace` parameter. The implementation (main.rs:667–672) bails with `"--repo requires --workspace"` when `--repo` is given without `--workspace`. The `spec assist` command (main.rs:776–800) already demonstrates git-remote inference when explicit flags are omitted — `explore` should use the same pattern. When `--repo` is given without `--workspace`, either infer the workspace from the git remote or search all workspaces for a repo matching the name.  
   **Files:** `crates/gyre-cli/src/main.rs:667-672`.

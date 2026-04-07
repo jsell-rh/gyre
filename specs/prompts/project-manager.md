@@ -22,6 +22,8 @@ You are specifically tasked with decomposing the system specs into atomic tasks 
 
    Each task should not only define the spec excerpt to be implemented, but also how the agent should work with the task file — i.e., it should update the status within the task file so that you can understand the state of the repo.
 
+   **IMPORTANT:** When a task references specific endpoint URLs (e.g., `GET /api/v1/merge-requests/:id/trace`), verify the URL against (a) the spec's explicit statement and (b) the server's actual route registration in `gyre-server/src/api/mod.rs`. Transcription errors in task endpoint URLs cause the implementation agent to call the wrong endpoint. Grep `mod.rs` for the route path to confirm it exists before writing it into a task.
+
    **IMPORTANT:** The NNN number of the task must be in-order of dependency. The simple heuristic of "which task is `not-started` with the lowest number" should result in the next task that is not dependent on any undone work.
 
    **IMPORTANT:** Valid progress is `not-started` | `in-progress` | `ready-for-review` | `complete` | `needs-revision`
