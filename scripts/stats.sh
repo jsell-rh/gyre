@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# Gyre Build Stats — tracks velocity, quality, and cost metrics across tasks.
+# Usage: ./scripts/stats.sh [--json]
+set -uo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TASKS_DIR="$REPO_ROOT/specs/tasks"
+REVIEWS_DIR="$REPO_ROOT/specs/reviews"
+JSON_MODE=false
+[[ "${1:-}" == "--json" ]] && JSON_MODE=true
+
+# --- Colors (disabled for JSON or non-tty) ---
+if $JSON_MODE; then
+    BOLD="" DIM="" RESET="" GREEN="" YELLOW="" RED="" CYAN="" BLUE=""
+else
+    BOLD=$'\033[1m' DIM=$'\033[2m' RESET=$'\033[0m'
+    GREEN=$'\033[32m' YELLOW=$'\033[33m' RED=$'\033[31m'
+    CYAN=$'\033[36m' BLUE=$'\033[34m'
+fi
+
+# --- Task status counts ---
+total_tasks=0; complete=0; in_review=0; in_progress=0; not_started=0; needs_revision=0
+declare -a task_names=() task_statuses=()
+
+for f in "$TASKS_DIR"/task-*.md; do
+    [[ -f "$f" ]] || continue
+    total_tasks=$((total_tasks + 1))
+    name=$(basename "$f" .md)
+    status=$(grep -oP '(?<=\*\*Status:\*\* `)[^`]+' "$f" 2>/dev/null || echo "unknown")
+    task_names+=("$name")
+    task_statuses+=("$status")
+    case "$status" in
+        complete) complete=$((complete + 1)) ;;
+        ready-for-review|in-review) in_review=$((in_review + 1)) ;;
+        in-progress) in_progress=$((in_progress + 1)) ;;
+        not-started) not_started=$((not_started + 1)) ;;
+        needs-revision) needs_revision=$((needs_revision + 1)) ;;
+    esac
+done
+
+if [[ $total_tasks -eq 0 ]]; then
+    echo "No tasks found in $TASKS_DIR"
+    exit 0
+fi
+
+# --- Review metrics per task ---
+declare -A review_rounds=() review_findings=()
+
+for f in "$REVIEWS_DIR"/task-*.md; do
+    [[ -f "$f" ]] || continue
+    name=$(basename "$f" .md)
+    round_headers=$(grep -c '^## Round [0-9]' "$f" 2>/dev/null || true)
+    findings_headers=$(grep -c '^## Findings' "$f" 2>/dev/null || true)
+    rounds=$((${round_headers:-0} + ${findings_headers:-0}))
+    findings=$(grep -c 'process-revision-complete' "$f" 2>/dev/null || true)
+    findings=${findings:-0}
+    review_rounds[$name]=$((rounds))
+    review_findings[$name]=$((findings))
+done
+
+# --- Wall clock time per task (from git history) ---
+OUTLIER_GAP=3600  # 1 hour — gaps longer are likely context switches or sleep
+
+declare -A task_wall_clock=() task_first_commit=() task_last_commit=()
+declare -A task_active_seconds=()
+
+compute_task_time() {
+    local task_id="$1"
+    local commits
+    commits=$(cd "$REPO_ROOT" && git log --all --format="%at" --grep="$task_id" --reverse 2>/dev/null)
+    [[ -z "$commits" ]] && return
+
+    local first last prev elapsed active_time=0 count=0
+    while IFS= read -r ts; do
+        [[ -z "$ts" ]] && continue
+        if [[ $count -eq 0 ]]; then
+            first=$ts
+        else
+            local gap=$((ts - prev))
+            if [[ $gap -gt 0 && $gap -lt $OUTLIER_GAP ]]; then
+                active_time=$((active_time + gap))
+            fi
+        fi
+        last=$ts
+        prev=$ts
+        count=$((count + 1))
+    done <<< "$commits"
+
+    [[ $count -lt 2 ]] && return
+
+    task_first_commit[$task_id]=$first
+    task_last_commit[$task_id]=$last
+    task_wall_clock[$task_id]=$((last - first))
+    task_active_seconds[$task_id]=$active_time
+}
+
+for name in "${task_names[@]}"; do
+    compute_task_time "$name"
+done
+
+# --- Code metrics ---
+total_rust_lines=$(find "$REPO_ROOT/crates" -name "*.rs" -not -path "*/.git/*" -not -path "*/target/*" 2>/dev/null | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
+test_rust_lines=$(find "$REPO_ROOT/crates" -name "*.rs" -not -path "*/.git/*" -not -path "*/target/*" 2>/dev/null | xargs grep -l '#\[cfg(test)\]\|#\[test\]' 2>/dev/null | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
+total_rust_lines=${total_rust_lines:-0}
+test_rust_lines=${test_rust_lines:-0}
+prod_rust_lines=$((total_rust_lines - test_rust_lines))
+
+total_svelte_lines=$(find "$REPO_ROOT/web/src" -name "*.svelte" -o -name "*.ts" 2>/dev/null | xargs wc -l 2>/dev/null | tail -1 | awk '{print $1}')
+total_svelte_lines=${total_svelte_lines:-0}
+
+total_commits=$(cd "$REPO_ROOT" && git log --all --oneline | wc -l)
+
+# Overall timeline
+first_commit_ts=$(cd "$REPO_ROOT" && git log --all --format="%at" --reverse | head -1)
+last_commit_ts=$(cd "$REPO_ROOT" && git log --all --format="%at" | head -1)
+total_wall_seconds=$((last_commit_ts - first_commit_ts))
+
+# Checklist items (process learning)
+checklist_items=$(cd "$REPO_ROOT" && git log --all --oneline --grep="fix(process)" | wc -l)
+
+# --- Format helpers ---
+fmt_duration() {
+    local secs=$1
+    local hrs=$((secs / 3600))
+    local mins=$(( (secs % 3600) / 60 ))
+    local s=$((secs % 60))
+    if [[ $hrs -gt 0 ]]; then
+        printf "%dh %dm %ds" "$hrs" "$mins" "$s"
+    else
+        printf "%dm %ds" "$mins" "$s"
+    fi
+}
+
+progress_bar() {
+    local pct=$1 width=30
+    local filled=$((pct * width / 100))
+    local empty=$((width - filled))
+    local bar=""
+    for ((i=0; i<filled; i++)); do bar+="#"; done
+    local rest=""
+    for ((i=0; i<empty; i++)); do rest+="-"; done
+    printf "%s%s%s%s%s" "${GREEN}" "$bar" "${DIM}" "$rest" "${RESET}"
+}
+
+# --- JSON output ---
+if $JSON_MODE; then
+    echo "{"
+    echo "  \"summary\": {"
+    echo "    \"total_tasks\": $total_tasks,"
+    echo "    \"complete\": $complete,"
+    echo "    \"in_review\": $in_review,"
+    echo "    \"in_progress\": $in_progress,"
+    echo "    \"not_started\": $not_started,"
+    echo "    \"needs_revision\": $needs_revision,"
+    echo "    \"progress_pct\": $((complete * 100 / total_tasks)),"
+    echo "    \"total_commits\": $total_commits,"
+    echo "    \"prod_lines\": $prod_rust_lines,"
+    echo "    \"test_lines\": $test_rust_lines,"
+    echo "    \"svelte_lines\": $total_svelte_lines,"
+    if [[ $total_rust_lines -gt 0 ]]; then
+        echo "    \"test_ratio\": \"$(printf '%.1f' "$(echo "scale=1; $test_rust_lines * 100 / $total_rust_lines" | bc)")%\","
+    else
+        echo "    \"test_ratio\": \"0%\","
+    fi
+    echo "    \"total_wall_clock_seconds\": $total_wall_seconds,"
+    echo "    \"checklist_items\": $checklist_items"
+    echo "  },"
+    echo "  \"tasks\": ["
+    first=true
+    for i in "${!task_names[@]}"; do
+        name="${task_names[$i]}"
+        status="${task_statuses[$i]}"
+        rounds=${review_rounds[$name]:-0}
+        findings=${review_findings[$name]:-0}
+        active=${task_active_seconds[$name]:-0}
+        wall=${task_wall_clock[$name]:-0}
+        $first || echo ","
+        first=false
+        printf '    {"task": "%s", "status": "%s", "review_rounds": %d, "findings": %d, "active_seconds": %d, "wall_seconds": %d}' \
+            "$name" "$status" "$rounds" "$findings" "$active" "$wall"
+    done
+    echo ""
+    echo "  ]"
+    echo "}"
+    exit 0
+fi
+
+# --- Human output ---
+echo ""
+echo "${BOLD}Gyre Build Stats${RESET}"
+echo "${DIM}$(date '+%Y-%m-%d %H:%M')${RESET}"
+echo ""
+
+# Progress
+pct=$((complete * 100 / total_tasks))
+echo "${BOLD}Progress${RESET}"
+printf "  [$(progress_bar $pct)] %d%% (%d/%d tasks)\n" "$pct" "$complete" "$total_tasks"
+echo "  ${GREEN}$complete complete${RESET}  ${YELLOW}$in_review in review${RESET}  ${BLUE}$in_progress in progress${RESET}  ${RED}$needs_revision needs revision${RESET}  ${DIM}$not_started not started${RESET}"
+echo ""
+
+# Timeline
+echo "${BOLD}Timeline${RESET}"
+echo "  Total wall clock:  $(fmt_duration $total_wall_seconds)"
+echo "  Total commits:     $total_commits"
+echo "  Checklist items:   $checklist_items (accumulated process learnings)"
+echo ""
+
+# Code
+echo "${BOLD}Code${RESET}"
+echo "  Rust production:   $prod_rust_lines lines"
+echo "  Rust test:         $test_rust_lines lines"
+echo "  Svelte/TS:         $total_svelte_lines lines"
+if [[ $total_rust_lines -gt 0 ]]; then
+    echo "  Test ratio:        $(printf '%.0f' "$(echo "scale=1; $test_rust_lines * 100 / $total_rust_lines" | bc)")% of Rust"
+fi
+if [[ $total_wall_seconds -gt 0 ]]; then
+    echo "  Throughput:        ~$(( prod_rust_lines * 3600 / total_wall_seconds )) prod lines/hr"
+fi
+echo ""
+
+# Per-task breakdown
+echo "${BOLD}Task Breakdown${RESET}"
+printf "  ${DIM}%-12s  %-16s  %6s  %8s  %14s${RESET}\n" "TASK" "STATUS" "ROUNDS" "FINDINGS" "ACTIVE TIME"
+printf "  %s%s%s\n" "${DIM}" "--------------------------------------------------------------" "${RESET}"
+
+total_rounds=0; total_findings=0; total_active=0
+for i in "${!task_names[@]}"; do
+    name="${task_names[$i]}"
+    status="${task_statuses[$i]}"
+    rounds=${review_rounds[$name]:-0}
+    findings=${review_findings[$name]:-0}
+    active=${task_active_seconds[$name]:-0}
+
+    total_rounds=$((total_rounds + rounds))
+    total_findings=$((total_findings + findings))
+    total_active=$((total_active + active))
+
+    case "$status" in
+        complete)         status_label="complete";       status_color="$GREEN" ;;
+        ready-for-review) status_label="in-review";      status_color="$YELLOW" ;;
+        needs-revision)   status_label="needs-revision"; status_color="$RED" ;;
+        in-review)        status_label="in-review";      status_color="$YELLOW" ;;
+        in-progress)      status_label="in-progress";    status_color="$BLUE" ;;
+        not-started)      status_label="not-started";    status_color="$DIM" ;;
+        *)                status_label="$status";        status_color="" ;;
+    esac
+    sc="${status_color}$(printf '%-16s' "$status_label")${RESET}"
+
+    rpad=$(printf "%6d" "$rounds")
+    if [[ $rounds -eq 0 ]]; then
+        rc="${DIM}${rpad}${RESET}"
+    elif [[ $rounds -le 3 ]]; then
+        rc="${GREEN}${rpad}${RESET}"
+    elif [[ $rounds -le 7 ]]; then
+        rc="${YELLOW}${rpad}${RESET}"
+    else
+        rc="${RED}${rpad}${RESET}"
+    fi
+
+    fpad=$(printf "%8d" "$findings")
+
+    if [[ $active -gt 0 ]]; then
+        at=$(printf "%14s" "$(fmt_duration $active)")
+    else
+        at=$(printf "%14s" "${DIM}--${RESET}")
+    fi
+
+    printf "  %-12s  %s  %s  %s  %s\n" "$name" "$sc" "$rc" "$fpad" "$at"
+done
+
+printf "  %s%s%s\n" "${DIM}" "--------------------------------------------------------------" "${RESET}"
+printf "  ${BOLD}%-12s  %-16s  %6d  %8d  %12s${RESET}\n" "TOTAL" "" "$total_rounds" "$total_findings" "$(fmt_duration $total_active)"
+echo ""
+
+# Review efficiency
+if [[ $total_findings -gt 0 && $complete -gt 0 ]]; then
+    echo "${BOLD}Review Efficiency${RESET}"
+    echo "  Total findings:        $total_findings"
+    echo "  Total review rounds:   $total_rounds"
+    if [[ $total_rounds -gt 0 ]]; then
+        echo "  Findings per round:    $(printf '%.1f' "$(echo "scale=1; $total_findings / $total_rounds" | bc)")"
+    fi
+    echo "  Avg rounds per task:   $(printf '%.1f' "$(echo "scale=1; $total_rounds / $complete" | bc)") (completed tasks only)"
+    echo ""
+
+    echo "  ${DIM}Highest review effort:${RESET}"
+    for name in "${task_names[@]}"; do
+        r=${review_rounds[$name]:-0}
+        f=${review_findings[$name]:-0}
+        [[ $r -gt 0 ]] && echo "    $r rounds, $f findings  $name"
+    done | sort -rn | head -3
+    echo ""
+fi
+
+# Experiment comparison
+echo "${BOLD}Experiment Comparison${RESET}"
+echo "  ${DIM}Run this script after a second build to compare:${RESET}"
+echo "  ${DIM}  ./scripts/stats.sh --json > run1.json${RESET}"
+echo "  ${DIM}  # rebuild with updated prompts${RESET}"
+echo "  ${DIM}  ./scripts/stats.sh --json > run2.json${RESET}"
+echo "  ${DIM}  diff <(jq . run1.json) <(jq . run2.json)${RESET}"
+echo ""
