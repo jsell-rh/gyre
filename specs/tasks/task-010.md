@@ -77,7 +77,7 @@ And these tools:
 
 - [ ] `briefing://` resource returns workspace briefing
 - [ ] `notifications://` resource returns inbox notifications
-- [ ] `trace://` resource returns MR SDLC timeline
+- [ ] `trace://` resource returns MR gate trace (GateTrace: spans, root_spans, service_graph)
 - [ ] `graph.concept` tool searches the knowledge graph by concept
 - [ ] `spec.assist` tool returns LLM-suggested spec edits
 - [ ] All resources/tools respect agent JWT auth and workspace scoping
