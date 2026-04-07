@@ -1,7 +1,7 @@
 # Review: TASK-002 — CLI HSI Parity Commands
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R3)  
+**Date:** 2026-04-07 (R4)  
 **Verdict:** needs-revision
 
 ---
@@ -51,3 +51,13 @@
 - [x] [process-revision-complete] **F10 — `gyre inbox resolve <id>` sends no JSON body; server requires `Json<ResolveRequest>`.**  
   The client method `resolve_notification` (client.rs:327–344) sends a POST request with no body and no `Content-Type: application/json` header. The server handler `resolve_notification` (users.rs:371–394) uses `Json(req): Json<ResolveRequest>` as a required Axum extractor. Axum's `Json` extractor rejects requests without a valid JSON body with a 400 or 415 status. As a result, `gyre inbox resolve <id>` will **fail at runtime every invocation**. Fix: the client must send an empty JSON object body (e.g., `.json(&serde_json::json!({}))`) to satisfy the extractor, since `ResolveRequest.action_taken` is `Option<String>` and will default to `None`.  
   **Files:** `crates/gyre-cli/src/client.rs:327-344` (missing `.json(...)` call), `crates/gyre-server/src/api/users.rs:371-375` (requires `Json<ResolveRequest>`).
+
+## R4 Findings
+
+- [ ] **F11 — `gyre trace` help text says "SDLC timeline"; spec says "System Trace" and data is GateTrace.**  
+  The `Trace` command definition (main.rs:125) has help text `/// Show SDLC timeline for a merge request`. HSI §11 names this surface "System Trace", and since the R2 fix (F8), the command calls `/api/v1/merge-requests/:id/trace` returning `GateTrace` data (spans, durations, statuses) — not an SDLC timeline of activity events. The help text is stale from before the R2 endpoint correction. Fix: change the doc comment to `/// Show system trace for a merge request` (or similar wording consistent with the spec's "System Trace" naming).  
+  **Files:** `crates/gyre-cli/src/main.rs:125`.
+
+- [ ] **F12 — `spec_assist` SSE parser collects all `data:` lines; should extract only the `complete` event.**  
+  The `spec_assist` client method (client.rs:471–483) parses the SSE response by collecting every `data:`-prefixed line into the result vec. Per `ui-layout.md` §3, the SSE stream contains two event types: `event: partial` (incremental explanation text chunks: `{"text": "..."}`) and `event: complete` (final response with `{diff, explanation}`). The parser does not track the current `event:` type — it collects ALL data lines indiscriminately. When the server sends N partial events + 1 complete event, the client returns N+1 entries, all treated as diff ops. Only the `complete` event's data should be extracted as the diff op list. Fix: track the current event type as lines are parsed; only push data from `event: complete` lines into the result vec. Partial data can be printed to stderr for progress indication if desired.  
+  **Files:** `crates/gyre-cli/src/client.rs:471-483` (SSE parser), `crates/gyre-cli/src/main.rs:853-865` (display loop treats all entries as diff ops).
