@@ -88,10 +88,11 @@ Before marking a task `ready-for-review`, verify:
 6. **Test coverage of new code paths:** Every behavioral code path you added has at least one test. For domain logic, a unit test. For adapters, a contract or integration test. For handlers, an API test.
 7. **Compilation:** `cargo build --all` succeeds with zero errors and zero warnings.
 8. **Tests pass:** `cargo test --all` passes.
-9. **Task traceability:** Re-read the entire task file. Every requirement stated in the task (description, spec excerpt, acceptance criteria) is traceable to code. If you cannot point to code that implements a stated requirement, the task is not complete.
-10. **No invented behavior:** Every code path traces to a specific statement in the specs. If the spec doesn't describe it, don't build it. "Seems useful" is not justification.
+9. **Task traceability — acceptance criteria sweep:** Re-read the entire task file top to bottom. For every acceptance criterion checkbox (`- [ ]`), name the exact file and function that satisfies it. If any criterion has no corresponding code, the task is not complete. Do not skip criteria that seem "already handled" — verify each one independently.
+10. **No invented behavior — scope boundary validation:** Every code path traces to a specific statement in the specs. If the spec doesn't describe it, don't build it. "Seems useful" is not justification. Pay special attention to **input validation boundaries**: if a spec says a tool/endpoint accepts "X or Y", your code must reject everything that is not X or Y. Enumerate the valid inputs from the spec, then verify your code rejects the complement. Example: if a tool "sends Directed or Custom messages," it must reject Broadcast, Telemetry, and any other kind — even if those kinds exist elsewhere in the system.
 11. **Fix-class exhaustion:** When fixing a bug, grep the entire codebase for every other site that exhibits the same pattern. Fix all instances, not just the one named in the finding.
 12. **Commit atomicity:** Each commit addresses one logical change. Commits reference the task ID.
+13. **No logic duplication:** Before writing a function, grep the codebase for existing implementations of the same algorithm or logic. If an existing function does what you need, call it. If it's in the wrong crate or module for your dependency graph, extract it to a shared location (e.g., a utility module in `gyre-common` or `gyre-server/src/`) rather than copying it. Never copy-paste a function body — duplicated logic will drift when one copy is updated and the other is forgotten.
 
 ## Workflow
 
