@@ -1204,8 +1204,13 @@ pub async fn complete_agent(
         }
     }
 
-    // Write snapshot ref for this agent (best-effort)
-    if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
+    // Write snapshot ref for this agent (best-effort — never fail the complete request)
+    let snap_result: Result<(), anyhow::Error> = async {
+        let repo = state
+            .repos
+            .find_by_id(&mr.repository_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("repo not found"))?;
         let snap_prefix = format!("refs/agents/{}/snapshots/", agent.id);
         let n = git_refs::count_refs_under(&repo.path, &snap_prefix).await;
         let snap_ref = format!("refs/agents/{}/snapshots/{}", agent.id, n);
@@ -1213,6 +1218,15 @@ pub async fn complete_agent(
         if let Some(sha) = git_refs::resolve_ref(&repo.path, &branch_ref).await {
             git_refs::write_ref(&repo.path, &snap_ref, &sha).await;
         }
+        Ok(())
+    }
+    .await;
+    if let Err(e) = snap_result {
+        tracing::warn!(
+            agent_id = %agent.id,
+            error = %e,
+            "snapshot ref write failed (best-effort, ignoring)"
+        );
     }
 
     // Auto-track agent completion
