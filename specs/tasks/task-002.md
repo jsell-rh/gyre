@@ -2,7 +2,7 @@
 
 **Spec reference:** `human-system-interface.md` §11 (CLI/MCP Parity Constraint)  
 **Depends on:** None (consumes existing REST endpoints)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [specs/reviews/task-002.md](../reviews/task-002.md)
 
 ## Spec Excerpt
@@ -91,3 +91,4 @@ When working on this task:
 - `fix(cli): address R3 finding — send JSON body for inbox resolve POST`
 - `fix(cli): address R4 findings — stale help text, SSE event-type discrimination`
 - `fix(cli): address R5 findings — response field name/shape mismatch`
+- `fix(cli): address R6 findings — dead agent_name field access + stale doc comment`

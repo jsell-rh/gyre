@@ -984,12 +984,7 @@ fn print_briefing(briefing: &serde_json::Value) {
             println!("--- Completed ---");
             for item in items {
                 let title = item["title"].as_str().unwrap_or("");
-                let agent = item["agent_name"].as_str().unwrap_or("");
-                if agent.is_empty() {
-                    println!("  - {title}");
-                } else {
-                    println!("  - {title} [{agent}]");
-                }
+                println!("  - {title}");
             }
             println!();
         }
@@ -1001,12 +996,7 @@ fn print_briefing(briefing: &serde_json::Value) {
             println!("--- In Progress ---");
             for item in items {
                 let title = item["title"].as_str().unwrap_or("");
-                let agent = item["agent_name"].as_str().unwrap_or("");
-                if agent.is_empty() {
-                    println!("  - {title}");
-                } else {
-                    println!("  - {title} [{agent}]");
-                }
+                println!("  - {title}");
             }
             println!();
         }
