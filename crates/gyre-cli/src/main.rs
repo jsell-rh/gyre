@@ -848,20 +848,12 @@ async fn main() -> Result<()> {
                 println!("No suggestions returned.");
             } else {
                 println!();
-                println!("Suggested changes:");
+                println!("Spec assist response:");
                 println!();
-                for (i, op) in ops.iter().enumerate() {
-                    let op_type = op["op"].as_str().unwrap_or("unknown");
-                    let op_path = op["path"].as_str().unwrap_or("");
-                    let content = op["content"].as_str().unwrap_or("");
-                    println!("--- Suggestion {} ---", i + 1);
-                    println!("  Op:   {op_type}");
-                    println!("  Path: {op_path}");
-                    println!("  Content:");
-                    for line in content.lines() {
-                        println!("    {line}");
+                for op in &ops {
+                    if let Some(text) = op["text"].as_str() {
+                        println!("{text}");
                     }
-                    println!();
                 }
             }
         }
@@ -894,7 +886,7 @@ async fn main() -> Result<()> {
                     for n in items {
                         let id = n["id"].as_str().unwrap_or("");
                         let title = n["title"].as_str().unwrap_or("");
-                        let desc = n["description"].as_str().unwrap_or("");
+                        let desc = n["body"].as_str().unwrap_or("");
                         let pri = n["priority"].as_u64().unwrap_or(0);
                         println!("[P{pri}] {title}");
                         println!("  ID: {id}");
