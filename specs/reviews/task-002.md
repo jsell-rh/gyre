@@ -1,7 +1,7 @@
 # Review: TASK-002 — CLI HSI Parity Commands
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R6)  
+**Date:** 2026-04-07 (R7)  
 **Verdict:** needs-revision
 
 ---
@@ -74,10 +74,20 @@
 
 ## R6 Findings
 
-- [ ] [process-revision-complete] **F15 — `briefing` display reads `item["agent_name"]` but server's `BriefingItem` has no such field.**  
+- [x] [process-revision-complete] **F15 — `briefing` display reads `item["agent_name"]` but server's `BriefingItem` has no such field.**  
   The `print_briefing` function (main.rs:987, 1004) reads `item["agent_name"].as_str()` for items in both the `completed` and `in_progress` arrays. The server's `BriefingItem` struct (graph.rs:260-267) has fields: `title`, `description`, `entity_type`, `entity_id`, `spec_path`, `timestamp` — no `agent_name`. The `as_str()` call returns `None`, `unwrap_or("")` gives `""`, and the display branch `println!("  - {title} [{agent}]")` is dead code — agent attribution is silently absent in all briefing output. The `in_progress` items come from tasks that have an `assigned_to` field (mapped from `Task.assigned_to`), and the server populates a separate `completed_agents` array with `agent_id` per HSI §4, but neither data source is surfaced by the CLI. Fix: remove the dead `agent_name` access, or map the task's `assigned_to` to a display name and use `completed_agents` for the completed section.  
   **Files:** `crates/gyre-cli/src/main.rs:987,1004` (reads nonexistent field), `crates/gyre-server/src/api/graph.rs:260-267` (`BriefingItem` struct).
 
-- [ ] [process-revision-complete] **F16 — `spec_assist` doc comment says "DiffOps" but R5 fix changed the data to `{"text": "..."}` payloads.**  
+- [x] [process-revision-complete] **F16 — `spec_assist` doc comment says "DiffOps" but R5 fix changed the data to `{"text": "..."}` payloads.**  
   The doc comment on `spec_assist` (client.rs:444) reads `"SSE stream → collected DiffOps"`. The R5 fix (F13) changed the display code to handle `{"text": "..."}` payloads from the server's `complete` event (specs_assist.rs:170-172). The function returns `Vec<serde_json::Value>` containing `{"text": "..."}` objects, not DiffOps. This is a stale reference from before the R4/R5 corrections. Fix: update the doc comment to `"SSE stream → collected text payloads"` or similar.  
   **Files:** `crates/gyre-cli/src/client.rs:444` (stale doc comment).
+
+## R7 Findings
+
+- [ ] **F17 — `print_briefing` omits the `cross_workspace` section entirely.**  
+  HSI §9 (lines 1270-1273) explicitly defines a "CROSS-WORKSPACE" section in the briefing narrative showing cross-workspace spec link changes: `"↔ platform-core updated idempotent-api.md / Your payment-retry.md depends on it."` The server's `BriefingResponse` (graph.rs:250) includes `cross_workspace: Vec<BriefingItem>`. The CLI's `print_briefing` function (main.rs:973-1028) handles `completed`, `in_progress`, `exceptions`, and `metrics` — but has no code to display `cross_workspace` items. Cross-workspace spec dependency notifications are silently dropped by the CLI, violating HSI §11's principle that "every data surface in the UI must be consumable outside the browser." Fix: add a `cross_workspace` section to `print_briefing`, rendering items between the "In Progress" and "Exceptions" sections, consistent with the spec §9 ordering.  
+  **Files:** `crates/gyre-cli/src/main.rs:973-1028` (missing section), `crates/gyre-server/src/api/graph.rs:250` (server sends `cross_workspace`).
+
+- [ ] **F18 — Briefing items display only `title`, silently dropping `description`, `spec_path`, and other fields.**  
+  The spec §9 (lines 1253-1283) shows each briefing item with detailed content — descriptions ("cargo test failed (3 tests). Agent retried once, still failing."), spec references ("spec: payment-retry.md"), and agent attribution. The server's `BriefingItem` (graph.rs:260-267) includes `description: String`, `spec_path: Option<String>`, `entity_type: String`, `entity_id: Option<String>`, and `timestamp: u64`. The CLI renders only `item["title"]` for all sections (main.rs:986, 998, 1010), discarding every other field. For exceptions, the user sees only a title like "Gate failure: billing-service MR #47" with no indication of what failed or how to respond. For completed items, there is no spec reference or description of what was accomplished. HSI §11 requires CLI parity with the UI — the UI displays these fields. Fix: render `description` below the title when non-empty, append `(spec: {spec_path})` when present, and include `timestamp` for ordering context. The display should match the spec §9 structure at minimum.  
+  **Files:** `crates/gyre-cli/src/main.rs:982-1015` (all section rendering loops).
