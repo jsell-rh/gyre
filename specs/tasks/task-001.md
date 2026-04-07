@@ -1,7 +1,7 @@
 # TASK-001: MCP Message Bus Tools (message.send, message.poll, message.ack)
 
 **Spec reference:** `message-bus.md` §MCP Integration  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [`specs/reviews/task-001.md`](../reviews/task-001.md)
 
 ## Spec Excerpt
@@ -81,3 +81,4 @@ When working on this task:
 - `feat(mcp): add message bus tools (send, poll, ack) — TASK-001`
 - `fix(mcp): address TASK-001 review findings F1-F4`
 - `fix(mcp): address TASK-001 review findings F5-F6 — agent origin, per-kind payloads`
+- `fix(mcp): address TASK-001 review findings F7-F8 — broadcast parity, full message serialization`

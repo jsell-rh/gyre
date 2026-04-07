@@ -1535,7 +1535,11 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
         }
     }
 
-    // Dispatch to consumers.
+    // Broadcast to WebSocket clients (must happen before dispatch so WS
+    // subscribers see the message even if dispatch consumers are slow).
+    let _ = state.message_broadcast_tx.send(msg.clone());
+
+    // Dispatch to consumers (notifications, etc.).
     let _ = state.message_dispatch_tx.try_send(msg.clone());
 
     tool_result(format!("Message sent: id={}, kind={}", msg_id, kind_str,))
@@ -1607,16 +1611,7 @@ async fn handle_message_poll(state: &AppState, args: &Value, auth: &Authenticate
         Ok(msgs) => {
             let items: Vec<serde_json::Value> = msgs
                 .iter()
-                .map(|m| {
-                    serde_json::json!({
-                        "id": m.id.to_string(),
-                        "from": m.from,
-                        "kind": m.kind.as_str(),
-                        "payload": m.payload,
-                        "created_at": m.created_at,
-                        "acknowledged": m.acknowledged,
-                    })
-                })
+                .filter_map(|m| serde_json::to_value(m).ok())
                 .collect();
             tool_result(format!(
                 "{} message(s):\n{}",
@@ -3089,6 +3084,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_message_send_broadcasts_to_websocket_channel() {
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-bc");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-bc-target"), "target", 0);
+        target.workspace_id = Id::new("ws-bc");
+        state.agents.create(&target).await.unwrap();
+
+        // Subscribe to broadcast channel BEFORE sending.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 200,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-bc-target"},
+                        "kind": "task_assignment",
+                        "payload": {"task_id": "TASK-BC"}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "send should succeed: {json}"
+        );
+
+        // F7: verify the message was broadcast to WebSocket channel.
+        let broadcast_msg = rx
+            .try_recv()
+            .expect("message must be broadcast to WS channel");
+        assert_eq!(
+            broadcast_msg.to,
+            gyre_common::message::Destination::Agent(Id::new("agent-bc-target"))
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_message_send_cross_workspace_rejected() {
         let state = test_state();
         let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
@@ -3200,6 +3242,19 @@ mod tests {
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("1 message(s)"));
         assert!(text.contains("poll-msg-1"));
+        // F8: verify full Message serialization — must include fields previously omitted.
+        assert!(
+            text.contains("workspace_id"),
+            "poll response must include workspace_id (full Message serialization)"
+        );
+        assert!(
+            text.contains("tenant_id"),
+            "poll response must include tenant_id (full Message serialization)"
+        );
+        assert!(
+            text.contains("to"),
+            "poll response must include 'to' destination (full Message serialization)"
+        );
     }
 
     #[tokio::test]

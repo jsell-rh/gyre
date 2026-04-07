@@ -292,6 +292,9 @@ pub async fn send_message(
             .map_err(ApiError::Internal)?;
     }
 
+    // Broadcast to WebSocket clients for real-time delivery.
+    let _ = state.message_broadcast_tx.send(msg.clone());
+
     // Dispatch to consumers (best-effort, non-blocking).
     let _ = state.message_dispatch_tx.try_send(msg.clone());
 
