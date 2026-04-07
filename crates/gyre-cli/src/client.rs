@@ -468,15 +468,29 @@ impl GyreClient {
         if !status.is_success() {
             anyhow::bail!("spec assist failed (HTTP {status}): {text}");
         }
-        // Parse SSE stream: lines like "data: {...}"
+        // Parse SSE stream: track event type and only extract data from "complete" events.
+        // The stream contains "event: partial" (incremental text chunks) and
+        // "event: complete" (final response with {diff, explanation}).
         let mut ops = Vec::new();
+        let mut current_event = String::new();
         for line in text.lines() {
-            if let Some(data) = line.strip_prefix("data: ") {
+            if let Some(event_type) = line.strip_prefix("event: ") {
+                current_event = event_type.trim().to_string();
+            } else if let Some(data) = line.strip_prefix("data: ") {
                 if data == "[DONE]" {
                     break;
                 }
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
-                    ops.push(val);
+                if current_event == "complete" {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                        ops.push(val);
+                    }
+                } else if current_event == "partial" {
+                    // Print partial progress to stderr for user feedback
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(text) = val.get("text").and_then(|t| t.as_str()) {
+                            eprint!("{text}");
+                        }
+                    }
                 }
             }
         }

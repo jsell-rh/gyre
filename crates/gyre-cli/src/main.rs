@@ -122,7 +122,7 @@ enum Commands {
         #[arg(long)]
         workspace: Option<String>,
     },
-    /// Show SDLC timeline for a merge request
+    /// Show system trace for a merge request
     Trace {
         /// Merge request ID
         mr_id: String,
