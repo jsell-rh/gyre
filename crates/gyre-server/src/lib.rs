@@ -31,6 +31,7 @@ pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod retention;
 pub mod siem;
+pub(crate) mod signing;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
 pub mod spec_registry;

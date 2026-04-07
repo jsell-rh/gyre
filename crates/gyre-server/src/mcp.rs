@@ -739,7 +739,13 @@ async fn handle_list_mrs(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_record_activity(state: &AppState, args: &Value) -> Value {
+async fn handle_record_activity(
+    state: &AppState,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    use gyre_common::message::MessageKind;
+
     let agent_id = match get_str(args, "agent_id") {
         Some(a) => a.to_string(),
         None => return tool_error("missing required field: agent_id"),
@@ -752,13 +758,33 @@ async fn handle_record_activity(state: &AppState, args: &Value) -> Value {
         Some(d) => d.to_string(),
         None => return tool_error("missing required field: description"),
     };
+
+    // Map AG-UI event_type to the appropriate MessageKind per message-bus.md §MCP Integration.
+    let kind = match event_type_str {
+        "TOOL_CALL_START" => MessageKind::ToolCallStart,
+        "TOOL_CALL_END" => MessageKind::ToolCallEnd,
+        "TEXT_MESSAGE_CONTENT" => MessageKind::TextMessageContent,
+        "RUN_STARTED" => MessageKind::RunStarted,
+        "RUN_FINISHED" => MessageKind::RunFinished,
+        "STATE_CHANGED" => MessageKind::StateChanged,
+        _ => MessageKind::StateChanged, // Fallback for unknown/custom event types.
+    };
+
+    // Derive workspace from the caller's agent record.
+    let caller_agent_id = Id::new(&auth.agent_id);
+    let ws_id = match state.agents.find_by_id(&caller_agent_id).await {
+        Ok(Some(a)) => a.workspace_id,
+        Ok(None) => {
+            // Fallback: use agent_id from args if auth agent not found (e.g. global token).
+            gyre_common::Id::new("default")
+        }
+        Err(_) => gyre_common::Id::new("default"),
+    };
+
     let event_id = uuid::Uuid::new_v4().to_string();
-    // Emit as Telemetry-tier message via unified bus.
-    // Use a "default" workspace since MCP callers don't have workspace context here.
-    let ws_id = gyre_common::Id::new("default");
     state.emit_telemetry(
         ws_id,
-        gyre_common::message::MessageKind::StateChanged,
+        kind,
         Some(serde_json::json!({
             "event_id": event_id,
             "agent_id": agent_id,
@@ -1317,6 +1343,15 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
         ));
     }
 
+    // Telemetry-tier standard kinds are not valid for message.send — they route
+    // through gyre_record_activity instead (message-bus.md §MCP Integration).
+    if kind.tier() == MessageTier::Telemetry && !matches!(kind, MessageKind::Custom(_)) {
+        return tool_error(format!(
+            "kind '{}' is Telemetry-tier — use gyre_record_activity instead of message.send",
+            kind_str
+        ));
+    }
+
     // Determine effective tier.
     let effective_tier = if let MessageKind::Custom(_) = &kind {
         if get_str(args, "tier") == Some("directed") {
@@ -1410,7 +1445,7 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
 
     // Sign Directed and Event tier.
     if effective_tier != MessageTier::Telemetry {
-        let (sig, kid) = sign_mcp_message(state, &msg);
+        let (sig, kid) = crate::signing::sign_message(state, &msg);
         msg.signature = Some(sig);
         msg.key_id = Some(kid);
     }
@@ -1428,54 +1463,7 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
     tool_result(format!("Message sent: id={}, kind={}", msg_id, kind_str,))
 }
 
-/// Sign a message with the server's Ed25519 key (same algorithm as REST handler).
-fn sign_mcp_message(state: &AppState, msg: &gyre_common::message::Message) -> (String, String) {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-    use sha2::{Digest, Sha256};
-
-    let (from_type, from_id) = match &msg.from {
-        gyre_common::message::MessageOrigin::Server => ("server", "".to_string()),
-        gyre_common::message::MessageOrigin::Agent(id) => ("agent", id.as_str().to_string()),
-        gyre_common::message::MessageOrigin::User(id) => ("user", id.as_str().to_string()),
-    };
-    let (to_type, to_id) = match &msg.to {
-        gyre_common::message::Destination::Agent(id) => ("agent", id.as_str().to_string()),
-        gyre_common::message::Destination::Workspace(id) => ("workspace", id.as_str().to_string()),
-        gyre_common::message::Destination::Broadcast => ("broadcast", "".to_string()),
-    };
-    let ws_id = msg
-        .workspace_id
-        .as_ref()
-        .map(|id| id.as_str().to_string())
-        .unwrap_or_default();
-
-    let payload_json = msg
-        .payload
-        .as_ref()
-        .map(|v| serde_json::to_string(v).unwrap_or_default())
-        .unwrap_or_default();
-
-    let mut hasher = Sha256::new();
-    hasher.update(payload_json.as_bytes());
-    let payload_hash = format!("{:x}", hasher.finalize());
-
-    let sign_input = format!(
-        "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-        msg.id.as_str(),
-        from_type,
-        from_id,
-        ws_id,
-        to_type,
-        to_id,
-        msg.kind.as_str(),
-        payload_hash,
-        msg.created_at,
-    );
-
-    let sig_bytes = state.agent_signing_key.sign_bytes(sign_input.as_bytes());
-    let sig_b64 = B64.encode(&sig_bytes);
-    (sig_b64, state.agent_signing_key.kid.clone())
-}
+// Signing uses the shared `crate::signing::sign_message` — no local copy.
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1484,6 +1472,12 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Parse MCP destination for `message.send`.
+///
+/// Per spec (message-bus.md §MCP Integration), `message.send` supports only
+/// Directed or Custom messages to an agent in the same workspace. Broadcast
+/// destination is NOT valid — it requires Server origin or Admin role, which
+/// agent MCP callers do not have.
 fn parse_mcp_destination(
     v: &serde_json::Value,
 ) -> Result<gyre_common::message::Destination, String> {
@@ -1494,9 +1488,6 @@ fn parse_mcp_destination(
         if let Some(ws_id) = obj.get("workspace").and_then(|v| v.as_str()) {
             return Ok(gyre_common::message::Destination::Workspace(Id::new(ws_id)));
         }
-    }
-    if v.as_str() == Some("broadcast") {
-        return Ok(gyre_common::message::Destination::Broadcast);
     }
     Err("invalid 'to': expected {\"agent\": \"<id>\"} or {\"workspace\": \"<id>\"}".to_string())
 }
@@ -2132,7 +2123,7 @@ pub async fn mcp_handler(
                 "gyre_update_task" => handle_update_task(&state, &args).await,
                 "gyre_create_mr" => handle_create_mr(&state, &args).await,
                 "gyre_list_mrs" => handle_list_mrs(&state, &args).await,
-                "gyre_record_activity" => handle_record_activity(&state, &args).await,
+                "gyre_record_activity" => handle_record_activity(&state, &args, &auth).await,
                 "gyre_agent_heartbeat" => handle_agent_heartbeat(&state, &args).await,
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
@@ -3243,6 +3234,117 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_broadcast_rejected() {
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-bc");
+        state.agents.create(&sender).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 80,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": "broadcast",
+                        "kind": "task_assignment"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["isError"].as_bool().unwrap(),
+            "broadcast destination should be rejected for message.send: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_telemetry_kind_rejected() {
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-tel");
+        state.agents.create(&sender).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 81,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"workspace": "ws-tel"},
+                        "kind": "tool_call_start"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["isError"].as_bool().unwrap(),
+            "telemetry kind should be rejected for message.send: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Telemetry-tier"));
+        assert!(text.contains("gyre_record_activity"));
+    }
+
+    #[tokio::test]
+    async fn mcp_record_activity_maps_event_types() {
+        let state = test_state();
+        // Create an agent so workspace lookup succeeds.
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-activity");
+        state.agents.create(&agent).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+
+        // Test each AG-UI event type mapping.
+        for event_type in &[
+            "TOOL_CALL_START",
+            "TOOL_CALL_END",
+            "TEXT_MESSAGE_CONTENT",
+            "RUN_STARTED",
+            "RUN_FINISHED",
+            "STATE_CHANGED",
+        ] {
+            let (status, json) = mcp_post(
+                app.clone(),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 82,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gyre_record_activity",
+                        "arguments": {
+                            "agent_id": "system",
+                            "event_type": event_type,
+                            "description": format!("test {}", event_type),
+                        }
+                    }
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "failed for {event_type}");
+            assert!(
+                !json["result"]["isError"].as_bool().unwrap(),
+                "record_activity should succeed for {event_type}: {json}"
+            );
+        }
     }
 
     #[test]
