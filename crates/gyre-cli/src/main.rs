@@ -91,6 +91,47 @@ enum Commands {
         #[command(subcommand)]
         command: ReleaseCommands,
     },
+    /// Display workspace briefing narrative
+    Briefing {
+        /// Workspace slug (required — resolves to workspace ID)
+        #[arg(long)]
+        workspace: String,
+        /// Only show activity since this Unix epoch
+        #[arg(long)]
+        since: Option<u64>,
+    },
+    /// List and manage notifications
+    Inbox {
+        #[command(subcommand)]
+        command: InboxCommands,
+    },
+    /// Search the knowledge graph for a concept
+    Explore {
+        /// Concept name to search for
+        concept: String,
+        /// Repository ID to scope the search
+        #[arg(long)]
+        repo: Option<String>,
+        /// Workspace slug to scope the search (cross-repo)
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Show SDLC timeline for a merge request
+    Trace {
+        /// Merge request ID
+        mr_id: String,
+    },
+    /// Spec operations
+    Spec {
+        #[command(subcommand)]
+        command: SpecCommands,
+    },
+    /// Show divergence (conflicting interpretation) alerts
+    Divergence {
+        /// Workspace slug to filter by
+        #[arg(long)]
+        workspace: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -155,6 +196,43 @@ enum TaskCommands {
     Take {
         /// Task ID
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum InboxCommands {
+    /// List notifications
+    List {
+        /// Workspace slug to filter by
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Priority range (e.g., "1-5")
+        #[arg(long)]
+        priority: Option<String>,
+    },
+    /// Dismiss a notification
+    Dismiss {
+        /// Notification ID
+        id: String,
+    },
+    /// Resolve a notification
+    Resolve {
+        /// Notification ID
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpecCommands {
+    /// Get LLM-suggested edits for a spec file
+    Assist {
+        /// Spec file path within the repository
+        path: String,
+        /// Instruction describing what to change
+        instruction: String,
+        /// Repository ID (required)
+        #[arg(long)]
+        repo_id: String,
     },
 }
 
@@ -491,9 +569,380 @@ async fn main() -> Result<()> {
                 println!("Run with --markdown to output full changelog markdown.");
             }
         }
+
+        Commands::Briefing { workspace, since } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            let workspace_id = api.resolve_workspace_slug(&workspace).await?;
+            let briefing = api.get_briefing(&workspace_id, since).await?;
+
+            println!("Workspace Briefing: {workspace}");
+            println!();
+
+            if let Some(summary) = briefing["summary"].as_str() {
+                if !summary.is_empty() {
+                    println!("{summary}");
+                    println!();
+                }
+            }
+
+            // Completed
+            if let Some(items) = briefing["completed"].as_array() {
+                if !items.is_empty() {
+                    println!("--- Completed ---");
+                    for item in items {
+                        let title = item["title"].as_str().unwrap_or("");
+                        let agent = item["agent_name"].as_str().unwrap_or("");
+                        if agent.is_empty() {
+                            println!("  - {title}");
+                        } else {
+                            println!("  - {title} [{agent}]");
+                        }
+                    }
+                    println!();
+                }
+            }
+
+            // In Progress
+            if let Some(items) = briefing["in_progress"].as_array() {
+                if !items.is_empty() {
+                    println!("--- In Progress ---");
+                    for item in items {
+                        let title = item["title"].as_str().unwrap_or("");
+                        let agent = item["agent_name"].as_str().unwrap_or("");
+                        if agent.is_empty() {
+                            println!("  - {title}");
+                        } else {
+                            println!("  - {title} [{agent}]");
+                        }
+                    }
+                    println!();
+                }
+            }
+
+            // Exceptions
+            if let Some(items) = briefing["exceptions"].as_array() {
+                if !items.is_empty() {
+                    println!("--- Exceptions ---");
+                    for item in items {
+                        let title = item["title"].as_str().unwrap_or("");
+                        println!("  ! {title}");
+                    }
+                    println!();
+                }
+            }
+
+            // Metrics
+            if let Some(metrics) = briefing.get("metrics") {
+                let mrs = metrics["mrs_merged"].as_u64().unwrap_or(0);
+                let gates = metrics["gate_runs"].as_u64().unwrap_or(0);
+                let budget = metrics["budget_spent_usd"].as_f64().unwrap_or(0.0);
+                let pct = metrics["budget_pct"].as_u64().unwrap_or(0);
+                println!("--- Metrics ---");
+                println!("  MRs merged:    {mrs}");
+                println!("  Gate runs:     {gates}");
+                println!("  Budget spent:  ${budget:.2} ({pct}%)");
+            }
+        }
+
+        Commands::Inbox {
+            command:
+                InboxCommands::List {
+                    workspace,
+                    priority,
+                },
+        } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            let workspace_id = if let Some(slug) = &workspace {
+                Some(api.resolve_workspace_slug(slug).await?)
+            } else {
+                None
+            };
+
+            let (min_pri, max_pri) = parse_priority_range(priority.as_deref())?;
+
+            let result = api
+                .get_notifications(workspace_id.as_deref(), min_pri, max_pri, None)
+                .await?;
+
+            let notifications = result["notifications"].as_array();
+            match notifications {
+                Some(items) if !items.is_empty() => {
+                    println!(
+                        "{:<8} {:<36} {:<5} {:<28} TITLE",
+                        "PRI", "ID", "TYPE", "AGE"
+                    );
+                    println!("{}", "-".repeat(100));
+                    for n in items {
+                        let id = n["id"].as_str().unwrap_or("");
+                        let pri = n["priority"].as_u64().unwrap_or(0);
+                        let ntype = n["notification_type"].as_str().unwrap_or("");
+                        let title = n["title"].as_str().unwrap_or("");
+                        let created = n["created_at"].as_u64().unwrap_or(0);
+                        let age = format_age(created);
+                        println!("P{pri:<7} {id:<36} {ntype:<5} {age:<28} {title}");
+                    }
+                }
+                _ => println!("No notifications."),
+            }
+        }
+
+        Commands::Inbox {
+            command: InboxCommands::Dismiss { id },
+        } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+            api.dismiss_notification(&id).await?;
+            println!("Notification {id} dismissed.");
+        }
+
+        Commands::Inbox {
+            command: InboxCommands::Resolve { id },
+        } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+            api.resolve_notification(&id).await?;
+            println!("Notification {id} resolved.");
+        }
+
+        Commands::Explore {
+            concept,
+            repo,
+            workspace,
+        } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            let workspace_id = if let Some(slug) = &workspace {
+                Some(api.resolve_workspace_slug(slug).await?)
+            } else {
+                None
+            };
+
+            let result = api
+                .get_graph(&concept, repo.as_deref(), workspace_id.as_deref())
+                .await?;
+
+            let nodes = result["nodes"].as_array();
+            match nodes {
+                Some(items) if !items.is_empty() => {
+                    println!(
+                        "{:<12} {:<30} {:<50} {:<10} SPEC",
+                        "TYPE", "NAME", "QUALIFIED_NAME", "CONFIDENCE"
+                    );
+                    println!("{}", "-".repeat(120));
+                    for n in items {
+                        let ntype = n["node_type"].as_str().unwrap_or("");
+                        let name = n["name"].as_str().unwrap_or("");
+                        let qname = n["qualified_name"].as_str().unwrap_or("");
+                        let confidence = n["spec_confidence"].as_str().unwrap_or("None");
+                        let spec = n["spec_path"].as_str().unwrap_or("-");
+                        println!("{ntype:<12} {name:<30} {qname:<50} {confidence:<10} {spec}");
+                    }
+                }
+                _ => println!("No matching graph nodes found for '{concept}'."),
+            }
+        }
+
+        Commands::Trace { mr_id } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            let result = api.get_mr_timeline(&mr_id).await?;
+
+            println!("Timeline for MR {mr_id}");
+            println!();
+
+            let events = result["events"].as_array();
+            match events {
+                Some(items) if !items.is_empty() => {
+                    for event in items {
+                        let ts = event["timestamp"].as_u64().unwrap_or(0);
+                        let etype = event["type"].as_str().unwrap_or("unknown");
+                        let detail = &event["detail"];
+                        let ts_str = format_timestamp(ts);
+                        println!("[{ts_str}] {etype}");
+                        // Print key detail fields compactly
+                        if let Some(obj) = detail.as_object() {
+                            for (k, v) in obj {
+                                let display = match v {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                println!("    {k}: {display}");
+                            }
+                        }
+                    }
+                }
+                _ => println!("No timeline events."),
+            }
+        }
+
+        Commands::Spec {
+            command:
+                SpecCommands::Assist {
+                    path,
+                    instruction,
+                    repo_id,
+                },
+        } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            println!("Requesting spec assist for {path}...");
+            let ops = api.spec_assist(&repo_id, &path, &instruction).await?;
+
+            if ops.is_empty() {
+                println!("No suggestions returned.");
+            } else {
+                println!();
+                println!("Suggested changes:");
+                println!();
+                for (i, op) in ops.iter().enumerate() {
+                    let op_type = op["op"].as_str().unwrap_or("unknown");
+                    let op_path = op["path"].as_str().unwrap_or("");
+                    let content = op["content"].as_str().unwrap_or("");
+                    println!("--- Suggestion {} ---", i + 1);
+                    println!("  Op:   {op_type}");
+                    println!("  Path: {op_path}");
+                    println!("  Content:");
+                    for line in content.lines() {
+                        println!("    {line}");
+                    }
+                    println!();
+                }
+            }
+        }
+
+        Commands::Divergence { workspace } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            let workspace_id = if let Some(slug) = &workspace {
+                Some(api.resolve_workspace_slug(slug).await?)
+            } else {
+                None
+            };
+
+            let result = api
+                .get_notifications(
+                    workspace_id.as_deref(),
+                    None,
+                    None,
+                    Some("ConflictingInterpretations"),
+                )
+                .await?;
+
+            let notifications = result["notifications"].as_array();
+            match notifications {
+                Some(items) if !items.is_empty() => {
+                    println!("Divergence Alerts");
+                    println!("{}", "-".repeat(80));
+                    for n in items {
+                        let id = n["id"].as_str().unwrap_or("");
+                        let title = n["title"].as_str().unwrap_or("");
+                        let desc = n["description"].as_str().unwrap_or("");
+                        let pri = n["priority"].as_u64().unwrap_or(0);
+                        println!("[P{pri}] {title}");
+                        println!("  ID: {id}");
+                        if !desc.is_empty() {
+                            println!("  {desc}");
+                        }
+                        println!();
+                    }
+                }
+                _ => println!("No divergence alerts."),
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Parse a priority range string like "1-5" into (min, max).
+fn parse_priority_range(range: Option<&str>) -> Result<(Option<u8>, Option<u8>)> {
+    match range {
+        None => Ok((None, None)),
+        Some(s) => {
+            let parts: Vec<&str> = s.split('-').collect();
+            if parts.len() != 2 {
+                anyhow::bail!(
+                    "invalid priority range '{s}': expected format 'MIN-MAX' (e.g., '1-5')"
+                );
+            }
+            let min: u8 = parts[0]
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid min priority '{}'", parts[0]))?;
+            let max: u8 = parts[1]
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid max priority '{}'", parts[1]))?;
+            Ok((Some(min), Some(max)))
+        }
+    }
+}
+
+/// Format a Unix epoch timestamp as a human-readable age string.
+fn format_age(epoch_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if epoch_secs == 0 || epoch_secs > now {
+        return "just now".to_string();
+    }
+    let diff = now - epoch_secs;
+    if diff < 60 {
+        format!("{diff}s ago")
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
+}
+
+/// Format a Unix epoch timestamp as ISO-ish string.
+fn format_timestamp(epoch_secs: u64) -> String {
+    // Simple UTC formatting without chrono dependency
+    let secs = epoch_secs;
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+
+    // Approximate date from days since epoch (1970-01-01)
+    // Good enough for display — not calendar-precise for leap seconds
+    let (year, month, day) = days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02}Z")
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Algorithm from Howard Hinnant's chrono-compatible date library
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 #[cfg(test)]
@@ -750,5 +1199,303 @@ mod tests {
         } else {
             panic!("Expected Release Prepare with options");
         }
+    }
+
+    // ── Briefing command tests ───────────────────────────────────────────────
+
+    #[test]
+    fn cli_briefing_parses() {
+        let args = Cli::try_parse_from(["gyre", "briefing", "--workspace", "platform"]);
+        assert!(args.is_ok());
+        if let Commands::Briefing { workspace, since } = args.unwrap().command {
+            assert_eq!(workspace, "platform");
+            assert!(since.is_none());
+        } else {
+            panic!("Expected Briefing");
+        }
+    }
+
+    #[test]
+    fn cli_briefing_with_since_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "briefing",
+            "--workspace",
+            "platform",
+            "--since",
+            "1700000000",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Briefing { workspace, since } = args.unwrap().command {
+            assert_eq!(workspace, "platform");
+            assert_eq!(since, Some(1700000000));
+        } else {
+            panic!("Expected Briefing");
+        }
+    }
+
+    #[test]
+    fn cli_briefing_requires_workspace() {
+        let args = Cli::try_parse_from(["gyre", "briefing"]);
+        assert!(args.is_err());
+    }
+
+    // ── Inbox command tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn cli_inbox_list_parses() {
+        let args = Cli::try_parse_from(["gyre", "inbox", "list"]);
+        assert!(args.is_ok());
+        if let Commands::Inbox {
+            command:
+                InboxCommands::List {
+                    workspace,
+                    priority,
+                },
+        } = args.unwrap().command
+        {
+            assert!(workspace.is_none());
+            assert!(priority.is_none());
+        } else {
+            panic!("Expected Inbox List");
+        }
+    }
+
+    #[test]
+    fn cli_inbox_list_with_filters_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "inbox",
+            "list",
+            "--workspace",
+            "myws",
+            "--priority",
+            "1-5",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Inbox {
+            command:
+                InboxCommands::List {
+                    workspace,
+                    priority,
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(workspace.as_deref(), Some("myws"));
+            assert_eq!(priority.as_deref(), Some("1-5"));
+        } else {
+            panic!("Expected Inbox List");
+        }
+    }
+
+    #[test]
+    fn cli_inbox_dismiss_parses() {
+        let args = Cli::try_parse_from(["gyre", "inbox", "dismiss", "notif-123"]);
+        assert!(args.is_ok());
+        if let Commands::Inbox {
+            command: InboxCommands::Dismiss { id },
+        } = args.unwrap().command
+        {
+            assert_eq!(id, "notif-123");
+        } else {
+            panic!("Expected Inbox Dismiss");
+        }
+    }
+
+    #[test]
+    fn cli_inbox_resolve_parses() {
+        let args = Cli::try_parse_from(["gyre", "inbox", "resolve", "notif-456"]);
+        assert!(args.is_ok());
+        if let Commands::Inbox {
+            command: InboxCommands::Resolve { id },
+        } = args.unwrap().command
+        {
+            assert_eq!(id, "notif-456");
+        } else {
+            panic!("Expected Inbox Resolve");
+        }
+    }
+
+    // ── Explore command tests ───────────────────────────────────────────────
+
+    #[test]
+    fn cli_explore_parses() {
+        let args = Cli::try_parse_from(["gyre", "explore", "UserRepository"]);
+        assert!(args.is_ok());
+        if let Commands::Explore {
+            concept,
+            repo,
+            workspace,
+        } = args.unwrap().command
+        {
+            assert_eq!(concept, "UserRepository");
+            assert!(repo.is_none());
+            assert!(workspace.is_none());
+        } else {
+            panic!("Expected Explore");
+        }
+    }
+
+    #[test]
+    fn cli_explore_with_repo_parses() {
+        let args = Cli::try_parse_from(["gyre", "explore", "AuthMiddleware", "--repo", "repo-123"]);
+        assert!(args.is_ok());
+        if let Commands::Explore {
+            concept,
+            repo,
+            workspace,
+        } = args.unwrap().command
+        {
+            assert_eq!(concept, "AuthMiddleware");
+            assert_eq!(repo.as_deref(), Some("repo-123"));
+            assert!(workspace.is_none());
+        } else {
+            panic!("Expected Explore");
+        }
+    }
+
+    #[test]
+    fn cli_explore_with_workspace_parses() {
+        let args =
+            Cli::try_parse_from(["gyre", "explore", "HttpServer", "--workspace", "platform"]);
+        assert!(args.is_ok());
+        if let Commands::Explore {
+            concept,
+            repo,
+            workspace,
+        } = args.unwrap().command
+        {
+            assert_eq!(concept, "HttpServer");
+            assert!(repo.is_none());
+            assert_eq!(workspace.as_deref(), Some("platform"));
+        } else {
+            panic!("Expected Explore");
+        }
+    }
+
+    // ── Trace command tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn cli_trace_parses() {
+        let args = Cli::try_parse_from(["gyre", "trace", "mr-789"]);
+        assert!(args.is_ok());
+        if let Commands::Trace { mr_id } = args.unwrap().command {
+            assert_eq!(mr_id, "mr-789");
+        } else {
+            panic!("Expected Trace");
+        }
+    }
+
+    // ── Spec assist command tests ───────────────────────────────────────────
+
+    #[test]
+    fn cli_spec_assist_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "spec",
+            "assist",
+            "specs/auth.md",
+            "add RBAC section",
+            "--repo-id",
+            "repo-42",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Spec {
+            command:
+                SpecCommands::Assist {
+                    path,
+                    instruction,
+                    repo_id,
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(path, "specs/auth.md");
+            assert_eq!(instruction, "add RBAC section");
+            assert_eq!(repo_id, "repo-42");
+        } else {
+            panic!("Expected Spec Assist");
+        }
+    }
+
+    // ── Divergence command tests ────────────────────────────────────────────
+
+    #[test]
+    fn cli_divergence_parses() {
+        let args = Cli::try_parse_from(["gyre", "divergence"]);
+        assert!(args.is_ok());
+        if let Commands::Divergence { workspace } = args.unwrap().command {
+            assert!(workspace.is_none());
+        } else {
+            panic!("Expected Divergence");
+        }
+    }
+
+    #[test]
+    fn cli_divergence_with_workspace_parses() {
+        let args = Cli::try_parse_from(["gyre", "divergence", "--workspace", "platform"]);
+        assert!(args.is_ok());
+        if let Commands::Divergence { workspace } = args.unwrap().command {
+            assert_eq!(workspace.as_deref(), Some("platform"));
+        } else {
+            panic!("Expected Divergence");
+        }
+    }
+
+    // ── Helper function tests ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_priority_range_none() {
+        let (min, max) = parse_priority_range(None).unwrap();
+        assert!(min.is_none());
+        assert!(max.is_none());
+    }
+
+    #[test]
+    fn parse_priority_range_valid() {
+        let (min, max) = parse_priority_range(Some("1-5")).unwrap();
+        assert_eq!(min, Some(1));
+        assert_eq!(max, Some(5));
+    }
+
+    #[test]
+    fn parse_priority_range_invalid_format() {
+        assert!(parse_priority_range(Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn parse_priority_range_invalid_number() {
+        assert!(parse_priority_range(Some("abc-5")).is_err());
+    }
+
+    #[test]
+    fn format_age_zero_is_just_now() {
+        assert_eq!(format_age(0), "just now");
+    }
+
+    #[test]
+    fn format_age_future_is_just_now() {
+        assert_eq!(format_age(u64::MAX), "just now");
+    }
+
+    #[test]
+    fn format_timestamp_epoch() {
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00:00Z");
+    }
+
+    #[test]
+    fn format_timestamp_known_date() {
+        // 2024-01-01 00:00:00 UTC = 1704067200
+        assert_eq!(format_timestamp(1704067200), "2024-01-01 00:00:00Z");
+    }
+
+    #[test]
+    fn days_to_ymd_epoch() {
+        assert_eq!(days_to_ymd(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_known_date() {
+        // 2024-01-01 is day 19723 since epoch
+        assert_eq!(days_to_ymd(19723), (2024, 1, 1));
     }
 }

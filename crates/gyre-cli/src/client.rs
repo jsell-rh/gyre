@@ -204,6 +204,220 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing MR response")
     }
 
+    /// Resolve a workspace slug to its ID. Returns the first match.
+    pub async fn resolve_workspace_slug(&self, slug: &str) -> Result<String> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/workspaces", self.base_url))
+            .header("Authorization", self.auth_header())
+            .query(&[("slug", slug)])
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list workspaces failed (HTTP {status}): {text}");
+        }
+        let workspaces: Vec<serde_json::Value> =
+            serde_json::from_str(&text).context("parsing workspaces response")?;
+        workspaces
+            .first()
+            .and_then(|w| w["id"].as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("no workspace found with slug '{slug}'"))
+    }
+
+    /// GET /api/v1/workspaces/:workspace_id/briefing
+    pub async fn get_briefing(
+        &self,
+        workspace_id: &str,
+        since: Option<u64>,
+    ) -> Result<serde_json::Value> {
+        let mut req = self
+            .client
+            .get(format!(
+                "{}/api/v1/workspaces/{workspace_id}/briefing",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header());
+        if let Some(epoch) = since {
+            req = req.query(&[("since", epoch.to_string())]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get briefing failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing briefing response")
+    }
+
+    /// GET /api/v1/users/me/notifications
+    pub async fn get_notifications(
+        &self,
+        workspace_id: Option<&str>,
+        min_priority: Option<u8>,
+        max_priority: Option<u8>,
+        notification_type: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/users/me/notifications", self.base_url))
+            .header("Authorization", self.auth_header());
+        if let Some(ws) = workspace_id {
+            req = req.query(&[("workspace_id", ws)]);
+        }
+        if let Some(min) = min_priority {
+            req = req.query(&[("min_priority", min.to_string())]);
+        }
+        if let Some(max) = max_priority {
+            req = req.query(&[("max_priority", max.to_string())]);
+        }
+        if let Some(nt) = notification_type {
+            req = req.query(&[("notification_type", nt)]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get notifications failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing notifications response")
+    }
+
+    /// POST /api/v1/notifications/:id/dismiss
+    pub async fn dismiss_notification(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/v1/notifications/{id}/dismiss",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            anyhow::bail!("dismiss notification failed (HTTP {status}): {text}");
+        }
+        Ok(())
+    }
+
+    /// POST /api/v1/notifications/:id/resolve
+    pub async fn resolve_notification(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/v1/notifications/{id}/resolve",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            anyhow::bail!("resolve notification failed (HTTP {status}): {text}");
+        }
+        Ok(())
+    }
+
+    /// GET /api/v1/repos/:id/graph or GET /api/v1/workspaces/:id/graph
+    pub async fn get_graph(
+        &self,
+        concept: &str,
+        repo_id: Option<&str>,
+        workspace_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let url = if let Some(rid) = repo_id {
+            format!("{}/api/v1/repos/{rid}/graph", self.base_url)
+        } else if let Some(wid) = workspace_id {
+            format!("{}/api/v1/workspaces/{wid}/graph", self.base_url)
+        } else {
+            anyhow::bail!("either --repo or --workspace is required for explore");
+        };
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .query(&[("concept", concept)])
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get graph failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing graph response")
+    }
+
+    /// GET /api/v1/merge-requests/:id/timeline
+    pub async fn get_mr_timeline(&self, mr_id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/merge-requests/{mr_id}/timeline",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get MR timeline failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing timeline response")
+    }
+
+    /// POST /api/v1/repos/:repo_id/specs/assist (SSE stream → collected DiffOps)
+    pub async fn spec_assist(
+        &self,
+        repo_id: &str,
+        spec_path: &str,
+        instruction: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        let body = serde_json::json!({
+            "spec_path": spec_path,
+            "instruction": instruction,
+        });
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/v1/repos/{repo_id}/specs/assist",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("spec assist failed (HTTP {status}): {text}");
+        }
+        // Parse SSE stream: lines like "data: {...}"
+        let mut ops = Vec::new();
+        for line in text.lines() {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    break;
+                }
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                    ops.push(val);
+                }
+            }
+        }
+        Ok(ops)
+    }
+
     /// Call POST /api/v1/release/prepare and return the JSON response.
     pub async fn release_prepare(
         &self,

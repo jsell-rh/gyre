@@ -2,7 +2,7 @@
 
 **Spec reference:** `human-system-interface.md` §11 (CLI/MCP Parity Constraint)  
 **Depends on:** None (consumes existing REST endpoints)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -84,4 +84,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(cli): add 6 HSI parity commands — briefing, inbox, explore, trace, spec assist, divergence`
