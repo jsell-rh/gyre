@@ -1,7 +1,7 @@
 # TASK-001: MCP Message Bus Tools (message.send, message.poll, message.ack)
 
 **Spec reference:** `message-bus.md` §MCP Integration  
-**Progress:** `ready-for-review`  
+**Progress:** `complete`  
 **Review:** [`specs/reviews/task-001.md`](../reviews/task-001.md)
 
 ## Spec Excerpt
