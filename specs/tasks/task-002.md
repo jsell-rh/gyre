@@ -46,7 +46,7 @@ The CLI (`crates/gyre-cli/src/main.rs`) currently supports:
    - Args: `<concept>` (positional), `--repo <name>`, `--workspace <slug>`
    - Output: table of matching graph nodes with type, name, qualified_name, spec linkage
 
-4. **`gyre trace`** — `GET /api/v1/merge-requests/:id/timeline`
+4. **`gyre trace`** — `GET /api/v1/merge-requests/:id/trace`
    - Args: `<mr-id>` (positional)
    - Output: chronological SDLC timeline (spec triggers, agent spawns, pushes, gates, merges)
 
