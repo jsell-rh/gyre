@@ -1,7 +1,7 @@
 # Review: TASK-002 — CLI HSI Parity Commands
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R5)  
+**Date:** 2026-04-07 (R6)  
 **Verdict:** needs-revision
 
 ---
@@ -71,3 +71,13 @@
 - [x] [process-revision-complete] **F14 — `divergence` display reads `n["description"]` but server sends `n["body"]`.**  
   The divergence alert display code (main.rs:897) reads `n["description"].as_str()`, but the server's `NotificationResponse` struct (users.rs:255-268) serializes the field as `body` (no `#[serde(rename)]`). The JSON key is `"body"`, not `"description"`. As a result, the description line in divergence alerts is always empty — even when the notification has body text. Fix: change `n["description"]` to `n["body"]`.  
   **Files:** `crates/gyre-cli/src/main.rs:897` (wrong field name), `crates/gyre-server/src/api/users.rs:262` (field is `body`).
+
+## R6 Findings
+
+- [ ] **F15 — `briefing` display reads `item["agent_name"]` but server's `BriefingItem` has no such field.**  
+  The `print_briefing` function (main.rs:987, 1004) reads `item["agent_name"].as_str()` for items in both the `completed` and `in_progress` arrays. The server's `BriefingItem` struct (graph.rs:260-267) has fields: `title`, `description`, `entity_type`, `entity_id`, `spec_path`, `timestamp` — no `agent_name`. The `as_str()` call returns `None`, `unwrap_or("")` gives `""`, and the display branch `println!("  - {title} [{agent}]")` is dead code — agent attribution is silently absent in all briefing output. The `in_progress` items come from tasks that have an `assigned_to` field (mapped from `Task.assigned_to`), and the server populates a separate `completed_agents` array with `agent_id` per HSI §4, but neither data source is surfaced by the CLI. Fix: remove the dead `agent_name` access, or map the task's `assigned_to` to a display name and use `completed_agents` for the completed section.  
+  **Files:** `crates/gyre-cli/src/main.rs:987,1004` (reads nonexistent field), `crates/gyre-server/src/api/graph.rs:260-267` (`BriefingItem` struct).
+
+- [ ] **F16 — `spec_assist` doc comment says "DiffOps" but R5 fix changed the data to `{"text": "..."}` payloads.**  
+  The doc comment on `spec_assist` (client.rs:444) reads `"SSE stream → collected DiffOps"`. The R5 fix (F13) changed the display code to handle `{"text": "..."}` payloads from the server's `complete` event (specs_assist.rs:170-172). The function returns `Vec<serde_json::Value>` containing `{"text": "..."}` objects, not DiffOps. This is a stale reference from before the R4/R5 corrections. Fix: update the doc comment to `"SSE stream → collected text payloads"` or similar.  
+  **Files:** `crates/gyre-cli/src/client.rs:444` (stale doc comment).
