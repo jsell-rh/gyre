@@ -36,6 +36,7 @@ What Gyre does - the product.
 | SDLC Philosophy | [`system/sdlc.md`](system/sdlc.md) | Challenge every ceremony, engineer the need away |
 | Business Continuity | [`system/business-continuity.md`](system/business-continuity.md) | BCP primitives, snapshot/restore, retention |
 | Supply Chain Security | [`system/supply-chain.md`](system/supply-chain.md) | Agent stack attestation, gyre-stack.lock, AIBOM, SLSA provenance, attestation levels |
+| **Authorization Provenance** | [`system/authorization-provenance.md`](system/authorization-provenance.md) | **Cryptographic work authorization:** signed inputs, CEL output constraints, derived input delegation chains, key binding, constraint propagation, offline verification. Amends agent-gates, supply-chain, identity-security, ABAC, agent-runtime, message-bus, HSI, observability |
 | Agent Gates & Spec Binding | [`system/agent-gates.md`](system/agent-gates.md) | Agents as merge gates, composable gate chains, spec-to-code cryptographic binding, spec approval ledger |
 | Spec Lifecycle | [`system/spec-lifecycle.md`](system/spec-lifecycle.md) | Auto-task on spec change, approval invalidation, drift detection, forge-native hooks |
 | Merge Dependencies | [`system/merge-dependencies.md`](system/merge-dependencies.md) | MR dependency DAG, atomic groups, auto-detection from branch lineage, dependency-aware merge queue |
