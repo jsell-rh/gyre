@@ -420,12 +420,12 @@ impl GyreClient {
             .ok_or_else(|| anyhow::anyhow!("no repo found with name '{repo_name}' in workspace"))
     }
 
-    /// GET /api/v1/merge-requests/:id/timeline
-    pub async fn get_mr_timeline(&self, mr_id: &str) -> Result<serde_json::Value> {
+    /// GET /api/v1/merge-requests/:id/trace
+    pub async fn get_mr_trace(&self, mr_id: &str) -> Result<serde_json::Value> {
         let resp = self
             .client
             .get(format!(
-                "{}/api/v1/merge-requests/{mr_id}/timeline",
+                "{}/api/v1/merge-requests/{mr_id}/trace",
                 self.base_url
             ))
             .header("Authorization", self.auth_header())
@@ -435,9 +435,9 @@ impl GyreClient {
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
-            anyhow::bail!("get MR timeline failed (HTTP {status}): {text}");
+            anyhow::bail!("get MR trace failed (HTTP {status}): {text}");
         }
-        serde_json::from_str(&text).context("parsing timeline response")
+        serde_json::from_str(&text).context("parsing trace response")
     }
 
     /// POST /api/v1/repos/:repo_id/specs/assist (SSE stream → collected DiffOps)

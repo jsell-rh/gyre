@@ -127,12 +127,14 @@ impl NotificationRepository for SqliteStorage {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
+        notification_type: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.clone();
         let ws_id = workspace_id.cloned();
+        let ntype = notification_type.map(|s| s.to_string());
         tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = notifications::table
@@ -148,6 +150,9 @@ impl NotificationRepository for SqliteStorage {
             }
             if let Some(max_p) = max_priority {
                 query = query.filter(notifications::priority.le(max_p as i32));
+            }
+            if let Some(ref nt) = ntype {
+                query = query.filter(notifications::notification_type.eq(nt));
             }
             let rows = query
                 .limit(limit as i64)

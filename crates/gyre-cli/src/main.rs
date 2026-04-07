@@ -115,10 +115,10 @@ enum Commands {
     Explore {
         /// Concept name to search for
         concept: String,
-        /// Repository name to scope the search (requires --workspace)
+        /// Repository name to scope the search (workspace inferred from git remote if --workspace omitted)
         #[arg(long)]
         repo: Option<String>,
-        /// Workspace slug to scope the search (cross-repo)
+        /// Workspace slug to scope the search
         #[arg(long)]
         workspace: Option<String>,
     },
@@ -664,38 +664,47 @@ async fn main() -> Result<()> {
             let token = cfg.require_token()?;
             let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
 
-            if repo.is_some() && workspace.is_none() {
-                anyhow::bail!(
-                    "--repo requires --workspace to resolve the repository name. \
-                     Use --workspace <slug> --repo <name>."
-                );
-            }
-
             // Determine which concept search endpoints to call.
             // If --repo is given (with --workspace), search that single repo.
+            // If --repo is given without --workspace, infer workspace from git remote.
             // If --workspace is given (without --repo), search across all repos in the workspace.
             // If neither is given, search across all accessible workspaces.
-            let results: Vec<serde_json::Value> = if let Some(slug) = &workspace {
-                let wid = api.resolve_workspace_slug(slug).await?;
-                if let Some(repo_name) = &repo {
+            let results: Vec<serde_json::Value> = match (&workspace, &repo) {
+                (Some(slug), Some(repo_name)) => {
+                    let wid = api.resolve_workspace_slug(slug).await?;
                     let rid = api.resolve_repo_name(&wid, repo_name).await?;
                     vec![api.get_graph_concept(&concept, Some(&rid), None).await?]
-                } else {
+                }
+                (Some(slug), None) => {
+                    let wid = api.resolve_workspace_slug(slug).await?;
                     vec![api.get_graph_concept(&concept, None, Some(&wid)).await?]
                 }
-            } else {
-                // Search across all accessible workspaces
-                let workspaces = api.list_workspaces().await?;
-                let mut all = Vec::new();
-                for ws in &workspaces {
-                    if let Some(wid) = ws["id"].as_str() {
-                        match api.get_graph_concept(&concept, None, Some(wid)).await {
-                            Ok(r) => all.push(r),
-                            Err(_) => continue, // skip inaccessible workspaces
+                (None, Some(repo_name)) => {
+                    // Infer workspace from git remote, then resolve repo name
+                    let (ws_slug, _) = infer_repo_from_git_remote().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "could not infer workspace from git remote. \
+                             Use --workspace <slug> --repo <name> to specify."
+                        )
+                    })?;
+                    let wid = api.resolve_workspace_slug(&ws_slug).await?;
+                    let rid = api.resolve_repo_name(&wid, repo_name).await?;
+                    vec![api.get_graph_concept(&concept, Some(&rid), None).await?]
+                }
+                (None, None) => {
+                    // Search across all accessible workspaces
+                    let workspaces = api.list_workspaces().await?;
+                    let mut all = Vec::new();
+                    for ws in &workspaces {
+                        if let Some(wid) = ws["id"].as_str() {
+                            match api.get_graph_concept(&concept, None, Some(wid)).await {
+                                Ok(r) => all.push(r),
+                                Err(_) => continue, // skip inaccessible workspaces
+                            }
                         }
                     }
+                    all
                 }
-                all
             };
 
             // Collect all nodes from all results
@@ -729,33 +738,55 @@ async fn main() -> Result<()> {
             let token = cfg.require_token()?;
             let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
 
-            let result = api.get_mr_timeline(&mr_id).await?;
+            let result = api.get_mr_trace(&mr_id).await?;
 
-            println!("Timeline for MR {mr_id}");
+            let commit_sha = result["commit_sha"].as_str().unwrap_or("unknown");
+            let gate_run_id = result["gate_run_id"].as_str().unwrap_or("unknown");
+            let span_count = result["span_count"].as_u64().unwrap_or(0);
+            let captured_at = result["captured_at"].as_u64().unwrap_or(0);
+
+            println!("Trace for MR {mr_id}");
+            println!("  commit:     {commit_sha}");
+            println!("  gate_run:   {gate_run_id}");
+            println!("  captured:   {}", format_timestamp(captured_at));
+            println!("  spans:      {span_count}");
             println!();
 
-            let events = result["events"].as_array();
-            match events {
+            let root_spans = result["root_spans"].as_array();
+            if let Some(roots) = root_spans {
+                let root_ids: Vec<&str> = roots.iter().filter_map(|v| v.as_str()).collect();
+                println!("Root spans: {}", root_ids.join(", "));
+                println!();
+            }
+
+            let spans = result["spans"].as_array();
+            match spans {
                 Some(items) if !items.is_empty() => {
-                    for event in items {
-                        let ts = event["timestamp"].as_u64().unwrap_or(0);
-                        let etype = event["type"].as_str().unwrap_or("unknown");
-                        let detail = &event["detail"];
-                        let ts_str = format_timestamp(ts);
-                        println!("[{ts_str}] {etype}");
-                        // Print key detail fields compactly
-                        if let Some(obj) = detail.as_object() {
-                            for (k, v) in obj {
-                                let display = match v {
-                                    serde_json::Value::String(s) => s.clone(),
-                                    other => other.to_string(),
-                                };
-                                println!("    {k}: {display}");
-                            }
-                        }
+                    println!(
+                        "{:<20} {:<20} {:<30} {:>10} {:<8}",
+                        "SPAN_ID", "SERVICE", "OPERATION", "DURATION", "STATUS"
+                    );
+                    println!("{}", "-".repeat(92));
+                    for span in items {
+                        let span_id = span["span_id"].as_str().unwrap_or("");
+                        let service = span["service_name"].as_str().unwrap_or("");
+                        let operation = span["operation_name"].as_str().unwrap_or("");
+                        let duration_us = span["duration_us"].as_u64().unwrap_or(0);
+                        let status = span["status"].as_str().unwrap_or("");
+                        let duration_str = if duration_us >= 1_000_000 {
+                            format!("{:.1}s", duration_us as f64 / 1_000_000.0)
+                        } else if duration_us >= 1_000 {
+                            format!("{:.1}ms", duration_us as f64 / 1_000.0)
+                        } else {
+                            format!("{duration_us}us")
+                        };
+                        println!(
+                            "{:<20} {:<20} {:<30} {:>10} {:<8}",
+                            span_id, service, operation, duration_str, status
+                        );
                     }
                 }
-                _ => println!("No timeline events."),
+                _ => println!("No trace spans."),
             }
         }
 
@@ -785,8 +816,15 @@ async fn main() -> Result<()> {
                     })?;
                     (ws, rn)
                 }
-                (None, Some(_)) => {
-                    anyhow::bail!("--repo requires --workspace to resolve the repository name.");
+                (None, Some(repo_name)) => {
+                    // Repo given without workspace — infer workspace from git remote
+                    let (ws, _) = infer_repo_from_git_remote().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "could not infer workspace from git remote. \
+                             Use --workspace <slug> --repo <name> to specify."
+                        )
+                    })?;
+                    (ws, repo_name)
                 }
                 (None, None) => {
                     // Try to infer both from git remote
@@ -1533,6 +1571,26 @@ mod tests {
             assert_eq!(concept, "AuthMiddleware");
             assert_eq!(repo.as_deref(), Some("my-service"));
             assert_eq!(workspace.as_deref(), Some("platform"));
+        } else {
+            panic!("Expected Explore");
+        }
+    }
+
+    #[test]
+    fn cli_explore_repo_without_workspace_parses() {
+        // --repo without --workspace is valid: workspace is inferred from git remote at runtime
+        let args =
+            Cli::try_parse_from(["gyre", "explore", "AuthMiddleware", "--repo", "my-service"]);
+        assert!(args.is_ok());
+        if let Commands::Explore {
+            concept,
+            repo,
+            workspace,
+        } = args.unwrap().command
+        {
+            assert_eq!(concept, "AuthMiddleware");
+            assert_eq!(repo.as_deref(), Some("my-service"));
+            assert!(workspace.is_none());
         } else {
             panic!("Expected Explore");
         }

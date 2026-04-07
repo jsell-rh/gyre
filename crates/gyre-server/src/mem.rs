@@ -1643,6 +1643,7 @@ impl NotificationRepository for MemNotificationRepository {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
+        notification_type: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
@@ -1654,6 +1655,7 @@ impl NotificationRepository for MemNotificationRepository {
                     && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
                     && min_priority.is_none_or(|min| n.priority >= min)
                     && max_priority.is_none_or(|max| n.priority <= max)
+                    && notification_type.is_none_or(|nt| n.notification_type.as_str() == nt)
             })
             .cloned()
             .collect();
