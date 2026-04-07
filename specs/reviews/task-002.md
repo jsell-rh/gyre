@@ -64,10 +64,10 @@
 
 ## R5 Findings
 
-- [ ] **F13 — `spec_assist` display code expects DiffOp fields (`op`, `path`, `content`) but server's `complete` event sends `{"text": "..."}`.**  
+- [-] [process-revision-complete] **F13 — `spec_assist` display code expects DiffOp fields (`op`, `path`, `content`) but server's `complete` event sends `{"text": "..."}`.**  
   The server's spec-assist `complete` event carries `{"text": "<full_text>"}` (specs_assist.rs:170-172). The R4 fix (F12) correctly made the SSE parser extract only `complete` events. But the display code (main.rs:853-864) indexes each collected value with `op["op"]`, `op["path"]`, `op["content"]` — fields that do not exist in the `{"text": "..."}` payload. All three resolve to `None`, producing `Op: unknown`, empty path, and empty content. The actual LLM response text (in `op["text"]`) is silently discarded. `gyre spec assist` shows empty/misleading results every invocation despite receiving a valid server response. Fix: parse the `complete` event's `{"text": "..."}` shape and display the text content. When TASK-012 changes the shape to `{diff, explanation}`, the display code should be updated to match — but today it must handle today's shape.  
   **Files:** `crates/gyre-cli/src/main.rs:853-864` (display code), `crates/gyre-server/src/api/specs_assist.rs:170-172` (server response shape).
 
-- [ ] **F14 — `divergence` display reads `n["description"]` but server sends `n["body"]`.**  
+- [-] [process-revision-complete] **F14 — `divergence` display reads `n["description"]` but server sends `n["body"]`.**  
   The divergence alert display code (main.rs:897) reads `n["description"].as_str()`, but the server's `NotificationResponse` struct (users.rs:255-268) serializes the field as `body` (no `#[serde(rename)]`). The JSON key is `"body"`, not `"description"`. As a result, the description line in divergence alerts is always empty — even when the notification has body text. Fix: change `n["description"]` to `n["body"]`.  
   **Files:** `crates/gyre-cli/src/main.rs:897` (wrong field name), `crates/gyre-server/src/api/users.rs:262` (field is `body`).
