@@ -1,7 +1,7 @@
 # Review: TASK-002 — CLI HSI Parity Commands
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R9)  
+**Date:** 2026-04-07 (R10)  
 **Verdict:** needs-revision
 
 ---
@@ -100,6 +100,10 @@
 
 ## R9 Findings
 
-- [-] [process-revision-complete] **F19 — `print_briefing` silently drops the `completed_agents` section of the BriefingResponse.**  
-  The server's `BriefingResponse` (graph.rs:244-257) includes `completed_agents: Vec<BriefingCompletedAgent>` (graph.rs:234-241), which carries per-agent completion data: `agent_id`, `spec_ref`, `decisions` (with reasoning), `uncertainties`, `conversation_sha`, and `completed_at`. HSI §9's COMPLETED section explicitly shows agent attribution and decision reasoning: "Agent: worker-12. Decision: used exponential backoff (confidence: high)". HSI §9's data source table lists "agent completion summaries" as a named data source for the Completed section. HSI §11 requires: "every data surface in the UI must be consumable outside the browser." The CLI's `print_briefing` function (main.rs:973-1036) renders `completed`, `in_progress`, `cross_workspace`, `exceptions`, and `metrics` — but has no code path for `completed_agents`. Agent decisions and uncertainties are silently dropped. This is the same flaw class as F17 (incomplete response consumption) — a composite response section is present in the server response but absent from the CLI rendering. Fix: add a "Completed Agents" subsection (or merge agent data inline with completed items by matching `spec_ref`) to render agent_id, decisions, and uncertainties.  
-  **Files:** `crates/gyre-cli/src/main.rs:973-1036` (missing section), `crates/gyre-server/src/api/graph.rs:234-257` (server sends `completed_agents`).
+- [x] **F19 (resolved R10).** `print_briefing` now renders the `completed_agents` section (main.rs:992-1031) with agent_id, spec_ref, decisions (string and object forms with reasoning/confidence), and uncertainties. Fixed in commit `1d64ad87`.
+
+## R10 Findings
+
+- [ ] **F20 — `gyre divergence` silently drops `entity_ref` from divergence alerts; spec defines it as the per-notification entity reference.**  
+  HSI §8 (line 288) defines the notification schema with `entity_ref TEXT, -- optional reference (spec_path, agent_id, mr_id)`. For divergence alerts specifically, §8 (line 1233) states: "One notification is created per spec_ref that exceeds the threshold — each notification includes the two conflicting MR/agent references." The `entity_ref` field carries the `spec_ref` identifying which spec has conflicting interpretations. The server's `NotificationResponse` (users.rs:263) includes `entity_ref: Option<String>` and populates it from the stored notification (users.rs:279). The CLI's divergence display (main.rs:884-897) reads `id`, `title`, `body`, and `priority` — but has no access to `entity_ref`. The spec reference is silently dropped. Without it, the user sees a divergence alert but cannot identify which spec is involved from structured data — they must parse the title or body text (which may or may not contain the spec path). This is the same flaw class as F14 (response field not consumed) — the server sends a structured field specifically designed for entity linkage, and the CLI ignores it. Fix: render `entity_ref` when non-empty, e.g., `println!("  Spec: {entity_ref}");` after the ID line.  
+  **Files:** `crates/gyre-cli/src/main.rs:884-897` (no `entity_ref` access), `crates/gyre-server/src/api/users.rs:263` (field exists in response).
