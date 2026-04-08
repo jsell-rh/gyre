@@ -2,7 +2,7 @@
 
 **Spec reference:** `ui-layout.md` §3 (LLM-Assisted Spec Editing), `human-system-interface.md` §3 (Explorer)
 **Depends on:** None (LlmPort infrastructure exists; TASK-011 is for save, not assist)
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 

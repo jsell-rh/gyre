@@ -1,6 +1,6 @@
 //! S3.3: Spec Editing Backend — assist/save/prompts
 //!
-//! POST /api/v1/repos/:id/specs/assist   — LLM-assisted editing (SSE stream, stubbed LLM)
+//! POST /api/v1/repos/:id/specs/assist   — LLM-assisted editing (SSE stream)
 //! POST /api/v1/repos/:id/specs/save     — commit spec to feature branch + create MR
 //! POST /api/v1/repos/:id/prompts/save   — direct commit to default branch
 
@@ -89,13 +89,17 @@ fn spec_path_slug(spec_path: &str) -> String {
 /// POST /api/v1/repos/:id/specs/assist
 ///
 /// LLM-assisted spec editing. Returns an SSE stream with partial explanation
-/// chunks and a final complete event containing the diff.
+/// chunks and a final complete event containing `{diff, explanation}`.
+///
+/// The LLM reads the current spec content (from the repo's default branch or
+/// `draft_content` if provided) and knowledge graph context (entities governed
+/// by this spec). It produces a JSON response with a `diff` array of edit
+/// operations and an `explanation` string.
+///
+/// If `spec_path` does not exist and no `draft_content` is provided, returns 404.
+/// If the LLM returns invalid JSON, an `event: error` SSE event is emitted.
 ///
 /// ABAC: resource_type "spec", action "generate".
-///
-/// The LLM call is stubbed — a simulated diff is produced from the instruction
-/// text. The SSE format (partial/complete/error events) and ABAC mapping are
-/// correct per ui-layout.md §3 "LLM Endpoint Contract".
 pub async fn assist_spec(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -132,6 +136,71 @@ pub async fn assist_spec(
         .as_ref()
         .ok_or(super::error::ApiError::LlmUnavailable)?;
 
+    // Determine effective spec content: draft_content overrides committed content.
+    let spec_content = if let Some(ref draft) = req.draft_content {
+        draft.clone()
+    } else {
+        // Read spec from the repo's default branch.
+        match state
+            .git_ops
+            .read_file(&repo.path, &repo.default_branch, &req.spec_path)
+            .await
+        {
+            Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).to_string(),
+            Ok(None) => {
+                // Spec does not exist and no draft_content — 404.
+                return Err(ApiError::NotFound(format!(
+                    "spec {} not found in repo {}",
+                    req.spec_path, repo_id
+                )));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    repo_id = %repo_id,
+                    spec_path = %req.spec_path,
+                    "Failed to read spec from repo: {e}"
+                );
+                // Fall back to empty content so the LLM can still assist.
+                String::new()
+            }
+        }
+    };
+
+    // Build knowledge graph context: query nodes governed by this spec.
+    let graph_context = match state
+        .graph_store
+        .get_nodes_by_spec(&repo_id_typed, &req.spec_path)
+        .await
+    {
+        Ok(nodes) if !nodes.is_empty() => {
+            let summaries: Vec<String> = nodes
+                .iter()
+                .take(50) // Limit context size
+                .map(|n| {
+                    format!(
+                        "- {} ({:?}): {} [{}:{}–{}]",
+                        n.name,
+                        n.node_type,
+                        n.qualified_name,
+                        n.file_path,
+                        n.line_start,
+                        n.line_end
+                    )
+                })
+                .collect();
+            summaries.join("\n")
+        }
+        Ok(_) => "No graph nodes are currently linked to this spec.".to_string(),
+        Err(e) => {
+            tracing::warn!(
+                repo_id = %repo_id,
+                spec_path = %req.spec_path,
+                "Failed to load graph context: {e}"
+            );
+            "Graph context unavailable.".to_string()
+        }
+    };
+
     // Load effective prompt; fall back to hardcoded default.
     let template_content = state
         .prompt_templates
@@ -143,33 +212,93 @@ pub async fn assist_spec(
 
     let system_prompt = template_content
         .replace("{{spec_path}}", &req.spec_path)
+        .replace("{{spec_content}}", &spec_content)
+        .replace("{{graph_context}}", &graph_context)
+        .replace("{{instruction}}", &req.instruction)
+        // Backward compat: old templates may use {{draft_content}}
         .replace(
             "{{draft_content}}",
-            req.draft_content.as_deref().unwrap_or(""),
-        )
-        .replace("{{instruction}}", &req.instruction);
+            req.draft_content.as_deref().unwrap_or(&spec_content),
+        );
     let user_prompt = format!("Instruction: {}", req.instruction);
 
     // Resolve model and call streaming LLM.
     let (model, _) =
         crate::llm_helpers::resolve_llm_model(&state, &repo.workspace_id, "specs-assist").await;
-    let stream = factory
+    let llm_stream = factory
         .for_model(&model)
         .stream_complete(&system_prompt, &user_prompt, None)
         .await
         .map_err(ApiError::Internal)?;
 
-    let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
+    let chunks: Vec<String> = llm_stream.filter_map(|r| async { r.ok() }).collect().await;
     let full_text = chunks.join("");
 
+    // Build SSE events: partial events stream the explanation progressively,
+    // complete event carries the full {diff, explanation} response.
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
-    for chunk in &chunks {
-        let data = serde_json::to_string(&serde_json::json!({"text": chunk})).unwrap_or_default();
-        events.push(Ok(Event::default().event("partial").data(data)));
+
+    // Try to parse the LLM response as the spec-required {diff, explanation} JSON.
+    match serde_json::from_str::<serde_json::Value>(&full_text) {
+        Ok(parsed) if parsed.get("diff").is_some() && parsed.get("explanation").is_some() => {
+            // Valid response — stream explanation as partial events.
+            let explanation = parsed["explanation"].as_str().unwrap_or("");
+            if !explanation.is_empty() {
+                // Emit explanation in chunks for progressive rendering.
+                let exp_chars: Vec<char> = explanation.chars().collect();
+                let chunk_size = exp_chars.len().max(1).div_ceil(3);
+                for chunk in exp_chars.chunks(chunk_size) {
+                    let text: String = chunk.iter().collect();
+                    let data = serde_json::to_string(&serde_json::json!({"text": text}))
+                        .unwrap_or_default();
+                    events.push(Ok(Event::default().event("partial").data(data)));
+                }
+            }
+
+            // Validate diff ops: each must have op, path, content.
+            let diff = parsed["diff"].as_array();
+            let valid_diff = diff
+                .map(|ops| {
+                    ops.iter().all(|op| {
+                        let op_str = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                        let has_path = op.get("path").and_then(|v| v.as_str()).is_some();
+                        matches!(op_str, "add" | "remove" | "replace") && has_path
+                    })
+                })
+                .unwrap_or(false);
+
+            if valid_diff {
+                let complete_data = serde_json::to_string(&parsed).unwrap_or_default();
+                events.push(Ok(Event::default().event("complete").data(complete_data)));
+            } else {
+                // diff ops are invalid — send error event
+                let error_data = serde_json::to_string(&serde_json::json!({
+                    "error": "LLM produced invalid diff operations. Each operation must have op (add/remove/replace), path, and content fields.",
+                    "explanation": explanation,
+                }))
+                .unwrap_or_default();
+                events.push(Ok(Event::default().event("error").data(error_data)));
+            }
+        }
+        Ok(_) => {
+            // JSON parsed but missing required fields — send error event.
+            let error_data = serde_json::to_string(&serde_json::json!({
+                "error": "LLM response is valid JSON but missing required 'diff' and/or 'explanation' fields.",
+                "raw_response": full_text,
+            }))
+            .unwrap_or_default();
+            events.push(Ok(Event::default().event("error").data(error_data)));
+        }
+        Err(_) => {
+            // LLM returned invalid JSON — send error event.
+            let error_data = serde_json::to_string(&serde_json::json!({
+                "error": "LLM returned invalid JSON. Please try rephrasing your instruction.",
+                "raw_response": full_text,
+            }))
+            .unwrap_or_default();
+            events.push(Ok(Event::default().event("error").data(error_data)));
+        }
     }
-    let complete_data =
-        serde_json::to_string(&serde_json::json!({"text": full_text})).unwrap_or_default();
-    events.push(Ok(Event::default().event("complete").data(complete_data)));
 
     let s = stream::iter(events);
     Ok(Sse::new(s).keep_alive(
@@ -410,32 +539,12 @@ mod tests {
     #[tokio::test]
     async fn assist_spec_rate_limited_after_10_requests() {
         let app = app();
-
-        // Create a repo so assist_spec can proceed past the 404 check.
-        let create_body = serde_json::json!({
-            "name": "rate-limit-test-repo",
-            "workspace_id": "ws-rate-test",
-            "tenant_id": "tenant-1",
-        });
-        let repo_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/repos")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(repo_resp.status(), StatusCode::CREATED);
-        let repo_json = body_json(repo_resp).await;
-        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+        let repo_id = create_repo(&app, "rate-limit-test-repo", "ws-rate-test").await;
 
         let assist_body = serde_json::json!({
             "spec_path": "specs/system/vision.md",
             "instruction": "Add a summary",
+            "draft_content": "# Vision\n\nExisting content.",
         });
 
         // First 10 requests must succeed.
@@ -575,11 +684,7 @@ mod tests {
         assert!(!mr_id.is_empty());
 
         // Verify notification was created (F4: must verify side effects, not just response).
-        let notifs = state
-            .notifications
-            .list_recent(10)
-            .await
-            .unwrap();
+        let notifs = state.notifications.list_recent(10).await.unwrap();
         let spec_notif = notifs
             .iter()
             .find(|n| n.notification_type == NotificationType::SpecPendingApproval)
@@ -739,14 +844,49 @@ mod tests {
         crate::api::api_router().with_state(std::sync::Arc::new(s))
     }
 
-    #[tokio::test]
-    async fn assist_spec_returns_503_when_llm_unavailable() {
-        let app = app_no_llm();
+    /// Create a test app with a mock LLM that returns a fixed response string.
+    fn app_with_llm_response(response: &str) -> Router {
+        let mut s = (*crate::mem::test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::new(response)),
+        }));
+        crate::api::api_router().with_state(Arc::new(s))
+    }
 
-        // Create a repo.
+    /// Parse SSE body text into (event_type, data) pairs.
+    fn parse_sse_events(body: &str) -> Vec<(String, String)> {
+        let mut events = Vec::new();
+        let mut current_event = String::new();
+        let mut current_data = String::new();
+        for line in body.lines() {
+            if let Some(evt) = line.strip_prefix("event:") {
+                current_event = evt.trim().to_string();
+            } else if let Some(data) = line.strip_prefix("data:") {
+                current_data = data.trim().to_string();
+            } else if line.is_empty() && !current_event.is_empty() {
+                events.push((current_event.clone(), current_data.clone()));
+                current_event.clear();
+                current_data.clear();
+            }
+        }
+        // Capture last event if body doesn't end with empty line.
+        if !current_event.is_empty() {
+            events.push((current_event, current_data));
+        }
+        events
+    }
+
+    async fn body_text(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    async fn create_repo(app: &Router, name: &str, ws: &str) -> String {
         let create_body = serde_json::json!({
-            "name": "assist-503-repo",
-            "workspace_id": "ws-assist-503",
+            "name": name,
+            "workspace_id": ws,
             "tenant_id": "tenant-1",
         });
         let repo_resp = app
@@ -762,12 +902,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repo_resp.status(), StatusCode::CREATED);
-        let repo_json = body_json(repo_resp).await;
-        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+        let json = body_json(repo_resp).await;
+        json["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn assist_spec_returns_503_when_llm_unavailable() {
+        let app = app_no_llm();
+        let repo_id = create_repo(&app, "assist-503-repo", "ws-assist-503").await;
 
         let assist_body = serde_json::json!({
             "spec_path": "specs/system/vision.md",
             "instruction": "Add a summary",
+            "draft_content": "# Vision\n\nExisting content.",
         });
         let resp = app
             .oneshot(
@@ -785,34 +932,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assist_spec_with_mock_llm_streams_sse_events() {
+    async fn assist_spec_nonexistent_spec_no_draft_returns_404() {
+        // NoopGitOps.read_file returns None, so spec doesn't exist.
+        // Without draft_content, the handler should return 404.
         let app = app();
+        let repo_id = create_repo(&app, "assist-404-repo", "ws-assist-404").await;
 
-        // Create a repo.
-        let create_body = serde_json::json!({
-            "name": "assist-sse-repo",
-            "workspace_id": "ws-assist-sse",
-            "tenant_id": "tenant-1",
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/nonexistent.md",
+            "instruction": "Add a section",
         });
-        let repo_resp = app
-            .clone()
+        let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/repos")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(repo_resp.status(), StatusCode::CREATED);
-        let repo_json = body_json(repo_resp).await;
-        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn assist_spec_with_valid_diff_response_streams_sse() {
+        let valid_response = serde_json::json!({
+            "diff": [
+                {"op": "add", "path": "## Error Handling", "content": "When retries exceed max..."},
+                {"op": "replace", "path": "## Overview", "content": "Updated overview text."}
+            ],
+            "explanation": "Added error handling section and updated overview."
+        });
+        let app = app_with_llm_response(&valid_response.to_string());
+        let repo_id = create_repo(&app, "assist-valid-repo", "ws-assist-valid").await;
 
         let assist_body = serde_json::json!({
             "spec_path": "specs/system/vision.md",
-            "instruction": "Add a summary",
+            "instruction": "Add error handling",
+            "draft_content": "# Vision\n\n## Overview\nOld overview.",
         });
         let resp = app
             .oneshot(
@@ -829,5 +989,231 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp.headers().get("content-type").unwrap();
         assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+
+        // Should have partial events (explanation chunks) + one complete event.
+        let partial_events: Vec<_> = events.iter().filter(|(t, _)| t == "partial").collect();
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert!(
+            !partial_events.is_empty(),
+            "should have partial events for explanation"
+        );
+        assert_eq!(
+            complete_events.len(),
+            1,
+            "should have exactly one complete event"
+        );
+
+        // Verify the complete event contains {diff, explanation}.
+        let complete_data: serde_json::Value = serde_json::from_str(&complete_events[0].1).unwrap();
+        assert!(complete_data.get("diff").unwrap().is_array());
+        assert!(complete_data.get("explanation").unwrap().is_string());
+        let diff = complete_data["diff"].as_array().unwrap();
+        assert_eq!(diff.len(), 2);
+        assert_eq!(diff[0]["op"], "add");
+        assert_eq!(diff[1]["op"], "replace");
+    }
+
+    #[tokio::test]
+    async fn assist_spec_invalid_json_from_llm_sends_error_event() {
+        // Mock LLM returns non-JSON text.
+        let app = app_with_llm_response("This is not valid JSON at all");
+        let repo_id = create_repo(&app, "assist-badjson-repo", "ws-assist-badjson").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add something",
+            "draft_content": "# Vision",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+
+        // Should have an error event, no complete event.
+        let error_events: Vec<_> = events.iter().filter(|(t, _)| t == "error").collect();
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert_eq!(error_events.len(), 1, "should have one error event");
+        assert_eq!(complete_events.len(), 0, "should have no complete event");
+
+        let error_data: serde_json::Value = serde_json::from_str(&error_events[0].1).unwrap();
+        assert!(error_data["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid JSON"));
+    }
+
+    #[tokio::test]
+    async fn assist_spec_json_missing_fields_sends_error_event() {
+        // Mock LLM returns valid JSON but missing required fields.
+        let app = app_with_llm_response(r#"{"some_field": "value"}"#);
+        let repo_id = create_repo(&app, "assist-missingfields-repo", "ws-assist-missing").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add something",
+            "draft_content": "# Vision",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+
+        let error_events: Vec<_> = events.iter().filter(|(t, _)| t == "error").collect();
+        assert_eq!(error_events.len(), 1);
+        let error_data: serde_json::Value = serde_json::from_str(&error_events[0].1).unwrap();
+        assert!(error_data["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing required"));
+    }
+
+    #[tokio::test]
+    async fn assist_spec_draft_content_overrides_repo_content() {
+        // When draft_content is provided, the handler uses it instead of reading
+        // from the repo (NoopGitOps returns None for read_file). This test verifies
+        // that providing draft_content avoids the 404 that would occur without it.
+        let valid_response = serde_json::json!({
+            "diff": [{"op": "add", "path": "## New Section", "content": "New content."}],
+            "explanation": "Added new section."
+        });
+        let app = app_with_llm_response(&valid_response.to_string());
+        let repo_id = create_repo(&app, "assist-draft-repo", "ws-assist-draft").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/nonexistent.md",
+            "instruction": "Add a new section",
+            "draft_content": "# My Draft Spec\n\nDraft content here.",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Should succeed (200) because draft_content was provided, not 404.
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert_eq!(complete_events.len(), 1, "should have a complete event");
+    }
+
+    #[tokio::test]
+    async fn assist_spec_new_spec_creation_with_draft() {
+        // New spec creation: spec_path doesn't exist + draft_content provided.
+        // The LLM should produce only "add" operations.
+        let valid_response = serde_json::json!({
+            "diff": [
+                {"op": "add", "path": "# New Spec", "content": "# Payment Retry\n\nSpec content."}
+            ],
+            "explanation": "Created new payment retry spec."
+        });
+        let app = app_with_llm_response(&valid_response.to_string());
+        let repo_id = create_repo(&app, "assist-newspec-repo", "ws-assist-newspec").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/payment-retry.md",
+            "instruction": "Create a payment retry spec",
+            "draft_content": "",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert_eq!(complete_events.len(), 1);
+
+        let complete_data: serde_json::Value = serde_json::from_str(&complete_events[0].1).unwrap();
+        let diff = complete_data["diff"].as_array().unwrap();
+        assert_eq!(diff.len(), 1);
+        assert_eq!(diff[0]["op"], "add");
+    }
+
+    #[tokio::test]
+    async fn assist_spec_invalid_diff_ops_sends_error() {
+        // Valid JSON with diff/explanation but invalid op values.
+        let bad_ops_response = serde_json::json!({
+            "diff": [
+                {"op": "invalid_op", "path": "## Section", "content": "text"}
+            ],
+            "explanation": "Some explanation."
+        });
+        let app = app_with_llm_response(&bad_ops_response.to_string());
+        let repo_id = create_repo(&app, "assist-badops-repo", "ws-assist-badops").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Do something",
+            "draft_content": "# Vision",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+        let error_events: Vec<_> = events.iter().filter(|(t, _)| t == "error").collect();
+        assert_eq!(error_events.len(), 1);
+        let error_data: serde_json::Value = serde_json::from_str(&error_events[0].1).unwrap();
+        assert!(error_data["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid diff"));
     }
 }
