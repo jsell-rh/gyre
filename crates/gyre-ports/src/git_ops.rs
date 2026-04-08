@@ -81,4 +81,16 @@ pub trait GitOpsPort: Send + Sync {
         content: &[u8],
         message: &str,
     ) -> Result<String>;
+
+    /// Read a file's content from the tip of a branch.
+    ///
+    /// Returns `Ok(None)` if the file does not exist at the given path on the
+    /// branch. Returns `Ok(Some(bytes))` with the blob content if found.
+    /// Works on bare repositories.
+    async fn read_file(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        file_path: &str,
+    ) -> Result<Option<Vec<u8>>>;
 }

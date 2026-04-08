@@ -551,6 +551,36 @@ impl GitOpsPort for Git2OpsAdapter {
         })
         .await?
     }
+
+    async fn read_file(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let repo_path = repo_path.to_string();
+        let branch = branch.to_string();
+        let file_path = file_path.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+
+            let branch_ref = match repo.find_branch(&branch, BranchType::Local) {
+                Ok(b) => b,
+                Err(_) => return Ok(None),
+            };
+            let commit = branch_ref.get().peel_to_commit()?;
+            let tree = commit.tree()?;
+
+            match tree.get_path(std::path::Path::new(&file_path)) {
+                Ok(entry) => {
+                    let blob = repo.find_blob(entry.id())?;
+                    Ok(Some(blob.content().to_vec()))
+                }
+                Err(_) => Ok(None),
+            }
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -1295,5 +1325,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(main_log.len(), 1); // only initial commit
+    }
+
+    // ── read_file tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_read_file_returns_content() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        adapter
+            .write_file(
+                path.to_str().unwrap(),
+                "main",
+                "specs/system/vision.md",
+                b"# Vision\n\nContent here.",
+                "Add vision spec",
+            )
+            .await
+            .unwrap();
+
+        let content = adapter
+            .read_file(path.to_str().unwrap(), "main", "specs/system/vision.md")
+            .await
+            .unwrap();
+        assert_eq!(content, Some(b"# Vision\n\nContent here.".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_returns_none_for_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        let content = adapter
+            .read_file(path.to_str().unwrap(), "main", "specs/no-such-file.md")
+            .await
+            .unwrap();
+        assert_eq!(content, None);
+    }
+
+    #[tokio::test]
+    async fn test_read_file_returns_none_for_missing_branch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        let content = adapter
+            .read_file(path.to_str().unwrap(), "no-branch", "README.md")
+            .await
+            .unwrap();
+        assert_eq!(content, None);
     }
 }

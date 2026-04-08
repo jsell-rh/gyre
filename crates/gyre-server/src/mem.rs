@@ -137,6 +137,15 @@ impl GitOpsPort for NoopGitOps {
     ) -> Result<String> {
         Ok("0000000000000000000000000000000000000000".to_string())
     }
+
+    async fn read_file(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
