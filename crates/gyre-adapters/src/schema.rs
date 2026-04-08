@@ -711,6 +711,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     meta_specs,
     meta_spec_versions,
     meta_spec_bindings,
+    trust_anchors,
+    key_bindings,
+    chain_attestations,
 );
 
 diesel::table! {
@@ -892,5 +895,52 @@ diesel::table! {
         created_at -> BigInt,
         updated_at -> BigInt,
         is_system -> Bool,
+    }
+}
+
+diesel::table! {
+    trust_anchors (tenant_id, id) {
+        id -> Text,
+        tenant_id -> Text,
+        issuer -> Text,
+        jwks_uri -> Text,
+        anchor_type -> Text,
+        constraints_json -> Text,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    key_bindings (id) {
+        id -> Text,
+        user_identity -> Text,
+        tenant_id -> Text,
+        public_key -> Binary,
+        issuer -> Text,
+        trust_anchor_id -> Text,
+        issued_at -> BigInt,
+        expires_at -> BigInt,
+        user_signature -> Binary,
+        platform_countersign -> Binary,
+        revoked_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    chain_attestations (id) {
+        id -> Text,
+        input_type -> Text,
+        input_json -> Text,
+        output_json -> Text,
+        metadata_json -> Text,
+        parent_ref -> Nullable<Text>,
+        chain_depth -> Integer,
+        workspace_id -> Text,
+        repo_id -> Text,
+        task_id -> Text,
+        agent_id -> Text,
+        created_at -> BigInt,
+        tenant_id -> Text,
+        commit_sha -> Text,
     }
 }
