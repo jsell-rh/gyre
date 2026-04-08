@@ -1,7 +1,7 @@
 # Review: TASK-012 — Specs Assist Real LLM Integration
 
 **Reviewer:** Verifier
-**Round:** R1
+**Round:** R2
 
 ---
 
@@ -16,3 +16,13 @@
 
 - [x] [process-revision-complete] **F4 — MCP handler template substitution broken by TASK-012 prompt template change.**
   TASK-012 changed `PROMPT_SPECS_ASSIST` in `llm_defaults.rs` to use new variables `{{spec_content}}` and `{{graph_context}}`. The MCP handler `handle_spec_assist` (`mcp.rs:2041-2044`) still only substitutes `{{spec_path}}`, `{{draft_content}}`, and `{{instruction}}`. After TASK-012, the MCP handler sends a prompt containing literal `{{spec_content}}` and `{{graph_context}}` text to the LLM. The MCP handler's substitution must be updated to match the new template variables, including loading spec content via `GitOpsPort::read_file` and graph context via `graph_store.get_nodes_by_spec`.
+
+---
+
+## R2
+
+- [ ] **F5 — MCP handler returns raw LLM text without response validation (logic divergence).**
+  `mcp.rs:2138` returns `tool_result(full_text)` — the raw, unparsed LLM output. The REST handler `assist_spec` at `specs_assist.rs:252-311` performs three validation steps the MCP handler skips entirely: (1) parses the raw text as JSON, (2) validates that `diff` and `explanation` fields exist, (3) validates each diff op has a valid `op` value (`add`/`remove`/`replace`) and a `path` field. On validation failure, the REST handler returns a structured error. The MCP consumer receives raw, unvalidated LLM text — if the LLM returns invalid JSON or malformed diff ops, the consumer gets no error indication and no structured data. This is a logic divergence per HSI §11 MCP parity: the MCP tool must return equivalent data to the REST endpoint, which means parsed `{diff, explanation}` JSON on success, or a structured error on failure.
+
+- [ ] **F6 — CLI `spec_assist` display code accesses `op["text"]` which no longer exists after TASK-012 changed the server response format (response field name mismatch).**
+  TASK-012 changed the server's `event: complete` data from `{text: full_text}` to `{diff: [...], explanation: "..."}`. The CLI display code at `main.rs:854` still accesses `op["text"].as_str()`, which returns `None` on the new `{diff, explanation}` response. The user runs `gyre spec assist` and sees "Spec assist response:" followed by empty output — all diff ops and explanation are silently dropped. Additionally, the client doc comment at `client.rs:444` says "collected text payloads" (stale — should reference `{diff, explanation}` responses), and `docs/api-reference.md:78` describes the endpoint as "SSE stream of `DiffOp` events" with ops `insert`/`delete`/`replace` — the `DiffOp` type was removed (R1 F1), and the op names should be `add`/`remove`/`replace` per spec. Fix: update `main.rs` display to render `diff` ops and `explanation` from the response; update client doc comment; update api-reference description.
