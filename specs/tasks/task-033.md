@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-canvas.md` §Evaluative  
 **Depends on:** TASK-029 (lens toggle — evaluative lens must be selectable)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -23,13 +23,13 @@ The evaluative lens uses trace data from `GET /api/v1/merge-requests/:id/trace` 
 
 ## Current State
 
-- `EvaluativeOverlay.svelte` exists and renders particles along edges for trace animation.
-- `PlaybackControls.svelte` provides play/pause/scrub functionality.
-- Node heat coloring (blue→red by duration) is NOT implemented — all nodes have uniform color during evaluative mode.
-- Node badges (span count, error rate, mean duration) are NOT rendered.
-- Edge thickness does NOT vary by call frequency.
-- Hover tooltips with timing stats do NOT exist.
-- The "Evaluative" tab in the detail panel does NOT exist.
+**Implemented.** Heat map, badges, edge thickness, and tooltips all work:
+- Lines 659, 2214-2227: blue→red heat palette based on duration
+- Lines 3332-3365: evaluative badges show span_duration, span_count, error_rate
+- Lines 3540-3557, 746-759: edge thickness scales by `traceEdgeFrequency` (1.5px–6px)
+- Lines 5188-5202: hover tooltips show p50, p95, error rate, tail latency warning
+
+**Note:** The "Evaluative" tab in NodeDetailPanel (per-node span list sorted by duration) was split to TASK-042 — the current implementation surfaces these stats in hover tooltips rather than a dedicated panel tab.
 
 ## Implementation Plan
 
@@ -84,4 +84,5 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.
+Evaluative detail panel tab deferred to TASK-042.

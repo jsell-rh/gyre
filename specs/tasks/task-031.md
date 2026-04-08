@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-canvas.md` §Progressive Drill-Down  
 **Depends on:** None (builds on existing double-click drill-down in ExplorerCanvas)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -26,11 +26,12 @@ From `explorer-canvas.md` §Progressive Drill-Down:
 
 ## Current State
 
-- Double-click drill-down exists in `ExplorerCanvas.svelte` — it filters nodes to children via `Contains` edges.
-- `Breadcrumb.svelte` exists and shows the drill-down path.
-- No smooth zoom transition animation — the view snaps instantly to the new node set.
-- No fade-out of unrelated nodes during transition.
-- No reverse transition when navigating back up.
+**Implemented.** All acceptance criteria met:
+- Lines 4274-4303: `onDblClick()` triggers smooth zoom-into with ease-out cubic interpolation (lines 3816-3822)
+- Lines 217-219: `drillFadeAlpha`/`drillFadeTarget` state vars drive fade animation
+- Lines 2521-2529, 3851-3860: unrelated nodes fade to ~12% opacity during drill
+- Lines 4461-4510: `navigateBreadcrumb()` animates reverse zoom-out
+- Breadcrumb at lines 5385-5394 calls `navigateBreadcrumb()` on click, supports URL deep-linking (`#drill=name1/name2`)
 
 ## Implementation Plan
 
@@ -74,4 +75,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.

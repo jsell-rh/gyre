@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-implementation.md` §System Default Views  
 **Depends on:** None (saved_views table and SavedViewRepository already exist)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -51,10 +51,12 @@ From `explorer-implementation.md` §System Default Views:
 
 ## Current State
 
-- `saved_views` table has an `is_system` boolean column.
-- `SavedViewRepository` trait and SQLite adapter are implemented.
-- REST API for saved views CRUD exists (`GET/POST /api/v1/repos/:id/views`).
-- No system default views are seeded — the saved views list is empty by default.
+**Implemented.** All acceptance criteria met (6 default views, exceeding the spec's 4):
+- `saved_views.rs` lines 190-223: `system_default_views()` returns 6 views: Architecture Overview, Test Coverage Gaps, Hot Paths, Blast Radius (click), Spec Coverage, Ungoverned Risk
+- Lines 132-180: lazy seeding on first `ListViews` access with UNIQUE constraint protection (idempotent)
+- Line 161: `is_system: true` on all seeded views
+- Lines 454-459: delete endpoint rejects system views with "System default views cannot be deleted"
+- Test at line 501-508: `assert_eq!(defaults.len(), 6)`
 
 ## Implementation Plan
 
@@ -100,4 +102,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.

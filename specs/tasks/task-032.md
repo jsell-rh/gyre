@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-canvas.md` §Causal Flow Trace, `system-explorer.md` §5  
 **Depends on:** TASK-029 (lens toggle — traces use structural lens)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -26,11 +26,12 @@ From `system-explorer.md` §5:
 
 ## Current State
 
-- No right-click context menu exists on canvas nodes.
-- No "Trace from here" action.
-- No path numbering or trace visualization.
-- `Calls` edges exist in the graph (from Rust LSP extraction) but are rendered identically to all other edges.
-- No BFS traversal from a starting node along specific edge types in the frontend.
+**Implemented.** All acceptance criteria met:
+- Lines 4314-4331, 5215-5330: right-click context menu with "View spec", "View provenance", "Trace from here", "Blast radius", and more
+- Lines 4338-4348, 5274-5276: "Trace from here" creates focus query with `edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 15`
+- Lines 1945-1960: BFS traversal resolves reachable nodes via adjacency
+- Lines 295-297, 2660-2689: `tracePathOrder` maps node IDs to step numbers, drawn as numbered badges
+- Lines 3571-3578: unreachable nodes dimmed via edge alpha reduction
 
 ## Implementation Plan
 
@@ -89,4 +90,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.

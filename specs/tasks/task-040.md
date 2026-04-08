@@ -2,7 +2,7 @@
 
 **Spec reference:** `lsp-call-graph.md` §Phase 3: Python  
 **Depends on:** None (independent; follows the same pattern as Rust/Go extractors)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -25,9 +25,13 @@ From §Architecture:
 
 ## Current State
 
-- Rust LSP extraction exists (`lsp_call_graph.rs`).
-- Python code extraction uses tree-sitter (Pass 1 only) — produces declarations but incomplete `Calls` edges.
-- No Python LSP (pyright) integration for Pass 2.
+**Implemented.** Call graph extraction works via external script (diverges from spec's Pyright LSP approach but achieves the same result):
+- `python_extractor.rs` line 75: "Pass 2: call-graph extraction via external Python script"
+- Lines 789-875: `extract_call_graph_pass2()` shells out to `scripts/python-callgraph.py`
+- Error handling at lines 812-838 for execution, exit codes, UTF-8, JSON parsing
+- Graceful degradation: prints warning and continues if script missing
+
+**Implementation note:** Uses `scripts/python-callgraph.py` (custom AST-walking script) instead of Pyright LSP subprocess. Functionally equivalent for call resolution.
 
 ## Implementation Plan
 
@@ -78,4 +82,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.

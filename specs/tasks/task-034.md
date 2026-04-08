@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-implementation.md` §Self-Check Loop  
 **Depends on:** None (MCP tools `graph_summary` and `graph_query_dryrun` already exist)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -35,11 +35,12 @@ From §Agent System Prompt:
 
 ## Current State
 
-- `explorer_ws.rs` handles WebSocket messages and spawns the Claude Agent SDK.
-- The agent has access to `graph_query_dryrun` MCP tool.
-- No `<view_query>` block extraction logic exists in the WebSocket handler.
-- No refinement loop — the agent's first output is sent directly to the frontend.
-- No cap on refinement turns.
+**Implemented.** All acceptance criteria met:
+- `explorer_ws.rs` line 3566: `parse_view_query_from_text()` extracts `<view_query>...</view_query>` blocks
+- Line 128-129: `MAX_REFINEMENT_TURNS = 3` caps the loop
+- Lines 2843-2950: dry-run validation, actionable warning collection, re-prompting with tool result
+- Line 2955, 3068: `send_status(sender, "refining")` during refinement turns
+- Lines 3141-3173: final fallback with nudge if agent doesn't produce view_query
 
 ## Implementation Plan
 
@@ -91,4 +92,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.

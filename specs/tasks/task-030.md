@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-canvas.md` §Structural (default)  
 **Depends on:** TASK-029 (lens toggle — structural lens must be selectable)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -19,9 +19,11 @@ From `system-explorer.md` §1:
 
 ## Current State
 
-- `GraphNode` already has `spec_confidence` (High/Medium/Low/None), `complexity`, and `churn_count_30d` fields.
-- `ExplorerCanvas.svelte` renders nodes with uniform colors based on `node_type` (categorical palette).
-- No visual encoding of spec coverage, complexity, or churn exists in the canvas.
+**Implemented.** All acceptance criteria met:
+- `ExplorerCanvas.svelte` lines 92-107: `specBorderColor()` maps spec_confidence to green/amber/orange/red
+- Lines 1366-1368: `nodeWeight(n)` uses `complexity` for treemap sizing
+- Line 3197: `churnThickness = Math.min(4, 1 + (n?.churn_count_30d || 0) * 0.3)` scales border thickness
+- Lines 4944-4953, 5072-5076: legend with swatches for structural/evaluative modes
 
 ## Implementation Plan
 
@@ -66,4 +68,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.

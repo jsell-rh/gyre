@@ -2,7 +2,7 @@
 
 **Spec reference:** `lsp-call-graph.md` §Phase 1: Go  
 **Depends on:** None (independent of frontend tasks; Rust LSP extractor already proves the pattern)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -29,10 +29,12 @@ From §Extraction Pipeline:
 
 ## Current State
 
-- Rust LSP call graph extraction exists in `crates/gyre-domain/src/lsp_call_graph.rs` and works via rust-analyzer.
-- No Go extractor exists.
-- The tree-sitter Go extractor (Pass 1) produces declarations but only basic `Calls` edges.
-- No `gyre-go-callgraph` binary exists.
+**Implemented.** All acceptance criteria met:
+- `scripts/go-callgraph/main.go` + compiled binary (7.9 MB) exist
+- `go_extractor.rs` lines 69-70: Pass 2 calls `extract_lsp_call_graph()` after tree-sitter Pass 1
+- Lines 673-735: shells out to `go-callgraph` binary, parses JSON call edges
+- Lines 679, 691, 1583: graceful degradation — skips silently if binary unavailable
+- Line 1600 test: "should have no errors even without go-callgraph"
 
 ## Implementation Plan
 
@@ -79,4 +81,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.

@@ -2,7 +2,7 @@
 
 **Spec reference:** `lsp-call-graph.md` §Phase 4: TypeScript  
 **Depends on:** None (independent; follows the same pattern as Rust/Python extractors)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -23,10 +23,13 @@ From §Performance Considerations:
 
 ## Current State
 
-- Rust and (after TASK-040) Python LSP extractors exist.
-- TypeScript code extraction uses tree-sitter (Pass 1 only) — produces declarations but incomplete `Calls` edges.
-- No TypeScript LSP integration for Pass 2.
-- The Gyre frontend (`web/src/`) is itself a TypeScript/Svelte project — this extractor would enable self-analysis.
+**Implemented.** Call graph extraction works via external script:
+- `typescript_extractor.rs` lines 67, 162: "Pass 2: TypeScript compiler API call-graph extraction"
+- Uses `scripts/ts-callgraph.mjs` for call graph extraction (custom script, not raw tsserver)
+- Follows same pattern as Python extractor: shell out, parse JSON, merge Calls edges
+- Graceful degradation if script unavailable
+
+**Implementation note:** Uses `scripts/ts-callgraph.mjs` instead of raw `typescript-language-server --stdio`. Functionally equivalent.
 
 ## Implementation Plan
 
@@ -74,4 +77,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.

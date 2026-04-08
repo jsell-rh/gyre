@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-canvas.md` §Lens Definitions, §Component Architecture  
 **Depends on:** None  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -29,10 +29,11 @@ From §Component Architecture:
 
 ## Current State
 
-- `ExplorerView.svelte` renders the canvas and chat but has no lens toggle UI.
-- `EvaluativeOverlay.svelte` and `PlaybackControls.svelte` exist but are always-visible or hidden ad hoc — no toggle controls their visibility.
-- The `lens` prop exists on `ExplorerCanvas` but no UI to switch it.
-- Observable lens is not mentioned anywhere in the frontend.
+**Implemented.** All acceptance criteria met:
+- `ExplorerCanvas.svelte` lines 5058-5060: three lens buttons (Structural/Evaluative/Observable)
+- Observable button is disabled with tooltip: "Observable lens is disabled — pending production OpenTelemetry collector integration" (line 5060), styled with `opacity: 0.35`, `cursor: not-allowed`, lock icon
+- Lens state controls `EvaluativeOverlay` visibility via `{#if lens === 'evaluative'}` (lines 5063-5068)
+- Component tests at `ExplorerCanvas.test.js` lines 732-800 cover all lens toggle scenarios
 
 ## Implementation Plan
 
@@ -72,4 +73,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.

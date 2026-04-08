@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-implementation.md` §Phase 4: Polish, `system-explorer.md` §1  
 **Depends on:** TASK-029 (lens toggle — Escape clears active query)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -20,10 +20,12 @@ From `ui-layout.md` §2:
 
 ## Current State
 
-- No keyboard shortcuts are wired in the Explorer view.
-- Escape does not clear the active view query.
-- `/` does not focus the chat input or search field.
-- The existing `ExplorerView.svelte` has no `keydown` event handler.
+**Implemented.** All acceptance criteria met:
+- `ExplorerView.svelte` line 1026: `<svelte:window onkeydown={onWindowKeydown}>` global listener
+- Lines 892-899: Escape cascade clears `activeViewQuery = null`
+- Lines 901-910: `/` key focuses `.chat-input` element
+- Line 890: `isTyping` check prevents shortcuts when input/textarea focused
+- `ExplorerCanvas.svelte` also has Cmd+K (global search), Tab/Shift+Tab (node cycling), Enter (select in search)
 
 ## Implementation Plan
 
@@ -66,4 +68,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.

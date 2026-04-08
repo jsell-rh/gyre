@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-implementation.md` §Phase 4: Polish  
 **Depends on:** None (WebSocket handler already sends status messages)  
-**Progress:** `not-started`
+**Progress:** `complete`
 
 ## Spec Excerpt
 
@@ -25,10 +25,11 @@ From §Phase 4: Polish:
 
 ## Current State
 
-- `explorer_ws.rs` sends `{ "type": "text", "content": "...", "done": true }` messages, but the full response is sent in one shot (not streamed token-by-token).
-- `explorer_ws.rs` sends `{ "type": "status", "status": "..." }` messages.
-- `ExplorerChat.svelte` receives messages but renders them only after `done: true` — no progressive rendering of partial text.
-- No "Thinking..." or "Refining..." indicator is shown in the chat UI.
+**Implemented.** All acceptance criteria met:
+- `ExplorerChat.svelte` lines 317-344: `case 'text'` handler accumulates streaming chunks via `streamingText += chunk` (done:false)
+- Line 910: `renderMarkdown(streamingText)` renders live during streaming
+- Lines 638-639, 917-931: status indicators with animated spinner for "thinking" and "refining" states
+- `explorer_ws.rs` lines 2827-2840: LLM response streamed in token chunks over WebSocket
 
 ## Implementation Plan
 
@@ -75,4 +76,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+Implemented as part of the explorer-canvas branch prior to task decomposition.
