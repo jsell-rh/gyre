@@ -15,14 +15,23 @@
 #             MCP tool args parsing (let _NAME = args.get(...)). An underscore-
 #             prefixed variable from tool args means the parameter is parsed
 #             from user input, advertised in the schema, but never used.
-#   Check 2 — Hand-built MCP responses: MCP handlers that use
-#             `let VAR = json!({` with 5+ unique field keys in the subsequent
+#   Check 2 — Hand-built MCP responses: ANY json!({ occurrence in non-test
+#             MCP handler code with 5+ unique field keys in the subsequent
 #             30 lines, indicating manual response assembly rather than struct
-#             serialization.
+#             serialization. Catches both `let var = json!({` and inline
+#             json!({ inside closures/iterators (e.g., `.map(|n| json!({...}))`).
+#   Check 3 — Debug-format enum serialization: MCP handlers that use
+#             `format!("{:?}", VAR).to_lowercase()` instead of serializing
+#             through serde. Debug format produces "enumvariant" for multi-word
+#             variants (e.g., EnumVariant), while serde #[serde(rename_all =
+#             "snake_case")] produces "enum_variant". These are different
+#             strings — consumers that discriminate on type strings will
+#             silently fail to match MCP values against REST values.
 #
 # Origin: specs/reviews/task-010.md F1 (dead depth param), F2/F3 (missing
-#         briefing fields), F4 (edge filter divergence) — all caused by MCP
-#         handlers reimplementing REST logic instead of delegating.
+#         briefing fields), F4 (edge filter divergence), F5 (hand-built JSON
+#         in closures), F7 (Debug-format enum serialization) — all caused by
+#         MCP handlers reimplementing REST logic instead of delegating.
 #
 # Exempt with: // mcp-parity:ok — <reason>
 #
@@ -63,15 +72,22 @@ if [ -n "$DEAD_PARAMS" ]; then
 fi
 
 # ── Check 2: Hand-built MCP responses ─────────────────────────────────────
-# Find `let VAR = json!({` lines (excluding test code), then count unique
-# "field_name": patterns in the subsequent 30 lines. 5+ unique fields signals
-# hand-built response assembly instead of struct serialization.
+# Find ALL json!({ occurrences in non-test MCP handler code (not just
+# `let var = json!({` — also catches json!({ inside closures, iterators,
+# .map(), .push(), etc.), then count unique "field_name": patterns in the
+# subsequent 30 lines. 5+ unique fields signals hand-built response assembly
+# instead of struct serialization.
+#
+# Prior version only matched `let VAR = json!({`, which missed the most
+# common hand-built pattern: per-item JSON construction inside .map() closures
+# (e.g., `.map(|n| json!({ "id": ..., "name": ..., ... }))`). This allowed
+# R2 findings F5/F7 to slip through.
 
 TOTAL_LINES=$(wc -l < "$MCP_FILE")
 TEST_BOUNDARY=$(grep -n '#\[cfg(test)\]' "$MCP_FILE" | head -1 | cut -d: -f1 || echo "$TOTAL_LINES")
 
-# Collect json!({ lines into an array to avoid subshell
-mapfile -t JSON_LINES < <(grep -n 'let [a-z_]* = json!({' "$MCP_FILE" || true)
+# Collect ALL json!({ lines into an array — not just `let var = json!({`
+mapfile -t JSON_LINES < <(grep -n 'json!({' "$MCP_FILE" | grep -v 'json!({})' || true)
 
 for entry in "${JSON_LINES[@]}"; do
     [ -z "$entry" ] && continue
@@ -116,6 +132,52 @@ for entry in "${JSON_LINES[@]}"; do
         VIOLATIONS=$((VIOLATIONS + 1))
     fi
 done
+
+# ── Check 3: Debug-format enum serialization ─────────────────────────────
+# Detect `format!("{:?}", VAR).to_lowercase()` in non-test MCP handler code.
+# Rust's Debug format on enums produces "EnumVariant" → lowercased to
+# "enumvariant". Serde's #[serde(rename_all = "snake_case")] produces
+# "enum_variant". For single-word variants these coincidentally match
+# (e.g., Module → "module"), but for multi-word variants they diverge:
+#   - DependsOn  → Debug: "dependson",  serde: "depends_on"
+#   - EnumVariant → Debug: "enumvariant", serde: "enum_variant"
+#   - FieldOf    → Debug: "fieldof",    serde: "field_of"
+# Consumers that match on type strings (e.g., filtering edges by "depends_on")
+# will silently fail against MCP responses that serialize as "dependson".
+#
+# The correct pattern: serialize through the response struct (which uses serde),
+# or use serde_json::to_value(&enum_value) for individual fields.
+
+DEBUG_FMT=$(grep -n 'format!("{:?}"' "$MCP_FILE" | grep -v 'mcp-parity:ok' || true)
+
+if [ -n "$DEBUG_FMT" ]; then
+    while IFS= read -r line; do
+        lineno=$(echo "$line" | cut -d: -f1)
+
+        # Skip test code
+        if [ "$lineno" -ge "$TEST_BOUNDARY" ]; then
+            continue
+        fi
+
+        HANDLER=$(head -n "$lineno" "$MCP_FILE" \
+            | grep -oP '(strip_prefix\("\K[^"]+|async fn \K[a-z_]+)' \
+            | tail -1 || echo "unknown")
+
+        echo ""
+        echo "DEBUG-FORMAT ENUM SERIALIZATION: $MCP_FILE:$lineno ($HANDLER)"
+        echo "  $line"
+        echo "  Using format!(\"{:?}\", ...) to serialize an enum produces different"
+        echo "  strings than serde for multi-word variants (e.g., \"dependson\" vs"
+        echo "  \"depends_on\"). This causes silent mismatches between MCP and REST"
+        echo "  responses for the same data."
+        echo ""
+        echo "  Fix: serialize through the response struct via serde_json::to_value(),"
+        echo "  or use serde_json::to_value(&enum_value) for individual enum fields."
+        echo ""
+        echo "  Exempt with '// mcp-parity:ok — <reason>' on the same line."
+        VIOLATIONS=$((VIOLATIONS + 1))
+    done <<< "$DEBUG_FMT"
+fi
 
 echo ""
 if [ "$VIOLATIONS" -eq 0 ]; then
