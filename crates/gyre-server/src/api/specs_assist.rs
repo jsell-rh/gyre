@@ -183,7 +183,8 @@ pub async fn assist_spec(
 ///
 /// Commits a spec change to a `spec-edit/<slug>-<uuid>` feature branch and
 /// auto-creates an MR targeting the default branch. If an existing open MR
-/// for the same spec_path exists (matched by branch prefix), returns it.
+/// for the same spec_path exists (matched by branch prefix), appends a commit
+/// to the existing branch.
 ///
 /// Creates a priority-2 (High) "Spec pending approval" notification. The
 /// notification's entity_id is the MR ID so the Inbox "Approve" action can
@@ -217,7 +218,19 @@ pub async fn save_spec(
         .find(|mr| mr.status == MrStatus::Open && mr.source_branch.starts_with(&branch_prefix));
 
     if let Some(mr) = existing_mr {
-        // Existing open MR found — return it (appending a new commit is stubbed).
+        // Existing open MR — append a commit to the existing branch.
+        state
+            .git_ops
+            .write_file(
+                &repo.path,
+                &mr.source_branch,
+                &req.spec_path,
+                req.content.as_bytes(),
+                &req.message,
+            )
+            .await
+            .map_err(ApiError::Internal)?;
+
         return Ok((
             StatusCode::OK,
             Json(SpecSaveResponse {
@@ -231,8 +244,25 @@ pub async fn save_spec(
     let short_uuid = &uuid::Uuid::new_v4().to_string().replace('-', "")[..8];
     let branch_name = format!("{}-{}", branch_prefix, short_uuid);
 
-    // Stub: real impl writes req.content to req.spec_path on the new branch
-    // via git_ops (git_ops port does not yet expose a write-file method).
+    // Create the feature branch from the default branch.
+    state
+        .git_ops
+        .create_branch(&repo.path, &branch_name, &repo.default_branch)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // Write the spec content to the new branch.
+    state
+        .git_ops
+        .write_file(
+            &repo.path,
+            &branch_name,
+            &req.spec_path,
+            req.content.as_bytes(),
+            &req.message,
+        )
+        .await
+        .map_err(ApiError::Internal)?;
 
     let now = now_secs();
     let mr_id = new_id();
@@ -252,17 +282,23 @@ pub async fn save_spec(
         .await
         .map_err(ApiError::Internal)?;
 
+    // Resolve tenant_id from workspace for the notification.
+    let tenant_id = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => "unknown".to_string(),
+    };
+
     // Priority-2 "Spec pending approval" notification (HSI §2 + §8).
-    // user_id/tenant_id are placeholders — real impl resolves workspace
-    // Admin/Developer members from workspace_id and fans out per-user.
+    // user_id is "system" — real per-user fan-out requires workspace membership
+    // which is outside this task's scope.
     let notif_id = new_id();
     let mut notif = Notification::new(
         notif_id,
         repo.workspace_id.clone(),
-        Id::new("system"), // placeholder; real impl fans out to workspace members
+        Id::new("system"),
         NotificationType::SpecPendingApproval,
         format!("Spec pending approval: {}", req.spec_path),
-        "system", // placeholder; real impl resolves from workspace lookup
+        &tenant_id,
         now as i64,
     );
     notif.entity_ref = Some(mr_id.to_string());
@@ -288,30 +324,33 @@ pub async fn save_spec(
 /// ABAC: resource_type "spec", action "generate" (not "write") so that
 /// Supervised trust's `trust:require-human-mr-review` policy does not block
 /// prompt iteration.
-///
-/// The actual git write is stubbed — returns a fake commit SHA.
 pub async fn save_prompt(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
-    Json(_req): Json<PromptSaveRequest>,
+    Json(req): Json<PromptSaveRequest>,
 ) -> Result<(StatusCode, Json<PromptSaveResponse>), ApiError> {
     let repo_id_typed = Id::new(&repo_id);
-    state
+    let repo = state
         .repos
         .find_by_id(&repo_id_typed)
         .await
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", repo_id)))?;
 
-    // Stub: real impl commits _req.content to _req.prompt_path on the default
-    // branch via git_ops (requires a write-file method not yet in the port).
-    let fake_sha = format!("{:040x}", uuid::Uuid::new_v4().as_u128());
-    Ok((
-        StatusCode::CREATED,
-        Json(PromptSaveResponse {
-            commit_sha: fake_sha,
-        }),
-    ))
+    // Commit directly to the default branch (no feature branch, no MR).
+    let commit_sha = state
+        .git_ops
+        .write_file(
+            &repo.path,
+            &repo.default_branch,
+            &req.prompt_path,
+            req.content.as_bytes(),
+            &req.message,
+        )
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok((StatusCode::CREATED, Json(PromptSaveResponse { commit_sha })))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -523,6 +562,129 @@ mod tests {
         let json = body_json(resp).await;
         assert!(json["branch"].as_str().unwrap().starts_with("spec-edit/"));
         assert!(!json["mr_id"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_spec_existing_mr_returns_same_mr() {
+        let app = app();
+        // Create a repo.
+        let create_body = serde_json::json!({
+            "name": "spec-edit-existing-mr",
+            "workspace_id": "ws-1",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        let save_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "content": "# Vision v1",
+            "message": "First edit",
+        });
+
+        // First save — creates MR.
+        let resp1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let json1 = body_json(resp1).await;
+        let branch1 = json1["branch"].as_str().unwrap().to_string();
+        let mr_id1 = json1["mr_id"].as_str().unwrap().to_string();
+
+        // Second save to same spec_path — should return the existing MR.
+        let save_body2 = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "content": "# Vision v2",
+            "message": "Second edit",
+        });
+        let resp2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body2).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Existing MR case returns 200, not 201.
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["branch"].as_str().unwrap(), branch1);
+        assert_eq!(json2["mr_id"].as_str().unwrap(), mr_id1);
+    }
+
+    #[tokio::test]
+    async fn save_prompt_returns_commit_sha() {
+        let app = app();
+        // Create a repo.
+        let create_body = serde_json::json!({
+            "name": "prompt-save-test",
+            "workspace_id": "ws-1",
+            "tenant_id": "tenant-1",
+        });
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        let save_body = serde_json::json!({
+            "prompt_path": "specs/prompts/specs-assist.md",
+            "content": "# Updated prompt template",
+            "message": "Update specs-assist prompt",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/prompts/save", repo_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let sha = json["commit_sha"].as_str().unwrap();
+        // SHA should be a valid 40-char hex string
+        assert_eq!(sha.len(), 40);
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

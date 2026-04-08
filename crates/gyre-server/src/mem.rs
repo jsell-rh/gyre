@@ -113,6 +113,30 @@ impl GitOpsPort for NoopGitOps {
     async fn fetch_mirror(&self, _path: &str) -> Result<()> {
         Ok(())
     }
+
+    async fn branch_exists(&self, _repo_path: &str, _branch_name: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn create_branch(
+        &self,
+        _repo_path: &str,
+        _branch_name: &str,
+        _from_ref: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write_file(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _file_path: &str,
+        _content: &[u8],
+        _message: &str,
+    ) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
+    }
 }
 
 #[cfg(test)]
