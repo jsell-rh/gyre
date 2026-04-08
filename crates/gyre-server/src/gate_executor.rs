@@ -271,30 +271,24 @@ async fn produce_gate_attestation(
         platform_countersign: vec![],
     };
 
-    // Sign the gate attestation content.
-    let sign_content = serde_json::json!({
-        "gate_id": gate.id.to_string(),
-        "gate_name": gate.name,
-        "gate_type": gate.gate_type,
-        "status": status,
-        "output_hash": hex::encode(&output_hash),
-    });
-    let sign_bytes = serde_json::to_vec(&sign_content).unwrap_or_default();
-    let signature = state.agent_signing_key.sign_bytes(&sign_bytes);
-
-    // Build the GateAttestation record.
+    // Build the GateAttestation record first, then sign using the shared
+    // signable_bytes() helper to ensure sign/verify message parity (checklist §44).
     // GateType and GateStatus in gyre_domain are re-exported from gyre_common,
     // so they are the same type — no conversion needed.
-    let gate_attestation = GateAttestation {
+    let mut gate_attestation = GateAttestation {
         gate_id: gate.id.to_string(),
         gate_name: gate.name.clone(),
         gate_type: gate.gate_type.clone(),
         status: status.clone(),
         output_hash,
         constraint: None, // Gate constraints are attached by review/validation agents
-        signature,
+        signature: vec![], // Populated below after signing
         key_binding,
     };
+
+    // Sign the gate attestation content using the shared signable_bytes() helper.
+    let sign_bytes = gate_attestation.signable_bytes();
+    gate_attestation.signature = state.agent_signing_key.sign_bytes(&sign_bytes);
 
     // Update the leaf attestation with this gate result appended.
     let mut updated_leaf = leaf.clone();

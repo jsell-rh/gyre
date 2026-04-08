@@ -637,8 +637,9 @@ pub async fn get_attestation_chain(
 /// For each attestation:
 ///   (a) If `attestation.output.agent_signature` is not None, verify it against
 ///       `attestation.output.content_hash` using the agent's key binding public key.
-///   (b) For each gate result, verify `gate.signature` against `gate.output_hash`
-///       using `gate.key_binding.public_key`.
+///   (b) For each gate result, verify `gate.signature` against the canonical
+///       signable bytes (via `GateAttestation::signable_bytes()`) using
+///       `gate.key_binding.public_key`.
 fn verify_output_signatures(chain: &[gyre_common::Attestation]) -> gyre_common::VerificationResult {
     use ring::signature::{self, UnparsedPublicKey};
 
@@ -682,11 +683,13 @@ fn verify_output_signatures(chain: &[gyre_common::Attestation]) -> gyre_common::
             });
         }
 
-        // (b) Verify each gate result signature.
+        // (b) Verify each gate result signature using the shared signable_bytes()
+        // helper to ensure sign/verify message parity (checklist §44).
         for (gi, gate) in att.output.gate_results.iter().enumerate() {
             let peer_key =
                 UnparsedPublicKey::new(&signature::ED25519, &gate.key_binding.public_key);
-            let sig_valid = peer_key.verify(&gate.output_hash, &gate.signature).is_ok();
+            let sign_bytes = gate.signable_bytes();
+            let sig_valid = peer_key.verify(&sign_bytes, &gate.signature).is_ok();
 
             if !sig_valid {
                 all_valid = false;
@@ -701,10 +704,7 @@ fn verify_output_signatures(chain: &[gyre_common::Attestation]) -> gyre_common::
                         gate.gate_name
                     )
                 } else {
-                    format!(
-                        "gate '{}' signature verification FAILED",
-                        gate.gate_name
-                    )
+                    format!("gate '{}' signature verification FAILED", gate.gate_name)
                 },
                 children: vec![],
             });
@@ -863,5 +863,108 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["task_id"], "TASK-007");
         assert_eq!(json["commits"].as_array().unwrap().len(), 2);
+    }
+
+    /// Round-trip sign-then-verify test for gate attestation signatures.
+    ///
+    /// Signs a GateAttestation using the same code path as gate_executor,
+    /// then verifies it using verify_output_signatures. This catches
+    /// sign/verify message mismatch (checklist §44, review F6).
+    #[tokio::test]
+    async fn gate_signature_round_trip_sign_verify() {
+        use gyre_common::{
+            gate::{GateStatus, GateType},
+            Attestation, AttestationInput, AttestationMetadata, AttestationOutput, GateAttestation,
+            InputContent, KeyBinding, ScopeConstraint, SignedInput,
+        };
+        use sha2::{Digest, Sha256};
+
+        let signing_key = crate::auth::AgentSigningKey::generate();
+
+        // Build a GateAttestation with a real signature via signable_bytes().
+        let output_hash = Sha256::digest(b"gate output content").to_vec();
+        let key_binding = KeyBinding {
+            public_key: signing_key.public_key_bytes.clone(),
+            user_identity: "gate-agent:test-gate".to_string(),
+            issuer: "http://localhost:3000".to_string(),
+            trust_anchor_id: "gyre-platform".to_string(),
+            issued_at: 1000,
+            expires_at: 9999,
+            user_signature: vec![],
+            platform_countersign: vec![],
+        };
+
+        let mut gate_att = GateAttestation {
+            gate_id: "gate-1".to_string(),
+            gate_name: "test-gate".to_string(),
+            gate_type: GateType::AgentReview,
+            status: GateStatus::Passed,
+            output_hash,
+            constraint: None,
+            signature: vec![],
+            key_binding: key_binding.clone(),
+        };
+
+        // Sign using signable_bytes() — same path as gate_executor.
+        let sign_bytes = gate_att.signable_bytes();
+        gate_att.signature = signing_key.sign_bytes(&sign_bytes);
+
+        // Wrap in an Attestation so verify_output_signatures can process it.
+        let attestation = Attestation {
+            id: "att-1".to_string(),
+            input: AttestationInput::Signed(SignedInput {
+                content: InputContent {
+                    spec_path: "specs/test.md".to_string(),
+                    spec_sha: "abc123".to_string(),
+                    workspace_id: "ws-1".to_string(),
+                    repo_id: "repo-1".to_string(),
+                    persona_constraints: vec![],
+                    meta_spec_set_sha: String::new(),
+                    scope: ScopeConstraint {
+                        allowed_paths: vec![],
+                        forbidden_paths: vec![],
+                    },
+                },
+                output_constraints: vec![],
+                signature: vec![],
+                key_binding: key_binding.clone(),
+                valid_until: 9999,
+                expected_generation: None,
+            }),
+            output: AttestationOutput {
+                content_hash: vec![0u8; 32],
+                commit_sha: "abc123def".to_string(),
+                agent_signature: None,
+                gate_results: vec![gate_att],
+            },
+            metadata: AttestationMetadata {
+                created_at: 1000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: "TASK-TEST".to_string(),
+                agent_id: "agent-1".to_string(),
+                chain_depth: 0,
+            },
+        };
+
+        // Verify — should succeed because sign and verify use the same message.
+        let result = super::verify_output_signatures(&[attestation.clone()]);
+        assert!(
+            result.valid,
+            "Gate signature round-trip verification must succeed: {}",
+            result.message
+        );
+        assert_eq!(result.children.len(), 1);
+        assert!(result.children[0].valid);
+
+        // Mutate gate_name and verify it fails — proves verification is meaningful.
+        let mut mutated = attestation;
+        mutated.output.gate_results[0].gate_name = "tampered-name".to_string();
+        let bad_result = super::verify_output_signatures(&[mutated]);
+        assert!(
+            !bad_result.valid,
+            "Tampered gate attestation must fail verification"
+        );
+        assert!(!bad_result.children[0].valid);
     }
 }

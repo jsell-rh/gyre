@@ -227,6 +227,25 @@ pub struct GateAttestation {
     pub key_binding: KeyBinding,
 }
 
+impl GateAttestation {
+    /// Returns the canonical bytes that are signed/verified for this gate attestation.
+    ///
+    /// Both the signing site (`gate_executor`) and verification site
+    /// (`verify_output_signatures`) MUST use this helper to ensure sign/verify
+    /// message parity (see checklist item 44). The signable message is a JSON
+    /// object containing 5 fields serialized via `serde_json::to_vec`.
+    pub fn signable_bytes(&self) -> Vec<u8> {
+        let sign_content = serde_json::json!({
+            "gate_id": self.gate_id,
+            "gate_name": self.gate_name,
+            "gate_type": self.gate_type,
+            "status": self.status,
+            "output_hash": hex::encode(&self.output_hash),
+        });
+        serde_json::to_vec(&sign_content).unwrap_or_default()
+    }
+}
+
 /// The complete attestation record — packages input, output, and metadata (§5.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attestation {
