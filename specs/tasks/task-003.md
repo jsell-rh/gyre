@@ -57,4 +57,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `288c90be` feat(provenance): add authorization provenance domain types and port traits (TASK-003)
