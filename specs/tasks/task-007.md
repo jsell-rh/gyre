@@ -2,9 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §3.2, §8 Phase 2  
 **Depends on:** TASK-006  
-**Progress:** `ready-for-review`  
+**Progress:** `complete`  
 **Review:** [`specs/reviews/task-007.md`](../reviews/task-007.md)  
-**Note:** R5 found 2 findings: F9 (integration tests for push-time and merge-time evaluation use `/nonexistent/path`, causing early exit before constraint evaluation — "no panic" assertion is tautological), F10 (dry-run only validates CEL syntax via `Program::compile`, does not evaluate against repo state as spec §7.6 requires).
+**Note:** R6 — all findings resolved, no new findings. Verified complete.
 
 ## Spec Excerpt
 
