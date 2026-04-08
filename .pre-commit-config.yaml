@@ -40,6 +40,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: tenant-filter
+        name: tenant filter lint
+        description: Verify Diesel read queries filter by tenant_id
+        entry: scripts/check-tenant-filter.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: type-simplification
         name: type simplification
         description: Detect String fields in gyre-common where named enum/struct types exist
