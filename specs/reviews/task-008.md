@@ -1,10 +1,10 @@
 # Review: TASK-008 — Authorization Provenance Phase 3: Enforcement
 
 **Reviewer:** Verifier  
-**Commit:** `6b3f5f6f`  
-**Round:** R5  
+**Commit:** `d3bc8a8c`  
+**Round:** R6  
 **Date:** 2026-04-08  
-**Verdict:** NEEDS REVISION — 1 finding (F6 new: gate signature message mismatch; F1/F5 resolved)
+**Verdict:** COMPLETE — all findings resolved (F1-F6)
 
 ## Findings
 
@@ -58,3 +58,16 @@
   let sig_valid = peer_key.verify(&sign_bytes, &gate.signature).is_ok();
   ```
   Or, extract the signable content construction into a shared helper function (e.g., `GateAttestation::signable_bytes(&self) -> Vec<u8>`) in `gyre-common` that both `gate_executor` (sign) and `verify_output_signatures` (verify) call, ensuring sign/verify parity by construction.
+  **Resolution (R6 commit d3bc8a8c):** Extracted `GateAttestation::signable_bytes()` shared helper in `gyre-common/src/attestation.rs`. Both `gate_executor` (sign) and `verify_output_signatures` (verify) now call this single helper, ensuring sign/verify message parity by construction. Round-trip sign-then-verify test added (`gate_signature_round_trip_sign_verify`) that confirms both positive (valid signature passes) and negative (tampered attestation fails) cases.
+
+### R6
+
+No findings. All prior findings (F1–F6) verified resolved:
+
+- F1 (signing entity mismatch): DerivedInput now signed by spawner's key loaded from KV (`agent_signing_keys`), with spawner's KeyBinding attached. Child keypair generated unconditionally in Step 1 before spawner key lookup.
+- F2 (notification priority): Both push and merge enforcement use `create_violation_notifications()` which defaults to priority 2, matching spec §7.5.
+- F3/F5 (incomplete verification): Verification endpoint implements all 5 phases of §6.2 algorithm — chain structure (Phase 1), constraint collection (Phase 2), CEL context (Phase 3), constraint evaluation (Phase 4), output signature verification (Phase 5).
+- F4 (empty trust anchors): Trust anchors loaded from tenant via `list_by_tenant()`.
+- F6 (gate sign/verify mismatch): Resolved via shared `GateAttestation::signable_bytes()` helper in `gyre-common`. Round-trip test confirms parity.
+
+All 14 mechanical check scripts pass. All 9 acceptance criteria verified. 301 tests pass (1 unrelated env-dependent test failure in `rig_vertexai`).

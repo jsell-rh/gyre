@@ -2,9 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §6, §7.2, §8 Phase 3  
 **Depends on:** TASK-007  
-**Progress:** `ready-for-review`  
+**Progress:** `complete`  
 **Review:** [specs/reviews/task-008.md](../reviews/task-008.md)  
-**Note:** R6 — F6 resolved: extracted `GateAttestation::signable_bytes()` shared helper in `gyre-common`, used by both `gate_executor` (sign) and `verify_output_signatures` (verify) to ensure sign/verify message parity by construction. Round-trip sign-then-verify test added.
+**Note:** R6 — all findings resolved. Verification complete.
 
 ## Spec Excerpt
 
