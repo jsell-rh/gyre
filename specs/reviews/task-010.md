@@ -44,3 +44,28 @@ R2 findings F5–F7 were addressed: `assemble_concept_results` extracted as shar
 - [-] [process-revision-complete] **F8: `briefing://` MCP resource skips `last_seen_at` default, diverging from REST handler's `since` resolution** — `mcp.rs:2257-2258`: when no `?since=` query param is provided, the MCP handler falls back directly to `now - 24h`. The REST handler `get_workspace_briefing` at `graph.rs:974-988` uses a three-step resolution: (1) explicit `?since=` param, (2) `user_workspace_state.get_last_seen(uid, workspace_id)`, (3) 24h fallback. The MCP handler skips step 2. An MCP consumer who visited the workspace 8 hours ago and reads `briefing://ws-1` (no explicit `since`) receives 24 hours of items, while a REST consumer receives only 8 hours. This violates HSI §11's parity constraint — the same implicit request produces different results depending on access method. The `auth` parameter is available in `handle_resource_read`, and `state.user_workspace_state` is accessible. Fix: replicate the REST handler's `since` resolution logic — check `auth.user_id`, look up `last_seen_at`, fall back to 24h.
 
 - [-] [process-revision-complete] **F9: `assemble_concept_results` doc comment contains stale route annotation `GET /api/v1/repos/{id}/graph/concept/{name}`** — `graph.rs:574`: the first line of the doc comment on `assemble_concept_results` is `/// GET /api/v1/repos/{id}/graph/concept/{name}` — a route annotation that described the REST handler before the function was extracted. `assemble_concept_results` is not an HTTP handler; it's a shared assembly function called by both REST and MCP. The stale route annotation is misleading — a reader scanning for endpoint definitions will find this function and assume it's a handler. The actual handler `get_graph_concept` at `graph.rs:649` lost its route annotation in the refactoring. Fix: remove the `GET /api/v1/repos/...` line from `assemble_concept_results`'s doc comment, and add `/// GET /api/v1/repos/{id}/graph/concept/{name}` to `get_graph_concept`.
+
+## R4 — 2026-04-08
+
+Reviewer: Verifier
+Commit under review: `64513d92`
+
+R3 findings F8–F9 resolved. Verification:
+
+- **F8:** MCP `briefing://` handler now implements the three-step `since` resolution: explicit `?since=` param → `user_workspace_state.get_last_seen()` → 24h fallback. Logic is byte-for-byte equivalent to the REST handler at `graph.rs:974-988`. New test `mcp_briefing_resource_uses_last_seen_at_default` verifies the `last_seen_at` lookup produces the correct `since` value.
+
+- **F9:** Route annotation `/// GET /api/v1/repos/{id}/graph/concept/{name}` removed from `assemble_concept_results` (shared assembly function) and restored on `get_graph_concept` (the actual handler) at `graph.rs:644`.
+
+Sweep for new findings:
+- All five new MCP handlers (`briefing://`, `notifications://`, `trace://`, `graph_concept`, `spec_assist`) delegate to shared assembly functions or serialize through response structs — no hand-built JSON for data responses.
+- Enum serialization uses serde (via `assemble_concept_results` → `KnowledgeGraphResponse` → `GraphNodeResponse`/`GraphEdgeResponse` with `#[serde(rename_all = "snake_case")]`) — no Debug-format divergence in TASK-010 code.
+- `notifications://` response envelope matches REST handler at `users.rs:313` (field-for-field: `notifications`, `limit`, `offset`).
+- `trace://` delegates to `assemble_gate_trace` — same function the REST handler calls.
+- `spec_assist` replicates REST handler's LLM call pipeline (rate limit → prompt template → model resolution → stream collect) with the same parameters.
+- All tests assert on observable response structure, not just "no panic".
+- `scripts/check-mcp-wrapper-parity.sh` — no violations in TASK-010 code (flagged items are pre-existing handlers).
+- `scripts/check-cli-spec-parity.sh` — passes.
+- `scripts/check-placeholder-stubs.sh` — passes.
+- All 1,843 tests pass (0 failures, 14 ignored).
+
+No new findings. **TASK-010 verified complete.**
