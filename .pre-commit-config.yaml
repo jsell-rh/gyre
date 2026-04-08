@@ -180,6 +180,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: stale-stub-markers
+        name: stale stub markers
+        description: Detect (stubbed) markers in doc comments of implemented functions
+        entry: scripts/check-stale-stub-markers.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
