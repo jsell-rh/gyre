@@ -58,4 +58,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `aa3e6fbe` feat(server): implement authorization provenance Phase 1 — key binding, signed input, trust anchors (TASK-006)
