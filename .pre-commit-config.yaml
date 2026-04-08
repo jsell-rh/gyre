@@ -188,6 +188,22 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: llm-endpoint-hygiene
+        name: LLM endpoint hygiene lint
+        description: Verify LLM endpoints track budget (CostEntry) and forward max_tokens
+        entry: scripts/check-llm-endpoint-hygiene.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: template-substitution
+        name: template substitution lint
+        description: Verify prompt template consumers substitute all declared variables
+        entry: scripts/check-template-substitution.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
