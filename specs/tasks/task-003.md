@@ -1,7 +1,7 @@
 # TASK-003: Authorization Provenance — Domain Types and Port Traits
 
 **Spec reference:** `authorization-provenance.md` §1–§5  
-**Progress:** `ready-for-review`  
+**Progress:** `complete`  
 **Review:** [`specs/reviews/task-003.md`](../reviews/task-003.md)
 
 ## Spec Excerpt

@@ -1,8 +1,8 @@
 # Review: TASK-003 — Authorization Provenance Domain Types and Port Traits
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R2)  
-**Verdict:** needs-revision
+**Date:** 2026-04-07 (R3)  
+**Verdict:** complete
 
 ---
 
@@ -28,3 +28,34 @@
   The spec (authorization-provenance.md §5.1) defines `GateAttestation` with `gate_type: GateType` and `status: GateStatus`. Both `GateType` and `GateStatus` exist as proper Rust enums in `gyre-domain/src/quality_gate.rs` — `GateType` has variants `TestCommand`, `LintCommand`, `RequiredApprovals`, `AgentReview`, `AgentValidation`; `GateStatus` has `Pending`, `Running`, `Passed`, `Failed`. Both derive `Serialize, Deserialize` with `#[serde(rename_all = "snake_case")]`. The implementation (attestation.rs:215-216) uses `pub gate_type: String` and `pub status: String`. This is a spec-type simplification drift — there is no compile-time or parse-time validation that `gate_type` contains a valid gate type value. Code that constructs a `GateAttestation` with `gate_type: "agent_review"` and code that checks for `"AgentReview"` will silently mismatch. The enums currently live in `gyre-domain`, which `gyre-common` cannot import (hexagonal boundary). The fix is to move `GateType` and `GateStatus` to `gyre-common` (they are pure value enums with no domain logic — same pattern as `MessageKind`, `NodeType`, `NotificationType`, etc. which are already in gyre-common) and update `gyre-domain/src/quality_gate.rs` to re-export from gyre-common.  
   **Files:** `crates/gyre-common/src/attestation.rs:215-216` (`String` types), `crates/gyre-domain/src/quality_gate.rs:35-45,55-60` (existing enum definitions).  
   **Process fixes:** Created `scripts/check-type-simplification.sh` — mechanically detects `String` fields in gyre-common types whose names match existing enum types elsewhere in the codebase (with context-qualified lookup, e.g., `status` in `GateAttestation` → `GateStatus`). Added to pre-commit hooks. Added "Cross-crate enum substitution" sub-item to implementation checklist item #23 and verifier prompt's "Spec-type simplification drift" target. Updated enumeration procedure to explicitly prompt for `String` → enum type checks.
+
+## R3 Findings
+
+- [x] **F3 (resolved R3).** `GateAttestation.gate_type` now uses `GateType` enum, `.status` uses `GateStatus` enum. Both enums moved to `gyre-common::gate` (pure value enums, no domain logic — same layer as `MessageKind`, `NodeType`). `gyre-domain::quality_gate` re-exports for backward compatibility. Test `gate_attestation_enum_fields_serialize_snake_case` confirms snake_case serialization (`"test_command"`, `"passed"`). Fixed in commit `e165b558`.
+
+**R3 Verdict: PASS — no new findings.**
+
+All types verified field-by-field against authorization-provenance.md §1–§5:
+- `TrustAnchor` (§1.1): 5 fields ✅
+- `KeyBinding` (§2.3): 8 fields ✅
+- `InputContent` (§2.2): 7 fields, `PersonaRef` structured type ✅
+- `SignedInput` (§2.1-2.2): 6 fields, full `KeyBinding` embedded ✅
+- `ScopeConstraint` (§2.2): 2 fields ✅
+- `OutputConstraint` (§3.1): 2 fields ✅
+- `GateConstraint` (§3.2): 4 fields ✅
+- `DerivedInput` (§4.1): 6 fields, full `KeyBinding` embedded ✅
+- `Attestation` (§5.1): 4 fields, `AttestationInput` tagged enum ✅
+- `AttestationOutput` (§5.1): 4 fields ✅
+- `AttestationMetadata` (§5.1): 6 fields ✅
+- `GateAttestation` (§5.1): 8 fields, `GateType`/`GateStatus` enums ✅
+- `VerificationResult` (§6.4): 4 fields, recursive tree ✅
+- `ConstraintViolation` MessageKind variant (§7.5): Event tier, server_only ✅
+
+Port traits:
+- `ChainAttestationRepository` (§5.4): 6 methods matching spec ✅
+- `TrustAnchorRepository`: CRUD, tenant-scoped ✅
+- `KeyBindingRepository`: store/find/invalidate ✅
+
+Hexagonal boundary: `gyre-common` has no infrastructure imports ✅
+Tests: 88 pass in gyre-common, 315 in gyre-domain ✅
+Compilation: full `cargo check --all` clean ✅
