@@ -2,7 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §3.2, §8 Phase 2  
 **Depends on:** TASK-006  
-**Progress:** `ready-for-review`
+**Progress:** `needs-revision`  
+**Review:** [`specs/reviews/task-007.md`](../reviews/task-007.md)  
+**Note:** R1 found 3 findings: F1 (missing attestation_id in ConstraintViolation payload), F2 (notification priority 3 vs spec-required 2), F3 (default_branch hardcoded to "main").
 
 ## Spec Excerpt
 

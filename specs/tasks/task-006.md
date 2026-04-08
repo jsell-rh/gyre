@@ -2,9 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §2, §7.1, §8 Phase 1  
 **Depends on:** TASK-003, TASK-004, TASK-005  
-**Progress:** `ready-for-review`  
+**Progress:** `needs-revision`  
 **Review:** [`specs/reviews/task-006.md`](../reviews/task-006.md)  
-**Note:** R1 found two findings (F1: tenant isolation, F2: signature verification). Fix committed `28e517d7`. Awaiting R2 verification.
+**Note:** R2 found 3 findings: F1 (tenant isolation, carried from R1 — code not fixed), F2 (signature verification, carried from R1 — code not fixed), F3 (NEW — SignedInput.signature is platform-signed instead of user-signed).
 
 ## Spec Excerpt
 
