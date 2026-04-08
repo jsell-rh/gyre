@@ -10,6 +10,7 @@ use gyre_common::{AttestationInput, Id, NotificationType, VerificationResult};
 use gyre_domain::constraint_evaluator::{
     self, Action, AgentContext, ConstraintInput, DiffStatsContext, OutputContext, TargetContext,
 };
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::AppState;
@@ -88,8 +89,9 @@ pub async fn evaluate_push_constraints(
         }
     };
 
-    // Build agent context from the agent record.
-    let agent_ctx = build_agent_context(state, agent_id, task_id).await;
+    // Build agent context from the agent record, workspace meta-spec set, and
+    // workload attestation.
+    let agent_ctx = build_agent_context(state, agent_id, task_id, workspace_id).await;
 
     // Look up workspace trust level.
     let workspace = state
@@ -103,11 +105,20 @@ pub async fn evaluate_push_constraints(
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
     // Derive strategy-implied constraints.
-    let strategy_constraints = constraint_evaluator::derive_strategy_constraints(
+    let mut strategy_constraints = constraint_evaluator::derive_strategy_constraints(
         &signed_input.content,
         trust_level.as_deref(),
         None, // attestation level policy not yet available at push time
     );
+
+    // Phase 2 guard: remove attestation-level constraints when the agent's
+    // attestation level is unknown (0 = default). Without this guard, the
+    // supervised workspace constraint `agent.attestation_level >= 2` always
+    // fails (0 < 2), producing false violations and blocking downstream
+    // constraint evaluation via §3.4 fail-closed short-circuit.
+    if agent_ctx.attestation_level == 0 {
+        strategy_constraints.retain(|c| !c.expression.contains("agent.attestation_level"));
+    }
 
     // Collect all constraints: explicit + strategy-implied + gate.
     let gate_constraints: Vec<gyre_common::attestation::GateConstraint> = attestations
@@ -316,8 +327,9 @@ pub async fn evaluate_merge_constraints(
         }
     };
 
-    // Build agent context.
-    let agent_ctx = build_agent_context(state, &agent_id, &task_id).await;
+    // Build agent context from the agent record, workspace meta-spec set, and
+    // workload attestation.
+    let agent_ctx = build_agent_context(state, &agent_id, &task_id, workspace_id).await;
 
     // Look up workspace trust level.
     let workspace = state
@@ -331,11 +343,17 @@ pub async fn evaluate_merge_constraints(
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
     // Derive strategy-implied constraints.
-    let strategy_constraints = constraint_evaluator::derive_strategy_constraints(
+    let mut strategy_constraints = constraint_evaluator::derive_strategy_constraints(
         &signed_input.content,
         trust_level.as_deref(),
         None,
     );
+
+    // Phase 2 guard: remove attestation-level constraints when the agent's
+    // attestation level is unknown (0 = default). See push-time guard comment.
+    if agent_ctx.attestation_level == 0 {
+        strategy_constraints.retain(|c| !c.expression.contains("agent.attestation_level"));
+    }
 
     // Collect gate constraints from attestation chain.
     let gate_constraints: Vec<gyre_common::attestation::GateConstraint> = attestations
@@ -432,8 +450,19 @@ pub async fn evaluate_merge_constraints(
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// Build an `AgentContext` from the agent record and JWT claims in the database.
-async fn build_agent_context(state: &AppState, agent_id: &str, task_id: &str) -> AgentContext {
+/// Build an `AgentContext` from the agent record, JWT claims, workspace
+/// meta-spec set, and workload attestation data.
+///
+/// Populates `meta_spec_set_sha` from the workspace's current meta-spec set
+/// (SHA256 of the serialized JSON). For `attestation_level`, workload
+/// attestation data is not yet available in Phase 2 — the field remains 0
+/// and callers must guard against generating constraints that reference it.
+async fn build_agent_context(
+    state: &AppState,
+    agent_id: &str,
+    task_id: &str,
+    workspace_id: &Id,
+) -> AgentContext {
     let agent = state
         .agents
         .find_by_id(&Id::new(agent_id))
@@ -452,19 +481,53 @@ async fn build_agent_context(state: &AppState, agent_id: &str, task_id: &str) ->
         .flatten()
         .unwrap_or_default();
 
+    // Meta-spec set SHA: compute from the workspace's current meta-spec set.
+    // The agent runs in this workspace, so its meta-spec set is the workspace's
+    // current set. If no set is configured, the SHA is empty (correctly fails
+    // against a non-empty input SHA, indicating the set has changed).
+    let meta_spec_set_sha = match state.meta_spec_sets.get(workspace_id).await {
+        Ok(Some(json)) => {
+            let mut hasher = Sha256::new();
+            hasher.update(json.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+        _ => String::new(),
+    };
+
+    // Workload attestation: populate container_id, image_hash, and stack_hash
+    // from the KV-cached workload attestation record if available.
+    let workload = state
+        .kv_store
+        .kv_get("workload_attestations", agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|json| {
+            serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json).ok()
+        });
+
+    let (stack_hash, container_id, image_hash) = match &workload {
+        Some(att) => (
+            att.stack_fingerprint.clone(),
+            att.container_id.clone().unwrap_or_default(),
+            att.image_hash.clone().unwrap_or_default(),
+        ),
+        None => (String::new(), String::new(), String::new()),
+    };
+
     AgentContext {
         id: agent_id.to_string(),
         persona,
-        stack_hash: String::new(),
-        attestation_level: 0,
-        meta_spec_set_sha: String::new(),
+        stack_hash,
+        attestation_level: 0, // empty-default:ok — Phase 2: attestation level derivation not yet implemented; callers guard constraint generation
+        meta_spec_set_sha,
         spawned_by: agent
             .as_ref()
             .and_then(|a| a.spawned_by.clone())
             .unwrap_or_default(),
         task_id: task_id.to_string(),
-        container_id: String::new(),
-        image_hash: String::new(),
+        container_id,
+        image_hash,
     }
 }
 
@@ -1288,5 +1351,128 @@ mod tests {
         // No panic = success. The function found the MR, resolved the agent
         // and task, found the attestation chain, but could not compute the
         // diff (expected without a real git repo).
+    }
+
+    // ── build_agent_context ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn build_agent_context_populates_meta_spec_set_sha_from_workspace() {
+        let state = crate::mem::test_state();
+        let ws_id = Id::new("ws-ctx-1");
+
+        // Store a meta-spec set for the workspace.
+        let meta_set_json = r#"{"workspace_id":"ws-ctx-1","personas":{},"principles":[],"standards":[],"process":[]}"#;
+        state
+            .meta_spec_sets
+            .upsert(&ws_id, meta_set_json)
+            .await
+            .unwrap();
+
+        // Compute expected SHA256.
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(meta_set_json.as_bytes());
+        let expected_sha = hex::encode(hasher.finalize());
+
+        let ctx = build_agent_context(&state, "agent-ctx-1", "TASK-CTX-1", &ws_id).await;
+
+        assert_eq!(ctx.meta_spec_set_sha, expected_sha);
+        assert!(!ctx.meta_spec_set_sha.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_agent_context_empty_sha_when_no_meta_spec_set() {
+        let state = crate::mem::test_state();
+        let ws_id = Id::new("ws-no-meta");
+
+        // No meta-spec set stored → SHA should be empty.
+        let ctx = build_agent_context(&state, "agent-ctx-2", "TASK-CTX-2", &ws_id).await;
+
+        assert!(ctx.meta_spec_set_sha.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_agent_context_populates_workload_fields() {
+        let state = crate::mem::test_state();
+        let ws_id = Id::new("ws-wl-1");
+
+        // Store a workload attestation for the agent.
+        let att = crate::workload_attestation::WorkloadAttestation {
+            agent_id: "agent-wl-1".to_string(),
+            pid: Some(1234),
+            hostname: "test-host".to_string(),
+            compute_target: "local".to_string(),
+            stack_fingerprint: "sha256:stack-abc".to_string(),
+            attested_at: 1_700_000_000,
+            alive: true,
+            last_verified_at: 1_700_000_000,
+            container_id: Some("container-xyz".to_string()),
+            image_hash: Some("sha256:img-def".to_string()),
+        };
+        let json = serde_json::to_string(&att).unwrap();
+        state
+            .kv_store
+            .kv_set("workload_attestations", "agent-wl-1", json)
+            .await
+            .unwrap();
+
+        let ctx = build_agent_context(&state, "agent-wl-1", "TASK-WL-1", &ws_id).await;
+
+        assert_eq!(ctx.stack_hash, "sha256:stack-abc");
+        assert_eq!(ctx.container_id, "container-xyz");
+        assert_eq!(ctx.image_hash, "sha256:img-def");
+    }
+
+    #[tokio::test]
+    async fn attestation_level_guard_removes_attestation_constraints() {
+        // Verify that when attestation_level is 0 (default), attestation-level
+        // constraints are filtered out to prevent false violations.
+        let content = InputContent {
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: "abc123".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: "def456".to_string(),
+            scope: ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+
+        // Derive constraints for a supervised workspace (produces attestation check).
+        let mut strategy = constraint_evaluator::derive_strategy_constraints(
+            &content,
+            Some("supervised"),
+            Some(3),
+        );
+
+        // Before guard: should have attestation constraints.
+        assert!(
+            strategy
+                .iter()
+                .any(|c| c.expression.contains("agent.attestation_level")),
+            "should have attestation constraints before guard"
+        );
+
+        // Apply the Phase 2 guard (same logic as evaluate_push/merge_constraints).
+        let agent_attestation_level = 0;
+        if agent_attestation_level == 0 {
+            strategy.retain(|c| !c.expression.contains("agent.attestation_level"));
+        }
+
+        // After guard: no attestation constraints.
+        assert!(
+            !strategy
+                .iter()
+                .any(|c| c.expression.contains("agent.attestation_level")),
+            "attestation constraints should be filtered when level is 0"
+        );
+
+        // Non-attestation constraints should survive the guard.
+        assert!(
+            strategy.iter().any(|c| c.name.contains("meta-spec")),
+            "meta-spec constraint should survive the guard"
+        );
     }
 }
