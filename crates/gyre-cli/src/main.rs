@@ -847,12 +847,24 @@ async fn main() -> Result<()> {
             if ops.is_empty() {
                 println!("No suggestions returned.");
             } else {
-                println!();
-                println!("Spec assist response:");
-                println!();
                 for op in &ops {
-                    if let Some(text) = op["text"].as_str() {
-                        println!("{text}");
+                    // Display explanation.
+                    if let Some(explanation) = op["explanation"].as_str() {
+                        println!();
+                        println!("Explanation: {explanation}");
+                    }
+                    // Display diff operations.
+                    if let Some(diff) = op["diff"].as_array() {
+                        println!();
+                        for d in diff {
+                            let op_type = d["op"].as_str().unwrap_or("unknown");
+                            let path = d["path"].as_str().unwrap_or("");
+                            let content = d["content"].as_str().unwrap_or("");
+                            println!("  [{op_type}] {path}");
+                            for line in content.lines() {
+                                println!("    {line}");
+                            }
+                        }
                     }
                 }
             }

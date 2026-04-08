@@ -278,8 +278,13 @@ pub async fn assist_spec(
                 .unwrap_or(false);
 
             if valid_diff {
-                let complete_data = serde_json::to_string(&parsed).unwrap_or_default();
-                events.push(Ok(Event::default().event("complete").data(complete_data)));
+                events.push(Ok(Event::default().event("complete").data(
+                    serde_json::to_string(&serde_json::json!({
+                        "diff": parsed["diff"],
+                        "explanation": parsed["explanation"],
+                    }))
+                    .unwrap_or_default(),
+                )));
             } else {
                 // diff ops are invalid — send error event
                 let error_data = serde_json::to_string(&serde_json::json!({

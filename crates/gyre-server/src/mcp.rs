@@ -2135,7 +2135,35 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
         tracing::warn!("Failed to record MCP specs/assist cost entry: {e}");
     }
 
-    tool_result(full_text)
+    // Validate LLM response: parse JSON, check diff+explanation fields, validate diff ops.
+    // Must match REST handler validation (specs_assist.rs) per HSI §11 MCP parity.
+    match serde_json::from_str::<serde_json::Value>(&full_text) {
+        Ok(parsed) if parsed.get("diff").is_some() && parsed.get("explanation").is_some() => {
+            // Validate diff ops: each must have valid op and path.
+            let diff = parsed["diff"].as_array();
+            let valid_diff = diff
+                .map(|ops| {
+                    ops.iter().all(|op| {
+                        let op_str = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                        let has_path = op.get("path").and_then(|v| v.as_str()).is_some();
+                        matches!(op_str, "add" | "remove" | "replace") && has_path
+                    })
+                })
+                .unwrap_or(false);
+
+            if valid_diff {
+                tool_result(serde_json::to_string_pretty(&parsed).unwrap_or_default())
+            } else {
+                tool_error("LLM produced invalid diff operations. Each operation must have op (add/remove/replace), path, and content fields.")
+            }
+        }
+        Ok(_) => {
+            tool_error("LLM response is valid JSON but missing required 'diff' and/or 'explanation' fields.")
+        }
+        Err(_) => {
+            tool_error("LLM returned invalid JSON. Please try rephrasing your instruction.")
+        }
+    }
 }
 
 // ── MCP Resources ─────────────────────────────────────────────────────────────

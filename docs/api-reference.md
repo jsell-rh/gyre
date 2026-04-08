@@ -75,7 +75,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/constraints/strategy` | Preview strategy-implied constraints: `?workspace_id=<id>` → `{constraints: [{name, expression},...]}` — returns the full set of strategy-implied constraints (persona, meta-spec, scope, trust level, attestation policy) that would apply for the given workspace context (authorization-provenance §7.6, TASK-007) |
 | `GET/PUT` | `/api/v1/repos/{id}/push-gates` | Get / set active pre-accept push gates for a repo (built-in: ConventionalCommit, TaskRef, NoEmDash); **PUT requires Admin role** (M13.1) |
 | `GET/PUT` | `/api/v1/repos/{id}/spec-policy` | Get / set per-repo spec enforcement policy: `{require_spec_ref: bool, require_approved_spec: bool, warn_stale_spec: bool, require_current_spec: bool}`. `warn_stale_spec` emits `StaleSpecWarning` domain event when MR spec_ref SHA differs from HEAD; `require_current_spec` blocks merge queue when stale. **PUT requires Admin role**. All fields default to `false` (backwards compatible). (M18) |
-| `POST` | `/api/v1/repos/{id}/specs/assist` | LLM-assisted spec editing — SSE stream of `DiffOp` events; body: `{spec_path, instruction, draft_content?}`; streams incremental diff operations (`insert`/`delete`/`replace`) to the caller (S3.3, HSI §11) |
+| `POST` | `/api/v1/repos/{id}/specs/assist` | LLM-assisted spec editing — SSE stream; body: `{spec_path, instruction, draft_content?}`; streams `event: partial` (incremental explanation text) and `event: complete` (final `{diff: [{op, path, content}], explanation}` JSON); diff ops: `add`/`remove`/`replace` (S3.3, HSI §11) |
 | `POST` | `/api/v1/repos/{id}/specs/save` | Commit spec changes to a feature branch and open an MR; body: `{spec_path, content, message}`; returns `{branch, mr_id}` (S3.3) |
 | `POST` | `/api/v1/repos/{id}/prompts/save` | Commit a prompt/spec directly to the default branch; body: `{prompt_path, content, message}` (S3.3) |
 | `GET` | `/api/v1/repos/{id}/blame?path={file}` | Per-line agent attribution — which agent last touched each line (M13.4) |
@@ -405,7 +405,7 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_message_poll` | Poll own inbox for Directed messages. Params: `after_ts`, `after_id`, `limit`, `unacked_only`. Derives agent_id from JWT. |
 | `gyre_message_ack` | Acknowledge a received message. Params: `message_id`. Derives agent_id from JWT. |
 | `graph_concept` | Search knowledge graph by concept name. Params: `concept` (required), `repo_id` or `workspace_id` (one required), `depth` (optional, default 2). Returns matching nodes and edges. (HSI §11) |
-| `spec_assist` | LLM-assisted spec editing. Params: `repo_id`, `spec_path`, `instruction` (all required), `draft_content` (optional). Returns LLM-generated edit suggestions. Rate limited: 10 req/60s per user/workspace. (HSI §11) |
+| `spec_assist` | LLM-assisted spec editing. Params: `repo_id`, `spec_path`, `instruction` (all required), `draft_content` (optional). Returns validated `{diff: [{op, path, content}], explanation}` JSON; diff ops: `add`/`remove`/`replace`. Rate limited: 10 req/60s per user/workspace. (HSI §11) |
 
 **Available resources** (from `resources/list`):
 

@@ -441,7 +441,7 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing trace response")
     }
 
-    /// POST /api/v1/repos/:repo_id/specs/assist (SSE stream → collected text payloads)
+    /// POST /api/v1/repos/:repo_id/specs/assist (SSE stream → collected `{diff, explanation}` responses)
     pub async fn spec_assist(
         &self,
         repo_id: &str,
