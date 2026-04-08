@@ -11,6 +11,7 @@ pub mod attestation_repo;
 pub mod audit;
 pub mod budget;
 pub mod budget_usage;
+pub mod chain_attestation;
 pub mod compute;
 pub mod compute_target_repository;
 pub mod container_audit_repo;
@@ -19,6 +20,7 @@ pub mod dependency;
 pub mod git_ops;
 pub mod graph;
 pub mod jj_ops;
+pub mod key_binding_repo;
 pub mod kv_store;
 pub mod llm;
 pub mod llm_config;
@@ -48,6 +50,7 @@ pub mod task;
 pub mod team;
 pub mod tenant;
 pub mod trace;
+pub mod trust_anchor;
 pub mod user;
 pub mod user_profile;
 pub mod user_workspace_state;
@@ -62,6 +65,7 @@ pub use attestation_repo::AttestationRepository;
 pub use audit::AuditRepository;
 pub use budget::BudgetRepository;
 pub use budget_usage::BudgetUsageRepository;
+pub use chain_attestation::ChainAttestationRepository;
 pub use compute::{ComputeTarget, ProcessHandle, SpawnConfig};
 pub use compute_target_repository::ComputeTargetRepository;
 pub use container_audit_repo::ContainerAuditRepository;
@@ -70,6 +74,7 @@ pub use dependency::DependencyRepository;
 pub use git_ops::GitOpsPort;
 pub use graph::GraphPort;
 pub use jj_ops::{JjChange, JjOpsPort};
+pub use key_binding_repo::KeyBindingRepository;
 pub use kv_store::KvJsonStore;
 pub use llm::{
     ContentBlock, ConversationContent, ConversationMessage, LlmPort, LlmPortFactory, ToolCall,
@@ -102,6 +107,7 @@ pub use task::TaskRepository;
 pub use team::TeamRepository;
 pub use tenant::TenantRepository;
 pub use trace::{SpanPayload, TraceRepository};
+pub use trust_anchor::TrustAnchorRepository;
 pub use user::{ApiKeyRepository, UserRepository};
 pub use user_profile::{
     JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,

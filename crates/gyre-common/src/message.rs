@@ -116,6 +116,10 @@ pub enum MessageKind {
     BudgetWarning,
     BudgetExhausted,
     AgentError,
+    /// Emitted when a constraint evaluation fails at push or merge time (§7.5).
+    /// server_only = true. Tier: Event (signed, TTL).
+    /// Broadcast to workspace and directed to the author agent.
+    ConstraintViolation,
 
     // ── Tier 3: Telemetry (unsigned + in-memory only) ──────────────────
     ToolCallStart,
@@ -162,6 +166,7 @@ impl MessageKind {
             MessageKind::BudgetWarning => "budget_warning",
             MessageKind::BudgetExhausted => "budget_exhausted",
             MessageKind::AgentError => "agent_error",
+            MessageKind::ConstraintViolation => "constraint_violation",
             MessageKind::ToolCallStart => "tool_call_start",
             MessageKind::ToolCallEnd => "tool_call_end",
             MessageKind::TextMessageContent => "text_message_content",
@@ -201,6 +206,7 @@ impl MessageKind {
                 | MessageKind::BudgetWarning
                 | MessageKind::BudgetExhausted
                 | MessageKind::AgentError
+                | MessageKind::ConstraintViolation
         )
     }
 
@@ -237,6 +243,7 @@ impl MessageKind {
             | MessageKind::BudgetWarning
             | MessageKind::BudgetExhausted
             | MessageKind::AgentError
+            | MessageKind::ConstraintViolation
             | MessageKind::Custom(_) => MessageTier::Event,
 
             MessageKind::ToolCallStart
@@ -279,6 +286,7 @@ impl MessageKind {
             "budget_warning" => MessageKind::BudgetWarning,
             "budget_exhausted" => MessageKind::BudgetExhausted,
             "agent_error" => MessageKind::AgentError,
+            "constraint_violation" => MessageKind::ConstraintViolation,
             "tool_call_start" => MessageKind::ToolCallStart,
             "tool_call_end" => MessageKind::ToolCallEnd,
             "text_message_content" => MessageKind::TextMessageContent,
@@ -549,6 +557,7 @@ mod tests {
             MessageKind::BudgetWarning,
             MessageKind::BudgetExhausted,
             MessageKind::AgentError,
+            MessageKind::ConstraintViolation,
             MessageKind::ToolCallStart,
             MessageKind::ToolCallEnd,
             MessageKind::TextMessageContent,

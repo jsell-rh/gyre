@@ -1,7 +1,7 @@
 # TASK-003: Authorization Provenance — Domain Types and Port Traits
 
 **Spec reference:** `authorization-provenance.md` §1–§5  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -37,13 +37,13 @@
 
 ## Acceptance Criteria
 
-- [ ] All types from §1–§5 exist in `gyre-common` with Serialize/Deserialize
-- [ ] `ConstraintViolation` added to `MessageKind` enum
-- [ ] `ChainAttestationRepository` port trait defined in `gyre-ports`
-- [ ] `TrustAnchorRepository` port trait defined
-- [ ] `KeyBindingRepository` port trait defined
-- [ ] Unit tests for serde round-trips on all types
-- [ ] `cargo test --all` passes
+- [x] All types from §1–§5 exist in `gyre-common` with Serialize/Deserialize
+- [x] `ConstraintViolation` added to `MessageKind` enum
+- [x] `ChainAttestationRepository` port trait defined in `gyre-ports`
+- [x] `TrustAnchorRepository` port trait defined
+- [x] `KeyBindingRepository` port trait defined
+- [x] Unit tests for serde round-trips on all types
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 
