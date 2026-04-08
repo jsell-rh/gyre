@@ -149,6 +149,80 @@ if [ -n "$HARDCODED_DISPLAY_HITS" ]; then
     FAIL=1
 fi
 
+# ── Check 4: Server-side syntax-only validation posing as evaluation ──
+#
+# When a spec says "dry-run evaluates constraints against repo state," the
+# server endpoint must actually *evaluate* constraints — not just *compile*
+# them.  CEL compilation (Program::compile / validate_cel_expression) only
+# checks syntax.  Evaluation requires building a context from repo state
+# and calling evaluate_all / evaluate / eval.
+#
+# A handler that calls validate_cel_expression or Program::compile but NOT
+# evaluate_all / evaluate / build_cel_context is a syntax-only validation
+# endpoint masquerading as a dry-run evaluator.
+#
+# See: specs/reviews/task-007.md F10
+
+SYNTAX_ONLY_HITS=""
+
+RUST_SRC="crates"
+if [ -d "$RUST_SRC" ]; then
+    # Find handlers/functions that reference "dry-run" or "validate" in doc
+    # comments and call validate_cel_expression but not evaluate_all/evaluate.
+    for file in $(grep -rl 'validate_cel_expression\|validate_constraints' "$RUST_SRC" --include='*.rs' 2>/dev/null || true); do
+        # Skip test modules and the constraint_evaluator itself (where the fn is defined)
+        if echo "$file" | grep -q 'constraint_evaluator\.rs$'; then
+            continue
+        fi
+
+        # Check if any function in this file:
+        # (a) has "dry-run" or "dry_run" or "validate" in a doc comment
+        # (b) calls validate_cel_expression (syntax-only check)
+        # (c) does NOT call evaluate_all, evaluate, or build_cel_context
+        if grep -qE '///.*([Dd]ry.?[Rr]un|validate|§7\.6)' "$file" 2>/dev/null; then
+            if grep -qE 'validate_cel_expression' "$file" 2>/dev/null; then
+                if ! grep -qE 'evaluate_all|evaluate_constraints_against|build_cel_context|\.evaluate\(' "$file" 2>/dev/null; then
+                    # This file has a dry-run/validate handler that only does syntax validation
+                    # Find the specific function(s)
+                    FUNCS=$(grep -n 'validate_cel_expression' "$file" 2>/dev/null | grep -v '// syntax-only:ok' || true)
+                    if [ -n "$FUNCS" ]; then
+                        while IFS= read -r funcline; do
+                            SYNTAX_ONLY_HITS="$SYNTAX_ONLY_HITS  $file:$funcline (syntax-only: calls validate_cel_expression but not evaluate)\n"
+                        done <<< "$FUNCS"
+                    fi
+                fi
+            fi
+        fi
+    done
+fi
+
+if [ -n "$SYNTAX_ONLY_HITS" ]; then
+    echo ""
+    echo "SYNTAX-ONLY VALIDATION posing as evaluation/dry-run:"
+    echo -e "$SYNTAX_ONLY_HITS"
+    echo "  These server handlers validate CEL syntax (compile) but do not evaluate"
+    echo "  constraints against actual repo state.  The spec §7.6 requires dry-run"
+    echo "  to 'evaluate the constraint set against the current repo state to preview"
+    echo "  what would pass/fail.'  Compilation only checks if the expression is"
+    echo "  parseable — it does NOT check whether the constraint would pass or fail"
+    echo "  against real data."
+    echo ""
+    echo "  A user entering 'agent.attestation_level >= 99' sees 'valid' (it parses)"
+    echo "  even though it would fail for every agent.  This is a false confidence"
+    echo "  bug — the user proceeds to approve, then discovers failures at push time."
+    echo ""
+    echo "  Fix: The endpoint must accept repo_id + workspace_id, build an evaluation"
+    echo "  context from actual repo/workspace state, call evaluate_all(), and return"
+    echo "  per-constraint pass/fail results."
+    echo ""
+    echo "  Add '// syntax-only:ok' on the validate_cel_expression call if syntax-only"
+    echo "  validation is genuinely the intended behavior (not for dry-run endpoints)."
+    echo ""
+    echo "  See: specs/reviews/task-007.md F10"
+    echo ""
+    FAIL=1
+fi
+
 # ── Result ──────────────────────────────────────────────────────────────
 
 if [ "$FAIL" -eq 0 ]; then

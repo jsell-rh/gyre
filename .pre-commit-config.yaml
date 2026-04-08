@@ -126,6 +126,14 @@ repos:
         language: script
         pass_filenames: false
 
+      - id: test-coverage-depth
+        name: test coverage depth lint
+        description: Detect integration tests with early-exit illusion or tautological assertions
+        entry: scripts/check-test-coverage-depth.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
