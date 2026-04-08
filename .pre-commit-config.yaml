@@ -164,6 +164,14 @@ repos:
         language: script
         pass_filenames: false
 
+      - id: early-return-side-effects
+        name: early return side effects lint
+        description: Detect early returns that skip independent operations like key generation
+        entry: scripts/check-early-return-side-effects.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
