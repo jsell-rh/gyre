@@ -1,7 +1,7 @@
 # Review: TASK-002 — CLI HSI Parity Commands
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R11)  
+**Date:** 2026-04-07 (R12)  
 **Verdict:** needs-revision
 
 ---
@@ -104,14 +104,42 @@
 
 ## R10 Findings
 
-- [-] [process-revision-complete] **F20 — `gyre divergence` silently drops `entity_ref` from divergence alerts; spec defines it as the per-notification entity reference.**  
-  HSI §8 (line 288) defines the notification schema with `entity_ref TEXT, -- optional reference (spec_path, agent_id, mr_id)`. For divergence alerts specifically, §8 (line 1233) states: "One notification is created per spec_ref that exceeds the threshold — each notification includes the two conflicting MR/agent references." The `entity_ref` field carries the `spec_ref` identifying which spec has conflicting interpretations. The server's `NotificationResponse` (users.rs:263) includes `entity_ref: Option<String>` and populates it from the stored notification (users.rs:279). The CLI's divergence display (main.rs:884-897) reads `id`, `title`, `body`, and `priority` — but has no access to `entity_ref`. The spec reference is silently dropped. Without it, the user sees a divergence alert but cannot identify which spec is involved from structured data — they must parse the title or body text (which may or may not contain the spec path). This is the same flaw class as F14 (response field not consumed) — the server sends a structured field specifically designed for entity linkage, and the CLI ignores it. Fix: render `entity_ref` when non-empty, e.g., `println!("  Spec: {entity_ref}");` after the ID line.  
-  **Files:** `crates/gyre-cli/src/main.rs:884-897` (no `entity_ref` access), `crates/gyre-server/src/api/users.rs:263` (field exists in response).  
-  **Process fixes:** Enhanced `check-response-consumption.sh` with Check 5 (direct response scalar field coverage) — mechanically detects unconsumed scalar fields in *Response structs the CLI consumes. Added item-level field coverage guidance to implementation checklist item #22 and verifier prompt's "Incomplete response consumption" target.
+- [x] **F20 (resolved R12).** `gyre divergence` now renders `entity_ref` (main.rs:891,894-896). Fixed in commit `6f62f335`.
 
 ## R11 Findings
 
-- [-] [process-revision-complete] **F21 — `completed_agents` display drops `conversation_sha`, which the spec defines as part of the completion schema and the CLI parity surface.**  
-  HSI §4 defines the agent completion summary schema including `conversation_sha: Option<String>` — the SHA-256 hash of the full conversation history, stored for the "Ask Why" interrogation feature. The server's `BriefingCompletedAgent` (graph.rs:239) includes `conversation_sha: Option<String>`. The CLI's completed_agents rendering (main.rs:996-1027) reads `agent_id`, `spec_ref`, `decisions`, and `uncertainties` — but does not read `conversation_sha`. HSI §11 requires "every data surface in the UI must be consumable outside the browser." The `conversation_sha` enables a CLI user to interrogate a completed agent's reasoning (e.g., piping the SHA to a future `gyre conversation view <sha>` command or the existing `ConversationRepository::get` API). Without it, a CLI-only user has no way to access the conversation reference that the UI provides. Fix: render `conversation_sha` when non-empty, e.g., `println!("    Conversation: {sha}");` after decisions/uncertainties.  
-  **Files:** `crates/gyre-cli/src/main.rs:996-1027` (no `conversation_sha` access), `crates/gyre-server/src/api/graph.rs:239` (field exists in response).  
-  **Process fixes:** Enhanced `check-response-consumption.sh` with Check 4 (item struct field coverage) — mechanically detects unconsumed scalar fields in Vec<T> element types of consumed *Response structs. Added item-level field coverage sub-item to implementation checklist item #22 and verifier prompt.
+- [x] **F21 (resolved R12).** `completed_agents` now renders `conversation_sha` (main.rs:1032-1035) and `completed_at` (main.rs:1037-1039). Fixed in commit `6f62f335`.
+
+## R12 Findings
+
+- [ ] **F22 — `print_briefing_item` silently drops `timestamp`, `entity_type`, and `entity_id` from `BriefingItem` — 3 of 6 scalar fields unconsumed.**  
+  The server's `BriefingItem` struct (graph.rs:260-267) has 6 fields: `title`, `description`, `entity_type`, `entity_id`, `spec_path`, `timestamp`. The CLI's `print_briefing_item` helper (main.rs:1092-1105) renders only `title`, `description`, and `spec_path`. Three fields are silently dropped with no exclusion comments:
+  - **`timestamp: u64`** — tells the user WHEN each item occurred. Without it, completed/in-progress/exception items have no temporal context. The user cannot distinguish a 2-hour-old gate failure from a 2-day-old one. This was explicitly called out in F18's fix instructions ("include `timestamp` for ordering context") but not implemented when F18 was resolved.
+  - **`entity_type: String`** — tells the user WHAT kind of entity the item refers to (task, MR, spec, gate_failure). Without it, the user sees only a title and description with no structured indication of the item category.
+  - **`entity_id: Option<String>`** — tells the user WHERE to follow up. A CLI user seeing "Gate failure: billing-service MR #47" has no machine-readable ID to pipe into `gyre trace <id>` or `gyre mr` commands. The entity_id field provides exactly this linkage.
+  
+  This is the "item struct scalar field omission" flaw class. HSI §11 requires "every data surface in the UI must be consumable outside the browser." The UI renders entity types, timestamps, and entity IDs. The CLI drops all three.
+  
+  Fix: extend `print_briefing_item` to render all three fields. Example:
+  ```rust
+  if let Some(etype) = item["entity_type"].as_str() {
+      if !etype.is_empty() {
+          let eid = item["entity_id"].as_str().unwrap_or("");
+          if !eid.is_empty() {
+              println!("      [{etype}: {eid}]");
+          } else {
+              println!("      [{etype}]");
+          }
+      }
+  }
+  if let Some(ts) = item["timestamp"].as_u64() {
+      if ts > 0 {
+          println!("      ({})", format_timestamp(ts));
+      }
+  }
+  ```
+  **Files:** `crates/gyre-cli/src/main.rs:1092-1105` (3 fields unconsumed), `crates/gyre-server/src/api/graph.rs:260-267` (`BriefingItem` struct definition).
+
+- [ ] **F23 — `completed_at` in briefing agents renders as raw Unix epoch; `format_timestamp` helper exists and is used by other commands.**  
+  The completed_agents display (main.rs:1037-1039) prints `completed_at` as a raw integer: `println!("    Completed at: {completed_at}");`, producing output like "Completed at: 1711324800". The `format_timestamp` helper (main.rs:1151) exists in the same file and is used by `gyre trace` to render human-readable timestamps like "2024-03-24 22:40:00Z". HSI §4 shows agent completion summaries with human-readable times ("Completed by security-review-agent at 14:32 UTC"). The CLI should call `format_timestamp(completed_at)` for consistency with the trace command and spec expectations.  
+  **Files:** `crates/gyre-cli/src/main.rs:1037-1039` (raw epoch), `crates/gyre-cli/src/main.rs:1151` (`format_timestamp` helper).
