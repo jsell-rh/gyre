@@ -2,7 +2,7 @@
 //!
 //! POST /api/v1/repos/:id/specs/assist   — LLM-assisted editing (SSE stream, stubbed LLM)
 //! POST /api/v1/repos/:id/specs/save     — commit spec to feature branch + create MR
-//! POST /api/v1/repos/:id/prompts/save   — direct commit to default branch (stubbed)
+//! POST /api/v1/repos/:id/prompts/save   — direct commit to default branch
 
 use axum::{
     extract::{Path, State},
@@ -183,8 +183,8 @@ pub async fn assist_spec(
 ///
 /// Commits a spec change to a `spec-edit/<slug>-<uuid>` feature branch and
 /// auto-creates an MR targeting the default branch. If an existing open MR
-/// for the same spec_path exists (matched by branch prefix), appends a commit
-/// to the existing branch.
+/// for the same spec_path exists (matched by branch prefix and the MR author
+/// is the current user), appends a commit to the existing branch.
 ///
 /// Creates a priority-2 (High) "Spec pending approval" notification. The
 /// notification's entity_id is the MR ID so the Inbox "Approve" action can
@@ -194,6 +194,7 @@ pub async fn assist_spec(
 pub async fn save_spec(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
+    caller: AuthenticatedAgent,
     Json(req): Json<SpecSaveRequest>,
 ) -> Result<(StatusCode, Json<SpecSaveResponse>), ApiError> {
     let repo_id_typed = Id::new(&repo_id);
@@ -213,9 +214,12 @@ pub async fn save_spec(
         .list_by_repo(&repo_id_typed)
         .await
         .unwrap_or_default();
-    let existing_mr = all_mrs
-        .into_iter()
-        .find(|mr| mr.status == MrStatus::Open && mr.source_branch.starts_with(&branch_prefix));
+    let caller_id = Id::new(&caller.agent_id);
+    let existing_mr = all_mrs.into_iter().find(|mr| {
+        mr.status == MrStatus::Open
+            && mr.source_branch.starts_with(&branch_prefix)
+            && mr.author_agent_id.as_ref() == Some(&caller_id)
+    });
 
     if let Some(mr) = existing_mr {
         // Existing open MR — append a commit to the existing branch.
@@ -275,6 +279,7 @@ pub async fn save_spec(
         now,
     );
     mr.workspace_id = repo.workspace_id.clone();
+    mr.author_agent_id = Some(caller_id.clone());
 
     state
         .merge_requests
@@ -303,7 +308,9 @@ pub async fn save_spec(
     );
     notif.entity_ref = Some(mr_id.to_string());
     // Non-fatal — MR is created even if notification fails.
-    let _ = state.notifications.create(&notif).await;
+    if let Err(e) = state.notifications.create(&notif).await {
+        tracing::warn!(mr_id = %mr_id, "Failed to create spec-pending-approval notification: {e}");
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -484,6 +491,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/repos/no-such-repo/specs/save")
+                    .header("Authorization", auth())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -517,7 +525,8 @@ mod tests {
 
     #[tokio::test]
     async fn save_spec_creates_mr_for_existing_repo() {
-        let app = app();
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
         // Create a repo first.
         let create_body = serde_json::json!({
             "name": "spec-edit-test",
@@ -552,6 +561,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
                     .unwrap(),
@@ -561,7 +571,21 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
         assert!(json["branch"].as_str().unwrap().starts_with("spec-edit/"));
-        assert!(!json["mr_id"].as_str().unwrap().is_empty());
+        let mr_id = json["mr_id"].as_str().unwrap();
+        assert!(!mr_id.is_empty());
+
+        // Verify notification was created (F4: must verify side effects, not just response).
+        let notifs = state
+            .notifications
+            .list_recent(10)
+            .await
+            .unwrap();
+        let spec_notif = notifs
+            .iter()
+            .find(|n| n.notification_type == NotificationType::SpecPendingApproval)
+            .expect("SpecPendingApproval notification must be created");
+        assert_eq!(spec_notif.priority, 2);
+        assert_eq!(spec_notif.entity_ref.as_deref(), Some(mr_id));
     }
 
     #[tokio::test]
@@ -602,6 +626,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
                     .unwrap(),
@@ -625,6 +650,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&save_body2).unwrap()))
                     .unwrap(),
