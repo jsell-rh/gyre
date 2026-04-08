@@ -1,8 +1,8 @@
 # Review: TASK-011 — Spec Save Git Write-Through
 
 **Reviewer:** Verifier
-**Round:** R1
-**Verdict:** `needs-revision`
+**Round:** R2
+**Verdict:** `complete`
 
 ---
 
