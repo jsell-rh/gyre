@@ -2254,8 +2254,22 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             Err(e) => return json!({"error": format!("failed to look up workspace: {e}")}),
             Ok(Some(_)) => {}
         }
-        // Resolve `since`: explicit param > 24h fallback.
-        let since = since_param.unwrap_or_else(|| now_secs().saturating_sub(24 * 3600));
+        // Resolve `since`: explicit param > last_seen_at from user_workspace_state > 24h fallback.
+        // Matches the REST handler's three-step resolution (HSI §11 parity).
+        let since: u64 = if let Some(s) = since_param {
+            s
+        } else if let Some(uid) = &auth.user_id {
+            let last_seen = state
+                .user_workspace_state
+                .get_last_seen(uid.as_str(), workspace_id)
+                .await
+                .unwrap_or(None);
+            last_seen
+                .map(|ts| ts as u64)
+                .unwrap_or_else(|| now_secs().saturating_sub(24 * 3600))
+        } else {
+            now_secs().saturating_sub(24 * 3600)
+        };
         // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
         match crate::api::graph::assemble_briefing(&state, workspace_id, since).await {
             Ok(briefing) => {
@@ -2540,13 +2554,17 @@ mod tests {
     }
 
     async fn mcp_post(app: Router, body: Value) -> (StatusCode, Value) {
+        mcp_post_with_token(app, body, "test-token").await
+    }
+
+    async fn mcp_post_with_token(app: Router, body: Value, token: &str) -> (StatusCode, Value) {
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/mcp")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -4067,6 +4085,69 @@ mod tests {
         assert!(briefing["metrics"].is_object());
         assert!(briefing.get("summary").is_some());
         assert!(briefing["completed_agents"].as_array().is_some());
+    }
+
+    #[tokio::test]
+    async fn mcp_briefing_resource_uses_last_seen_at_default() {
+        // F8: when no ?since= param, MCP briefing must use last_seen_at from
+        // user_workspace_state (matching the REST handler's three-step resolution).
+        let st = test_state();
+
+        // Create workspace.
+        use gyre_domain::{User, Workspace};
+        let ws = Workspace::new(
+            Id::new("ws-seen"),
+            Id::new("default"),
+            "seen-test",
+            "seen-test",
+            now_secs(),
+        );
+        st.workspaces.create(&ws).await.unwrap();
+
+        // Create user + API key so auth.user_id is Some.
+        let user = User::new(Id::new("u-seen"), "ext-seen", "tester", 1000);
+        st.users.create(&user).await.unwrap();
+        let raw_key = "gyre_test_briefing_key";
+        st.api_keys
+            .create(
+                &crate::auth::hash_api_key(raw_key),
+                &user.id,
+                "briefing-key",
+            )
+            .await
+            .unwrap();
+
+        // Set last_seen_at to a specific timestamp.
+        let last_seen_ts: i64 = now_secs() as i64 - 3600; // 1 hour ago
+        st.user_workspace_state
+            .upsert_last_seen("u-seen", "ws-seen", last_seen_ts)
+            .await
+            .unwrap();
+
+        let app = crate::build_router(st);
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 104,
+                "method": "resources/read",
+                "params": { "uri": "briefing://ws-seen" }
+            }),
+            raw_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let contents = json["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        let text = contents[0]["text"].as_str().unwrap();
+        let briefing: Value = serde_json::from_str(text).unwrap();
+        // The briefing should use last_seen_at (~1h ago), not the 24h fallback.
+        // Verify the `since` field reflects the last_seen_at timestamp.
+        let since_val = briefing["since"].as_u64().unwrap();
+        assert_eq!(
+            since_val, last_seen_ts as u64,
+            "briefing since should use last_seen_at ({last_seen_ts}), got {since_val}"
+        );
     }
 
     // ── TASK-010: notifications:// resource ──────────────────────────────────

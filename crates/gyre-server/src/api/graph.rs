@@ -571,7 +571,6 @@ pub async fn get_graph_by_spec(
     }))
 }
 
-/// GET /api/v1/repos/{id}/graph/concept/{name}
 /// Shared concept-search logic used by both REST and MCP handlers (HSI §11 parity).
 ///
 /// Searches nodes across the given `repo_ids` whose `name` or `qualified_name`
@@ -642,6 +641,7 @@ pub async fn assemble_concept_results(
     })
 }
 
+/// GET /api/v1/repos/{id}/graph/concept/{name}
 /// Returns nodes matching the concept name pattern (case-insensitive substring match).
 ///
 /// In the full implementation this would use ConceptView definitions from the spec manifest.
