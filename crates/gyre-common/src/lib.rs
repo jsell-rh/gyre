@@ -14,7 +14,7 @@ pub mod view_spec;
 
 pub use attestation::{
     Attestation, AttestationInput, AttestationMetadata, AttestationOutput, DerivedInput,
-    GateAttestation, GateConstraint, InputContent, KeyBindingRef, OutputConstraint,
+    GateAttestation, GateConstraint, InputContent, OutputConstraint, PersonaRef,
     ScopeConstraint, SignedInput, TrustAnchor, TrustAnchorType, VerificationResult,
 };
 pub use completion::{AgentCompletionSummary, Decision};

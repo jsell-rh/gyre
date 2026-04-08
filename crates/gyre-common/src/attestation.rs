@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::key_binding::KeyBinding;
+
 // ── §1.1 Trust Anchor ──────────────────────────────────────────────────
 
 /// The type of identity issuer a trust anchor represents.
@@ -53,6 +55,16 @@ pub struct ScopeConstraint {
     pub forbidden_paths: Vec<String>,
 }
 
+/// A reference to a persona required for implementation (§2.2).
+///
+/// Structured type (not a bare string) so that downstream CEL evaluators
+/// can access fields: `input.persona_constraints[0].name`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersonaRef {
+    /// Persona name (e.g., "security").
+    pub name: String,
+}
+
 /// The content that a human signs when approving a spec (§2.2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputContent {
@@ -66,7 +78,7 @@ pub struct InputContent {
     pub repo_id: String,
     /// Required persona(s) for implementation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub persona_constraints: Vec<String>,
+    pub persona_constraints: Vec<PersonaRef>,
     /// Hash of the bound meta-spec set at approval time.
     pub meta_spec_set_sha: String,
     /// What parts of the repo this authorization covers.
@@ -88,20 +100,11 @@ pub struct SignedInput {
     pub expected_generation: Option<u32>,
     /// Ed25519 signature over the content.
     pub signature: Vec<u8>,
-    /// The key binding that produced this signature.
-    pub key_binding: KeyBindingRef,
-}
-
-/// A reference to a KeyBinding embedded in a SignedInput or DerivedInput.
-///
-/// This is a lightweight reference (public key + trust anchor ID) rather than
-/// the full KeyBinding record, since the full record lives in the KeyBinding store.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct KeyBindingRef {
-    /// Ed25519 public key bytes.
-    pub public_key: Vec<u8>,
-    /// Which TrustAnchor authenticated this signer.
-    pub trust_anchor_id: String,
+    /// The full key binding that produced this signature (§2.3).
+    ///
+    /// The full `KeyBinding` is embedded (not a reference) so the attestation
+    /// chain is self-contained for offline verification (§6.3).
+    pub key_binding: KeyBinding,
 }
 
 // ── §3.1 Output Constraint ─────────────────────────────────────────────
@@ -153,8 +156,8 @@ pub struct DerivedInput {
     pub output_constraints: Vec<OutputConstraint>,
     /// Orchestrator's signature over the derivation.
     pub signature: Vec<u8>,
-    /// Orchestrator's workload key binding.
-    pub key_binding: KeyBindingRef,
+    /// Orchestrator's full key binding for offline verification (§2.3, §6.3).
+    pub key_binding: KeyBinding,
 }
 
 // ── §5.1 Attestation ───────────────────────────────────────────────────
@@ -219,8 +222,8 @@ pub struct GateAttestation {
     pub constraint: Option<GateConstraint>,
     /// Gate agent or forge signature.
     pub signature: Vec<u8>,
-    /// Gate agent's key binding.
-    pub key_binding: KeyBindingRef,
+    /// Gate agent's full key binding for offline verification (§2.3, §6.3).
+    pub key_binding: KeyBinding,
 }
 
 /// The complete attestation record — packages input, output, and metadata (§5.1).
@@ -259,10 +262,16 @@ pub struct VerificationResult {
 mod tests {
     use super::*;
 
-    fn sample_key_binding_ref() -> KeyBindingRef {
-        KeyBindingRef {
+    fn sample_key_binding() -> KeyBinding {
+        KeyBinding {
             public_key: vec![1, 2, 3, 4],
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://keycloak.example.com".to_string(),
             trust_anchor_id: "tenant-keycloak".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: 1_700_003_600,
+            user_signature: vec![10, 20, 30, 40],
+            platform_countersign: vec![50, 60, 70, 80],
         }
     }
 
@@ -279,7 +288,7 @@ mod tests {
             spec_sha: "abc123".to_string(),
             workspace_id: "ws-1".to_string(),
             repo_id: "repo-1".to_string(),
-            persona_constraints: vec!["security".to_string()],
+            persona_constraints: vec![PersonaRef { name: "security".to_string() }],
             meta_spec_set_sha: "def456".to_string(),
             scope: sample_scope_constraint(),
         }
@@ -299,7 +308,7 @@ mod tests {
             valid_until: 1_700_000_000,
             expected_generation: Some(1),
             signature: vec![10, 20, 30],
-            key_binding: sample_key_binding_ref(),
+            key_binding: sample_key_binding(),
         }
     }
 
@@ -321,7 +330,7 @@ mod tests {
             output_hash: vec![80, 90],
             constraint: Some(sample_gate_constraint()),
             signature: vec![11, 22, 33],
-            key_binding: sample_key_binding_ref(),
+            key_binding: sample_key_binding(),
         }
     }
 
@@ -484,7 +493,7 @@ mod tests {
             update: "scope.narrow(\"src/payments/refund.rs\")".to_string(),
             output_constraints: vec![sample_output_constraint()],
             signature: vec![10, 20, 30],
-            key_binding: sample_key_binding_ref(),
+            key_binding: sample_key_binding(),
         };
         let json = serde_json::to_string(&di).unwrap();
         let back: DerivedInput = serde_json::from_str(&json).unwrap();
@@ -499,7 +508,7 @@ mod tests {
             update: "identity".to_string(),
             output_constraints: vec![],
             signature: vec![2],
-            key_binding: sample_key_binding_ref(),
+            key_binding: sample_key_binding(),
         };
         let json = serde_json::to_string(&di).unwrap();
         assert!(!json.contains("preconditions"));
@@ -524,7 +533,7 @@ mod tests {
             update: "identity".to_string(),
             output_constraints: vec![],
             signature: vec![4, 5],
-            key_binding: sample_key_binding_ref(),
+            key_binding: sample_key_binding(),
         });
         let json = serde_json::to_string(&input).unwrap();
         let back: AttestationInput = serde_json::from_str(&json).unwrap();
@@ -544,7 +553,7 @@ mod tests {
             update: "x".to_string(),
             output_constraints: vec![],
             signature: vec![2],
-            key_binding: sample_key_binding_ref(),
+            key_binding: sample_key_binding(),
         });
         let json = serde_json::to_string(&derived).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -635,7 +644,7 @@ mod tests {
             update: "narrow_scope".to_string(),
             output_constraints: vec![],
             signature: vec![11],
-            key_binding: sample_key_binding_ref(),
+            key_binding: sample_key_binding(),
         });
         att.metadata.chain_depth = 1;
         let json = serde_json::to_string(&att).unwrap();
@@ -683,13 +692,30 @@ mod tests {
         assert!(!json.contains("children"));
     }
 
-    // ── KeyBindingRef ──────────────────────────────────────────────────
+    // ── PersonaRef ─────────────────────────────────────────────────────
 
     #[test]
-    fn key_binding_ref_roundtrip() {
-        let kbr = sample_key_binding_ref();
-        let json = serde_json::to_string(&kbr).unwrap();
-        let back: KeyBindingRef = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, kbr);
+    fn persona_ref_roundtrip() {
+        let pr = PersonaRef { name: "security".to_string() };
+        let json = serde_json::to_string(&pr).unwrap();
+        let back: PersonaRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, pr);
+    }
+
+    #[test]
+    fn persona_ref_serializes_as_object() {
+        let pr = PersonaRef { name: "security".to_string() };
+        let json = serde_json::to_string(&pr).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["name"], "security");
+    }
+
+    #[test]
+    fn persona_constraints_serialize_as_object_array() {
+        let content = sample_input_content();
+        let json = serde_json::to_string(&content).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let constraints = v["persona_constraints"].as_array().unwrap();
+        assert_eq!(constraints[0]["name"], "security");
     }
 }
