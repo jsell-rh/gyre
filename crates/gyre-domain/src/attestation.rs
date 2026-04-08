@@ -44,6 +44,11 @@ pub struct MergeAttestation {
 }
 
 /// Signed attestation bundle returned by `GET /api/v1/merge-requests/{id}/attestation`.
+///
+/// **Deprecated (Phase 4):** This legacy format is subsumed by the chain attestation
+/// system (`authorization-provenance.md` §5.2). New attestations are produced in both
+/// formats during the dual-write period. Consumers should migrate to the chain attestation
+/// API: `GET /api/v1/repos/{id}/attestations/{commit_sha}/verification`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttestationBundle {
     pub attestation: MergeAttestation,
@@ -51,4 +56,7 @@ pub struct AttestationBundle {
     pub signature: String,
     /// `kid` of the Ed25519 key that produced `signature`.
     pub signing_key_id: String,
+    /// Deprecation notice included in API responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecation_notice: Option<String>,
 }

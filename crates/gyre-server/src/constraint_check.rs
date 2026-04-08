@@ -288,40 +288,50 @@ pub async fn enforce_push_constraints(
     };
     let attestation_id = attestation_id.clone();
 
-    // Verify the attestation chain structure.
-    for att in &attestations {
-        let result = crate::git_http::verify_attestation_audit_only(att);
-        if !result.valid {
-            // Emit ConstraintViolation event for observability.
-            state
-                .emit_event(
-                    Some(workspace_id.clone()),
-                    Destination::Workspace(workspace_id.clone()),
-                    MessageKind::ConstraintViolation,
-                    Some(serde_json::json!({
-                        "attestation_id": att.id,
-                        "constraint_name": "attestation_chain_valid",
-                        "expression": "verify_chain(attestation)",
-                        "context_snapshot": {},
-                        "action": "push",
-                        "agent_id": agent_id,
-                        "repo_id": repo_id,
-                        "timestamp": crate::api::now_secs(),
-                    })),
-                )
-                .await;
-            return Err(format!(
-                "push rejected: attestation chain invalid — {}",
-                result.message
-            ));
-        }
+    // Verify the full attestation chain structure (§4.4, §6.2).
+    let chain_result = crate::git_http::verify_chain(&attestations, 10);
+    if !chain_result.valid {
+        // §7.7: attestation.chain_invalid audit event.
+        warn!(
+            task_id = %task_id,
+            repo_id = %repo_id,
+            agent_id = %agent_id,
+            category = "Provenance",
+            event = "attestation.chain_invalid",
+            message = %chain_result.message,
+            "attestation.chain_invalid: push-time chain verification failed"
+        );
+        // Emit ConstraintViolation event for observability.
+        state
+            .emit_event(
+                Some(workspace_id.clone()),
+                Destination::Workspace(workspace_id.clone()),
+                MessageKind::ConstraintViolation,
+                Some(serde_json::json!({
+                    "attestation_id": attestation_id,
+                    "constraint_name": "attestation_chain_valid",
+                    "expression": "verify_chain(attestation)",
+                    "context_snapshot": {},
+                    "action": "push",
+                    "agent_id": agent_id,
+                    "repo_id": repo_id,
+                    "timestamp": crate::api::now_secs(),
+                })),
+            )
+            .await;
+        return Err(format!(
+            "push rejected: attestation chain invalid — {}",
+            chain_result.message
+        ));
     }
 
     // Compute the diff for constraint evaluation.
     let diff_info = match compute_push_diff(repo_path, ref_updates).await {
         Some(d) => d,
         None => {
-            return Err("push rejected: failed to compute diff for constraint evaluation".to_string());
+            return Err(
+                "push rejected: failed to compute diff for constraint evaluation".to_string(),
+            );
         }
     };
 
@@ -351,21 +361,14 @@ pub async fn enforce_push_constraints(
         strategy_constraints.retain(|c| !c.expression.contains("agent.attestation_level"));
     }
 
-    // Collect all constraints.
-    let gate_constraints: Vec<gyre_common::attestation::GateConstraint> = attestations
-        .iter()
-        .flat_map(|att| {
-            att.output
-                .gate_results
-                .iter()
-                .filter_map(|gr| gr.constraint.clone())
-        })
-        .collect();
+    // Collect all constraints from the full chain (§4.3 additive accumulation).
+    let (_root, explicit_from_chain, gate_from_chain) =
+        crate::git_http::accumulate_chain_constraints(&attestations);
 
     let all_constraints = constraint_evaluator::collect_all_constraints(
-        &signed_input.output_constraints,
+        &explicit_from_chain,
         &strategy_constraints,
-        &gate_constraints,
+        &gate_from_chain,
     );
 
     if all_constraints.is_empty() {
@@ -401,9 +404,7 @@ pub async fn enforce_push_constraints(
     let ctx = match constraint_evaluator::build_cel_context(&ci) {
         Ok(c) => c,
         Err(e) => {
-            return Err(format!(
-                "push rejected: failed to build CEL context: {e}"
-            ));
+            return Err(format!("push rejected: failed to build CEL context: {e}"));
         }
     };
 
@@ -545,21 +546,17 @@ pub async fn enforce_merge_constraints(
     });
 
     let Some((signed_input, attestation_id)) = signed_input_with_id else {
-        return Err(
-            "merge blocked: no SignedInput found in attestation chain".to_string(),
-        );
+        return Err("merge blocked: no SignedInput found in attestation chain".to_string());
     };
     let attestation_id = attestation_id.clone();
 
-    // Verify attestation chain structure.
-    for att in &attestations {
-        let result = crate::git_http::verify_attestation_audit_only(att);
-        if !result.valid {
-            return Err(format!(
-                "merge blocked: attestation chain invalid — {}",
-                result.message
-            ));
-        }
+    // Verify full attestation chain structure (§4.4, §6.2).
+    let chain_result = crate::git_http::verify_chain(&attestations, 10);
+    if !chain_result.valid {
+        return Err(format!(
+            "merge blocked: attestation chain invalid — {}",
+            chain_result.message
+        ));
     }
 
     // Compute diff for the merge commit.
@@ -594,20 +591,14 @@ pub async fn enforce_merge_constraints(
         strategy_constraints.retain(|c| !c.expression.contains("agent.attestation_level"));
     }
 
-    let gate_constraints: Vec<gyre_common::attestation::GateConstraint> = attestations
-        .iter()
-        .flat_map(|att| {
-            att.output
-                .gate_results
-                .iter()
-                .filter_map(|gr| gr.constraint.clone())
-        })
-        .collect();
+    // Collect all constraints from the full chain (§4.3 additive accumulation).
+    let (_root, explicit_from_chain, gate_from_chain) =
+        crate::git_http::accumulate_chain_constraints(&attestations);
 
     let all_constraints = constraint_evaluator::collect_all_constraints(
-        &signed_input.output_constraints,
+        &explicit_from_chain,
         &strategy_constraints,
-        &gate_constraints,
+        &gate_from_chain,
     );
 
     if all_constraints.is_empty() {
@@ -632,9 +623,7 @@ pub async fn enforce_merge_constraints(
     let ctx = match constraint_evaluator::build_cel_context(&ci) {
         Ok(c) => c,
         Err(e) => {
-            return Err(format!(
-                "merge blocked: failed to build CEL context: {e}"
-            ));
+            return Err(format!("merge blocked: failed to build CEL context: {e}"));
         }
     };
 
@@ -669,15 +658,14 @@ pub async fn enforce_merge_constraints(
             &context_snapshot,
         )
         .await;
-        // Phase 3: priority-3 notifications for merge-time violations (§7.5).
-        create_violation_notifications_with_priority(
+        // §7.5: priority 2 for all constraint violation notifications.
+        create_violation_notifications(
             state,
             &violations,
             &task_id,
             repo_id,
             workspace_id,
             "merge",
-            3, // priority 3 for merge-time enforcement
         )
         .await;
 
@@ -1208,7 +1196,7 @@ pub fn parse_shortstat(text: &str) -> (u64, u64) {
     (insertions, deletions)
 }
 
-/// Log constraint evaluation results.
+/// Log constraint evaluation results (§7.7 audit events).
 fn log_constraint_results(
     result: &VerificationResult,
     task_id: &str,
@@ -1218,24 +1206,30 @@ fn log_constraint_results(
     constraint_count: usize,
 ) {
     if result.valid {
+        // §7.7: attestation.verified audit event.
         info!(
             task_id = %task_id,
             repo_id = %repo_id,
             agent_id = %agent_id,
             action = %action,
+            category = "Provenance",
+            event = "attestation.verified",
             constraints_evaluated = constraint_count,
-            "attestation.verified: all {} constraint(s) passed (audit-only)",
+            "attestation.verified: all {} constraint(s) passed",
             constraint_count
         );
     } else {
+        // §7.7: attestation.constraint_failed audit event.
         warn!(
             task_id = %task_id,
             repo_id = %repo_id,
             agent_id = %agent_id,
             action = %action,
+            category = "Provenance",
+            event = "attestation.constraint_failed",
             constraints_evaluated = constraint_count,
             message = %result.message,
-            "attestation.constraint_failed: constraint evaluation failed (audit-only, not rejecting)"
+            "attestation.constraint_failed: constraint evaluation failed"
         );
     }
 }
@@ -1371,86 +1365,6 @@ async fn create_violation_notifications(
                 &tenant_id,
                 now,
             );
-            notif.body = Some(
-                serde_json::json!({
-                    "expression": violation.expression,
-                    "message": violation.message,
-                    "task_id": task_id,
-                    "action": action,
-                })
-                .to_string(),
-            );
-            notif.repo_id = Some(repo_id.to_string());
-            notif.entity_ref = Some(format!("task:{task_id}"));
-
-            if let Err(e) = state.notifications.create(&notif).await {
-                warn!(
-                    constraint = %violation.constraint_name,
-                    error = %e,
-                    "failed to create constraint violation notification"
-                );
-            }
-        }
-    }
-}
-
-/// Create Inbox notifications for constraint violations with a specific priority.
-///
-/// Phase 3 merge-time uses priority 3 (§7.5: "the push/merge was already rejected").
-/// Phase 2 audit-only uses priority 2 via `create_violation_notifications`.
-async fn create_violation_notifications_with_priority(
-    state: &AppState,
-    violations: &[ConstraintViolationInfo],
-    task_id: &str,
-    repo_id: &str,
-    workspace_id: &Id,
-    action: &str,
-    priority: u8,
-) {
-    let members = state
-        .workspace_memberships
-        .list_by_workspace(workspace_id)
-        .await
-        .unwrap_or_default();
-
-    let tenant_id = state
-        .workspaces
-        .find_by_id(workspace_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|ws| ws.tenant_id.to_string())
-        .unwrap_or_else(|| "default".to_string());
-
-    let now = crate::api::now_secs() as i64;
-
-    for violation in violations {
-        let title = format!(
-            "Constraint violation at {action}: {}",
-            violation.constraint_name
-        );
-
-        for member in &members {
-            if !matches!(
-                member.role,
-                gyre_domain::WorkspaceRole::Admin
-                    | gyre_domain::WorkspaceRole::Developer
-                    | gyre_domain::WorkspaceRole::Owner
-            ) {
-                continue;
-            }
-
-            let notif_id = Id::new(uuid::Uuid::new_v4().to_string());
-            let mut notif = gyre_common::Notification::new(
-                notif_id,
-                workspace_id.clone(),
-                member.user_id.clone(),
-                NotificationType::ConstraintViolation,
-                title.clone(),
-                &tenant_id,
-                now,
-            );
-            notif.priority = priority;
             notif.body = Some(
                 serde_json::json!({
                     "expression": violation.expression,
@@ -2269,12 +2183,7 @@ mod tests {
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
 
-        let mut si = make_signed_input(
-            vec!["src/**"],
-            vec![],
-            vec!["security"],
-            vec![],
-        );
+        let mut si = make_signed_input(vec!["src/**"], vec![], vec!["security"], vec![]);
         si.content.meta_spec_set_sha = meta_sha;
         // Forge the signature (wrong bytes).
         si.signature = vec![0xDE; 64];
@@ -2350,7 +2259,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "should reject push with failing constraint");
+        assert!(
+            result.is_err(),
+            "should reject push with failing constraint"
+        );
         let err = result.unwrap_err();
         assert!(
             err.contains("constraint(s) failed"),
@@ -2441,11 +2353,8 @@ mod tests {
         };
         state.merge_requests.create(&mr).await.unwrap();
 
-        let mut agent = gyre_domain::Agent::new(
-            Id::new("agent-merge-enf-1"),
-            "merge-enf-agent-1",
-            0,
-        );
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("agent-merge-enf-1"), "merge-enf-agent-1", 0);
         agent.current_task_id = Some(Id::new("TASK-MERGE-ENF-1"));
         state.agents.create(&agent).await.unwrap();
 
@@ -2501,11 +2410,8 @@ mod tests {
         };
         state.merge_requests.create(&mr).await.unwrap();
 
-        let mut agent = gyre_domain::Agent::new(
-            Id::new("agent-merge-enf-2"),
-            "merge-enf-agent-2",
-            0,
-        );
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("agent-merge-enf-2"), "merge-enf-agent-2", 0);
         agent.current_task_id = Some(Id::new("TASK-MERGE-ENF-2"));
         state.agents.create(&agent).await.unwrap();
 
@@ -2547,10 +2453,7 @@ mod tests {
         )
         .await;
 
-        assert!(
-            result.is_err(),
-            "should block merge when constraint fails"
-        );
+        assert!(result.is_err(), "should block merge when constraint fails");
         let err = result.unwrap_err();
         assert!(
             err.contains("constraint(s) failed"),

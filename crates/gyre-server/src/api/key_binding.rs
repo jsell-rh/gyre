@@ -145,11 +145,14 @@ pub async fn create_key_binding(
         .await
         .map_err(|e| ApiError::Internal(e))?;
 
+    // §7.7: key_binding.created audit event.
     info!(
         user_identity = %user_identity,
         tenant_id = %auth.tenant_id,
         expires_at = expires_at,
-        "key_binding.created"
+        category = "Identity",
+        event = "key_binding.created",
+        "key_binding.created: key binding registered for {user_identity}"
     );
 
     Ok((

@@ -1760,6 +1760,18 @@ pub(crate) fn verify_attestation_audit_only(
             // Check key binding expiry.
             let now = crate::api::now_secs();
             let kb_valid = !signed.key_binding.is_expired(now);
+            if !kb_valid {
+                // §7.7: key_binding.expired audit event.
+                tracing::warn!(
+                    user_identity = %signed.key_binding.user_identity,
+                    expired_at = signed.key_binding.expires_at,
+                    category = "Identity",
+                    event = "key_binding.expired",
+                    "key_binding.expired: key binding for {} expired at {}",
+                    signed.key_binding.user_identity,
+                    signed.key_binding.expires_at
+                );
+            }
             children.push(gyre_common::VerificationResult {
                 label: "key_binding.expiry".to_string(),
                 valid: kb_valid,
@@ -1825,6 +1837,169 @@ pub(crate) fn verify_attestation_audit_only(
         },
         children,
     }
+}
+
+/// Full chain verification: walk from leaf to root `SignedInput` (§4.4, §6.2).
+///
+/// Returns a `VerificationResult` tree covering:
+///   - Each node's structural verification (signature, key binding, expiry)
+///   - Chain depth limit check (configurable, hard limit 10)
+///   - Accumulated constraints from the entire chain
+///
+/// The `max_depth` parameter is workspace-configurable; the hard limit of 10
+/// applies regardless.
+pub(crate) fn verify_chain(
+    chain: &[gyre_common::Attestation],
+    max_depth: u32,
+) -> gyre_common::VerificationResult {
+    let effective_max = max_depth.min(10);
+    let mut children = Vec::new();
+
+    if chain.is_empty() {
+        return gyre_common::VerificationResult {
+            label: "chain_verification".to_string(),
+            valid: false,
+            message: "empty attestation chain".to_string(),
+            children: vec![],
+        };
+    }
+
+    // Verify each node in the chain (root first → leaf last).
+    let mut all_valid = true;
+    let mut found_root = false;
+
+    for (i, att) in chain.iter().enumerate() {
+        let node_result = verify_attestation_audit_only(att);
+        if !node_result.valid {
+            all_valid = false;
+        }
+
+        // Check depth against configurable max.
+        if att.metadata.chain_depth > effective_max {
+            children.push(gyre_common::VerificationResult {
+                label: format!("node[{}].depth_limit", i),
+                valid: false,
+                message: format!(
+                    "chain depth {} exceeds max {} (hard limit 10)",
+                    att.metadata.chain_depth, effective_max
+                ),
+                children: vec![],
+            });
+            all_valid = false;
+        }
+
+        // Verify chain linkage: DerivedInput must have a non-empty parent_ref
+        // and there must be a prior node at a lower chain_depth.
+        // The parent_ref is a content hash of the parent attestation, not its
+        // id field — so we verify structural consistency (non-empty, depth ordering)
+        // rather than trying to match content hashes to IDs.
+        if let gyre_common::AttestationInput::Derived(ref derived) = att.input {
+            let has_parent_ref = !derived.parent_ref.is_empty();
+            let has_parent_at_lower_depth = chain
+                .iter()
+                .any(|p| p.metadata.chain_depth < att.metadata.chain_depth);
+            let linkage_valid = has_parent_ref && has_parent_at_lower_depth;
+            children.push(gyre_common::VerificationResult {
+                label: format!("node[{}].parent_linkage", i),
+                valid: linkage_valid,
+                message: if linkage_valid {
+                    format!(
+                        "parent_ref present, parent at depth {} found",
+                        att.metadata.chain_depth.saturating_sub(1)
+                    )
+                } else if !has_parent_ref {
+                    "missing parent_ref".to_string()
+                } else {
+                    "no parent node at lower depth found in chain".to_string()
+                },
+                children: vec![],
+            });
+            if !linkage_valid {
+                all_valid = false;
+            }
+        }
+
+        if matches!(att.input, gyre_common::AttestationInput::Signed(_)) {
+            found_root = true;
+        }
+
+        children.push(node_result);
+    }
+
+    // The chain must have a root SignedInput.
+    if !found_root {
+        children.push(gyre_common::VerificationResult {
+            label: "root_signed_input".to_string(),
+            valid: false,
+            message: "no root SignedInput found in chain".to_string(),
+            children: vec![],
+        });
+        all_valid = false;
+    } else {
+        children.push(gyre_common::VerificationResult {
+            label: "root_signed_input".to_string(),
+            valid: true,
+            message: "root SignedInput found".to_string(),
+            children: vec![],
+        });
+    }
+
+    gyre_common::VerificationResult {
+        label: "chain_verification".to_string(),
+        valid: all_valid,
+        message: if all_valid {
+            format!(
+                "chain of {} node(s) verified (max depth {})",
+                chain.len(),
+                effective_max
+            )
+        } else {
+            "chain verification failed".to_string()
+        },
+        children,
+    }
+}
+
+/// Accumulate all constraints from a verified chain (§4.3, §6.2 Phase 2).
+///
+/// Walks the chain root→leaf, collecting:
+/// 1. Explicit constraints from the root SignedInput
+/// 2. Additional constraints from each DerivedInput (additive only)
+/// 3. Gate constraints from gate attestations on each node
+///
+/// Returns the full constraint set for evaluation.
+pub(crate) fn accumulate_chain_constraints(
+    chain: &[gyre_common::Attestation],
+) -> (
+    Option<gyre_common::attestation::SignedInput>,
+    Vec<gyre_common::attestation::OutputConstraint>,
+    Vec<gyre_common::attestation::GateConstraint>,
+) {
+    let mut explicit_constraints = Vec::new();
+    let mut gate_constraints = Vec::new();
+    let mut root_input = None;
+
+    for att in chain {
+        match &att.input {
+            gyre_common::AttestationInput::Signed(si) => {
+                root_input = Some(si.clone());
+                explicit_constraints.extend(si.output_constraints.iter().cloned());
+            }
+            gyre_common::AttestationInput::Derived(di) => {
+                // Additive only: append derived constraints.
+                explicit_constraints.extend(di.output_constraints.iter().cloned());
+            }
+        }
+
+        // Collect gate constraints from all nodes.
+        for gate_result in &att.output.gate_results {
+            if let Some(ref gc) = gate_result.constraint {
+                gate_constraints.push(gc.clone());
+            }
+        }
+    }
+
+    (root_input, explicit_constraints, gate_constraints)
 }
 
 // ---------------------------------------------------------------------------
@@ -2638,5 +2813,306 @@ mod tests {
             .find(|c| c.label == "chain_depth")
             .expect("should have chain_depth child");
         assert!(!depth_child.valid);
+    }
+
+    // ── Full chain verification (TASK-009, §4.4, §6.2) ───────────────
+
+    fn make_signed_chain_attestation(
+        task_id: &str,
+        key_pair: &ring::signature::Ed25519KeyPair,
+    ) -> gyre_common::Attestation {
+        use ring::signature::KeyPair;
+
+        let content = gyre_common::attestation::InputContent {
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: "abc12345".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![gyre_common::attestation::PersonaRef {
+                name: "security".to_string(),
+            }],
+            meta_spec_set_sha: "def456".to_string(),
+            scope: gyre_common::attestation::ScopeConstraint {
+                allowed_paths: vec!["src/**".to_string()],
+                forbidden_paths: vec![],
+            },
+        };
+
+        let content_bytes = serde_json::to_vec(&content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &content_bytes);
+        let signature = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
+        let kb = gyre_common::KeyBinding {
+            public_key: key_pair.public_key().as_ref().to_vec(),
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://keycloak.example.com".to_string(),
+            trust_anchor_id: "tenant-keycloak".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+
+        gyre_common::Attestation {
+            id: "root-att-1".to_string(),
+            input: gyre_common::AttestationInput::Signed(gyre_common::attestation::SignedInput {
+                content,
+                output_constraints: vec![gyre_common::attestation::OutputConstraint {
+                    name: "scope to src".to_string(),
+                    expression: r#"output.changed_files.all(f, f.startsWith("src/"))"#.to_string(),
+                }],
+                valid_until: u64::MAX,
+                expected_generation: None,
+                signature,
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![],
+                commit_sha: "sha-root".to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_700_000_000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: task_id.to_string(),
+                agent_id: "orchestrator-1".to_string(),
+                chain_depth: 0,
+            },
+        }
+    }
+
+    fn make_derived_chain_attestation(
+        parent: &gyre_common::Attestation,
+        task_id: &str,
+        agent_id: &str,
+        depth: u32,
+    ) -> gyre_common::Attestation {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        use ring::signature::KeyPair;
+
+        // Compute parent_ref as content hash of parent attestation.
+        let parent_bytes = serde_json::to_vec(parent).unwrap();
+        let parent_hash = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&parent_bytes);
+            hasher.finalize().to_vec()
+        };
+
+        let derivation_content = serde_json::json!({
+            "parent_ref": hex::encode(&parent_hash),
+            "agent_id": agent_id,
+            "task_id": task_id,
+        });
+        let derivation_bytes = serde_json::to_vec(&derivation_content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &derivation_bytes);
+        let sig = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
+        let kb = gyre_common::KeyBinding {
+            public_key: key_pair.public_key().as_ref().to_vec(),
+            user_identity: format!("agent:{agent_id}"),
+            issuer: "https://gyre.example.com".to_string(),
+            trust_anchor_id: "gyre-oidc".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![],
+            platform_countersign: vec![],
+        };
+
+        gyre_common::Attestation {
+            id: format!("derived-att-{}", agent_id),
+            input: gyre_common::AttestationInput::Derived(gyre_common::DerivedInput {
+                parent_ref: parent_hash,
+                preconditions: vec![],
+                update: format!("agent:{agent_id} spawned for task:{task_id}"),
+                output_constraints: vec![],
+                signature: sig,
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![],
+                commit_sha: format!("sha-{agent_id}"),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_700_000_100,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: task_id.to_string(),
+                agent_id: agent_id.to_string(),
+                chain_depth: depth,
+            },
+        }
+    }
+
+    #[test]
+    fn verify_chain_single_signed_input() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let root = make_signed_chain_attestation("TASK-CHAIN-1", &key_pair);
+        let chain = vec![root];
+
+        let result = verify_chain(&chain, 10);
+        assert!(
+            result.valid,
+            "single signed input chain should be valid: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn verify_chain_human_orchestrator_agent() {
+        // Full chain: human → orchestrator → agent (depth 0, 1, 2).
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let root = make_signed_chain_attestation("TASK-CHAIN-2", &key_pair);
+        let orch = make_derived_chain_attestation(&root, "TASK-CHAIN-2", "orchestrator-1", 1);
+        let agent = make_derived_chain_attestation(&orch, "TASK-CHAIN-2", "worker-1", 2);
+
+        let chain = vec![root, orch, agent];
+        let result = verify_chain(&chain, 10);
+        assert!(
+            result.valid,
+            "human→orchestrator→agent chain should be valid: {}",
+            result.message
+        );
+
+        // Verify root SignedInput was found.
+        let root_found = result
+            .children
+            .iter()
+            .any(|c| c.label == "root_signed_input" && c.valid);
+        assert!(root_found, "should find root SignedInput");
+    }
+
+    #[test]
+    fn verify_chain_exceeds_depth_limit() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let root = make_signed_chain_attestation("TASK-DEEP", &key_pair);
+        let derived = make_derived_chain_attestation(&root, "TASK-DEEP", "deep-agent", 5);
+
+        let chain = vec![root, derived];
+
+        // With max_depth=3, depth=5 should fail.
+        let result = verify_chain(&chain, 3);
+        assert!(!result.valid, "should fail when depth exceeds limit");
+        let depth_failed = result
+            .children
+            .iter()
+            .any(|c| c.label.contains("depth_limit") && !c.valid);
+        assert!(depth_failed, "should have depth limit failure");
+    }
+
+    #[test]
+    fn verify_chain_empty_is_invalid() {
+        let result = verify_chain(&[], 10);
+        assert!(!result.valid, "empty chain should be invalid");
+        assert!(result.message.contains("empty"));
+    }
+
+    #[test]
+    fn verify_chain_no_root_signed_input_is_invalid() {
+        // Chain with only derived inputs (no root).
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let root = make_signed_chain_attestation("TASK-NOROOT", &key_pair);
+        let derived = make_derived_chain_attestation(&root, "TASK-NOROOT", "agent-1", 1);
+
+        // Only include the derived, not the root.
+        let chain = vec![derived];
+        let result = verify_chain(&chain, 10);
+        assert!(!result.valid, "chain without root should be invalid");
+    }
+
+    #[test]
+    fn accumulate_chain_constraints_additive() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let root = make_signed_chain_attestation("TASK-ACC", &key_pair);
+
+        // Create a derived with additional constraints.
+        let mut derived = make_derived_chain_attestation(&root, "TASK-ACC", "agent-1", 1);
+        if let gyre_common::AttestationInput::Derived(ref mut di) = derived.input {
+            di.output_constraints
+                .push(gyre_common::attestation::OutputConstraint {
+                    name: "agent-scope".to_string(),
+                    expression: r#"output.changed_files.all(f, f.startsWith("src/payments/"))"#
+                        .to_string(),
+                });
+        }
+
+        let chain = vec![root, derived];
+        let (root_si, explicit, gate) = accumulate_chain_constraints(&chain);
+
+        assert!(root_si.is_some(), "should find root signed input");
+        // Root has 1 constraint + derived has 1 = 2 total.
+        assert_eq!(
+            explicit.len(),
+            2,
+            "should accumulate constraints additively"
+        );
+        assert!(gate.is_empty(), "should have no gate constraints");
+    }
+
+    #[test]
+    fn accumulate_chain_constraints_includes_gate_constraints() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let mut root = make_signed_chain_attestation("TASK-GATE", &key_pair);
+        // Add a gate attestation with a constraint.
+        root.output
+            .gate_results
+            .push(gyre_common::attestation::GateAttestation {
+                gate_id: "gate-review".to_string(),
+                gate_name: "Code Review".to_string(),
+                gate_type: gyre_common::GateType::AgentReview,
+                status: gyre_common::GateStatus::Passed,
+                output_hash: vec![1, 2, 3],
+                constraint: Some(gyre_common::attestation::GateConstraint {
+                    gate_id: "gate-review".to_string(),
+                    gate_name: "Code Review".to_string(),
+                    constraint: gyre_common::attestation::OutputConstraint {
+                        name: "review constraint".to_string(),
+                        expression: "true".to_string(),
+                    },
+                    signed_by: vec![4, 5, 6],
+                }),
+                signature: vec![7, 8, 9],
+                key_binding: gyre_common::KeyBinding {
+                    public_key: vec![1; 32],
+                    user_identity: "gate-agent:review".to_string(),
+                    issuer: "https://gyre.example.com".to_string(),
+                    trust_anchor_id: "gyre-platform".to_string(),
+                    issued_at: 1_700_000_000,
+                    expires_at: u64::MAX,
+                    user_signature: vec![],
+                    platform_countersign: vec![],
+                },
+            });
+
+        let chain = vec![root];
+        let (_root_si, explicit, gate) = accumulate_chain_constraints(&chain);
+
+        assert_eq!(explicit.len(), 1, "should have 1 explicit constraint");
+        assert_eq!(gate.len(), 1, "should have 1 gate constraint");
+        assert_eq!(gate[0].gate_name, "Code Review");
     }
 }

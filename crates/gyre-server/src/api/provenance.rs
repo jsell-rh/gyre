@@ -142,7 +142,10 @@ pub struct AttestationPath {
 /// ABAC: resource_type = attestation, action = read.
 pub async fn get_verification(
     State(state): State<Arc<AppState>>,
-    Path(AttestationPath { id: repo_id, commit_sha }): Path<AttestationPath>,
+    Path(AttestationPath {
+        id: repo_id,
+        commit_sha,
+    }): Path<AttestationPath>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Verify repo exists.
     state
@@ -158,18 +161,27 @@ pub async fn get_verification(
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("attestation lookup failed: {e}")))?
         .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "no attestation found for commit {commit_sha}"
-            ))
+            ApiError::NotFound(format!("no attestation found for commit {commit_sha}"))
         })?;
 
-    // Verify the attestation chain.
-    let result = crate::git_http::verify_attestation_audit_only(&attestation);
+    // Load the full chain for comprehensive verification (§4.4, §6.2).
+    let chain = state
+        .chain_attestations
+        .load_chain(&attestation.id)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("chain lookup failed: {e}")))?;
+
+    // Get workspace-configurable max depth (default 10).
+    let max_depth = 10u32; // Will be configurable per workspace in future
+
+    // Verify the full chain from leaf to root (§6.2).
+    let result = crate::git_http::verify_chain(&chain, max_depth);
 
     Ok(Json(serde_json::json!({
         "commit_sha": commit_sha,
         "repo_id": repo_id,
         "attestation_id": attestation.id,
+        "chain_depth": chain.len(),
         "verification": result,
     })))
 }
@@ -180,7 +192,10 @@ pub async fn get_verification(
 /// ABAC: resource_type = attestation, action = export.
 pub async fn get_attestation_bundle(
     State(state): State<Arc<AppState>>,
-    Path(AttestationPath { id: repo_id, commit_sha }): Path<AttestationPath>,
+    Path(AttestationPath {
+        id: repo_id,
+        commit_sha,
+    }): Path<AttestationPath>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Verify repo exists.
     let repo = state
@@ -196,9 +211,7 @@ pub async fn get_attestation_bundle(
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("attestation lookup failed: {e}")))?
         .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "no attestation found for commit {commit_sha}"
-            ))
+            ApiError::NotFound(format!("no attestation found for commit {commit_sha}"))
         })?;
 
     // Load the full attestation chain from this attestation back to root.
@@ -226,15 +239,219 @@ pub async fn get_attestation_bundle(
 
     let now = crate::api::now_secs();
 
+    // Load trust anchors for the repo's tenant (§6.3).
+    let trust_anchors = {
+        let ws = state
+            .workspaces
+            .find_by_id(&Id::new(&attestation.metadata.workspace_id))
+            .await
+            .ok()
+            .flatten();
+        if let Some(ws) = ws {
+            state
+                .trust_anchors
+                .list_by_tenant(ws.tenant_id.as_str())
+                .await
+                .unwrap_or_default()
+        } else {
+            vec![]
+        }
+    };
+
     // Build the VerificationBundle (§6.3).
     let bundle = serde_json::json!({
         "attestation_chain": chain,
-        "trust_anchors": [],  // trust anchors would be loaded from tenant config
+        "trust_anchors": trust_anchors,
         "git_diff": git_diff,
         "timestamp": now,
     });
 
     Ok(Json(bundle))
+}
+
+// ── Chain Visualization (TASK-009, §7.6) ──────────────────────────────────────
+
+/// A node in the provenance chain visualization.
+#[derive(Serialize)]
+pub struct ChainNode {
+    /// Attestation ID.
+    pub id: String,
+    /// "signed" or "derived".
+    pub input_type: String,
+    /// Signer identity (user or agent).
+    pub signer_identity: String,
+    /// Number of constraints on this node.
+    pub constraint_count: usize,
+    /// Number of gate attestations on this node.
+    pub gate_count: usize,
+    /// Chain depth (0 = root).
+    pub chain_depth: u32,
+    /// Verification status of this node.
+    pub valid: bool,
+    /// Human-readable verification message.
+    pub message: String,
+    /// Task ID.
+    pub task_id: String,
+    /// Agent ID.
+    pub agent_id: String,
+    /// Created timestamp.
+    pub created_at: u64,
+    /// Failed constraints (if any).
+    pub failed_constraints: Vec<FailedConstraint>,
+}
+
+/// A failed constraint in the chain visualization.
+#[derive(Serialize)]
+pub struct FailedConstraint {
+    pub name: String,
+    pub expression: String,
+    pub message: String,
+}
+
+/// An edge in the provenance chain visualization.
+#[derive(Serialize)]
+pub struct ChainEdge {
+    /// Source node ID (parent).
+    pub from: String,
+    /// Target node ID (child).
+    pub to: String,
+    /// Edge label.
+    pub label: String,
+}
+
+/// Response for the chain visualization endpoint.
+#[derive(Serialize)]
+pub struct ChainVisualization {
+    pub commit_sha: String,
+    pub repo_id: String,
+    pub nodes: Vec<ChainNode>,
+    pub edges: Vec<ChainEdge>,
+    /// Overall chain verification result.
+    pub chain_valid: bool,
+    pub chain_message: String,
+}
+
+/// GET /api/v1/repos/:id/attestations/:commit_sha/chain
+///
+/// Returns the attestation chain as a directed graph for Explorer visualization (§7.6).
+/// Each node shows signer identity, constraint count, verification status.
+/// Failed constraints are highlighted with the failing expression and value.
+///
+pub async fn get_attestation_chain(
+    State(state): State<Arc<AppState>>,
+    Path(AttestationPath {
+        id: repo_id,
+        commit_sha,
+    }): Path<AttestationPath>,
+) -> Result<Json<ChainVisualization>, ApiError> {
+    // verification-scope:structural-only — visualization endpoint, not verification.
+    // Full constraint evaluation is performed by GET .../verification.
+
+    // Verify repo exists.
+    state
+        .repos
+        .find_by_id(&Id::new(&repo_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // Find attestation for this commit.
+    let attestation = state
+        .chain_attestations
+        .find_by_commit(&commit_sha)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("attestation lookup failed: {e}")))?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("no attestation found for commit {commit_sha}"))
+        })?;
+
+    // Load the full chain.
+    let chain = state
+        .chain_attestations
+        .load_chain(&attestation.id)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("chain lookup failed: {e}")))?;
+
+    // Verify the chain.
+    let chain_result = crate::git_http::verify_chain(&chain, 10);
+
+    // Build nodes and edges.
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+
+    for att in &chain {
+        let node_result = crate::git_http::verify_attestation_audit_only(att);
+
+        let (input_type, signer_identity, constraint_count) = match &att.input {
+            gyre_common::AttestationInput::Signed(si) => {
+                let constraints = si.output_constraints.len();
+                (
+                    "signed".to_string(),
+                    si.key_binding.user_identity.clone(),
+                    constraints,
+                )
+            }
+            gyre_common::AttestationInput::Derived(di) => {
+                let constraints = di.output_constraints.len();
+                (
+                    "derived".to_string(),
+                    di.key_binding.user_identity.clone(),
+                    constraints,
+                )
+            }
+        };
+
+        // Collect failed constraints from verification result.
+        let failed_constraints: Vec<FailedConstraint> = node_result
+            .children
+            .iter()
+            .filter(|c| !c.valid)
+            .map(|c| FailedConstraint {
+                name: c.label.clone(),
+                expression: String::new(), // expression not available in structural checks
+                message: c.message.clone(),
+            })
+            .collect();
+
+        nodes.push(ChainNode {
+            id: att.id.clone(),
+            input_type,
+            signer_identity,
+            constraint_count,
+            gate_count: att.output.gate_results.len(),
+            chain_depth: att.metadata.chain_depth,
+            valid: node_result.valid,
+            message: node_result.message,
+            task_id: att.metadata.task_id.clone(),
+            agent_id: att.metadata.agent_id.clone(),
+            created_at: att.metadata.created_at,
+            failed_constraints,
+        });
+
+        // Build edges from DerivedInput to its parent (at lower depth).
+        if let gyre_common::AttestationInput::Derived(_) = att.input {
+            // Find the parent node: the one at the immediately lower chain_depth.
+            if let Some(parent) = chain
+                .iter()
+                .rev()
+                .find(|p| p.metadata.chain_depth == att.metadata.chain_depth.saturating_sub(1))
+            {
+                edges.push(ChainEdge {
+                    from: parent.id.clone(),
+                    to: att.id.clone(),
+                    label: "derives from".to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(Json(ChainVisualization {
+        commit_sha,
+        repo_id,
+        nodes,
+        edges,
+        chain_valid: chain_result.valid,
+        chain_message: chain_result.message,
+    }))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

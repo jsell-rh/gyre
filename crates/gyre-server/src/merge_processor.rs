@@ -370,8 +370,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     // We use the source branch HEAD as the "merge commit" for diff computation
     // since the actual merge commit doesn't exist yet.
     if let Some(source_sha) =
-        crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.source_branch))
-            .await
+        crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.source_branch)).await
     {
         if let Err(reason) = crate::constraint_check::enforce_merge_constraints(
             state,
@@ -394,11 +393,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             );
             state
                 .merge_queue
-                .update_status(
-                    &entry.id,
-                    MergeQueueEntryStatus::Failed,
-                    Some(reason),
-                )
+                .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
                 .await?;
             return Ok(());
         }

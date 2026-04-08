@@ -643,18 +643,18 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
         Policy {
             id: Id::new("builtin-require-signed-authorization"),
             name: "builtin:require-signed-authorization".to_string(),
-            description: "Deny push/merge for non-system subjects unless valid attestation chain exists".to_string(),
+            description:
+                "Deny push/merge for non-system subjects unless valid attestation chain exists"
+                    .to_string(),
             scope: PolicyScope::Tenant,
             scope_id: None,
             priority: 998,
             effect: PolicyEffect::Deny,
-            conditions: vec![
-                Condition {
-                    attribute: "subject.type".to_string(),
-                    operator: ConditionOp::NotEquals,
-                    value: ConditionValue::String("system".to_string()),
-                },
-            ],
+            conditions: vec![Condition {
+                attribute: "subject.type".to_string(),
+                operator: ConditionOp::NotEquals,
+                value: ConditionValue::String("system".to_string()),
+            }],
             actions: vec!["push".to_string(), "merge".to_string()],
             resource_types: vec!["attestation".to_string()],
             enabled: true,

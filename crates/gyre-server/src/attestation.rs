@@ -17,6 +17,10 @@ pub use gyre_domain::{AttestationBundle, AttestationGateResult, MergeAttestation
 ///
 /// The canonical form is deterministic JSON (struct field order as declared).
 /// The signature covers the UTF-8 bytes of that JSON.
+///
+/// **Note:** `AttestationBundle` is deprecated (Phase 4). This function
+/// continues to produce bundles for backward compatibility during the
+/// dual-write period. New code should use the chain attestation API.
 pub fn sign_attestation(
     attestation: MergeAttestation,
     signing_key: &crate::auth::AgentSigningKey,
@@ -30,6 +34,9 @@ pub fn sign_attestation(
         attestation,
         signature,
         signing_key_id,
+        deprecation_notice: Some(
+            "This format is deprecated. Use GET /api/v1/repos/{id}/attestations/{commit_sha}/verification for chain attestation.".to_string()
+        ),
     }
 }
 

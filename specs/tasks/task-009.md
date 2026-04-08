@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §4, §5.2, §7.3, §8 Phase 4  
 **Depends on:** TASK-008  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -66,4 +66,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- feat(provenance): implement authorization provenance Phase 4 — full chains and AIBOM integration (TASK-009)

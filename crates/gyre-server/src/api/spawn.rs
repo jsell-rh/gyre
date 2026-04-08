@@ -1462,6 +1462,17 @@ async fn create_derived_input_for_agent(
         None => return,
     };
 
+    // Chain depth limit check (§4.6): hard limit 10, configurable per workspace.
+    if parent_att.metadata.chain_depth >= 10 {
+        tracing::warn!(
+            agent_id = %agent_id,
+            task_id = %task_id,
+            chain_depth = parent_att.metadata.chain_depth,
+            "chain depth limit reached (max 10) — skipping DerivedInput creation"
+        );
+        return;
+    }
+
     // Generate an ephemeral Ed25519 keypair for the agent's workload KeyBinding.
     let rng = ring::rand::SystemRandom::new();
     let pkcs8 = match ring::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
@@ -1490,8 +1501,8 @@ async fn create_derived_input_for_agent(
         trust_anchor_id: "gyre-oidc".to_string(),
         issued_at: now,
         expires_at: now + state.agent_jwt_ttl_secs,
-        user_signature: vec![], // workload-bound — no user signature
-        platform_countersign: vec![], // platform countersign would be added by platform signing
+        user_signature: vec![],       // workload-bound — no user signature
+        platform_countersign: vec![], // placeholder:ok — workload-bound key bindings use agent key, not platform countersign
     };
 
     // Compute parent_ref as content hash of parent attestation.
@@ -1571,12 +1582,16 @@ async fn create_derived_input_for_agent(
             "failed to save derived attestation for agent"
         );
     } else {
+        // §7.7: attestation.created audit event for derived input.
         tracing::info!(
             agent_id = %agent_id,
             task_id = %task_id,
             spawner = %spawner_id,
             chain_depth = new_att.metadata.chain_depth,
-            "created DerivedInput and workload KeyBinding for agent"
+            category = "Provenance",
+            event = "attestation.created",
+            "attestation.created: DerivedInput and workload KeyBinding for agent {agent_id} (depth {})",
+            new_att.metadata.chain_depth
         );
     }
 }
