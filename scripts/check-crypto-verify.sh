@@ -313,6 +313,121 @@ for file in $(find "$SERVER_SRC" -name '*.rs' -type f | sort); do
     done
 done
 
+# ── Class 4: Asymmetric branch verification ──────────────────────────
+#
+# A verify function that handles MULTIPLE crypto-bearing input types
+# (e.g., SignedInput and DerivedInput via match arms) where SOME branches
+# perform cryptographic verification and OTHERS skip it. The most common
+# failure mode: the Signed branch calls Ed25519 verify, but the Derived
+# branch only checks structural properties (has_parent, parent_ref non-empty)
+# without verifying the DerivedInput's signature.
+#
+# The spec §4.4 step 1 requires BOTH input types to be cryptographically
+# verified: "verify_signature(attestation.input.signature,
+# attestation.input.key_binding)" applies to DerivedInputs just as to
+# SignedInputs.
+#
+# Detection: a verify function handles both Signed( and Derived( match arms,
+# has crypto operations (ring, .verify(), UnparsedPublicKey), BUT the
+# Derived section lacks crypto operations. Class 2 misses this because it
+# checks at the function level — if any branch has crypto ops, Class 2
+# passes. Class 4 checks at the branch level.
+#
+# Exempt with: // branch-verify:ok — <reason>
+#
+# See: specs/reviews/task-009.md F1 (DerivedInput signature not verified)
+
+echo ""
+echo "=== Class 4: Asymmetric branch verification ==="
+
+for file in $(find "$SERVER_SRC" -name '*.rs' -type f | sort); do
+    [ -f "$file" ] || continue
+
+    awk -v file="$file" '
+    # Skip test modules
+    /^\s*#\[cfg\(test\)\]/ { in_test_module = 1; next }
+
+    # Detect function boundaries
+    /^\s*(pub\s+)?(async\s+)?fn\s+/ {
+        # Check previous function
+        if (fn_name != "" && is_verify_fn && has_signed_branch && has_derived_branch && has_crypto_in_signed && !has_crypto_in_derived && !has_exempt) {
+            printf "ASYMMETRIC BRANCH VERIFICATION: %s in %s:%d\n", fn_name, file, fn_start
+            printf "  Function handles both Signed and Derived input types but only\n"
+            printf "  performs cryptographic verification for the Signed branch.\n"
+            printf "  The Derived branch must also verify Ed25519 signature and key\n"
+            printf "  binding — DerivedInput.signature proves who authorized the delegation.\n"
+            printf "  Spec: §4.4 step 1 requires verify_signature for all input types.\n"
+            printf "  See: specs/reviews/task-009.md F1 (asymmetric branch verification)\n\n"
+            violations++
+        }
+        if (fn_name != "" && is_verify_fn && has_signed_branch && has_derived_branch) checked++
+
+        # Parse function name
+        match($0, /fn ([a-zA-Z_][a-zA-Z0-9_]*)/, m)
+        fn_name = m[1]
+        fn_start = NR
+        is_verify_fn = 0
+        has_signed_branch = 0
+        has_derived_branch = 0
+        has_crypto_in_signed = 0
+        has_crypto_in_derived = 0
+        in_signed_section = 0
+        in_derived_section = 0
+        has_exempt = 0
+        # Skip test functions
+        if (fn_name ~ /^test_/ || in_test_module) fn_name = ""
+        if (fn_name ~ /verify/) is_verify_fn = 1
+        next
+    }
+    fn_name != "" && is_verify_fn {
+        if ($0 ~ /branch-verify:ok/) has_exempt = 1
+
+        # Track which branch we are in based on match arm patterns
+        if ($0 ~ /Signed\(|SignedInput/) {
+            has_signed_branch = 1
+            in_signed_section = 1
+            in_derived_section = 0
+        }
+        if ($0 ~ /Derived\(|DerivedInput/) {
+            has_derived_branch = 1
+            in_derived_section = 1
+            in_signed_section = 0
+        }
+
+        # Check for crypto operations in the current section
+        if ($0 ~ /ring::|\.verify\(|UnparsedPublicKey|Ed25519|ed25519|verify_signature|digest::digest/) {
+            if (in_signed_section) has_crypto_in_signed = 1
+            if (in_derived_section) has_crypto_in_derived = 1
+        }
+    }
+    END {
+        if (fn_name != "" && is_verify_fn && has_signed_branch && has_derived_branch && has_crypto_in_signed && !has_crypto_in_derived && !has_exempt) {
+            printf "ASYMMETRIC BRANCH VERIFICATION: %s in %s:%d\n", fn_name, file, fn_start
+            printf "  Function handles both Signed and Derived input types but only\n"
+            printf "  performs cryptographic verification for the Signed branch.\n"
+            printf "  The Derived branch must also verify Ed25519 signature and key\n"
+            printf "  binding — DerivedInput.signature proves who authorized the delegation.\n"
+            printf "  Spec: §4.4 step 1 requires verify_signature for all input types.\n"
+            printf "  See: specs/reviews/task-009.md F1 (asymmetric branch verification)\n\n"
+            violations++
+        }
+        if (fn_name != "" && is_verify_fn && has_signed_branch && has_derived_branch) checked++
+        printf "SUMMARY:%d:%d\n", checked, violations
+    }
+    ' "$file" | while IFS= read -r line; do
+        case "$line" in
+            SUMMARY:*)
+                c=$(echo "$line" | cut -d: -f2)
+                v=$(echo "$line" | cut -d: -f3)
+                echo "$c $v" >> /tmp/check-crypto-verify-$$
+                ;;
+            *)
+                echo "$line"
+                ;;
+        esac
+    done
+done
+
 # ── Tally results ─────────────────────────────────────────────────────
 
 if [ -f /tmp/check-crypto-verify-$$ ]; then
@@ -336,6 +451,8 @@ else
     echo "     Structural checks (expiry, chain depth, non-empty) are necessary but not sufficient."
     echo "     Class 3: Delegation structures (DerivedInput) must be signed by the PARENT's"
     echo "     existing key from storage, not a newly generated child key."
+    echo "     Class 4: Verify functions that handle multiple input types (Signed/Derived)"
+    echo "     must perform crypto verification for ALL branches, not just Signed."
     echo "${VIOLATIONS} violation(s) found out of ${CHECKED} functions checked."
     exit 1
 fi

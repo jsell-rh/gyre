@@ -14,14 +14,19 @@
 # (phases 2–5). Consumers get valid: true even when constraints are violated.
 #
 # This script detects API handler functions that call structural-only
-# verification functions (verify_attestation_audit_only) without also calling
-# constraint evaluation functions (evaluate_all, build_cel_context,
+# verification functions (verify_attestation_audit_only, verify_chain) without
+# also calling constraint evaluation functions (evaluate_all, build_cel_context,
 # derive_strategy_constraints, evaluate_constraints_against).
+#
+# Note: verify_chain calls verify_attestation_audit_only internally for each
+# node — it is still structural-only verification (Phase 1 of §6.2). Switching
+# from verify_attestation_audit_only to verify_chain does NOT add constraint
+# evaluation (Phases 2–5). Both functions must be treated as structural-only.
 #
 # An endpoint that is INTENTIONALLY structural-only (e.g., an internal health
 # check) can be exempted with: // verification-scope:structural-only
 #
-# See: specs/reviews/task-008.md F3 (incomplete verification endpoint)
+# See: specs/reviews/task-008.md F3, R2 F5 (incomplete verification endpoint)
 #
 # Run by pre-commit and CI.
 
@@ -38,8 +43,9 @@ fi
 
 echo "Checking verification endpoint completeness..."
 
-# Find non-test source files that call verify_attestation_audit_only
-for file in $(grep -rl 'verify_attestation_audit_only' "$SERVER_SRC" --include='*.rs' 2>/dev/null | sort); do
+# Find non-test source files that call any structural-only verification function
+# (verify_attestation_audit_only OR verify_chain — both are structural-only)
+for file in $(grep -rl 'verify_attestation_audit_only\|verify_chain' "$SERVER_SRC" --include='*.rs' 2>/dev/null | sort); do
     [ -f "$file" ] || continue
 
     # Use awk to find handler functions (pub async fn) that call
@@ -54,7 +60,7 @@ for file in $(grep -rl 'verify_attestation_audit_only' "$SERVER_SRC" --include='
         # Check previous function
         if (fn_name != "" && has_structural_verify && is_handler && !has_constraint_eval && !has_exempt) {
             printf "INCOMPLETE VERIFICATION ENDPOINT: %s in %s:%d\n", fn_name, file, fn_start
-            printf "  Handler calls verify_attestation_audit_only (structural checks only)\n"
+            printf "  Handler calls structural-only verification (verify_attestation_audit_only or verify_chain)\n"
             printf "  but does not call constraint evaluation functions. The spec §6.2 defines\n"
             printf "  a 5-phase verification algorithm; structural checks are only phase 1.\n"
             printf "  Missing: collect constraints, build CEL context, evaluate constraints,\n"
@@ -81,7 +87,7 @@ for file in $(grep -rl 'verify_attestation_audit_only' "$SERVER_SRC" --include='
     }
     fn_name != "" {
         if ($0 ~ /verification-scope:structural-only/) has_exempt = 1
-        if ($0 ~ /verify_attestation_audit_only/) has_structural_verify = 1
+        if ($0 ~ /verify_attestation_audit_only|verify_chain/) has_structural_verify = 1
         # Constraint evaluation functions — any of these indicate the endpoint
         # does more than structural verification
         if ($0 ~ /evaluate_all|evaluate_constraints|build_cel_context|derive_strategy_constraints|enforce_push_constraints|evaluate_push_constraints|evaluate_merge_constraints/) has_constraint_eval = 1
@@ -89,7 +95,7 @@ for file in $(grep -rl 'verify_attestation_audit_only' "$SERVER_SRC" --include='
     END {
         if (fn_name != "" && has_structural_verify && is_handler && !has_constraint_eval && !has_exempt) {
             printf "INCOMPLETE VERIFICATION ENDPOINT: %s in %s:%d\n", fn_name, file, fn_start
-            printf "  Handler calls verify_attestation_audit_only (structural checks only)\n"
+            printf "  Handler calls structural-only verification (verify_attestation_audit_only or verify_chain)\n"
             printf "  but does not call constraint evaluation functions. The spec §6.2 defines\n"
             printf "  a 5-phase verification algorithm; structural checks are only phase 1.\n"
             printf "  Missing: collect constraints, build CEL context, evaluate constraints,\n"
