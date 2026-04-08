@@ -17,6 +17,7 @@
   import { detectLang, highlightLine } from './syntaxHighlight.js';
   import { renderMarkdown } from './markdown.js';
   import CopyableId from './CopyableId.svelte';
+  import ProvenanceChain from '../components/ProvenanceChain.svelte';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -3038,6 +3039,16 @@
                   </span>
                 </div>
               </div>
+            {/if}
+
+            <!-- Cryptographic attestation chain visualization (§7.6) -->
+            {#if c.repository_id || c.repo_id}
+              {@const commitRepoId = c.repository_id ?? c.repo_id}
+              <ProvenanceChain
+                repoId={commitRepoId}
+                commitSha={sha}
+                token={localStorage.getItem('gyre_token') ?? ''}
+              />
             {/if}
 
             <!-- Investigate: spawn interrogation agent from this commit's context -->

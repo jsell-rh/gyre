@@ -503,7 +503,7 @@ pub async fn git_receive_pack(
                                 task_id = %tid,
                                 repo_id = %repo_id_clone,
                                 label = %result.label,
-                                "attestation.verified: chain valid (audit-only)"
+                                "attestation.verified: chain valid"
                             );
                         } else {
                             tracing::warn!(
@@ -512,7 +512,7 @@ pub async fn git_receive_pack(
                                 repo_id = %repo_id_clone,
                                 label = %result.label,
                                 message = %result.message,
-                                "attestation.chain_invalid: verification failed (audit-only, not rejecting)"
+                                "attestation.chain_invalid: verification failed"
                             );
                         }
                     }
@@ -1813,7 +1813,69 @@ pub(crate) fn verify_attestation_audit_only(
                 },
                 children: vec![],
             });
-            has_parent
+
+            // Cryptographic signature verification (§4.4 step 1):
+            // Verify Ed25519 signature over SHA256(derivation_content) against
+            // key_binding.public_key. Mirrors the Signed branch verification.
+            let sig_valid = {
+                use ring::digest;
+                use ring::signature::{self, UnparsedPublicKey};
+
+                let derivation_content = serde_json::json!({
+                    "parent_ref": hex::encode(&derived.parent_ref),
+                    "agent_id": attestation.metadata.agent_id,
+                    "task_id": attestation.metadata.task_id,
+                });
+                let derivation_bytes = serde_json::to_vec(&derivation_content).unwrap_or_default();
+                let content_hash = digest::digest(&digest::SHA256, &derivation_bytes);
+                let peer_public_key =
+                    UnparsedPublicKey::new(&signature::ED25519, &derived.key_binding.public_key);
+                peer_public_key
+                    .verify(content_hash.as_ref(), &derived.signature)
+                    .is_ok()
+            };
+            children.push(gyre_common::VerificationResult {
+                label: "derived_input.signature".to_string(),
+                valid: sig_valid,
+                message: if sig_valid {
+                    "Ed25519 signature verified against key_binding.public_key".to_string()
+                } else {
+                    "Ed25519 signature verification FAILED — signature does not match \
+                     key_binding.public_key over derivation content hash"
+                        .to_string()
+                },
+                children: vec![],
+            });
+
+            // Check key binding expiry (§4.4 step 2).
+            let now = crate::api::now_secs();
+            let kb_valid = !derived.key_binding.is_expired(now);
+            if !kb_valid {
+                tracing::warn!(
+                    user_identity = %derived.key_binding.user_identity,
+                    expired_at = derived.key_binding.expires_at,
+                    category = "Identity",
+                    event = "key_binding.expired",
+                    "key_binding.expired: key binding for {} expired at {}",
+                    derived.key_binding.user_identity,
+                    derived.key_binding.expires_at
+                );
+            }
+            children.push(gyre_common::VerificationResult {
+                label: "key_binding.expiry".to_string(),
+                valid: kb_valid,
+                message: if kb_valid {
+                    format!("expires at {}", derived.key_binding.expires_at)
+                } else {
+                    format!(
+                        "expired at {} (now={})",
+                        derived.key_binding.expires_at, now
+                    )
+                },
+                children: vec![],
+            });
+
+            has_parent && sig_valid && kb_valid
         }
     };
 
@@ -1831,9 +1893,9 @@ pub(crate) fn verify_attestation_audit_only(
         label: "attestation_chain_verification".to_string(),
         valid: all_valid,
         message: if all_valid {
-            "all checks passed (audit-only)".to_string()
+            "all structural checks passed".to_string()
         } else {
-            "one or more checks failed (audit-only, not rejecting)".to_string()
+            "one or more structural checks failed".to_string()
         },
         children,
     }

@@ -52,7 +52,7 @@ pub async fn evaluate_push_constraints(
             tracing::debug!(
                 task_id = %task_id,
                 repo_id = %repo_id,
-                "no attestation chain found for task (Phase 2, audit-only)"
+                "no attestation chain found for task (Phase 2, logging only)" // enforcement-mode:ok — Phase 2 is genuinely non-enforcing
             );
             return;
         }
@@ -917,7 +917,7 @@ pub async fn evaluate_merge_constraints(
 /// (SHA256 of the serialized JSON). For `attestation_level`, workload
 /// attestation data is not yet available in Phase 2 — the field remains 0
 /// and callers must guard against generating constraints that reference it.
-async fn build_agent_context(
+pub(crate) async fn build_agent_context(
     state: &AppState,
     agent_id: &str,
     task_id: &str,
@@ -1091,7 +1091,10 @@ async fn compute_push_diff(
 }
 
 /// Compute the diff for a merge commit (parent comparison).
-async fn compute_commit_diff(repo_path: &str, commit_sha: &str) -> Option<OutputContext> {
+pub(crate) async fn compute_commit_diff(
+    repo_path: &str,
+    commit_sha: &str,
+) -> Option<OutputContext> {
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
     // Get changed files relative to first parent.

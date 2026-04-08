@@ -138,7 +138,13 @@ pub struct AttestationPath {
 /// GET /api/v1/repos/:id/attestations/:commit_sha/verification
 ///
 /// Returns the full `VerificationResult` tree for the attestation chain
-/// associated with the given commit SHA.
+/// associated with the given commit SHA. Implements the complete §6.2
+/// verification algorithm (5 phases):
+///   Phase 1: Verify the input chain (structural + crypto)
+///   Phase 2: Collect all constraints (explicit + strategy-implied + gate)
+///   Phase 3: Build CEL context from actual output (diff)
+///   Phase 4: Evaluate all constraints
+///   Phase 5: Verify output signatures
 /// ABAC: resource_type = attestation, action = read.
 pub async fn get_verification(
     State(state): State<Arc<AppState>>,
@@ -147,8 +153,8 @@ pub async fn get_verification(
         commit_sha,
     }): Path<AttestationPath>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Verify repo exists.
-    state
+    // Verify repo exists and get repo data (needed for path + default_branch).
+    let repo = state
         .repos
         .find_by_id(&Id::new(&repo_id))
         .await?
@@ -174,15 +180,174 @@ pub async fn get_verification(
     // Get workspace-configurable max depth (default 10).
     let max_depth = 10u32; // Will be configurable per workspace in future
 
-    // Verify the full chain from leaf to root (§6.2).
-    let result = crate::git_http::verify_chain(&chain, max_depth);
+    // ── Phase 1: Verify the input chain (structural + crypto) ──
+    let chain_result = crate::git_http::verify_chain(&chain, max_depth);
+
+    // If chain structure is invalid, return early with the failure.
+    if !chain_result.valid {
+        return Ok(Json(serde_json::json!({
+            "commit_sha": commit_sha,
+            "repo_id": repo_id,
+            "attestation_id": attestation.id,
+            "chain_depth": chain.len(),
+            "verification": chain_result,
+            "constraint_results": null,
+        })));
+    }
+
+    // ── Phase 2: Collect all constraints ──
+    // Find root SignedInput.
+    let signed_input = chain.iter().find_map(|att| match &att.input {
+        gyre_common::AttestationInput::Signed(si) => Some(si),
+        _ => None,
+    });
+
+    // Accumulate constraints from the full chain (explicit + gate).
+    let (_root, explicit_from_chain, gate_from_chain) =
+        crate::git_http::accumulate_chain_constraints(&chain);
+
+    // Derive strategy-implied constraints from workspace config.
+    let workspace = state
+        .workspaces
+        .find_by_id(&Id::new(&attestation.metadata.workspace_id))
+        .await
+        .ok()
+        .flatten();
+    let trust_level = workspace
+        .as_ref()
+        .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
+
+    let mut strategy_constraints = if let Some(si) = signed_input {
+        gyre_domain::constraint_evaluator::derive_strategy_constraints(
+            &si.content,
+            trust_level.as_deref(),
+            None,
+        )
+    } else {
+        vec![]
+    };
+
+    // ── Phase 3: Build CEL context from actual output ──
+    // Build agent context.
+    let agent_ctx = crate::constraint_check::build_agent_context(
+        &state,
+        &attestation.metadata.agent_id,
+        &attestation.metadata.task_id,
+        &Id::new(&attestation.metadata.workspace_id),
+    )
+    .await;
+
+    // Guard: remove attestation-level constraints when the agent's level is unknown.
+    if agent_ctx.attestation_level == 0 {
+        strategy_constraints.retain(|c| !c.expression.contains("agent.attestation_level"));
+    }
+
+    // Collect all constraints.
+    let all_constraints = gyre_domain::constraint_evaluator::collect_all_constraints(
+        &explicit_from_chain,
+        &strategy_constraints,
+        &gate_from_chain,
+    );
+
+    // Compute the diff for the commit.
+    let diff_info = crate::constraint_check::compute_commit_diff(&repo.path, &commit_sha).await;
+
+    // Build target context.
+    let target_ctx = gyre_domain::constraint_evaluator::TargetContext {
+        repo_id: repo_id.clone(),
+        workspace_id: attestation.metadata.workspace_id.clone(),
+        branch: String::new(), // not available from attestation alone
+        default_branch: repo.default_branch.clone(),
+    };
+
+    // ── Phase 4: Evaluate all constraints ──
+    let constraint_result = if !all_constraints.is_empty() {
+        if let Some(ref diff) = diff_info {
+            if let Some(si) = signed_input {
+                let ci = gyre_domain::constraint_evaluator::ConstraintInput {
+                    input: &si.content,
+                    output: diff,
+                    agent: &agent_ctx,
+                    target: &target_ctx,
+                    action: gyre_domain::constraint_evaluator::Action::Push,
+                };
+                match gyre_domain::constraint_evaluator::build_cel_context(&ci) {
+                    Ok(ctx) => {
+                        let eval_result =
+                            gyre_domain::constraint_evaluator::evaluate_all(&all_constraints, &ctx);
+                        Some(eval_result)
+                    }
+                    Err(e) => Some(gyre_common::VerificationResult {
+                        valid: false,
+                        label: "constraint_evaluation".to_string(),
+                        message: format!("failed to build CEL context: {e}"),
+                        children: vec![],
+                    }),
+                }
+            } else {
+                Some(gyre_common::VerificationResult {
+                    valid: false,
+                    label: "constraint_evaluation".to_string(),
+                    message: "no SignedInput found in chain — cannot evaluate constraints"
+                        .to_string(),
+                    children: vec![],
+                })
+            }
+        } else {
+            Some(gyre_common::VerificationResult {
+                valid: false,
+                label: "constraint_evaluation".to_string(),
+                message: "could not compute commit diff for constraint evaluation".to_string(),
+                children: vec![],
+            })
+        }
+    } else {
+        // No constraints to evaluate — pass.
+        Some(gyre_common::VerificationResult {
+            valid: true,
+            label: "constraint_evaluation".to_string(),
+            message: "no constraints to evaluate".to_string(),
+            children: vec![],
+        })
+    };
+
+    // ── Phase 5: Output signature verification ──
+    // Already covered by verify_chain (checks agent_signature and gate signatures).
+
+    // Combine Phase 1 (chain structure) and Phase 4 (constraint evaluation)
+    // into the overall verification result.
+    let overall_valid = chain_result.valid && constraint_result.as_ref().map_or(true, |r| r.valid);
+    let overall_message = if overall_valid {
+        "all verification phases passed".to_string()
+    } else if !chain_result.valid {
+        format!("chain verification failed: {}", chain_result.message)
+    } else {
+        constraint_result
+            .as_ref()
+            .map(|r| format!("constraint evaluation failed: {}", r.message))
+            .unwrap_or_else(|| "constraint evaluation incomplete".to_string())
+    };
+
+    let overall = gyre_common::VerificationResult {
+        valid: overall_valid,
+        label: "full_verification".to_string(),
+        message: overall_message,
+        children: {
+            let mut children = vec![chain_result];
+            if let Some(cr) = constraint_result {
+                children.push(cr);
+            }
+            children
+        },
+    };
 
     Ok(Json(serde_json::json!({
         "commit_sha": commit_sha,
         "repo_id": repo_id,
         "attestation_id": attestation.id,
         "chain_depth": chain.len(),
-        "verification": result,
+        "constraints_evaluated": all_constraints.len(),
+        "verification": overall,
     })))
 }
 

@@ -252,17 +252,13 @@ pub async fn get_aibom(
                     .unwrap_or_default();
                 if !chain.is_empty() {
                     chain_attested_count += 1;
-                    // Include chain summary (not the full chain to keep response size manageable).
+                    // Include the full attestation chain per commit (§7.3, supply-chain.md §5).
+                    // The full chain is required for offline verification — a summary
+                    // cannot be used to reconstruct or verify the attestation chain.
                     Some(serde_json::json!({
                         "attestation_id": att.id,
                         "chain_depth": att.metadata.chain_depth,
-                        "has_signed_input": chain.iter().any(|a| matches!(a.input, gyre_common::AttestationInput::Signed(_))),
-                        "constraint_count": chain.iter().flat_map(|a| match &a.input {
-                            gyre_common::AttestationInput::Signed(si) => si.output_constraints.clone(),
-                            gyre_common::AttestationInput::Derived(di) => di.output_constraints.clone(),
-                        }).count(),
-                        "gate_attestation_count": chain.iter().flat_map(|a| a.output.gate_results.iter()).count(),
-                        "chain_node_count": chain.len(),
+                        "chain": chain,
                     }))
                 } else {
                     None
