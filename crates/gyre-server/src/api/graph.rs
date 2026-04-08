@@ -572,6 +572,76 @@ pub async fn get_graph_by_spec(
 }
 
 /// GET /api/v1/repos/{id}/graph/concept/{name}
+/// Shared concept-search logic used by both REST and MCP handlers (HSI §11 parity).
+///
+/// Searches nodes across the given `repo_ids` whose `name` or `qualified_name`
+/// contains the `pattern` (case-insensitive substring match). Returns matched
+/// nodes and edges where both source and target are in the matched node set.
+pub async fn assemble_concept_results(
+    state: &AppState,
+    repo_ids: &[String],
+    pattern: &str,
+) -> Result<KnowledgeGraphResponse, ApiError> {
+    let pattern = pattern.to_lowercase();
+    let mut matched_nodes = Vec::new();
+    let mut matched_edges = Vec::new();
+    let mut matched_node_ids = std::collections::HashSet::new();
+
+    for rid in repo_ids {
+        let repo_id = Id::new(rid);
+        let all_nodes = state
+            .graph_store
+            .list_nodes(&repo_id, None)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        let nodes: Vec<GraphNode> = all_nodes
+            .into_iter()
+            .filter(|n| {
+                n.name.to_lowercase().contains(&pattern)
+                    || n.qualified_name.to_lowercase().contains(&pattern)
+            })
+            .collect();
+
+        for n in &nodes {
+            matched_node_ids.insert(n.id.to_string());
+        }
+        matched_nodes.extend(nodes);
+    }
+
+    for rid in repo_ids {
+        let repo_id = Id::new(rid);
+        let all_edges = state
+            .graph_store
+            .list_edges(&repo_id, None)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        let edges: Vec<GraphEdge> = all_edges
+            .into_iter()
+            .filter(|e| {
+                matched_node_ids.contains(e.source_id.as_str())
+                    && matched_node_ids.contains(e.target_id.as_str())
+            })
+            .collect();
+
+        matched_edges.extend(edges);
+    }
+
+    let repo_id_label = if repo_ids.len() == 1 {
+        repo_ids[0].clone()
+    } else {
+        "multi-repo".to_string()
+    };
+
+    Ok(KnowledgeGraphResponse {
+        repo_id: repo_id_label,
+        nodes: matched_nodes.into_iter().map(Into::into).collect(),
+        edges: matched_edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
+    })
+}
+
 /// Returns nodes matching the concept name pattern (case-insensitive substring match).
 ///
 /// In the full implementation this would use ConceptView definitions from the spec manifest.
@@ -581,45 +651,8 @@ pub async fn get_graph_concept(
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
     require_repo(&state, &id).await?;
-    let repo_id = Id::new(&id);
-    let pattern = concept_name.to_lowercase();
-
-    let all_nodes = state
-        .graph_store
-        .list_nodes(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    let nodes: Vec<GraphNode> = all_nodes
-        .into_iter()
-        .filter(|n| {
-            n.name.to_lowercase().contains(&pattern)
-                || n.qualified_name.to_lowercase().contains(&pattern)
-        })
-        .collect();
-
-    let node_ids: std::collections::HashSet<String> =
-        nodes.iter().map(|n| n.id.to_string()).collect();
-
-    let all_edges = state
-        .graph_store
-        .list_edges(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    let edges: Vec<GraphEdge> = all_edges
-        .into_iter()
-        .filter(|e| {
-            node_ids.contains(e.source_id.as_str()) && node_ids.contains(e.target_id.as_str())
-        })
-        .collect();
-
-    Ok(Json(KnowledgeGraphResponse {
-        repo_id: id,
-        nodes: nodes.into_iter().map(Into::into).collect(),
-        edges: edges.into_iter().map(Into::into).collect(),
-        warnings: vec![],
-    }))
+    let response = assemble_concept_results(&state, &[id], &concept_name).await?;
+    Ok(Json(response))
 }
 
 /// GET /api/v1/repos/{id}/graph/timeline
@@ -1100,7 +1133,6 @@ pub async fn get_workspace_graph_concept(
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
     require_workspace(&state, &id).await?;
-    let pattern = concept_name.to_lowercase();
 
     let repo_ids: Vec<String> = state
         .repos
@@ -1111,51 +1143,8 @@ pub async fn get_workspace_graph_concept(
         .map(|r| r.id.to_string())
         .collect();
 
-    let mut matched_nodes = Vec::new();
-    let mut matched_edges = Vec::new();
-
-    for rid in &repo_ids {
-        let repo_id = Id::new(rid);
-        let all_nodes = state
-            .graph_store
-            .list_nodes(&repo_id, None)
-            .await
-            .map_err(ApiError::Internal)?;
-
-        let nodes: Vec<GraphNode> = all_nodes
-            .into_iter()
-            .filter(|n| {
-                n.name.to_lowercase().contains(&pattern)
-                    || n.qualified_name.to_lowercase().contains(&pattern)
-            })
-            .collect();
-
-        let node_ids: std::collections::HashSet<String> =
-            nodes.iter().map(|n| n.id.to_string()).collect();
-
-        let all_edges = state
-            .graph_store
-            .list_edges(&repo_id, None)
-            .await
-            .map_err(ApiError::Internal)?;
-
-        let edges: Vec<GraphEdge> = all_edges
-            .into_iter()
-            .filter(|e| {
-                node_ids.contains(e.source_id.as_str()) && node_ids.contains(e.target_id.as_str())
-            })
-            .collect();
-
-        matched_nodes.extend(nodes);
-        matched_edges.extend(edges);
-    }
-
-    Ok(Json(KnowledgeGraphResponse {
-        repo_id: id,
-        nodes: matched_nodes.into_iter().map(Into::into).collect(),
-        edges: matched_edges.into_iter().map(Into::into).collect(),
-        warnings: vec![],
-    }))
+    let response = assemble_concept_results(&state, &repo_ids, &concept_name).await?;
+    Ok(Json(response))
 }
 
 /// Request body for structural prediction.

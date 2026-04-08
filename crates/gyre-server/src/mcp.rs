@@ -1952,12 +1952,13 @@ async fn handle_node_provenance(state: &AppState, args: &Value) -> Value {
     ))
 }
 
+/// MCP tool handler for `graph.concept` — delegates to the same shared
+/// `assemble_concept_results` function used by the REST handlers (HSI §11 parity).
 async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
     let concept = match require_str(args, "concept") {
         Ok(c) => c.to_string(),
         Err(_) => return tool_error("missing required field: concept"),
     };
-    let pattern = concept.to_lowercase();
 
     // Determine scope: repo_id or workspace_id.
     let repo_ids: Vec<String> = if let Some(repo_id) = get_str(args, "repo_id") {
@@ -1972,83 +1973,15 @@ async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
         return tool_error("provide either repo_id or workspace_id");
     };
 
-    let mut matched_nodes = Vec::new();
-    let mut matched_edges = Vec::new();
-    let mut matched_node_ids = std::collections::HashSet::new();
-
-    for rid in &repo_ids {
-        let repo_id = Id::new(rid);
-        let all_nodes = match state.graph_store.list_nodes(&repo_id, None).await {
-            Ok(n) => n,
-            Err(e) => return tool_error(format!("failed to load graph nodes: {e}")),
-        };
-        let nodes: Vec<_> = all_nodes
-            .into_iter()
-            .filter(|n| {
-                n.deleted_at.is_none()
-                    && (n.name.to_lowercase().contains(&pattern)
-                        || n.qualified_name.to_lowercase().contains(&pattern))
-            })
-            .collect();
-        for n in &nodes {
-            matched_node_ids.insert(n.id.to_string());
+    // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
+    match crate::api::graph::assemble_concept_results(state, &repo_ids, &concept).await {
+        Ok(response) => {
+            let result =
+                serde_json::to_value(&response).unwrap_or_else(|e| json!({"error": e.to_string()}));
+            tool_result(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
-        matched_nodes.extend(nodes);
+        Err(_) => tool_error("concept search failed"),
     }
-
-    // Collect edges that connect matched nodes.
-    for rid in &repo_ids {
-        let repo_id = Id::new(rid);
-        let all_edges = match state.graph_store.list_edges(&repo_id, None).await {
-            Ok(e) => e,
-            Err(e) => return tool_error(format!("failed to load graph edges: {e}")),
-        };
-        for edge in all_edges {
-            if edge.deleted_at.is_none()
-                && (matched_node_ids.contains(&edge.source_id.to_string())
-                    && matched_node_ids.contains(&edge.target_id.to_string()))
-            {
-                matched_edges.push(edge);
-            }
-        }
-    }
-
-    let node_items: Vec<Value> = matched_nodes
-        .iter()
-        .map(|n| {
-            json!({
-                "id": n.id.to_string(),
-                "repo_id": n.repo_id.to_string(),
-                "node_type": format!("{:?}", n.node_type).to_lowercase(),
-                "name": n.name,
-                "qualified_name": n.qualified_name,
-                "file_path": n.file_path,
-                "line_start": n.line_start,
-                "line_end": n.line_end,
-                "spec_path": n.spec_path,
-            })
-        })
-        .collect();
-
-    let edge_items: Vec<Value> = matched_edges
-        .iter()
-        .map(|e| {
-            json!({
-                "id": e.id.to_string(),
-                "repo_id": e.repo_id.to_string(),
-                "source_id": e.source_id.to_string(),
-                "target_id": e.target_id.to_string(),
-                "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
-            })
-        })
-        .collect();
-
-    let result = json!({
-        "concept": concept,
-        "nodes": node_items,
-        "edges": edge_items,
-    });
-    tool_result(serde_json::to_string_pretty(&result).unwrap_or_default())
 }
 
 async fn handle_spec_assist(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
@@ -4316,9 +4249,9 @@ mod tests {
         assert!(!json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         let result: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(result["concept"], "auth");
         assert!(result["nodes"].as_array().is_some());
         assert!(result["edges"].as_array().is_some());
+        assert!(result["repo_id"].as_str().is_some());
     }
 
     // ── TASK-010: spec_assist tool ───────────────────────────────────────────
