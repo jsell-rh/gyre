@@ -1,7 +1,7 @@
 # Review: TASK-002 — CLI HSI Parity Commands
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R10)  
+**Date:** 2026-04-07 (R11)  
 **Verdict:** needs-revision
 
 ---
@@ -107,3 +107,9 @@
 - [ ] **F20 — `gyre divergence` silently drops `entity_ref` from divergence alerts; spec defines it as the per-notification entity reference.**  
   HSI §8 (line 288) defines the notification schema with `entity_ref TEXT, -- optional reference (spec_path, agent_id, mr_id)`. For divergence alerts specifically, §8 (line 1233) states: "One notification is created per spec_ref that exceeds the threshold — each notification includes the two conflicting MR/agent references." The `entity_ref` field carries the `spec_ref` identifying which spec has conflicting interpretations. The server's `NotificationResponse` (users.rs:263) includes `entity_ref: Option<String>` and populates it from the stored notification (users.rs:279). The CLI's divergence display (main.rs:884-897) reads `id`, `title`, `body`, and `priority` — but has no access to `entity_ref`. The spec reference is silently dropped. Without it, the user sees a divergence alert but cannot identify which spec is involved from structured data — they must parse the title or body text (which may or may not contain the spec path). This is the same flaw class as F14 (response field not consumed) — the server sends a structured field specifically designed for entity linkage, and the CLI ignores it. Fix: render `entity_ref` when non-empty, e.g., `println!("  Spec: {entity_ref}");` after the ID line.  
   **Files:** `crates/gyre-cli/src/main.rs:884-897` (no `entity_ref` access), `crates/gyre-server/src/api/users.rs:263` (field exists in response).
+
+## R11 Findings
+
+- [ ] **F21 — `completed_agents` display drops `conversation_sha`, which the spec defines as part of the completion schema and the CLI parity surface.**  
+  HSI §4 defines the agent completion summary schema including `conversation_sha: Option<String>` — the SHA-256 hash of the full conversation history, stored for the "Ask Why" interrogation feature. The server's `BriefingCompletedAgent` (graph.rs:239) includes `conversation_sha: Option<String>`. The CLI's completed_agents rendering (main.rs:996-1027) reads `agent_id`, `spec_ref`, `decisions`, and `uncertainties` — but does not read `conversation_sha`. HSI §11 requires "every data surface in the UI must be consumable outside the browser." The `conversation_sha` enables a CLI user to interrogate a completed agent's reasoning (e.g., piping the SHA to a future `gyre conversation view <sha>` command or the existing `ConversationRepository::get` API). Without it, a CLI-only user has no way to access the conversation reference that the UI provides. Fix: render `conversation_sha` when non-empty, e.g., `println!("    Conversation: {sha}");` after decisions/uncertainties.  
+  **Files:** `crates/gyre-cli/src/main.rs:996-1027` (no `conversation_sha` access), `crates/gyre-server/src/api/graph.rs:239` (field exists in response).
