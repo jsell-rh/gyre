@@ -3,7 +3,7 @@
 # performs cryptographic verification — not just decode/deserialize or
 # structural checks.
 #
-# Three flaw classes detected:
+# Five flaw classes detected:
 #
 # Class 1 — Decode-without-verify (see TASK-006 F2):
 #   A handler that base64-decodes a signature and stores the bytes without ever
@@ -428,6 +428,108 @@ for file in $(find "$SERVER_SRC" -name '*.rs' -type f | sort); do
     done
 done
 
+# ── Class 5: Sign/verify message mismatch ───────────────────────────
+#
+# When verification code passes a raw hash field (output_hash, content_hash)
+# directly to `.verify()` as the message, but the corresponding signing code
+# constructs a JSON structure containing that hash plus other fields, the
+# Ed25519 messages don't match — verification ALWAYS fails for legitimate
+# signatures (false negatives). This is a silent correctness failure: the
+# code appears to verify, the function is named correctly, crypto operations
+# are present, and all prior Classes pass — but the wrong bytes are checked.
+#
+# Detection heuristic: within a verify function, if `.verify(` is called
+# with a raw `output_hash` or `content_hash` field as the message (not
+# wrapped in a JSON reconstruction), and the function does NOT reconstruct
+# a JSON signable structure (serde_json::json!, serde_json::to_vec, or
+# a signable_bytes() call) before the verify call for that specific entity,
+# the verify message likely doesn't match what was signed.
+#
+# Exempt with: // sign-verify-parity:ok — <reason>
+#
+# See: specs/reviews/task-008.md F6 (sign/verify message mismatch)
+
+echo ""
+echo "=== Class 5: Sign/verify message mismatch ==="
+
+for file in $(find "$SERVER_SRC" -name '*.rs' -type f | sort); do
+    [ -f "$file" ] || continue
+
+    awk -v file="$file" '
+    # Skip test modules
+    /^\s*#\[cfg\(test\)\]/ { in_test_module = 1; next }
+
+    # Detect function boundaries
+    /^\s*(pub\s+)?(async\s+)?fn\s+/ {
+        # Check previous function
+        if (fn_name != "" && is_verify_fn && has_raw_hash_verify && !has_signable_reconstruction && !has_exempt) {
+            printf "SIGN/VERIFY MESSAGE MISMATCH: %s in %s:%d\n", fn_name, file, fn_start
+            printf "  Function verifies a signature against a raw hash field (output_hash or\n"
+            printf "  content_hash) but does not reconstruct the JSON signable structure that\n"
+            printf "  the signing code uses. Ed25519 requires the exact same message bytes for\n"
+            printf "  sign and verify. If the signer serializes a JSON object containing the\n"
+            printf "  hash (plus other fields), the verifier must reconstruct that same JSON —\n"
+            printf "  not pass the raw hash bytes directly.\n"
+            printf "  Fix: reconstruct the signable JSON, or use a shared signable_bytes() helper.\n"
+            printf "  See: specs/reviews/task-008.md F6 (sign/verify message mismatch)\n\n"
+            violations++
+        }
+        if (fn_name != "" && is_verify_fn && has_raw_hash_verify) checked++
+
+        # Parse function name
+        match($0, /fn ([a-zA-Z_][a-zA-Z0-9_]*)/, m)
+        fn_name = m[1]
+        fn_start = NR
+        is_verify_fn = 0
+        has_raw_hash_verify = 0
+        has_signable_reconstruction = 0
+        has_exempt = 0
+        # Skip test functions
+        if (fn_name ~ /^test_/ || in_test_module) fn_name = ""
+        if (fn_name ~ /verify/) is_verify_fn = 1
+        next
+    }
+    fn_name != "" && is_verify_fn {
+        if ($0 ~ /sign-verify-parity:ok/) has_exempt = 1
+        # Detect .verify() called with a raw hash field as the message.
+        # Pattern: .verify(&something.output_hash, or .verify(&something.content_hash,
+        # or .verify(&gate.output_hash, etc.
+        if ($0 ~ /\.verify\(.*[._]output_hash|\.verify\(.*[._]content_hash/) has_raw_hash_verify = 1
+        # Detect JSON signable structure reconstruction before verify.
+        # If the function builds serde_json::json!({...}) or calls serde_json::to_vec
+        # or calls a signable_bytes() helper, the message is being reconstructed.
+        if ($0 ~ /serde_json::json!|serde_json::to_vec|signable_bytes/) has_signable_reconstruction = 1
+    }
+    END {
+        if (fn_name != "" && is_verify_fn && has_raw_hash_verify && !has_signable_reconstruction && !has_exempt) {
+            printf "SIGN/VERIFY MESSAGE MISMATCH: %s in %s:%d\n", fn_name, file, fn_start
+            printf "  Function verifies a signature against a raw hash field (output_hash or\n"
+            printf "  content_hash) but does not reconstruct the JSON signable structure that\n"
+            printf "  the signing code uses. Ed25519 requires the exact same message bytes for\n"
+            printf "  sign and verify. If the signer serializes a JSON object containing the\n"
+            printf "  hash (plus other fields), the verifier must reconstruct that same JSON —\n"
+            printf "  not pass the raw hash bytes directly.\n"
+            printf "  Fix: reconstruct the signable JSON, or use a shared signable_bytes() helper.\n"
+            printf "  See: specs/reviews/task-008.md F6 (sign/verify message mismatch)\n\n"
+            violations++
+        }
+        if (fn_name != "" && is_verify_fn && has_raw_hash_verify) checked++
+        printf "SUMMARY:%d:%d\n", checked, violations
+    }
+    ' "$file" | while IFS= read -r line; do
+        case "$line" in
+            SUMMARY:*)
+                c=$(echo "$line" | cut -d: -f2)
+                v=$(echo "$line" | cut -d: -f3)
+                echo "$c $v" >> /tmp/check-crypto-verify-$$
+                ;;
+            *)
+                echo "$line"
+                ;;
+        esac
+    done
+done
+
 # ── Tally results ─────────────────────────────────────────────────────
 
 if [ -f /tmp/check-crypto-verify-$$ ]; then
@@ -453,6 +555,9 @@ else
     echo "     existing key from storage, not a newly generated child key."
     echo "     Class 4: Verify functions that handle multiple input types (Signed/Derived)"
     echo "     must perform crypto verification for ALL branches, not just Signed."
+    echo "     Class 5: Verify functions must reconstruct the same signable message the signer"
+    echo "     used. Passing raw output_hash/content_hash to .verify() when the signer serialized"
+    echo "     a JSON structure containing the hash = message mismatch = always-failing verification."
     echo "${VIOLATIONS} violation(s) found out of ${CHECKED} functions checked."
     exit 1
 fi
