@@ -888,8 +888,12 @@ async fn main() -> Result<()> {
                         let title = n["title"].as_str().unwrap_or("");
                         let desc = n["body"].as_str().unwrap_or("");
                         let pri = n["priority"].as_u64().unwrap_or(0);
+                        let entity_ref = n["entity_ref"].as_str().unwrap_or("");
                         println!("[P{pri}] {title}");
                         println!("  ID: {id}");
+                        if !entity_ref.is_empty() {
+                            println!("  Spec: {entity_ref}");
+                        }
                         if !desc.is_empty() {
                             println!("  {desc}");
                         }
@@ -1024,6 +1028,14 @@ fn print_briefing(briefing: &serde_json::Value) {
                             println!("    Uncertainty: {text}");
                         }
                     }
+                }
+                if let Some(sha) = agent["conversation_sha"].as_str() {
+                    if !sha.is_empty() {
+                        println!("    Conversation: {sha}");
+                    }
+                }
+                if let Some(completed_at) = agent["completed_at"].as_u64() {
+                    println!("    Completed at: {completed_at}");
                 }
             }
             println!();
