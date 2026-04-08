@@ -62,3 +62,4 @@ When working on this task:
 
 - `aa3e6fbe` feat(server): implement authorization provenance Phase 1 — key binding, signed input, trust anchors (TASK-006)
 - `28e517d7` fix(process): add path scope binding check and crypto verification guidance (TASK-006)
+- `d71a15fe` fix(provenance): address R2 findings — tenant isolation, crypto verify, user-signed input (TASK-006)
