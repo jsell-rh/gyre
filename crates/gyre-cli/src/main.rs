@@ -983,8 +983,7 @@ fn print_briefing(briefing: &serde_json::Value) {
         if !items.is_empty() {
             println!("--- Completed ---");
             for item in items {
-                let title = item["title"].as_str().unwrap_or("");
-                println!("  - {title}");
+                print_briefing_item(item, "  - ");
             }
             println!();
         }
@@ -995,8 +994,18 @@ fn print_briefing(briefing: &serde_json::Value) {
         if !items.is_empty() {
             println!("--- In Progress ---");
             for item in items {
-                let title = item["title"].as_str().unwrap_or("");
-                println!("  - {title}");
+                print_briefing_item(item, "  - ");
+            }
+            println!();
+        }
+    }
+
+    // Cross-Workspace
+    if let Some(items) = briefing["cross_workspace"].as_array() {
+        if !items.is_empty() {
+            println!("--- Cross-Workspace ---");
+            for item in items {
+                print_briefing_item(item, "  ↔ ");
             }
             println!();
         }
@@ -1007,8 +1016,7 @@ fn print_briefing(briefing: &serde_json::Value) {
         if !items.is_empty() {
             println!("--- Exceptions ---");
             for item in items {
-                let title = item["title"].as_str().unwrap_or("");
-                println!("  ! {title}");
+                print_briefing_item(item, "  ! ");
             }
             println!();
         }
@@ -1024,6 +1032,22 @@ fn print_briefing(briefing: &serde_json::Value) {
         println!("  MRs merged:    {mrs}");
         println!("  Gate runs:     {gates}");
         println!("  Budget spent:  ${budget:.2} ({pct}%)");
+    }
+}
+
+/// Print a single briefing item with its details (description, spec_path, timestamp).
+fn print_briefing_item(item: &serde_json::Value, prefix: &str) {
+    let title = item["title"].as_str().unwrap_or("");
+    println!("{prefix}{title}");
+    if let Some(desc) = item["description"].as_str() {
+        if !desc.is_empty() {
+            println!("      {desc}");
+        }
+    }
+    if let Some(spec) = item["spec_path"].as_str() {
+        if !spec.is_empty() {
+            println!("      (spec: {spec})");
+        }
     }
 }
 
