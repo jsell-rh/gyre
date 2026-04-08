@@ -3,7 +3,7 @@
 # performs cryptographic verification — not just decode/deserialize or
 # structural checks.
 #
-# Two flaw classes detected:
+# Three flaw classes detected:
 #
 # Class 1 — Decode-without-verify (see TASK-006 F2):
 #   A handler that base64-decodes a signature and stores the bytes without ever
@@ -17,6 +17,15 @@
 #   functions that check structural properties (non-empty fields, expiry,
 #   chain depth) but skip the actual cryptographic signature check — making
 #   audit logs unreliable because forged signatures report as valid.
+#
+#
+# Class 3 — Delegation signing entity mismatch (see TASK-008 F1):
+#   A spawn/delegation function that generates a NEW keypair for the child
+#   agent and uses that key to sign a DerivedInput — when the spec requires
+#   the PARENT/SPAWNER's existing key to sign it. The newly generated key
+#   should be stored for the child's future use (push-time signing), not
+#   used to sign the delegation structure. Detection: function has keygen +
+#   sign + DerivedInput construction but no spawner key lookup from storage.
 #
 # Scope: all non-test Rust source files under crates/gyre-server/src/ — not
 # just api/ handlers. Verification functions in git_http.rs, constraint_check.rs,
@@ -207,6 +216,103 @@ for file in $(find "$SERVER_SRC" -name '*.rs' -type f | sort); do
     done
 done
 
+# ── Class 3: Delegation signing entity mismatch ──────────────────────
+#
+# When a function creates a delegation structure (DerivedInput), the spec
+# requires the PARENT/SPAWNER to sign it — not the entity being spawned.
+# The most common failure mode: a spawn function generates a new keypair
+# for the child agent and uses THAT key to sign the DerivedInput, making
+# the delegation circular (the child authorizes its own spawn).
+#
+# Detection heuristic: if a function both (a) generates a new Ed25519
+# keypair (Ed25519KeyPair::generate) AND (b) signs something AND (c)
+# constructs a DerivedInput — all in the same function — that is
+# suspicious. The new key should be stored for the agent's future use,
+# while the DerivedInput should be signed with the SPAWNER's existing key
+# loaded from storage.
+#
+# Exempt with: // signing-entity:ok — <reason>
+#
+# See: specs/reviews/task-008.md F1 (signing entity mismatch)
+
+echo ""
+echo "=== Class 3: Delegation signing entity mismatch ==="
+
+for file in $(find "$SERVER_SRC" -name '*.rs' -type f | sort); do
+    [ -f "$file" ] || continue
+
+    awk -v file="$file" '
+    # Skip test modules
+    /^\s*#\[cfg\(test\)\]/ { in_test_module = 1; next }
+
+    # Detect function boundaries
+    /^\s*(pub\s+)?(async\s+)?fn\s+/ {
+        # Check previous function
+        if (fn_name != "" && has_keygen && has_sign && has_derived_input && !has_key_lookup && !has_exempt) {
+            printf "DELEGATION SIGNING ENTITY MISMATCH: %s in %s:%d\n", fn_name, file, fn_start
+            printf "  Function generates a new keypair AND signs a DerivedInput in the same\n"
+            printf "  function WITHOUT loading an existing key from storage. This suggests the\n"
+            printf "  newly generated key (for the child) is being used to sign the delegation\n"
+            printf "  structure, when the SPAWNER/PARENT key should sign it.\n"
+            printf "  Spec: DerivedInput.signature = orchestrator signs derivation (§4.1, §4.5)\n"
+            printf "  See: specs/reviews/task-008.md F1 (signing entity mismatch)\n\n"
+            violations++
+        }
+        if (fn_name != "" && has_derived_input) checked++
+
+        # Parse function name
+        match($0, /fn ([a-zA-Z_][a-zA-Z0-9_]*)/, m)
+        fn_name = m[1]
+        fn_start = NR
+        has_keygen = 0
+        has_sign = 0
+        has_derived_input = 0
+        has_key_lookup = 0
+        has_exempt = 0
+        # Skip test functions
+        if (fn_name ~ /^test_/ || in_test_module) fn_name = ""
+        next
+    }
+    fn_name != "" {
+        if ($0 ~ /signing-entity:ok/) has_exempt = 1
+        # Detect new keypair generation
+        if ($0 ~ /generate_pkcs8|Ed25519KeyPair::generate|KeyPair::generate/) has_keygen = 1
+        # Detect signing operations
+        if ($0 ~ /\.sign\(|sign_bytes/) has_sign = 1
+        # Detect DerivedInput construction
+        if ($0 ~ /DerivedInput\s*\{|DerivedInput {/) has_derived_input = 1
+        # Detect loading an EXISTING key from storage (spawner key lookup)
+        # Pattern: kv_get("agent_signing_keys", spawner...) or similar storage reads
+        if ($0 ~ /kv_get.*signing_key|kv_get.*spawner|load_signing_key|get_signing_key|spawner.*signing/) has_key_lookup = 1
+    }
+    END {
+        if (fn_name != "" && has_keygen && has_sign && has_derived_input && !has_key_lookup && !has_exempt) {
+            printf "DELEGATION SIGNING ENTITY MISMATCH: %s in %s:%d\n", fn_name, file, fn_start
+            printf "  Function generates a new keypair AND signs a DerivedInput in the same\n"
+            printf "  function WITHOUT loading an existing key from storage. This suggests the\n"
+            printf "  newly generated key (for the child) is being used to sign the delegation\n"
+            printf "  structure, when the SPAWNER/PARENT key should sign it.\n"
+            printf "  Spec: DerivedInput.signature = orchestrator signs derivation (§4.1, §4.5)\n"
+            printf "  See: specs/reviews/task-008.md F1 (signing entity mismatch)\n\n"
+            violations++
+        }
+        if (fn_name != "" && has_derived_input) checked++
+        printf "SUMMARY:%d:%d\n", checked, violations
+    }
+    ' "$file" | while IFS= read -r line; do
+        case "$line" in
+            SUMMARY:*)
+                c=$(echo "$line" | cut -d: -f2)
+                v=$(echo "$line" | cut -d: -f3)
+                echo "$c $v" >> /tmp/check-crypto-verify-$$
+                ;;
+            *)
+                echo "$line"
+                ;;
+        esac
+    done
+done
+
 # ── Tally results ─────────────────────────────────────────────────────
 
 if [ -f /tmp/check-crypto-verify-$$ ]; then
@@ -224,10 +330,12 @@ if [ "$VIOLATIONS" -eq 0 ]; then
     exit 0
 else
     echo "Fix: Ensure all functions that handle cryptographic material perform actual"
-    echo "     cryptographic operations — not just structural/format checks."
+    echo "     cryptographic operations -- not just structural/format checks."
     echo "     Class 1: After decoding crypto material, call ed25519_verify or equivalent."
     echo "     Class 2: Verification functions must call ring::signature, .verify(), etc."
     echo "     Structural checks (expiry, chain depth, non-empty) are necessary but not sufficient."
+    echo "     Class 3: Delegation structures (DerivedInput) must be signed by the PARENT's"
+    echo "     existing key from storage, not a newly generated child key."
     echo "${VIOLATIONS} violation(s) found out of ${CHECKED} functions checked."
     exit 1
 fi
