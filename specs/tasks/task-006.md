@@ -2,9 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §2, §7.1, §8 Phase 1  
 **Depends on:** TASK-003, TASK-004, TASK-005  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [`specs/reviews/task-006.md`](../reviews/task-006.md)  
-**Note:** R3 verified F1–F3 resolved. 1 new finding: F4 (push-time audit-only verification skips cryptographic signature check on SignedInput).
+**Note:** R4 — F4 resolved. verify_attestation_audit_only now performs Ed25519 cryptographic signature verification.
 
 ## Spec Excerpt
 

@@ -1687,6 +1687,33 @@ fn verify_attestation_audit_only(
                 children: vec![],
             });
 
+            // Cryptographic signature verification (§4.4 step 1, §6.1, §6.2):
+            // Verify Ed25519 signature over SHA256(content) against key_binding.public_key.
+            let sig_valid = {
+                use ring::digest;
+                use ring::signature::{self, UnparsedPublicKey};
+
+                let content_bytes = serde_json::to_vec(&signed.content).unwrap_or_default();
+                let content_hash = digest::digest(&digest::SHA256, &content_bytes);
+                let peer_public_key =
+                    UnparsedPublicKey::new(&signature::ED25519, &signed.key_binding.public_key);
+                peer_public_key
+                    .verify(content_hash.as_ref(), &signed.signature)
+                    .is_ok()
+            };
+            children.push(gyre_common::VerificationResult {
+                label: "signed_input.signature".to_string(),
+                valid: sig_valid,
+                message: if sig_valid {
+                    "Ed25519 signature verified against key_binding.public_key".to_string()
+                } else {
+                    "Ed25519 signature verification FAILED — signature does not match \
+                     key_binding.public_key over InputContent hash"
+                        .to_string()
+                },
+                children: vec![],
+            });
+
             // Check key binding expiry.
             let now = crate::api::now_secs();
             let kb_valid = !signed.key_binding.is_expired(now);
@@ -1714,7 +1741,7 @@ fn verify_attestation_audit_only(
                 children: vec![],
             });
 
-            spec_ok && kb_valid && time_valid
+            spec_ok && sig_valid && kb_valid && time_valid
         }
         gyre_common::AttestationInput::Derived(derived) => {
             let has_parent = !derived.parent_ref.is_empty();
@@ -2248,8 +2275,32 @@ mod tests {
 
     #[test]
     fn verify_attestation_audit_only_valid_signed_input() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        // Generate a real Ed25519 keypair and sign the content.
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let content = gyre_common::InputContent {
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: "abc12345".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: "def456".to_string(),
+            scope: gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+
+        let content_bytes = serde_json::to_vec(&content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &content_bytes);
+        let signature = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
         let kb = gyre_common::KeyBinding {
-            public_key: vec![1; 32],
+            public_key: key_pair.public_key().as_ref().to_vec(),
             user_identity: "user:jsell".to_string(),
             issuer: "https://keycloak.example.com".to_string(),
             trust_anchor_id: "tenant-keycloak".to_string(),
@@ -2262,22 +2313,11 @@ mod tests {
         let att = gyre_common::Attestation {
             id: "att-1".to_string(),
             input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
-                content: gyre_common::InputContent {
-                    spec_path: "specs/system/payments.md".to_string(),
-                    spec_sha: "abc12345".to_string(),
-                    workspace_id: "ws-1".to_string(),
-                    repo_id: "repo-1".to_string(),
-                    persona_constraints: vec![],
-                    meta_spec_set_sha: "def456".to_string(),
-                    scope: gyre_common::ScopeConstraint {
-                        allowed_paths: vec![],
-                        forbidden_paths: vec![],
-                    },
-                },
+                content,
                 output_constraints: vec![],
                 valid_until: u64::MAX,
                 expected_generation: None,
-                signature: vec![30],
+                signature,
                 key_binding: kb,
             }),
             output: gyre_common::AttestationOutput {
@@ -2299,12 +2339,126 @@ mod tests {
         let result = super::verify_attestation_audit_only(&att);
         assert!(result.valid, "result should be valid: {:?}", result);
         assert_eq!(result.label, "attestation_chain_verification");
+        // Verify the signature child reports valid.
+        let sig_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "signed_input.signature")
+            .expect("should have signed_input.signature child");
+        assert!(
+            sig_child.valid,
+            "signature should be valid: {:?}",
+            sig_child
+        );
+    }
+
+    #[test]
+    fn verify_attestation_audit_only_forged_signature() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        // Generate a real keypair but use a forged (wrong) signature.
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let content = gyre_common::InputContent {
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: "abc12345".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: "def456".to_string(),
+            scope: gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+
+        let kb = gyre_common::KeyBinding {
+            public_key: key_pair.public_key().as_ref().to_vec(),
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://keycloak.example.com".to_string(),
+            trust_anchor_id: "tenant-keycloak".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+
+        let att = gyre_common::Attestation {
+            id: "att-forged".to_string(),
+            input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
+                content,
+                output_constraints: vec![],
+                valid_until: u64::MAX,
+                expected_generation: None,
+                signature: vec![0xDE; 64], // forged signature bytes (64 bytes for Ed25519)
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![40],
+                commit_sha: "sha-abc".to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_700_000_000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: "TASK-007".to_string(),
+                agent_id: "agent-1".to_string(),
+                chain_depth: 0,
+            },
+        };
+
+        let result = super::verify_attestation_audit_only(&att);
+        // Overall should be invalid because signature is forged.
+        assert!(
+            !result.valid,
+            "result should be invalid for forged sig: {:?}",
+            result
+        );
+        // Signature child specifically should report invalid.
+        let sig_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "signed_input.signature")
+            .expect("should have signed_input.signature child");
+        assert!(!sig_child.valid, "forged signature should be invalid");
+        assert!(
+            sig_child.message.contains("FAILED"),
+            "message should indicate failure: {}",
+            sig_child.message
+        );
     }
 
     #[test]
     fn verify_attestation_audit_only_expired_key_binding() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let content = gyre_common::InputContent {
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: "abc12345".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: String::new(),
+            scope: gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+
+        let content_bytes = serde_json::to_vec(&content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &content_bytes);
+        let signature = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
         let kb = gyre_common::KeyBinding {
-            public_key: vec![1; 32],
+            public_key: key_pair.public_key().as_ref().to_vec(),
             user_identity: "user:jsell".to_string(),
             issuer: "https://keycloak.example.com".to_string(),
             trust_anchor_id: "tenant-keycloak".to_string(),
@@ -2317,22 +2471,11 @@ mod tests {
         let att = gyre_common::Attestation {
             id: "att-2".to_string(),
             input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
-                content: gyre_common::InputContent {
-                    spec_path: "specs/system/payments.md".to_string(),
-                    spec_sha: "abc12345".to_string(),
-                    workspace_id: "ws-1".to_string(),
-                    repo_id: "repo-1".to_string(),
-                    persona_constraints: vec![],
-                    meta_spec_set_sha: String::new(),
-                    scope: gyre_common::ScopeConstraint {
-                        allowed_paths: vec![],
-                        forbidden_paths: vec![],
-                    },
-                },
+                content,
                 output_constraints: vec![],
                 valid_until: u64::MAX,
                 expected_generation: None,
-                signature: vec![30],
+                signature,
                 key_binding: kb,
             }),
             output: gyre_common::AttestationOutput {
@@ -2353,6 +2496,16 @@ mod tests {
 
         let result = super::verify_attestation_audit_only(&att);
         assert!(!result.valid, "result should be invalid: {:?}", result);
+        // Signature should still be cryptographically valid.
+        let sig_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "signed_input.signature")
+            .expect("should have signed_input.signature child");
+        assert!(
+            sig_child.valid,
+            "signature should be valid even though key is expired"
+        );
         // Check that the key_binding.expiry child reports invalid.
         let kb_child = result
             .children
@@ -2364,8 +2517,31 @@ mod tests {
 
     #[test]
     fn verify_attestation_audit_only_excessive_chain_depth() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let content = gyre_common::InputContent {
+            spec_path: "specs/system/x.md".to_string(),
+            spec_sha: "1234567890abcdef".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: String::new(),
+            scope: gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+
+        let content_bytes = serde_json::to_vec(&content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &content_bytes);
+        let signature = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
         let kb = gyre_common::KeyBinding {
-            public_key: vec![1; 32],
+            public_key: key_pair.public_key().as_ref().to_vec(),
             user_identity: "user:jsell".to_string(),
             issuer: "https://example.com".to_string(),
             trust_anchor_id: "test".to_string(),
@@ -2378,22 +2554,11 @@ mod tests {
         let att = gyre_common::Attestation {
             id: "att-deep".to_string(),
             input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
-                content: gyre_common::InputContent {
-                    spec_path: "specs/system/x.md".to_string(),
-                    spec_sha: "1234567890abcdef".to_string(),
-                    workspace_id: "ws-1".to_string(),
-                    repo_id: "repo-1".to_string(),
-                    persona_constraints: vec![],
-                    meta_spec_set_sha: String::new(),
-                    scope: gyre_common::ScopeConstraint {
-                        allowed_paths: vec![],
-                        forbidden_paths: vec![],
-                    },
-                },
+                content,
                 output_constraints: vec![],
                 valid_until: u64::MAX,
                 expected_generation: None,
-                signature: vec![],
+                signature,
                 key_binding: kb,
             }),
             output: gyre_common::AttestationOutput {
@@ -2414,6 +2579,16 @@ mod tests {
 
         let result = super::verify_attestation_audit_only(&att);
         assert!(!result.valid);
+        // Signature should be cryptographically valid.
+        let sig_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "signed_input.signature")
+            .expect("should have signed_input.signature child");
+        assert!(
+            sig_child.valid,
+            "signature should be valid even though chain depth is excessive"
+        );
         let depth_child = result
             .children
             .iter()
