@@ -40,6 +40,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: type-simplification
+        name: type simplification
+        description: Detect String fields in gyre-common where named enum/struct types exist
+        entry: scripts/check-type-simplification.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
