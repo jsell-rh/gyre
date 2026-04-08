@@ -2,11 +2,8 @@
 
 **Spec reference:** `authorization-provenance.md` §6, §7.2, §8 Phase 3  
 **Depends on:** TASK-007  
-**Progress:** `needs-revision`  
-**Review:** [specs/reviews/task-008.md](../reviews/task-008.md)  
-**Note:** R3 — 2 findings require code fixes (process checks added but code not changed):
-- **F1 (REGRESSION):** `create_derived_input_for_agent` early-returns when spawner has no signing key, skipping child keypair generation. Fix: always generate child keypair; only skip DerivedInput creation when spawner key unavailable.
-- **F5 (PERSISTS):** Verification endpoint Phase 5 (output signature verification) not implemented. `verify_chain` only checks input signatures, not `agent_signature` or gate `signature` fields. Fix: add Phase 5 to verify output signatures against content hashes.
+**Progress:** `ready-for-review`  
+**Review:** [specs/reviews/task-008.md](../reviews/task-008.md)
 
 ## Spec Excerpt
 

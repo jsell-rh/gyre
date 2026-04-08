@@ -1473,11 +1473,72 @@ async fn create_derived_input_for_agent(
         return;
     }
 
-    // ── Step 1: Load the SPAWNER's (orchestrator's) signing key (§4.1, §4.5) ──
+    // ── Step 1: Generate the CHILD agent's keypair (unconditional) ──
+    // The child agent ALWAYS needs its own keypair to sign output attestations
+    // at push time, regardless of whether the spawner has a key. This must
+    // happen before any conditional logic that might skip DerivedInput creation,
+    // otherwise the delegation chain cannot bootstrap (§7.4).
+    let rng = ring::rand::SystemRandom::new();
+    let child_pkcs8 = match ring::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, "failed to generate agent keypair: {e}");
+            return;
+        }
+    };
+    let child_key_pair = match ring::signature::Ed25519KeyPair::from_pkcs8(child_pkcs8.as_ref()) {
+        Ok(kp) => kp,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, "failed to parse agent keypair: {e}");
+            return;
+        }
+    };
+    use ring::signature::KeyPair;
+    let child_public_key = child_key_pair.public_key().as_ref().to_vec();
+
+    // Build the child agent's own workload KeyBinding (for push-time signing).
+    let child_kb = gyre_common::KeyBinding {
+        public_key: child_public_key,
+        user_identity: format!("agent:{agent_id}"),
+        issuer: state.base_url.clone(),
+        trust_anchor_id: "gyre-oidc".to_string(),
+        issued_at: now,
+        expires_at: now + state.agent_jwt_ttl_secs,
+        user_signature: vec![],       // workload-bound — no user signature
+        platform_countersign: vec![], // placeholder:ok — workload-bound key bindings use agent key, not platform countersign
+    };
+
+    // Store the child agent's own private key so it can sign output attestations.
+    let _ = state
+        .kv_store
+        .kv_set(
+            "agent_signing_keys",
+            agent_id,
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                child_pkcs8.as_ref(),
+            ),
+        )
+        .await;
+
+    // Store the child agent's own KeyBinding separately so that when this agent
+    // later acts as a spawner, its KeyBinding can be attached to the DerivedInput
+    // it signs. Uses a separate namespace to avoid overwriting the actual
+    // DerivedInput stored above (which carries the spawner's KeyBinding).
+    if let Ok(kb_json) = serde_json::to_string(&child_kb) {
+        let _ = state
+            .kv_store
+            .kv_set("agent_key_bindings", agent_id, kb_json)
+            .await;
+    }
+
+    // ── Step 2: Load the SPAWNER's (orchestrator's) signing key (§4.1, §4.5) ──
     // The DerivedInput must be signed by the spawner (parent/orchestrator), NOT
     // the child agent being spawned. This proves that a specific orchestrator
     // authorized the delegation. The spawner's key was stored when the spawner
     // itself was spawned (or when the orchestrator first received its key).
+    // If the spawner has no key, we skip DerivedInput creation but the child's
+    // keypair (stored above) is preserved so the delegation chain can bootstrap.
     let spawner_key_b64 = match state
         .kv_store
         .kv_get("agent_signing_keys", spawner_id)
@@ -1488,9 +1549,10 @@ async fn create_derived_input_for_agent(
             tracing::warn!(
                 agent_id = %agent_id,
                 spawner_id = %spawner_id,
-                "spawner has no signing key in KV — skipping DerivedInput creation"
+                "spawner has no signing key in KV — skipping DerivedInput creation \
+                 (child keypair already stored)"
             );
-            return;
+            return; // early-return:ok — child keypair already generated and stored above
         }
     };
     let spawner_pkcs8 = match base64::Engine::decode(
@@ -1500,14 +1562,14 @@ async fn create_derived_input_for_agent(
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::warn!(spawner_id = %spawner_id, "failed to decode spawner key: {e}");
-            return;
+            return; // early-return:ok — child keypair already generated and stored above
         }
     };
     let spawner_key_pair = match ring::signature::Ed25519KeyPair::from_pkcs8(&spawner_pkcs8) {
         Ok(kp) => kp,
         Err(e) => {
             tracing::warn!(spawner_id = %spawner_id, "failed to parse spawner keypair: {e}");
-            return;
+            return; // early-return:ok — child keypair already generated and stored above
         }
     };
 
@@ -1515,7 +1577,6 @@ async fn create_derived_input_for_agent(
     // canonical location), then fall back to extracting from `agent_derived_inputs`
     // (backward compatibility). If neither exists, the spawner is the root agent —
     // build a KeyBinding from its public key.
-    use ring::signature::KeyPair;
     let spawner_kb = {
         // Try the canonical key binding store first.
         let from_kb_store = state
@@ -1560,39 +1621,6 @@ async fn create_derived_input_for_agent(
         }
     };
 
-    // ── Step 2: Generate the CHILD agent's keypair for its own future use ──
-    // The child agent needs its own keypair to sign output attestations at push
-    // time. This keypair is stored in KV for the child, separate from the
-    // spawner's key used to sign the DerivedInput.
-    let rng = ring::rand::SystemRandom::new();
-    let child_pkcs8 = match ring::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(agent_id = %agent_id, "failed to generate agent keypair: {e}");
-            return;
-        }
-    };
-    let child_key_pair = match ring::signature::Ed25519KeyPair::from_pkcs8(child_pkcs8.as_ref()) {
-        Ok(kp) => kp,
-        Err(e) => {
-            tracing::warn!(agent_id = %agent_id, "failed to parse agent keypair: {e}");
-            return;
-        }
-    };
-    let child_public_key = child_key_pair.public_key().as_ref().to_vec();
-
-    // Build the child agent's own workload KeyBinding (for push-time signing).
-    let child_kb = gyre_common::KeyBinding {
-        public_key: child_public_key,
-        user_identity: format!("agent:{agent_id}"),
-        issuer: state.base_url.clone(),
-        trust_anchor_id: "gyre-oidc".to_string(),
-        issued_at: now,
-        expires_at: now + state.agent_jwt_ttl_secs,
-        user_signature: vec![],       // workload-bound — no user signature
-        platform_countersign: vec![], // placeholder:ok — workload-bound key bindings use agent key, not platform countersign
-    };
-
     // ── Step 3: Sign the DerivedInput with the SPAWNER's key (§4.1, §4.5) ──
     // Compute parent_ref as content hash of parent attestation.
     let parent_bytes = serde_json::to_vec(parent_att).unwrap_or_default();
@@ -1635,30 +1663,6 @@ async fn create_derived_input_for_agent(
         let _ = state
             .kv_store
             .kv_set("agent_derived_inputs", agent_id, di_json)
-            .await;
-    }
-
-    // Store the child agent's own private key so it can sign output attestations.
-    let _ = state
-        .kv_store
-        .kv_set(
-            "agent_signing_keys",
-            agent_id,
-            base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                child_pkcs8.as_ref(),
-            ),
-        )
-        .await;
-
-    // Store the child agent's own KeyBinding separately so that when this agent
-    // later acts as a spawner, its KeyBinding can be attached to the DerivedInput
-    // it signs. Uses a separate namespace to avoid overwriting the actual
-    // DerivedInput stored above (which carries the spawner's KeyBinding).
-    if let Ok(kb_json) = serde_json::to_string(&child_kb) {
-        let _ = state
-            .kv_store
-            .kv_set("agent_key_bindings", agent_id, kb_json)
             .await;
     }
 

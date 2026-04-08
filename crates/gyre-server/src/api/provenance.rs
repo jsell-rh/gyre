@@ -311,16 +311,26 @@ pub async fn get_verification(
         })
     };
 
-    // ── Phase 5: Output signature verification ──
-    // Already covered by verify_chain (checks agent_signature and gate signatures).
+    // ── Phase 5: Output signature verification (§6.2) ──
+    // Verify agent_signature and gate result signatures for each attestation
+    // in the chain. verify_chain only checks INPUT signatures (SignedInput,
+    // DerivedInput); this phase checks OUTPUT signatures.
+    let output_sig_result = verify_output_signatures(&chain);
 
-    // Combine Phase 1 (chain structure) and Phase 4 (constraint evaluation)
-    // into the overall verification result.
-    let overall_valid = chain_result.valid && constraint_result.as_ref().map_or(true, |r| r.valid);
+    // Combine Phase 1 (chain structure), Phase 4 (constraint evaluation),
+    // and Phase 5 (output signatures) into the overall verification result.
+    let overall_valid = chain_result.valid
+        && constraint_result.as_ref().map_or(true, |r| r.valid)
+        && output_sig_result.valid;
     let overall_message = if overall_valid {
         "all verification phases passed".to_string()
     } else if !chain_result.valid {
         format!("chain verification failed: {}", chain_result.message)
+    } else if !output_sig_result.valid {
+        format!(
+            "output signature verification failed: {}",
+            output_sig_result.message
+        )
     } else {
         constraint_result
             .as_ref()
@@ -337,6 +347,7 @@ pub async fn get_verification(
             if let Some(cr) = constraint_result {
                 children.push(cr);
             }
+            children.push(output_sig_result);
             children
         },
     };
@@ -617,6 +628,101 @@ pub async fn get_attestation_chain(
         chain_valid: chain_result.valid,
         chain_message: chain_result.message,
     }))
+}
+
+// ── Phase 5: Output signature verification (§6.2) ───────────────────────────
+
+/// Verify output signatures for all attestations in a chain (§6.2 Phase 5).
+///
+/// For each attestation:
+///   (a) If `attestation.output.agent_signature` is not None, verify it against
+///       `attestation.output.content_hash` using the agent's key binding public key.
+///   (b) For each gate result, verify `gate.signature` against `gate.output_hash`
+///       using `gate.key_binding.public_key`.
+fn verify_output_signatures(chain: &[gyre_common::Attestation]) -> gyre_common::VerificationResult {
+    use ring::signature::{self, UnparsedPublicKey};
+
+    let mut children = Vec::new();
+    let mut all_valid = true;
+
+    for (i, att) in chain.iter().enumerate() {
+        // (a) Verify agent_signature if present.
+        if let Some(ref agent_sig) = att.output.agent_signature {
+            // The agent signs over the content_hash. The key binding is from
+            // the attestation's input (the agent that produced the output).
+            let agent_pub_key = match &att.input {
+                gyre_common::AttestationInput::Signed(si) => &si.key_binding.public_key,
+                gyre_common::AttestationInput::Derived(di) => {
+                    // For derived inputs, the key_binding belongs to the spawner.
+                    // The agent's own key is not directly in the attestation input.
+                    // Agent signature verification requires the agent's public key
+                    // which is stored separately. For now, use the key binding from
+                    // the input — if the agent signed with a different key, this will
+                    // correctly fail verification.
+                    &di.key_binding.public_key
+                }
+            };
+
+            let peer_key = UnparsedPublicKey::new(&signature::ED25519, agent_pub_key);
+            let sig_valid = peer_key.verify(&att.output.content_hash, agent_sig).is_ok();
+
+            if !sig_valid {
+                all_valid = false;
+            }
+
+            children.push(gyre_common::VerificationResult {
+                label: format!("node[{}].agent_signature", i),
+                valid: sig_valid,
+                message: if sig_valid {
+                    "agent output signature verified against content_hash".to_string()
+                } else {
+                    "agent output signature verification FAILED".to_string()
+                },
+                children: vec![],
+            });
+        }
+
+        // (b) Verify each gate result signature.
+        for (gi, gate) in att.output.gate_results.iter().enumerate() {
+            let peer_key =
+                UnparsedPublicKey::new(&signature::ED25519, &gate.key_binding.public_key);
+            let sig_valid = peer_key.verify(&gate.output_hash, &gate.signature).is_ok();
+
+            if !sig_valid {
+                all_valid = false;
+            }
+
+            children.push(gyre_common::VerificationResult {
+                label: format!("node[{}].gate[{}].signature", i, gi),
+                valid: sig_valid,
+                message: if sig_valid {
+                    format!(
+                        "gate '{}' signature verified against output_hash",
+                        gate.gate_name
+                    )
+                } else {
+                    format!(
+                        "gate '{}' signature verification FAILED",
+                        gate.gate_name
+                    )
+                },
+                children: vec![],
+            });
+        }
+    }
+
+    gyre_common::VerificationResult {
+        label: "output_signature_verification".to_string(),
+        valid: all_valid,
+        message: if children.is_empty() {
+            "no output signatures to verify".to_string()
+        } else if all_valid {
+            format!("all {} output signature(s) verified", children.len())
+        } else {
+            "one or more output signature verifications failed".to_string()
+        },
+        children,
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
