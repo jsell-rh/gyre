@@ -95,8 +95,7 @@ impl KeyBindingRepository for SqliteStorage {
                     key_bindings::issued_at.eq(binding.issued_at as i64),
                     key_bindings::expires_at.eq(binding.expires_at as i64),
                     key_bindings::user_signature.eq(&binding.user_signature as &[u8]),
-                    key_bindings::platform_countersign
-                        .eq(&binding.platform_countersign as &[u8]),
+                    key_bindings::platform_countersign.eq(&binding.platform_countersign as &[u8]),
                     key_bindings::revoked_at.eq(None::<i64>),
                 ))
                 .execute(&mut *conn)
@@ -138,13 +137,21 @@ impl KeyBindingRepository for SqliteStorage {
         let user_identity = user_identity.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<KeyBinding>> {
             let mut conn = pool.get().context("get db connection")?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
             let rows = key_bindings::table
                 .filter(key_bindings::tenant_id.eq(&tenant_id))
                 .filter(key_bindings::user_identity.eq(&user_identity))
                 .filter(key_bindings::revoked_at.is_null())
+                .filter(key_bindings::expires_at.gt(now))
                 .load::<KeyBindingRow>(&mut *conn)
                 .context("find active key bindings by identity")?;
-            Ok(rows.into_iter().map(KeyBindingRow::into_key_binding).collect())
+            Ok(rows
+                .into_iter()
+                .map(KeyBindingRow::into_key_binding)
+                .collect())
         })
         .await?
     }
@@ -221,7 +228,7 @@ mod tests {
             issuer: "https://keycloak.example.com".to_string(),
             trust_anchor_id: "tenant-keycloak".to_string(),
             issued_at: 1_700_000_000,
-            expires_at: 1_700_003_600,
+            expires_at: 4_102_444_800, // 2100-01-01 — far future so tests don't expire
             user_signature: vec![10, 20, 30, 40],
             platform_countersign: vec![50, 60, 70, 80],
         }
@@ -241,7 +248,7 @@ mod tests {
         assert_eq!(found.user_identity, "user:jsell");
         assert_eq!(found.public_key, binding.public_key);
         assert_eq!(found.issued_at, 1_700_000_000);
-        assert_eq!(found.expires_at, 1_700_003_600);
+        assert_eq!(found.expires_at, 4_102_444_800);
     }
 
     #[tokio::test]
@@ -326,6 +333,26 @@ mod tests {
             .await
             .unwrap();
         assert!(found.is_some());
+    }
+
+    #[tokio::test]
+    async fn find_active_excludes_expired_bindings() {
+        let (_tmp, storage) = tmp_storage();
+        // Store a binding that expired in the past (not revoked, but expired)
+        let mut expired = sample_binding();
+        expired.expires_at = 1_000_000_000; // well in the past
+        storage.store("t1", &expired).await.unwrap();
+        // Store a binding that is still valid
+        let mut active = sample_binding();
+        active.public_key = vec![20, 21, 22, 23];
+        storage.store("t1", &active).await.unwrap();
+        let results = storage
+            .find_active_by_identity("t1", "user:jsell")
+            .await
+            .unwrap();
+        // Only the non-expired binding should be returned
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].public_key, vec![20, 21, 22, 23]);
     }
 
     #[tokio::test]

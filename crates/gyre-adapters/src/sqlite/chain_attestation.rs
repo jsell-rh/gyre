@@ -157,11 +157,13 @@ impl ChainAttestationRepository for SqliteStorage {
 
     async fn find_by_id(&self, id: &str) -> Result<Option<Attestation>> {
         let pool = Arc::clone(&self.pool);
+        let tenant_id = self.tenant_id.clone();
         let id = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<Attestation>> {
             let mut conn = pool.get().context("get db connection")?;
             let row = chain_attestations::table
                 .find(&id)
+                .filter(chain_attestations::tenant_id.eq(&tenant_id))
                 .first::<ChainAttestationRow>(&mut *conn)
                 .optional()
                 .context("find chain attestation by id")?;
@@ -172,6 +174,7 @@ impl ChainAttestationRepository for SqliteStorage {
 
     async fn load_chain(&self, leaf_id: &str) -> Result<Vec<Attestation>> {
         let pool = Arc::clone(&self.pool);
+        let tenant_id = self.tenant_id.clone();
         let leaf_id = leaf_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<Attestation>> {
             let mut conn = pool.get().context("get db connection")?;
@@ -186,6 +189,7 @@ impl ChainAttestationRepository for SqliteStorage {
                 }
                 let row = chain_attestations::table
                     .find(&id)
+                    .filter(chain_attestations::tenant_id.eq(&tenant_id))
                     .first::<ChainAttestationRow>(&mut *conn)
                     .optional()
                     .context("load chain attestation")?;
@@ -209,10 +213,12 @@ impl ChainAttestationRepository for SqliteStorage {
 
     async fn find_by_task(&self, task_id: &str) -> Result<Vec<Attestation>> {
         let pool = Arc::clone(&self.pool);
+        let tenant_id = self.tenant_id.clone();
         let task_id = task_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<Attestation>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = chain_attestations::table
+                .filter(chain_attestations::tenant_id.eq(&tenant_id))
                 .filter(chain_attestations::task_id.eq(&task_id))
                 .order(chain_attestations::created_at.asc())
                 .load::<ChainAttestationRow>(&mut *conn)
@@ -226,10 +232,12 @@ impl ChainAttestationRepository for SqliteStorage {
 
     async fn find_by_commit(&self, commit_sha: &str) -> Result<Option<Attestation>> {
         let pool = Arc::clone(&self.pool);
+        let tenant_id = self.tenant_id.clone();
         let commit_sha = commit_sha.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<Attestation>> {
             let mut conn = pool.get().context("get db connection")?;
             let row = chain_attestations::table
+                .filter(chain_attestations::tenant_id.eq(&tenant_id))
                 .filter(chain_attestations::commit_sha.eq(&commit_sha))
                 .first::<ChainAttestationRow>(&mut *conn)
                 .optional()
@@ -246,10 +254,12 @@ impl ChainAttestationRepository for SqliteStorage {
         until: u64,
     ) -> Result<Vec<Attestation>> {
         let pool = Arc::clone(&self.pool);
+        let tenant_id = self.tenant_id.clone();
         let repo_id = repo_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<Attestation>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = chain_attestations::table
+                .filter(chain_attestations::tenant_id.eq(&tenant_id))
                 .filter(chain_attestations::repo_id.eq(&repo_id))
                 .filter(chain_attestations::created_at.ge(since as i64))
                 .filter(chain_attestations::created_at.le(until as i64))
@@ -522,7 +532,10 @@ mod tests {
         let found = storage.find_by_id("sha256:gated").await.unwrap().unwrap();
         assert_eq!(found.output.gate_results.len(), 1);
         assert_eq!(found.output.gate_results[0].gate_id, "gate-1");
-        assert_eq!(found.output.gate_results[0].gate_type, GateType::TestCommand);
+        assert_eq!(
+            found.output.gate_results[0].gate_type,
+            GateType::TestCommand
+        );
         assert_eq!(found.output.gate_results[0].status, GateStatus::Passed);
     }
 
@@ -535,5 +548,56 @@ mod tests {
         storage.save(&att).await.unwrap();
         let found = storage.find_by_id("sha256:root").await.unwrap().unwrap();
         assert_eq!(found.output.commit_sha, "commit2");
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation_find_by_id() {
+        let (_tmp, storage) = tmp_storage();
+        let att = sample_signed_attestation("sha256:t1", "TASK-001", "commit1");
+        storage.save(&att).await.unwrap();
+        // Same DB, different tenant — should not see the attestation
+        let other = storage.with_tenant("other-tenant");
+        let found = other.find_by_id("sha256:t1").await.unwrap();
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation_find_by_task() {
+        let (_tmp, storage) = tmp_storage();
+        let att = sample_signed_attestation("sha256:t2", "TASK-001", "commit1");
+        storage.save(&att).await.unwrap();
+        let other = storage.with_tenant("other-tenant");
+        let results = other.find_by_task("TASK-001").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation_find_by_commit() {
+        let (_tmp, storage) = tmp_storage();
+        let att = sample_signed_attestation("sha256:t3", "TASK-001", "commit-iso");
+        storage.save(&att).await.unwrap();
+        let other = storage.with_tenant("other-tenant");
+        let found = other.find_by_commit("commit-iso").await.unwrap();
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation_find_by_repo() {
+        let (_tmp, storage) = tmp_storage();
+        let att = sample_signed_attestation("sha256:t4", "TASK-001", "commit1");
+        storage.save(&att).await.unwrap();
+        let other = storage.with_tenant("other-tenant");
+        let results = other.find_by_repo("repo-1", 0, u64::MAX).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation_load_chain() {
+        let (_tmp, storage) = tmp_storage();
+        let att = sample_signed_attestation("sha256:t5", "TASK-001", "commit1");
+        storage.save(&att).await.unwrap();
+        let other = storage.with_tenant("other-tenant");
+        let chain = other.load_chain("sha256:t5").await.unwrap();
+        assert!(chain.is_empty());
     }
 }

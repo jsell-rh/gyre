@@ -58,3 +58,5 @@ CREATE INDEX IF NOT EXISTS idx_chain_attestations_repo_time
     ON chain_attestations (repo_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_chain_attestations_parent
     ON chain_attestations (parent_ref);
+CREATE INDEX IF NOT EXISTS idx_chain_attestations_workspace
+    ON chain_attestations (workspace_id);

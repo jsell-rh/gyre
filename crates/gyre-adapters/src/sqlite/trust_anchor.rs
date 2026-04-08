@@ -256,7 +256,11 @@ mod tests {
             expression: "true".to_string(),
         }];
         storage.update("t1", &updated).await.unwrap();
-        let found = storage.find_by_id("t1", "tenant-keycloak").await.unwrap().unwrap();
+        let found = storage
+            .find_by_id("t1", "tenant-keycloak")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(found.jwks_uri, updated.jwks_uri);
         assert_eq!(found.constraints.len(), 1);
         assert_eq!(found.constraints[0].name, "test");
@@ -311,7 +315,11 @@ mod tests {
             },
         ];
         storage.create("t1", &anchor).await.unwrap();
-        let found = storage.find_by_id("t1", "tenant-keycloak").await.unwrap().unwrap();
+        let found = storage
+            .find_by_id("t1", "tenant-keycloak")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(found.constraints.len(), 2);
         assert_eq!(found.constraints[0].name, "scope check");
         assert_eq!(found.constraints[1].name, "no secrets");

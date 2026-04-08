@@ -289,7 +289,9 @@ mod tests {
             spec_sha: "abc123".to_string(),
             workspace_id: "ws-1".to_string(),
             repo_id: "repo-1".to_string(),
-            persona_constraints: vec![PersonaRef { name: "security".to_string() }],
+            persona_constraints: vec![PersonaRef {
+                name: "security".to_string(),
+            }],
             meta_spec_set_sha: "def456".to_string(),
             scope: sample_scope_constraint(),
         }
@@ -706,7 +708,9 @@ mod tests {
 
     #[test]
     fn persona_ref_roundtrip() {
-        let pr = PersonaRef { name: "security".to_string() };
+        let pr = PersonaRef {
+            name: "security".to_string(),
+        };
         let json = serde_json::to_string(&pr).unwrap();
         let back: PersonaRef = serde_json::from_str(&json).unwrap();
         assert_eq!(back, pr);
@@ -714,7 +718,9 @@ mod tests {
 
     #[test]
     fn persona_ref_serializes_as_object() {
-        let pr = PersonaRef { name: "security".to_string() };
+        let pr = PersonaRef {
+            name: "security".to_string(),
+        };
         let json = serde_json::to_string(&pr).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["name"], "security");
