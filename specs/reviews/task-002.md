@@ -1,7 +1,7 @@
 # Review: TASK-002 — CLI HSI Parity Commands
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R8)  
+**Date:** 2026-04-07 (R9)  
 **Verdict:** needs-revision
 
 ---
@@ -94,10 +94,12 @@
 
 ## R8 Findings
 
-- [-] [process-revision-complete] **F17 (still open — third round).** `print_briefing` still omits the `cross_workspace` section. The function at main.rs:973-1028 is unchanged since R7. The server's `BriefingResponse` (graph.rs:250) includes `cross_workspace: Vec<BriefingItem>` and the HSI §9 narrative (line 1270) explicitly defines a CROSS-WORKSPACE section. The CLI still has no code path to render these items.  
-  **Files:** `crates/gyre-cli/src/main.rs:973-1028`.  
-  **Process fixes:** (1) Added `scripts/check-response-consumption.sh` — mechanically detects missing sections in composite responses and under-consumed item fields. (2) Added needs-revision workflow to implementation prompt — structured procedure for reading review findings and verifying each fix. (3) Added reference to `check-response-consumption.sh` in checklist item #22.
+- [x] **F17 (resolved R9).** `print_briefing` now renders the `cross_workspace` section (main.rs:1003-1011) with `↔` prefix via `print_briefing_item`. Fixed in commit `902643db`.
 
-- [-] [process-revision-complete] **F18 (still open — third round).** Briefing items still display only `title`. All four section rendering loops (main.rs:986, 998, 1010 for completed/in_progress/exceptions) print only `item["title"]`. The server's `BriefingItem` (graph.rs:260-267) provides `description: String`, `spec_path: Option<String>`, `entity_type: String`, `entity_id: Option<String>`, and `timestamp: u64` — all silently discarded. HSI §9's briefing narrative (lines 1253-1283) shows descriptions, spec references, and action prompts for each item.  
-  **Files:** `crates/gyre-cli/src/main.rs:982-1015`.  
-  **Process fixes:** Same as F17 — `scripts/check-response-consumption.sh` check 2 detects single-field item loops. Needs-revision workflow ensures findings are systematically addressed.
+- [x] **F18 (resolved R9).** All section rendering loops now call `print_briefing_item` (main.rs:1039-1052), which renders `title`, `description`, and `spec_path`. Fixed in commit `902643db`.
+
+## R9 Findings
+
+- [ ] **F19 — `print_briefing` silently drops the `completed_agents` section of the BriefingResponse.**  
+  The server's `BriefingResponse` (graph.rs:244-257) includes `completed_agents: Vec<BriefingCompletedAgent>` (graph.rs:234-241), which carries per-agent completion data: `agent_id`, `spec_ref`, `decisions` (with reasoning), `uncertainties`, `conversation_sha`, and `completed_at`. HSI §9's COMPLETED section explicitly shows agent attribution and decision reasoning: "Agent: worker-12. Decision: used exponential backoff (confidence: high)". HSI §9's data source table lists "agent completion summaries" as a named data source for the Completed section. HSI §11 requires: "every data surface in the UI must be consumable outside the browser." The CLI's `print_briefing` function (main.rs:973-1036) renders `completed`, `in_progress`, `cross_workspace`, `exceptions`, and `metrics` — but has no code path for `completed_agents`. Agent decisions and uncertainties are silently dropped. This is the same flaw class as F17 (incomplete response consumption) — a composite response section is present in the server response but absent from the CLI rendering. Fix: add a "Completed Agents" subsection (or merge agent data inline with completed items by matching `spec_ref`) to render agent_id, decisions, and uncertainties.  
+  **Files:** `crates/gyre-cli/src/main.rs:973-1036` (missing section), `crates/gyre-server/src/api/graph.rs:234-257` (server sends `completed_agents`).
