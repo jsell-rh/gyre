@@ -1,7 +1,7 @@
 # Review: TASK-012 — Specs Assist Real LLM Integration
 
 **Reviewer:** Verifier
-**Round:** R2
+**Round:** R3
 
 ---
 
@@ -26,3 +26,10 @@
 
 - [-] [process-revision-complete] **F6 — CLI `spec_assist` display code accesses `op["text"]` which no longer exists after TASK-012 changed the server response format (response field name mismatch).**
   TASK-012 changed the server's `event: complete` data from `{text: full_text}` to `{diff: [...], explanation: "..."}`. The CLI display code at `main.rs:854` still accesses `op["text"].as_str()`, which returns `None` on the new `{diff, explanation}` response. The user runs `gyre spec assist` and sees "Spec assist response:" followed by empty output — all diff ops and explanation are silently dropped. Additionally, the client doc comment at `client.rs:444` says "collected text payloads" (stale — should reference `{diff, explanation}` responses), and `docs/api-reference.md:78` describes the endpoint as "SSE stream of `DiffOp` events" with ops `insert`/`delete`/`replace` — the `DiffOp` type was removed (R1 F1), and the op names should be `add`/`remove`/`replace` per spec. Fix: update `main.rs` display to render `diff` ops and `explanation` from the response; update client doc comment; update api-reference description.
+
+---
+
+## R3
+
+- [ ] **F7 — CLI client does not handle `event: error` SSE events — users see misleading "No suggestions returned." when the LLM returns invalid output.**
+  TASK-012 introduced `event: error` on the server side (for invalid LLM JSON, missing fields, or invalid diff ops — `specs_assist.rs:296-315`). The CLI client `spec_assist` parser (`client.rs:471-496`) only captures `complete` and `partial` events. When the server sends `event: error`, the client ignores it, returns an empty `ops` vec, and the display code at `main.rs:847-848` prints "No suggestions returned." — a misleading message that implies the LLM had no suggestions rather than reporting the actual error. The spec (`ui-layout.md` §3 line 167) defines `event: error` as part of the SSE contract. The R2 fix (F6) already updated this client code for the new `complete` event format but did not add `error` event handling. Fix: in the client's SSE parser (`client.rs:483-494`), add an `else if current_event == "error"` branch that captures the error data. In the display code (`main.rs:847`), check for error events and print the error message (e.g., `eprintln!("Error: {}", error_data["error"].as_str())`) before or instead of the "No suggestions returned." fallback.
