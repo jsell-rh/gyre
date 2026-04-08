@@ -2,9 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §3.2, §8 Phase 2  
 **Depends on:** TASK-006  
-**Progress:** `ready-for-review`  
+**Progress:** `needs-revision`  
 **Review:** [`specs/reviews/task-007.md`](../reviews/task-007.md)  
-**Note:** R3 found 2 findings: F6 (ConstraintEditor strategy-implied display incomplete — missing persona, workspace trust level, attestation policy constraints), F7 (no integration tests for merge-time constraint evaluation).
+**Note:** R4 found 1 finding: F8 (`build_agent_context` always sets `meta_spec_set_sha: ""` and `attestation_level: 0`, causing unconditional false violations for every constraint evaluation — spurious events, notifications, and blocked downstream evaluation via §3.4 fail-closed short-circuit).
 
 ## Spec Excerpt
 
