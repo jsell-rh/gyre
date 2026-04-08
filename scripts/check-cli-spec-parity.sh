@@ -347,6 +347,131 @@ if [ -f "$CLI_CLIENT" ]; then
     fi
 fi
 
+# --- Check 10: SSE complete-event field access vs server response shape ---
+# When a CLI display function accesses fields from SSE "complete" event data
+# using op["field"] or value["field"], verify the field name exists in the
+# server handler's SSE complete-event data construction for the same endpoint.
+#
+# A response format change (e.g., from {text: full_text} to {diff, explanation})
+# that doesn't propagate to CLI display code causes silent data loss: the CLI
+# reads op["text"] which returns Null on the new {diff, explanation} shape,
+# and the user sees empty output with no error.
+#
+# Detection: for each CLI function that consumes SSE complete-event data from
+# a client function, extract all ["field"] accesses on the event values. Then
+# find the server handler that produces the SSE stream and extract the field
+# names from the event("complete").data(...) construction. Flag any CLI field
+# access where the field doesn't appear in the server's complete-event data.
+#
+# Origin: specs/reviews/task-012.md R2 F6 — CLI spec_assist display accessed
+#         op["text"] but server now sends {diff, explanation} in complete events.
+
+CLI_CLIENT="crates/gyre-cli/src/client.rs"
+SERVER_API_DIR="crates/gyre-server/src/api"
+
+if [ -f "$CLI_MAIN" ] && [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
+    # Strategy: find CLI client functions that parse SSE streams (contain
+    # 'event: complete' or 'current_event == "complete"' patterns), then:
+    # (1) Extract the server endpoint URL from the client function
+    # (2) Find the server handler for that endpoint
+    # (3) Extract field names from event("complete").data(...) construction
+    # (4) Find CLI display code that consumes the parsed data and check
+    #     its ["field"] accesses against the server fields
+
+    # Find SSE-consuming client functions
+    SSE_FN_LINES=$(grep -n '"complete"' "$CLI_CLIENT" 2>/dev/null | head -20 || true)
+
+    if [ -n "$SSE_FN_LINES" ]; then
+        while IFS= read -r sse_line; do
+            [ -z "$sse_line" ] && continue
+            SSE_LINENO=$(echo "$sse_line" | cut -d: -f1)
+
+            # Find the enclosing function
+            FN_START=$(head -n "$SSE_LINENO" "$CLI_CLIENT" \
+                | grep -n 'pub async fn\|pub fn\|async fn' \
+                | tail -1 \
+                | cut -d: -f1 || echo "1")
+
+            fn_name=$(sed -n "${FN_START}p" "$CLI_CLIENT" \
+                | grep -oP '(pub async fn|async fn|pub fn) \K[a-z_]+' || echo "unknown")
+
+            # Find function end
+            FN_END_SEARCH=$(tail -n +"$((SSE_LINENO + 1))" "$CLI_CLIENT" \
+                | grep -n 'pub async fn\|pub fn' \
+                | head -1 \
+                | cut -d: -f1 || echo "200")
+            FN_END=$((SSE_LINENO + FN_END_SEARCH))
+
+            # Extract the endpoint URL from the function body
+            FN_BODY=$(sed -n "${FN_START},${FN_END}p" "$CLI_CLIENT")
+            ENDPOINT=$(echo "$FN_BODY" | grep -oP 'api/v1/[^"]+' | head -1 || true)
+            [ -z "$ENDPOINT" ] && continue
+
+            # Normalize the endpoint path for matching
+            ENDPOINT_NORM=$(echo "$ENDPOINT" | sed 's/{[^}]*}/:param/g')
+
+            # Find the server handler file that registers this route
+            for rs_file in "$SERVER_API_DIR"/*.rs; do
+                [ -f "$rs_file" ] || continue
+
+                # Check if this file contains an event("complete") construction
+                COMPLETE_EVENTS=$(grep -n 'event("complete")' "$rs_file" 2>/dev/null || true)
+                [ -z "$COMPLETE_EVENTS" ] && continue
+
+                # Also verify the file is related to this endpoint
+                BASE_NAME=$(basename "$rs_file" .rs)
+                ENDPOINT_BASE=$(echo "$ENDPOINT_NORM" | grep -oP '[a-z_]+' | tail -1 || true)
+
+                # Extract field names from event("complete").data(...) construction.
+                # Look for json!({ "field": ... }) or serde_json::to_string(&json!({...}))
+                # within 10 lines after event("complete")
+                while IFS= read -r complete_line; do
+                    [ -z "$complete_line" ] && continue
+                    CE_LINENO=$(echo "$complete_line" | cut -d: -f1)
+                    CE_WINDOW_END=$((CE_LINENO + 20))
+                    SERVER_FIELDS=$(sed -n "${CE_LINENO},${CE_WINDOW_END}p" "$rs_file" \
+                        | grep -oP '"[a-z_]+":\s' \
+                        | sed 's/"//g; s/:.*//; s/ //' \
+                        | sort -u || true)
+
+                    [ -z "$SERVER_FIELDS" ] && continue
+
+                    # Now find the CLI display function that consumes fn_name's return value.
+                    # Search main.rs for calls to api.<fn_name> and extract ["field"] accesses
+                    # on the return value (within 30 lines after the call).
+                    CALL_SITES=$(grep -n "${fn_name}" "$CLI_MAIN" 2>/dev/null | grep -v '//' | head -5 || true)
+
+                    while IFS= read -r call_site; do
+                        [ -z "$call_site" ] && continue
+                        CS_LINENO=$(echo "$call_site" | cut -d: -f1)
+                        CS_WINDOW_END=$((CS_LINENO + 30))
+
+                        # Extract all ["field"] accesses in the display window
+                        CLI_FIELDS=$(sed -n "${CS_LINENO},${CS_WINDOW_END}p" "$CLI_MAIN" \
+                            | grep -oP '\["([a-z_]+)"\]' \
+                            | sed 's/\["\|"\]//g' \
+                            | sort -u || true)
+
+                        for cli_field in $CLI_FIELDS; do
+                            [ -z "$cli_field" ] && continue
+                            if ! echo "$SERVER_FIELDS" | grep -qx "$cli_field" 2>/dev/null; then
+                                echo "CLI-SPEC PARITY: CLI accesses [\"$cli_field\"] on SSE complete-event data but server's complete event does not contain this field"
+                                echo "  Client: $CLI_CLIENT fn $fn_name (endpoint: $ENDPOINT)"
+                                echo "  Server: $rs_file:$CE_LINENO — complete event contains fields: $SERVER_FIELDS"
+                                echo "  Display: $CLI_MAIN:$CS_LINENO — accesses [\"$cli_field\"] which does not exist in the server response."
+                                echo "  This field may be from a prior response format. The CLI will get Null and display empty output."
+                                echo "  Fix: Update the CLI display code to access the current response fields."
+                                echo ""
+                                FAIL=1
+                            fi
+                        done
+                    done <<< "$CALL_SITES"
+                done <<< "$COMPLETE_EVENTS"
+            done
+        done <<< "$SSE_FN_LINES"
+    fi
+fi
+
 if [ "$FAIL" -eq 0 ]; then
     echo "CLI-spec parity lint passed."
 fi

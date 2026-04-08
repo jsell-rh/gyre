@@ -35,6 +35,16 @@
 #             on non-handler functions (shared utilities extracted from handlers
 #             that kept the route annotation instead of leaving it on the
 #             actual handler).
+#   Check 6 — Raw LLM response passthrough: MCP handlers that call
+#             stream_complete (LLM endpoint) and return the raw collected
+#             text via tool_result() without performing JSON parsing or
+#             validation. The REST handler for the same LLM endpoint
+#             typically parses the raw LLM text as JSON, validates expected
+#             fields (e.g., {diff, explanation}), and sends structured error
+#             events on invalid output. An MCP handler that skips this
+#             validation returns raw, unparsed LLM text — the consumer
+#             gets no error indication and no structured data when the LLM
+#             produces invalid output.
 #
 # Origin: specs/reviews/task-010.md F1 (dead depth param), F2/F3 (missing
 #         briefing fields), F4 (edge filter divergence), F5 (hand-built JSON
@@ -42,6 +52,9 @@
 #         since-default parity), F9 (stale route annotation after extraction)
 #         — all caused by MCP handlers reimplementing REST logic or carrying
 #         stale metadata after refactoring.
+#         specs/reviews/task-012.md R2 F5 (raw LLM response passthrough) —
+#         MCP handler returned raw LLM text without JSON parsing/validation
+#         that the REST handler performs.
 #
 # Exempt with: // mcp-parity:ok — <reason>
 #
@@ -357,6 +370,90 @@ for src_file in $(find crates/gyre-server/src/ -name '*.rs' -not -path '*/tests/
             VIOLATIONS=$((VIOLATIONS + 1))
         fi
     done <<< "$ROUTE_ANNOTATIONS"
+done
+
+# ── Check 6: Raw LLM response passthrough ────────────────────────────────
+# When an MCP handler calls stream_complete (LLM call), collects the raw
+# text, and returns it via tool_result() without JSON parsing/validation,
+# the consumer gets unvalidated LLM output. The REST handler for the same
+# endpoint typically parses the raw text as JSON, validates required fields,
+# and returns structured errors on invalid output. An MCP handler that
+# skips this returns raw text where structured data is expected.
+#
+# Detection: find functions in mcp.rs that (a) call stream_complete and
+# (b) return tool_result(variable) without any JSON parsing between
+# the LLM call and the return. JSON parsing signals: serde_json::from_str,
+# serde_json::from_value, .as_object(), .get("field").
+#
+# Origin: specs/reviews/task-012.md R2 F5 — MCP spec_assist handler
+#         returned raw LLM text while REST handler parsed and validated
+#         {diff, explanation} JSON.
+
+# Find all functions in MCP file that call stream_complete
+mapfile -t LLM_FN_LINES < <(grep -n 'stream_complete' "$MCP_FILE" | head -20)
+
+for entry in "${LLM_FN_LINES[@]}"; do
+    [ -z "$entry" ] && continue
+    lineno=$(echo "$entry" | cut -d: -f1)
+
+    # Skip test code
+    if [ "$lineno" -ge "$TEST_BOUNDARY" ]; then
+        continue
+    fi
+
+    # Check for exemption
+    line_text=$(sed -n "${lineno}p" "$MCP_FILE")
+    if echo "$line_text" | grep -q 'mcp-parity:ok'; then
+        continue
+    fi
+
+    # Find the enclosing function
+    FN_START=$(head -n "$lineno" "$MCP_FILE" \
+        | grep -n 'async fn \|pub fn \|fn ' \
+        | tail -1 \
+        | cut -d: -f1 || echo "1")
+
+    # Find function end (next fn definition or +300 lines)
+    FN_END_OFFSET=$(tail -n +"$((lineno + 1))" "$MCP_FILE" \
+        | grep -n 'async fn \|pub fn ' \
+        | head -1 \
+        | cut -d: -f1 || echo "300")
+    FN_END=$((lineno + FN_END_OFFSET))
+
+    fn_name=$(sed -n "${FN_START}p" "$MCP_FILE" \
+        | grep -oP '(async fn|pub fn|fn) \K[a-z_]+' || echo "unknown")
+
+    # Extract the function body between stream_complete and function end
+    POST_LLM_BODY=$(sed -n "${lineno},${FN_END}p" "$MCP_FILE")
+
+    # Check if the function returns tool_result() with the raw text
+    HAS_TOOL_RESULT=$(echo "$POST_LLM_BODY" | grep -c 'tool_result(' || true)
+
+    if [ "${HAS_TOOL_RESULT:-0}" -gt 0 ]; then
+        # Check if there's JSON parsing between stream_complete and tool_result
+        HAS_JSON_PARSING=$(echo "$POST_LLM_BODY" \
+            | grep -c 'serde_json::from_str\|serde_json::from_value\|\.as_object()\|\.get("diff")\|\.get("explanation")\|parsed\[' || true)
+
+        if [ "${HAS_JSON_PARSING:-0}" -eq 0 ]; then
+            echo ""
+            echo "RAW LLM RESPONSE PASSTHROUGH: $MCP_FILE:$lineno (fn $fn_name)"
+            echo "  This MCP handler calls stream_complete (LLM call) and returns the raw"
+            echo "  text via tool_result() without JSON parsing or validation."
+            echo ""
+            echo "  The REST handler for the same LLM endpoint parses the raw LLM text,"
+            echo "  validates expected fields (e.g., {diff, explanation}), and returns"
+            echo "  structured errors on invalid output. The MCP handler must perform the"
+            echo "  same validation to maintain HSI §11 parity — otherwise, the consumer"
+            echo "  gets raw, unvalidated LLM text instead of structured data."
+            echo ""
+            echo "  Fix: Parse the raw LLM text as JSON (serde_json::from_str), validate"
+            echo "  the expected fields exist, and return a structured tool_result with"
+            echo "  the validated data — or tool_error on validation failure."
+            echo ""
+            echo "  Exempt with '// mcp-parity:ok — <reason>' on the stream_complete line."
+            VIOLATIONS=$((VIOLATIONS + 1))
+        fi
+    fi
 done
 
 echo ""
