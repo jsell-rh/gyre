@@ -2,7 +2,8 @@
 
 **Spec reference:** `human-system-interface.md` §11 (CLI/MCP Parity Constraint)  
 **Depends on:** None (consumes existing REST endpoints and domain logic)  
-**Progress:** `ready-for-review`
+**Progress:** `needs-revision`
+**Review:** [`specs/reviews/task-010.md`](../reviews/task-010.md)
 
 ## Spec Excerpt
 
