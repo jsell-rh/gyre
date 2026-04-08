@@ -12,7 +12,7 @@ use axum::{
 };
 use futures_util::{stream, StreamExt as _};
 use gyre_common::{Id, Notification, NotificationType};
-use gyre_domain::{MergeRequest, MrStatus};
+use gyre_domain::{CostEntry, MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 
@@ -32,13 +32,6 @@ pub struct SpecAssistRequest {
     pub spec_path: String,
     pub instruction: String,
     pub draft_content: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct DiffOp {
-    pub op: String,
-    pub path: String,
-    pub content: String,
 }
 
 #[derive(Deserialize)]
@@ -223,16 +216,33 @@ pub async fn assist_spec(
     let user_prompt = format!("Instruction: {}", req.instruction);
 
     // Resolve model and call streaming LLM.
-    let (model, _) =
+    let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &repo.workspace_id, "specs-assist").await;
     let llm_stream = factory
         .for_model(&model)
-        .stream_complete(&system_prompt, &user_prompt, None)
+        .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
         .map_err(ApiError::Internal)?;
 
     let chunks: Vec<String> = llm_stream.filter_map(|r| async { r.ok() }).collect().await;
     let full_text = chunks.join("");
+
+    // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158).
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let base_estimate = (estimated_input + 500) as f64;
+    let estimated_tokens = base_estimate * 3.0;
+    let cost_entry = CostEntry::new(
+        new_id(),
+        Id::new(caller.agent_id.clone()),
+        None,
+        "llm_query",
+        estimated_tokens,
+        "tokens",
+        now_secs(),
+    );
+    if let Err(e) = state.costs.record(&cost_entry).await {
+        tracing::warn!("Failed to record specs/assist cost entry: {e}");
+    }
 
     // Build SSE events: partial events stream the explanation progressively,
     // complete event carries the full {diff, explanation} response.

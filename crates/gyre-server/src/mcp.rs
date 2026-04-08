@@ -16,7 +16,7 @@ use axum::{
 };
 use futures_util::stream;
 use gyre_common::Id;
-use gyre_domain::{MergeRequest, Task, TaskPriority, TaskStatus};
+use gyre_domain::{CostEntry, MergeRequest, Task, TaskPriority, TaskStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -2028,6 +2028,57 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
         None => return tool_error("LLM not configured — spec assist unavailable"),
     };
 
+    // Determine effective spec content: draft_content overrides committed content.
+    let spec_content = if let Some(ref draft) = draft_content {
+        draft.clone()
+    } else {
+        match state
+            .git_ops
+            .read_file(&repo.path, &repo.default_branch, &spec_path)
+            .await
+        {
+            Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).to_string(),
+            Ok(None) => {
+                return tool_error(format!("spec {spec_path} not found in repo {repo_id}"));
+            }
+            Err(e) => {
+                tracing::warn!(repo_id = %repo_id, spec_path = %spec_path, "Failed to read spec from repo: {e}");
+                String::new()
+            }
+        }
+    };
+
+    // Build knowledge graph context: query nodes governed by this spec.
+    let graph_context = match state
+        .graph_store
+        .get_nodes_by_spec(&repo_id_typed, &spec_path)
+        .await
+    {
+        Ok(nodes) if !nodes.is_empty() => {
+            let summaries: Vec<String> = nodes
+                .iter()
+                .take(50)
+                .map(|n| {
+                    format!(
+                        "- {} ({:?}): {} [{}:{}–{}]",
+                        n.name,
+                        n.node_type,
+                        n.qualified_name,
+                        n.file_path,
+                        n.line_start,
+                        n.line_end
+                    )
+                })
+                .collect();
+            summaries.join("\n")
+        }
+        Ok(_) => "No graph nodes are currently linked to this spec.".to_string(),
+        Err(e) => {
+            tracing::warn!(repo_id = %repo_id, spec_path = %spec_path, "Failed to load graph context: {e}");
+            "Graph context unavailable.".to_string()
+        }
+    };
+
     // Load effective prompt; fall back to hardcoded default.
     let template_content = state
         .prompt_templates
@@ -2040,18 +2091,23 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
 
     let system_prompt = template_content
         .replace("{{spec_path}}", &spec_path)
-        .replace("{{draft_content}}", draft_content.as_deref().unwrap_or(""))
-        .replace("{{instruction}}", &instruction);
+        .replace("{{spec_content}}", &spec_content)
+        .replace("{{graph_context}}", &graph_context)
+        .replace("{{instruction}}", &instruction)
+        .replace(
+            "{{draft_content}}",
+            draft_content.as_deref().unwrap_or(&spec_content),
+        );
     let user_prompt = format!("Instruction: {instruction}");
 
     // Resolve model and call LLM.
-    let (model, _) =
+    let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(state, &repo.workspace_id, "specs-assist").await;
 
     use futures_util::StreamExt as _;
     let stream = match factory
         .for_model(&model)
-        .stream_complete(&system_prompt, &user_prompt, None)
+        .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
     {
         Ok(s) => s,
@@ -2061,6 +2117,23 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
     // Collect all chunks into the final text.
     let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
     let full_text = chunks.join("");
+
+    // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158).
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let base_estimate = (estimated_input + 500) as f64;
+    let estimated_tokens = base_estimate * 3.0;
+    let cost_entry = CostEntry::new(
+        new_id(),
+        Id::new(auth.agent_id.clone()),
+        None,
+        "llm_query",
+        estimated_tokens,
+        "tokens",
+        now_secs(),
+    );
+    if let Err(e) = state.costs.record(&cost_entry).await {
+        tracing::warn!("Failed to record MCP specs/assist cost entry: {e}");
+    }
 
     tool_result(full_text)
 }
