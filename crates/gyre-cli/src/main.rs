@@ -989,6 +989,47 @@ fn print_briefing(briefing: &serde_json::Value) {
         }
     }
 
+    // Completed Agents (HSI §9 — agent decisions and uncertainties)
+    if let Some(agents) = briefing["completed_agents"].as_array() {
+        if !agents.is_empty() {
+            println!("--- Completed Agents ---");
+            for agent in agents {
+                let agent_id = agent["agent_id"].as_str().unwrap_or("unknown");
+                let spec_ref = agent["spec_ref"].as_str().unwrap_or("");
+                if spec_ref.is_empty() {
+                    println!("  Agent: {agent_id}");
+                } else {
+                    println!("  Agent: {agent_id} (spec: {spec_ref})");
+                }
+                if let Some(decisions) = agent["decisions"].as_array() {
+                    for decision in decisions {
+                        if let Some(text) = decision.as_str() {
+                            println!("    Decision: {text}");
+                        } else if let Some(obj) = decision.as_object() {
+                            let reasoning =
+                                obj.get("reasoning").and_then(|v| v.as_str()).unwrap_or("");
+                            let confidence =
+                                obj.get("confidence").and_then(|v| v.as_str()).unwrap_or("");
+                            if !reasoning.is_empty() && !confidence.is_empty() {
+                                println!("    Decision: {reasoning} (confidence: {confidence})");
+                            } else if !reasoning.is_empty() {
+                                println!("    Decision: {reasoning}");
+                            }
+                        }
+                    }
+                }
+                if let Some(uncertainties) = agent["uncertainties"].as_array() {
+                    for u in uncertainties {
+                        if let Some(text) = u.as_str() {
+                            println!("    Uncertainty: {text}");
+                        }
+                    }
+                }
+            }
+            println!();
+        }
+    }
+
     // In Progress
     if let Some(items) = briefing["in_progress"].as_array() {
         if !items.is_empty() {
