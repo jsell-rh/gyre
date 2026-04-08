@@ -2,9 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §2, §7.1, §8 Phase 1  
 **Depends on:** TASK-003, TASK-004, TASK-005  
-**Progress:** `ready-for-review`  
+**Progress:** `complete`  
 **Review:** [`specs/reviews/task-006.md`](../reviews/task-006.md)  
-**Note:** R4 — F4 resolved. verify_attestation_audit_only now performs Ed25519 cryptographic signature verification.
+**Note:** R5 — all 4 findings resolved, no new findings. Verified complete.
 
 ## Spec Excerpt
 
