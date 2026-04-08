@@ -41,4 +41,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `085e5584` feat(provenance): add storage adapters and migration for authorization provenance (TASK-004)
