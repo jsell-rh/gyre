@@ -315,6 +315,27 @@ pub fn derive_strategy_constraints(
     constraints
 }
 
+/// Derive path constraints from `ScopeConstraint` for validation (§7.6 dry-run).
+///
+/// Public wrapper for the dry-run endpoint to validate scope constraint
+/// glob patterns by converting them to CEL and compiling the expressions.
+pub fn derive_path_constraints_for_validation(
+    scope: &ScopeConstraint,
+    constraints: &mut Vec<OutputConstraint>,
+) {
+    derive_path_constraints(scope, constraints);
+}
+
+/// Validate a CEL constraint expression by compiling it (§7.6 dry-run).
+///
+/// Returns `Ok(())` if the expression is syntactically valid CEL,
+/// or `Err(message)` if the expression fails to compile.
+pub fn validate_cel_expression(expression: &str) -> Result<(), String> {
+    Program::compile(expression)
+        .map(|_| ())
+        .map_err(|e| format!("CEL parse error: {e}"))
+}
+
 /// Derive path constraints from `ScopeConstraint` (§3.2).
 ///
 /// - `allowed_paths` (if non-empty): all changed files must match at least one allowed glob.
@@ -1129,5 +1150,59 @@ mod tests {
         let program = Program::compile(r#"action == "merge""#).unwrap();
         let result = program.execute(&ctx).unwrap();
         assert_eq!(result, Value::Bool(true));
+    }
+
+    // ── validate_cel_expression (§7.6 dry-run) ──────────────────────────
+
+    #[test]
+    fn validate_valid_cel_expression() {
+        assert!(validate_cel_expression(r#"agent.persona == "security""#).is_ok());
+    }
+
+    #[test]
+    fn validate_complex_cel_expression() {
+        assert!(
+            validate_cel_expression(r#"output.changed_files.all(f, f.startsWith("src/"))"#).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_invalid_cel_expression() {
+        let result = validate_cel_expression("this is not valid CEL !!!");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("CEL parse error"));
+    }
+
+    #[test]
+    fn validate_arithmetic_cel_is_valid_syntax() {
+        // "1 + 1" is valid CEL syntax even though it doesn't return bool.
+        assert!(validate_cel_expression("1 + 1").is_ok());
+    }
+
+    #[test]
+    fn validate_size_function_cel() {
+        assert!(validate_cel_expression("output.changed_files.size() < 50").is_ok());
+    }
+
+    // ── derive_path_constraints_for_validation ──────────────────────────
+
+    #[test]
+    fn derive_path_constraints_for_validation_produces_valid_cel() {
+        let scope = ScopeConstraint {
+            allowed_paths: vec!["src/payments/**".to_string()],
+            forbidden_paths: vec!["src/auth/**".to_string()],
+        };
+        let mut constraints = Vec::new();
+        derive_path_constraints_for_validation(&scope, &mut constraints);
+        assert_eq!(constraints.len(), 2);
+        // Verify each derived expression compiles as valid CEL.
+        for c in &constraints {
+            assert!(
+                validate_cel_expression(&c.expression).is_ok(),
+                "scope constraint '{}' should produce valid CEL: {}",
+                c.name,
+                c.expression
+            );
+        }
     }
 }

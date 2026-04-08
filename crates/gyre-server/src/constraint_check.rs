@@ -226,6 +226,7 @@ pub async fn evaluate_merge_constraints(
     workspace_id: &Id,
     _source_branch: &str,
     target_branch: &str,
+    default_branch: &str,
 ) {
     // Look up the MR to find the agent and task.
     let mr = match state
@@ -362,7 +363,7 @@ pub async fn evaluate_merge_constraints(
         repo_id: repo_id.to_string(),
         workspace_id: workspace_id.to_string(),
         branch: target_branch.to_string(),
-        default_branch: target_branch.to_string(),
+        default_branch: default_branch.to_string(),
     };
 
     let ci = ConstraintInput {

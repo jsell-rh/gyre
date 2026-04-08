@@ -344,6 +344,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/specs/:path/progress",
             get(specs::get_spec_progress),
         )
+        // Constraint validation dry-run (authorization-provenance.md §7.6)
+        .route(
+            "/api/v1/constraints/validate",
+            post(specs::validate_constraints),
+        )
         // Spec editing backend (S3.3 — HSI §11 CLI/MCP parity)
         .route(
             "/api/v1/repos/:id/specs/assist",

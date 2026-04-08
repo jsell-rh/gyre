@@ -1168,14 +1168,140 @@ pub async fn get_spec_progress(
 }
 
 // ---------------------------------------------------------------------------
+// Constraint validation (authorization-provenance.md §7.6 — dry-run)
+// ---------------------------------------------------------------------------
+
+/// Request body for constraint validation dry-run.
+#[derive(Deserialize)]
+pub struct ValidateConstraintsRequest {
+    /// CEL constraint expressions to validate.
+    pub constraints: Vec<ConstraintEntry>,
+    /// Scope constraints (glob patterns) to validate.
+    #[serde(default)]
+    pub scope: Option<ScopeEntry>,
+}
+
+#[derive(Deserialize)]
+pub struct ConstraintEntry {
+    pub name: String,
+    pub expression: String,
+}
+
+#[derive(Deserialize)]
+pub struct ScopeEntry {
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+    #[serde(default)]
+    pub forbidden_paths: Vec<String>,
+}
+
+/// Per-constraint validation result.
+#[derive(Serialize)]
+pub struct ConstraintValidationResult {
+    pub name: String,
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Overall validation response.
+#[derive(Serialize)]
+pub struct ValidateConstraintsResponse {
+    pub valid: bool,
+    pub results: Vec<ConstraintValidationResult>,
+}
+
+/// POST /api/v1/constraints/validate — validate constraint expressions (§7.6 dry-run).
+///
+/// Compiles each CEL expression using the real CEL parser. Also derives scope
+/// constraints from glob patterns and validates them. Returns per-constraint
+/// results indicating whether each expression is syntactically valid CEL.
+pub async fn validate_constraints(
+    Json(body): Json<ValidateConstraintsRequest>,
+) -> Result<Json<ValidateConstraintsResponse>, ApiError> {
+    use gyre_domain::constraint_evaluator;
+
+    let mut results = Vec::new();
+    let mut all_valid = true;
+
+    // Validate each user-provided CEL constraint expression by compiling it.
+    for entry in &body.constraints {
+        if entry.expression.trim().is_empty() {
+            results.push(ConstraintValidationResult {
+                name: entry.name.clone(),
+                valid: false,
+                error: Some("expression is empty".to_string()),
+            });
+            all_valid = false;
+            continue;
+        }
+
+        match constraint_evaluator::validate_cel_expression(&entry.expression) {
+            Ok(()) => {
+                results.push(ConstraintValidationResult {
+                    name: entry.name.clone(),
+                    valid: true,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                results.push(ConstraintValidationResult {
+                    name: entry.name.clone(),
+                    valid: false,
+                    error: Some(e),
+                });
+                all_valid = false;
+            }
+        }
+    }
+
+    // Validate scope constraints by deriving the CEL expressions and compiling them.
+    if let Some(scope) = &body.scope {
+        let scope_constraint = gyre_common::attestation::ScopeConstraint {
+            allowed_paths: scope.allowed_paths.clone(),
+            forbidden_paths: scope.forbidden_paths.clone(),
+        };
+        let mut scope_cel = Vec::new();
+        constraint_evaluator::derive_path_constraints_for_validation(
+            &scope_constraint,
+            &mut scope_cel,
+        );
+        for sc in &scope_cel {
+            match constraint_evaluator::validate_cel_expression(&sc.expression) {
+                Ok(()) => {
+                    results.push(ConstraintValidationResult {
+                        name: sc.name.clone(),
+                        valid: true,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(ConstraintValidationResult {
+                        name: sc.name.clone(),
+                        valid: false,
+                        error: Some(e),
+                    });
+                    all_valid = false;
+                }
+            }
+        }
+    }
+
+    Ok(Json(ValidateConstraintsResponse {
+        valid: all_valid,
+        results,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use base64::Engine as _;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -2096,10 +2222,7 @@ specs:
 
     /// Sign an InputContent hash with the given PKCS8 private key.
     /// Returns base64-encoded signature.
-    fn sign_input_content(
-        pkcs8_bytes: &[u8],
-        input_content: &gyre_common::InputContent,
-    ) -> String {
+    fn sign_input_content(pkcs8_bytes: &[u8], input_content: &gyre_common::InputContent) -> String {
         use base64::engine::general_purpose::STANDARD;
         use base64::Engine;
         use ring::digest;
@@ -2200,12 +2323,9 @@ specs:
                 {
                     use ring::digest;
                     use ring::signature::{self, UnparsedPublicKey};
-                    let content_bytes =
-                        serde_json::to_vec(&signed.content).unwrap();
-                    let content_hash =
-                        digest::digest(&digest::SHA256, &content_bytes);
-                    let peer_pk =
-                        UnparsedPublicKey::new(&signature::ED25519, &pub_key);
+                    let content_bytes = serde_json::to_vec(&signed.content).unwrap();
+                    let content_hash = digest::digest(&digest::SHA256, &content_bytes);
+                    let peer_pk = UnparsedPublicKey::new(&signature::ED25519, &pub_key);
                     peer_pk
                         .verify(content_hash.as_ref(), &signed.signature)
                         .expect("SignedInput.signature must verify against KeyBinding public key");
@@ -2408,5 +2528,141 @@ specs:
             .unwrap();
         // Should reject with 400 — signature verification failed.
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Constraint validation (§7.6 dry-run) ─────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_constraints_valid_cel() {
+        let app = app();
+        let body = serde_json::json!({
+            "constraints": [
+                { "name": "persona check", "expression": "agent.persona == \"security\"" },
+                { "name": "file count", "expression": "output.changed_files.size() < 50" }
+            ]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/constraints/validate")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["valid"], true);
+        assert_eq!(body["results"].as_array().unwrap().len(), 2);
+        assert_eq!(body["results"][0]["valid"], true);
+        assert_eq!(body["results"][1]["valid"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_constraints_invalid_cel() {
+        let app = app();
+        let body = serde_json::json!({
+            "constraints": [
+                { "name": "bad expr", "expression": "this is not valid CEL !!!" }
+            ]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/constraints/validate")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["valid"], false);
+        assert_eq!(body["results"][0]["valid"], false);
+        assert!(body["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("CEL parse error"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_constraints_with_scope() {
+        let app = app();
+        let body = serde_json::json!({
+            "constraints": [],
+            "scope": {
+                "allowed_paths": ["src/payments/**"],
+                "forbidden_paths": ["src/auth/**"]
+            }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/constraints/validate")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["valid"], true);
+        // Should have 2 scope constraint results (allowed + forbidden).
+        assert_eq!(body["results"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn validate_constraints_empty_expression_rejected() {
+        let app = app();
+        let body = serde_json::json!({
+            "constraints": [
+                { "name": "empty", "expression": "  " }
+            ]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/constraints/validate")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["valid"], false);
+        assert_eq!(body["results"][0]["error"], "expression is empty");
     }
 }

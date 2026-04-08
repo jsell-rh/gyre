@@ -4,8 +4,9 @@
    *
    * Shows strategy-implied constraints (read-only) derived from workspace config,
    * allows explicit constraint entry (CEL expression), scope definition (glob patterns),
-   * and a dry-run button to preview constraint evaluation.
+   * and a dry-run button to evaluate constraints server-side via the CEL parser.
    */
+  import { api } from './api.js';
 
   let {
     specPath = '',
@@ -66,28 +67,29 @@
     dryRunning = true;
     dryRunResult = null;
     try {
-      // Simulate constraint evaluation — shows what would pass/fail.
       const output_constraints = constraints
         .filter(c => c.name.trim() && c.expression.trim())
         .map(c => ({ name: c.name.trim(), expression: c.expression.trim() }));
       const scope = buildScope();
-      // For now, dry-run simply validates expressions are parseable.
-      const issues = [];
-      for (const c of output_constraints) {
-        if (!c.expression.includes('.') && !c.expression.includes('==') && !c.expression.includes('>=')) {
-          issues.push(`"${c.name}": expression may not be valid CEL`);
-        }
+
+      // Validate constraints server-side using the real CEL parser (§7.6).
+      const body = { constraints: output_constraints };
+      if (scope) {
+        body.scope = scope;
       }
-      if (scope?.allowed_paths?.length) {
-        for (const p of scope.allowed_paths) {
-          if (!p.includes('*') && !p.includes('/')) {
-            issues.push(`Allowed path "${p}" has no glob pattern`);
-          }
+
+      const result = await api.validateConstraints(body);
+      const issues = [];
+      for (const r of result.results) {
+        if (!r.valid) {
+          issues.push(`"${r.name}": ${r.error || 'invalid'}`);
         }
       }
       dryRunResult = issues.length
         ? { valid: false, issues }
         : { valid: true, issues: [] };
+    } catch (e) {
+      dryRunResult = { valid: false, issues: [`Validation request failed: ${e.message}`] };
     } finally {
       dryRunning = false;
     }

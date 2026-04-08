@@ -530,6 +530,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 &updated_mr.workspace_id,
                 &updated_mr.source_branch,
                 &updated_mr.target_branch,
+                &repo.default_branch,
             )
             .await;
 
