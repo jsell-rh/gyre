@@ -2,9 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §3.2, §8 Phase 2  
 **Depends on:** TASK-006  
-**Progress:** `ready-for-review`  
+**Progress:** `needs-revision`  
 **Review:** [`specs/reviews/task-007.md`](../reviews/task-007.md)  
-**Note:** R4 found 1 finding: F8 (`build_agent_context` always sets `meta_spec_set_sha: ""` and `attestation_level: 0`, causing unconditional false violations for every constraint evaluation — spurious events, notifications, and blocked downstream evaluation via §3.4 fail-closed short-circuit).
+**Note:** R5 found 2 findings: F9 (integration tests for push-time and merge-time evaluation use `/nonexistent/path`, causing early exit before constraint evaluation — "no panic" assertion is tautological), F10 (dry-run only validates CEL syntax via `Program::compile`, does not evaluate against repo state as spec §7.6 requires).
 
 ## Spec Excerpt
 
