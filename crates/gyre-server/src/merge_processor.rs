@@ -517,6 +517,22 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 .await;
             info!(mr_id = %updated_mr.id, sha = %merge_commit_sha, "attestation bundle created and stored");
 
+            // TASK-007 (Phase 2): Merge-time constraint evaluation (audit-only).
+            // Collect all constraints (explicit + strategy-implied + gate),
+            // evaluate against the merged diff, log results, emit violations.
+            // Does NOT block the merge.
+            crate::constraint_check::evaluate_merge_constraints(
+                state,
+                &updated_mr.id.to_string(),
+                &repo.id.to_string(),
+                &repo.path,
+                &merge_commit_sha,
+                &updated_mr.workspace_id,
+                &updated_mr.source_branch,
+                &updated_mr.target_branch,
+            )
+            .await;
+
             // Notify the MR author that their MR was merged (HSI §2).
             if let Some(ref author_id) = updated_mr.author_agent_id {
                 crate::notifications::notify_mr_merged(

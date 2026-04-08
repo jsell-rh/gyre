@@ -42,6 +42,8 @@ pub enum NotificationType {
     SuggestedSpecLink,
     /// Priority 2 — a spec was rejected while agents were implementing it.
     SpecRejected,
+    /// Priority 3 — a constraint violation was detected at push or merge time (§7.5).
+    ConstraintViolation,
 }
 
 impl NotificationType {
@@ -62,6 +64,7 @@ impl NotificationType {
             Self::AgentEscalation => "AgentEscalation",
             Self::SuggestedSpecLink => "SuggestedSpecLink",
             Self::SpecRejected => "SpecRejected",
+            Self::ConstraintViolation => "ConstraintViolation",
         }
     }
 
@@ -82,6 +85,7 @@ impl NotificationType {
             "AgentEscalation" => Some(Self::AgentEscalation),
             "SuggestedSpecLink" => Some(Self::SuggestedSpecLink),
             "SpecRejected" => Some(Self::SpecRejected),
+            "ConstraintViolation" => Some(Self::ConstraintViolation),
             _ => None,
         }
     }
@@ -103,6 +107,7 @@ impl NotificationType {
             Self::AgentEscalation => 5,
             Self::SuggestedSpecLink => 10,
             Self::SpecRejected => 2,
+            Self::ConstraintViolation => 3,
         }
     }
 }
@@ -205,6 +210,7 @@ mod tests {
             NotificationType::AgentEscalation,
             NotificationType::SuggestedSpecLink,
             NotificationType::SpecRejected,
+            NotificationType::ConstraintViolation,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));

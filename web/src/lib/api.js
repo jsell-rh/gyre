@@ -365,10 +365,14 @@ export const api = {
   // Spec registry (M21.1)
   getSpecs: () => request('/specs'),
   getSpec: (path) => request(`/specs/${encodeURIComponent(path)}`),
-  approveSpec: (path, sha) =>
+  approveSpec: (path, sha, { output_constraints, scope } = {}) =>
     request(`/specs/${encodeURIComponent(path)}/approve`, {
       method: 'POST',
-      body: JSON.stringify({ sha }),
+      body: JSON.stringify({
+        sha,
+        ...(output_constraints?.length ? { output_constraints } : {}),
+        ...(scope ? { scope } : {}),
+      }),
     }),
   revokeSpec: (path, reason) =>
     request(`/specs/${encodeURIComponent(path)}/revoke`, {

@@ -8,6 +8,7 @@
   import EmptyState from './EmptyState.svelte';
   import EditorSplit from './EditorSplit.svelte';
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
+  import ConstraintEditor from './ConstraintEditor.svelte';
   import { api } from './api.js';
   import { entityName as sharedEntityName, shortId as sharedShortId, formatSha, formatId as sharedFormatId } from './entityNames.svelte.js';
   import { relativeTime, absoluteTime, formatDuration, formatDate } from './timeFormat.js';
@@ -947,6 +948,7 @@
   let approving = $state(false);
   let revoking = $state(false);
   let rejecting = $state(false);
+  let showConstraintEditor = $state(false);
 
   async function approveCurrentSpec() {
     if (!entity || approving) return;
@@ -958,6 +960,24 @@
       await api.approveSpec(path, sha);
       toastSuccess($t('detail_panel.spec_approved'));
       // Update local state to reflect approval
+      if (entity.data) entity = { ...entity, data: { ...entity.data, approval_status: 'approved' } };
+    } catch (e) {
+      toastError($t('detail_panel.approval_failed', { values: { error: e.message } }));
+    } finally {
+      approving = false;
+    }
+  }
+
+  async function approveWithConstraints({ output_constraints, scope }) {
+    if (!entity || approving) return;
+    const sha = entity.data?.current_sha;
+    const path = entity.id;
+    if (!sha || !path) { toastError($t('detail_panel.approve_missing_sha')); return; }
+    approving = true;
+    try {
+      await api.approveSpec(path, sha, { output_constraints, scope });
+      toastSuccess($t('detail_panel.spec_approved'));
+      showConstraintEditor = false;
       if (entity.data) entity = { ...entity, data: { ...entity.data, approval_status: 'approved' } };
     } catch (e) {
       toastError($t('detail_panel.approval_failed', { values: { error: e.message } }));
@@ -3223,11 +3243,23 @@
                 <button class="approval-btn approve" onclick={approveCurrentSpec} disabled={approving}>
                   {approving ? $t('detail_panel.approving') : $t('detail_panel.approve')}
                 </button>
+                <button class="approval-btn secondary" onclick={() => showConstraintEditor = !showConstraintEditor}>
+                  {showConstraintEditor ? 'Hide Constraints' : 'Approve with Constraints'}
+                </button>
                 <button class="approval-btn revoke" onclick={rejectCurrentSpec} disabled={rejecting}>
                   {rejecting ? 'Rejecting...' : 'Reject'}
                 </button>
               {/if}
             </div>
+            {#if showConstraintEditor && sd.approval_status !== 'approved'}
+              <ConstraintEditor
+                specPath={entity.id}
+                specSha={sd.current_sha}
+                onApprove={approveWithConstraints}
+                onCancel={() => showConstraintEditor = false}
+                {approving}
+              />
+            {/if}
             {#if sd.linked_tasks?.length > 0}
               <span class="progress-section-label">Linked Tasks</span>
               <ul class="task-list">

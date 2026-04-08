@@ -443,10 +443,14 @@ pub async fn git_receive_pack(
             )
             .await;
 
-        // TASK-006: Audit-only attestation chain verification (Phase 1).
-        // Run verification on pushed commits if an attestation chain exists,
-        // but only log the results — never reject.
+        // TASK-006 (Phase 1) + TASK-007 (Phase 2): Audit-only attestation chain
+        // verification AND strategy-implied constraint evaluation.
+        // Phase 1 verifies the chain structure; Phase 2 derives and evaluates
+        // strategy-implied constraints against the actual diff.
+        // Both are audit-only — results are logged and violations emitted, but
+        // pushes are NEVER rejected.
         if let Some(ref tid) = task_id_clone {
+            // Phase 1: chain structure verification.
             match state_clone.chain_attestations.find_by_task(tid).await {
                 Ok(attestations) if !attestations.is_empty() => {
                     for att in &attestations {
@@ -486,6 +490,22 @@ pub async fn git_receive_pack(
                     );
                 }
             }
+
+            // Phase 2: strategy-implied constraint evaluation (TASK-007).
+            let constraint_ref_updates: Vec<(String, String, String)> = ref_updates
+                .iter()
+                .map(|u| (u.old_sha.clone(), u.new_sha.clone(), u.refname.clone()))
+                .collect();
+            crate::constraint_check::evaluate_push_constraints(
+                &state_clone,
+                tid,
+                &repo_id_clone,
+                &repo_path_clone,
+                &agent_id,
+                &push_workspace_id,
+                &constraint_ref_updates,
+            )
+            .await;
         }
 
         // Spec lifecycle: auto-create tasks for spec changes on the default branch.
