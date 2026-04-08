@@ -2,7 +2,8 @@
 
 **Spec reference:** `ui-layout.md` §3 (LLM-Assisted Spec Editing, Save workflow), `human-system-interface.md` §3 (Explorer: Inline Spec Editing)
 **Depends on:** None (consumes existing git_ops port and notification system)
-**Progress:** `ready-for-review`
+**Progress:** `needs-revision`
+**Review:** [`specs/reviews/task-011.md`](../reviews/task-011.md)
 
 ## Spec Excerpt
 
