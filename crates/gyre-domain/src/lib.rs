@@ -18,6 +18,7 @@ pub mod audit;
 pub mod budget;
 pub mod compose;
 pub mod compute_target;
+pub mod constraint_evaluator;
 pub mod container_audit;
 pub mod dependency;
 pub mod extractor;
@@ -63,6 +64,11 @@ pub use audit::{AuditEvent, AuditEventType};
 pub use budget::{BudgetCallRecord, BudgetConfig, BudgetUsage};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};
 pub use compute_target::{ComputeTargetEntity, ComputeTargetType};
+pub use constraint_evaluator::{
+    build_cel_context, collect_all_constraints, derive_strategy_constraints, evaluate_all,
+    evaluate_constraint, Action, AgentContext, ConstraintInput, DiffStatsContext, OutputContext,
+    TargetContext,
+};
 pub use container_audit::ContainerAuditRecord;
 pub use dependency::{DependencyEdge, DependencyStatus, DependencyType, DetectionMethod};
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};

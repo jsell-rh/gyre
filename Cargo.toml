@@ -106,6 +106,9 @@ dashmap = "6"
 zstd = "0.13"
 # Hex encoding for SHA digests
 hex = "0.4"
+# CEL expression evaluation (authorization provenance constraints)
+cel-interpreter = "0.10"
+cel-parser = "0.10"
 
 # Internal crates
 gyre-common = { path = "crates/gyre-common" }
