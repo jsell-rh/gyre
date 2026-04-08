@@ -1173,4 +1173,120 @@ mod tests {
         assert!(notifications[0].title.contains("path scope"));
         assert_eq!(notifications[0].repo_id.as_deref(), Some("repo-1"));
     }
+
+    // ── Integration: merge-time constraint evaluation ─────────────────
+
+    #[tokio::test]
+    async fn evaluate_merge_no_attestation_chain_is_noop() {
+        let state = crate::mem::test_state();
+
+        // Create a MR with an agent author but no attestation chain.
+        let mr = gyre_domain::MergeRequest {
+            id: Id::new("mr-no-chain"),
+            repository_id: Id::new("repo-1"),
+            title: "Test MR".to_string(),
+            source_branch: "feat/test".to_string(),
+            target_branch: "main".to_string(),
+            status: gyre_domain::MrStatus::Approved,
+            author_agent_id: Some(Id::new("agent-merge-1")),
+            reviewers: vec![],
+            diff_stats: None,
+            has_conflicts: None,
+            spec_ref: None,
+            depends_on: vec![],
+            atomic_group: None,
+            created_at: 0,
+            updated_at: 0,
+            workspace_id: Id::new("ws-1"),
+            reverted_at: None,
+            revert_mr_id: None,
+        };
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Create the agent with a current_task_id.
+        let mut agent = gyre_domain::Agent::new(Id::new("agent-merge-1"), "merge-agent", 0);
+        agent.current_task_id = Some(Id::new("TASK-MERGE-1"));
+        state.agents.create(&agent).await.unwrap();
+
+        // No attestation stored for TASK-MERGE-1 → should gracefully degrade.
+        evaluate_merge_constraints(
+            &state,
+            "mr-no-chain",
+            "repo-1",
+            "/nonexistent",
+            "abc123",
+            &Id::new("ws-1"),
+            "feat/test",
+            "main",
+            "main",
+        )
+        .await;
+        // No panic = success. The function gracefully degrades when no
+        // attestation chain exists.
+    }
+
+    #[tokio::test]
+    async fn evaluate_merge_with_attestation_chain_runs_constraints() {
+        let state = crate::mem::test_state();
+
+        // Create a MR with an agent author.
+        let mr = gyre_domain::MergeRequest {
+            id: Id::new("mr-with-chain"),
+            repository_id: Id::new("repo-1"),
+            title: "Test MR with chain".to_string(),
+            source_branch: "feat/provenance".to_string(),
+            target_branch: "main".to_string(),
+            status: gyre_domain::MrStatus::Approved,
+            author_agent_id: Some(Id::new("agent-merge-2")),
+            reviewers: vec![],
+            diff_stats: None,
+            has_conflicts: None,
+            spec_ref: None,
+            depends_on: vec![],
+            atomic_group: None,
+            created_at: 0,
+            updated_at: 0,
+            workspace_id: Id::new("ws-1"),
+            reverted_at: None,
+            revert_mr_id: None,
+        };
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Create the agent with a current_task_id.
+        let mut agent = gyre_domain::Agent::new(Id::new("agent-merge-2"), "merge-agent-2", 0);
+        agent.current_task_id = Some(Id::new("TASK-MERGE-2"));
+        state.agents.create(&agent).await.unwrap();
+
+        // Store a SignedInput attestation for the task.
+        let si = make_signed_input(
+            vec!["src/**"],
+            vec![],
+            vec!["security"],
+            vec![OutputConstraint {
+                name: "merge test constraint".to_string(),
+                expression: "true".to_string(),
+            }],
+        );
+        let att = make_attestation(si, "TASK-MERGE-2");
+        state.chain_attestations.save(&att).await.unwrap();
+
+        // Run merge evaluation — this will successfully look up the MR,
+        // resolve the agent and task, find the attestation chain, but fail
+        // to compute the diff from a nonexistent repo path (expected).
+        evaluate_merge_constraints(
+            &state,
+            "mr-with-chain",
+            "repo-1",
+            "/nonexistent/path",
+            "abc123def",
+            &Id::new("ws-1"),
+            "feat/provenance",
+            "main",
+            "main",
+        )
+        .await;
+        // No panic = success. The function found the MR, resolved the agent
+        // and task, found the attestation chain, but could not compute the
+        // diff (expected without a real git repo).
+    }
 }

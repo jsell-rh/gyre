@@ -232,10 +232,7 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["public_key"], pubkey_b64);
         assert!(json["user_identity"].as_str().unwrap().starts_with("user:"));
-        assert!(!json["platform_countersign"]
-            .as_str()
-            .unwrap()
-            .is_empty());
+        assert!(!json["platform_countersign"].as_str().unwrap().is_empty());
         assert!(json["issued_at"].as_u64().is_some());
         assert!(json["expires_at"].as_u64().is_some());
     }

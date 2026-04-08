@@ -349,6 +349,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/constraints/validate",
             post(specs::validate_constraints),
         )
+        // Strategy-implied constraints preview (authorization-provenance.md §7.6)
+        .route(
+            "/api/v1/constraints/strategy",
+            get(specs::get_strategy_constraints),
+        )
         // Spec editing backend (S3.3 — HSI §11 CLI/MCP parity)
         .route(
             "/api/v1/repos/:id/specs/assist",

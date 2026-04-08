@@ -11,6 +11,8 @@
   let {
     specPath = '',
     specSha = '',
+    workspaceId = '',
+    repoId = '',
     onApprove = () => {},
     onCancel = () => {},
     approving = false,
@@ -25,17 +27,25 @@
   let dryRunResult = $state(null);
   let dryRunning = $state(false);
 
-  // Strategy-implied constraints (read-only, shown for context).
-  const strategyConstraints = $derived.by(() => {
-    const implied = [];
-    implied.push({ name: 'meta-spec set match', expression: 'agent.meta_spec_set_sha == input.meta_spec_set_sha' });
-    if (allowedPaths.trim()) {
-      implied.push({ name: 'allowed paths', expression: `output.changed_files scope to: ${allowedPaths}` });
-    }
-    if (forbiddenPaths.trim()) {
-      implied.push({ name: 'forbidden paths', expression: `output.changed_files excluded from: ${forbiddenPaths}` });
-    }
-    return implied;
+  // Strategy-implied constraints fetched from the server (read-only, shown for context).
+  let strategyConstraints = $state([]);
+  let strategyLoading = $state(false);
+
+  // Fetch strategy-implied constraints from the server on mount (§7.6).
+  $effect(() => {
+    strategyLoading = true;
+    const params = new URLSearchParams();
+    if (workspaceId) params.set('workspace_id', workspaceId);
+    api.getStrategyConstraints(params.toString())
+      .then(data => {
+        strategyConstraints = data.constraints || [];
+      })
+      .catch(() => {
+        strategyConstraints = [];
+      })
+      .finally(() => {
+        strategyLoading = false;
+      });
   });
 
   function addConstraint() {
@@ -105,13 +115,19 @@
   <!-- Strategy-Implied Constraints (read-only) -->
   <div class="constraint-section">
     <h5>Strategy-Implied Constraints</h5>
-    <p class="hint">These are automatically derived and cannot be edited.</p>
-    {#each strategyConstraints as sc}
-      <div class="constraint-row readonly">
-        <span class="constraint-name">{sc.name}</span>
-        <code class="constraint-expr">{sc.expression}</code>
-      </div>
-    {/each}
+    <p class="hint">These are automatically derived from workspace config, trust level, and attestation policy. They cannot be edited.</p>
+    {#if strategyLoading}
+      <p class="hint">Loading strategy constraints...</p>
+    {:else if strategyConstraints.length === 0}
+      <p class="hint">No strategy-implied constraints for this context.</p>
+    {:else}
+      {#each strategyConstraints as sc}
+        <div class="constraint-row readonly">
+          <span class="constraint-name">{sc.name}</span>
+          <code class="constraint-expr">{sc.expression}</code>
+        </div>
+      {/each}
+    {/if}
   </div>
 
   <!-- Explicit Constraints -->

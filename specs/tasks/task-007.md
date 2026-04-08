@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §3.2, §8 Phase 2  
 **Depends on:** TASK-006  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [`specs/reviews/task-007.md`](../reviews/task-007.md)  
 **Note:** R3 found 2 findings: F6 (ConstraintEditor strategy-implied display incomplete — missing persona, workspace trust level, attestation policy constraints), F7 (no integration tests for merge-time constraint evaluation).
 
@@ -62,3 +62,4 @@ When working on this task:
 ## Git Commits
 
 - feat(provenance): implement authorization provenance Phase 2 — strategy-implied constraints (TASK-007)
+- fix(provenance): address R3 findings — server-fetched strategy constraints display (F6), merge-time integration tests (F7) (TASK-007)

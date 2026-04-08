@@ -3255,6 +3255,8 @@
               <ConstraintEditor
                 specPath={entity.id}
                 specSha={sd.current_sha}
+                workspaceId={sd.workspace_id ?? ''}
+                repoId={sd.repo_id ?? ''}
                 onApprove={approveWithConstraints}
                 onCancel={() => showConstraintEditor = false}
                 {approving}

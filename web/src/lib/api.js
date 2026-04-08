@@ -391,6 +391,9 @@ export const api = {
   // Constraint validation dry-run (authorization-provenance.md §7.6)
   validateConstraints: (data) =>
     request('/constraints/validate', { method: 'POST', body: JSON.stringify(data) }),
+  // Strategy-implied constraints preview (authorization-provenance.md §7.6)
+  getStrategyConstraints: (queryString) =>
+    request(`/constraints/strategy${queryString ? '?' + queryString : ''}`),
   // Search (M22.7)
   search: ({ q, entity_type, workspace_id, limit = 20 } = {}) => {
     const params = new URLSearchParams({ q: q || '' });

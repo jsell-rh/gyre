@@ -9,6 +9,8 @@
 //! POST /api/v1/specs/:path/approve — approve a spec version
 //! POST /api/v1/specs/:path/revoke  — revoke an approval
 //! GET  /api/v1/specs/:path/history — approval history
+//! POST /api/v1/constraints/validate — validate constraint expressions (dry-run)
+//! GET  /api/v1/constraints/strategy — preview strategy-implied constraints
 
 use axum::{
     extract::{Path, Query, State},
@@ -1291,6 +1293,95 @@ pub async fn validate_constraints(
         valid: all_valid,
         results,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Strategy-implied constraints preview (authorization-provenance.md §7.6)
+// ---------------------------------------------------------------------------
+
+/// Query parameters for the strategy-implied constraints preview endpoint.
+#[derive(Deserialize)]
+pub struct StrategyConstraintsQuery {
+    /// Workspace ID to derive trust-level constraints from.
+    pub workspace_id: Option<String>,
+}
+
+/// A single strategy-implied constraint in the preview response.
+#[derive(Serialize)]
+pub struct StrategyConstraintEntry {
+    pub name: String,
+    pub expression: String,
+}
+
+/// Response for the strategy-implied constraints preview endpoint.
+#[derive(Serialize)]
+pub struct StrategyConstraintsResponse {
+    pub constraints: Vec<StrategyConstraintEntry>,
+}
+
+/// GET /api/v1/constraints/strategy — preview strategy-implied constraints (§7.6).
+///
+/// Returns the full set of strategy-implied constraints that would apply for a
+/// given workspace context. This includes: persona constraints, meta-spec set
+/// match, scope constraints, workspace trust level constraints, and attestation
+/// level policy constraints.
+///
+/// Used by the ConstraintEditor UI to display read-only strategy-implied
+/// constraints before approval.
+pub async fn get_strategy_constraints(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<StrategyConstraintsQuery>,
+) -> Result<Json<StrategyConstraintsResponse>, ApiError> {
+    use gyre_domain::constraint_evaluator;
+
+    // Determine workspace trust level.
+    let trust_level = if let Some(ref ws_id) = query.workspace_id {
+        let workspace = state
+            .workspaces
+            .find_by_id(&gyre_common::Id::new(ws_id))
+            .await
+            .ok()
+            .flatten();
+        workspace.map(|ws| format!("{:?}", ws.trust_level).to_lowercase())
+    } else {
+        None
+    };
+
+    // Build a representative InputContent for constraint derivation.
+    // At preview time, we use placeholder values — the actual values will be
+    // populated at approval time. The derived constraints are structural
+    // (e.g., "agent.persona must match one of X") and show the constraint
+    // categories that apply, not final evaluated values.
+    let preview_content = gyre_common::InputContent {
+        spec_path: String::new(),
+        spec_sha: String::new(),
+        workspace_id: query.workspace_id.clone().unwrap_or_default(),
+        repo_id: String::new(),
+        persona_constraints: vec![gyre_common::PersonaRef {
+            name: "<assigned-persona>".to_string(),
+        }],
+        meta_spec_set_sha: "<workspace-meta-spec-sha>".to_string(),
+        scope: gyre_common::ScopeConstraint {
+            allowed_paths: vec![],
+            forbidden_paths: vec![],
+        },
+    };
+
+    let strategy = constraint_evaluator::derive_strategy_constraints(
+        &preview_content,
+        trust_level.as_deref(),
+        None,
+    );
+
+    let constraints = strategy
+        .into_iter()
+        .map(|c| StrategyConstraintEntry {
+            name: c.name,
+            expression: c.expression,
+        })
+        .collect();
+
+    Ok(Json(StrategyConstraintsResponse { constraints }))
 }
 
 // ---------------------------------------------------------------------------
@@ -2664,5 +2755,99 @@ specs:
         .unwrap();
         assert_eq!(body["valid"], false);
         assert_eq!(body["results"][0]["error"], "expression is empty");
+    }
+
+    // ── Strategy-implied constraints preview (§7.6) ─────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_strategy_constraints_returns_baseline() {
+        let app = app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/constraints/strategy")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let constraints = body["constraints"].as_array().unwrap();
+        // Should always include persona and meta-spec constraints at minimum.
+        assert!(
+            constraints.len() >= 2,
+            "should have at least persona + meta-spec constraints, got {}",
+            constraints.len()
+        );
+        // Verify persona constraint is present.
+        assert!(
+            constraints
+                .iter()
+                .any(|c| c["name"].as_str().unwrap().contains("persona")),
+            "should include a persona constraint"
+        );
+        // Verify meta-spec constraint is present.
+        assert!(
+            constraints
+                .iter()
+                .any(|c| c["name"].as_str().unwrap().contains("meta-spec")),
+            "should include a meta-spec constraint"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_strategy_constraints_with_supervised_workspace() {
+        let (app, state) = app_with_spec();
+
+        // Create a supervised workspace.
+        let ws = gyre_domain::Workspace {
+            id: gyre_common::Id::new("ws-supervised"),
+            tenant_id: gyre_common::Id::new("default"),
+            name: "Supervised WS".to_string(),
+            slug: "supervised".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Supervised,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/constraints/strategy?workspace_id=ws-supervised")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let constraints = body["constraints"].as_array().unwrap();
+        // Supervised workspace should include attestation level constraint.
+        assert!(
+            constraints
+                .iter()
+                .any(|c| c["name"].as_str().unwrap().contains("supervised")),
+            "supervised workspace should produce an attestation level constraint, got: {:?}",
+            constraints
+        );
     }
 }
