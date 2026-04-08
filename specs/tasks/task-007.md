@@ -2,9 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §3.2, §8 Phase 2  
 **Depends on:** TASK-006  
-**Progress:** `ready-for-review`  
+**Progress:** `needs-revision`  
 **Review:** [`specs/reviews/task-007.md`](../reviews/task-007.md)  
-**Note:** R2 found 2 findings: F4 (merge-time default_branch hardcoded to target_branch — same class as R1 F3), F5 (dry-run is superficial client-side string check, not CEL evaluation against repo state).
+**Note:** R3 found 2 findings: F6 (ConstraintEditor strategy-implied display incomplete — missing persona, workspace trust level, attestation policy constraints), F7 (no integration tests for merge-time constraint evaluation).
 
 ## Spec Excerpt
 
