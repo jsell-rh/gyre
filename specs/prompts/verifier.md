@@ -18,7 +18,7 @@ Flaws include:
 - Migrations without matching `down.sql`
 - Dead code (types/functions defined but never used)
 - Tests that don't test what they claim to test (e.g., testing intermediate state instead of observable behavior)
-- API endpoints not registered in the router or missing auth
+- API endpoints not registered in the router or missing auth (two-tier model: ABAC middleware for `api_router()` routes, per-handler `AuthenticatedAgent` for non-ABAC routes)
 - Domain logic in handlers (should be in `gyre-domain`)
 - Business logic in adapters (should be in `gyre-domain`)
 - Missing error handling at system boundaries
