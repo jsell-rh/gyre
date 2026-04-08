@@ -1,11 +1,13 @@
 # Review: TASK-007 — Authorization Provenance Phase 2: Strategy-Implied Constraints
 
 **Reviewer:** Verifier  
-**Commit:** `af37a23a`  
-**Round:** R1  
+**Commit:** `1ff2f738`  
+**Round:** R2  
 **Date:** 2026-04-08
 
 ## Findings
+
+### R1 (resolved)
 
 - [-] [process-revision-complete] **F1 — `ConstraintViolation` event payload missing spec-required `attestation_id` field**
   `crates/gyre-server/src/constraint_check.rs` lines 720–729: The `emit_constraint_violations` function builds the ConstraintViolation event payload with fields `constraint_name`, `expression`, `action`, `agent_id`, `repo_id`, `task_id`, `timestamp`, `message`. The spec §7.5 defines the `ConstraintViolation` message kind with `attestation_id: string` as a required field — it identifies which specific attestation chain was being verified when the constraint failed. The implementation omits `attestation_id` and substitutes `task_id` (not in the spec schema). Even in audit-only mode, `attestation_id` is needed for forensic tracing: if a task has multiple attestation nodes, `task_id` alone does not identify which node failed. The spec also requires `context_snapshot: object` (the CEL context at evaluation time), which is omitted. **Fix:** Pass the attestation ID through to `emit_constraint_violations` and include it in the payload. Add `context_snapshot` with the serialized CEL context (or a representative subset).
@@ -15,3 +17,11 @@
 
 - [-] [process-revision-complete] **F3 — Push-time constraint evaluation hardcodes `default_branch` to `"main"`**
   `crates/gyre-server/src/constraint_check.rs` line 145: The `evaluate_push_constraints` function sets `default_branch: "main".to_string()` in the `TargetContext`. The repository's actual `default_branch` field is available in the calling context (`git_http.rs` line 400: `let default_branch_clone = default_branch;`) but is not passed to `evaluate_push_constraints`. Any CEL constraint referencing `target.default_branch` (e.g., `target.branch == target.default_branch` to check if the push targets the default branch) will silently return wrong results for repos with a non-"main" default branch (e.g., "master", "develop"). **Fix:** Add a `default_branch: &str` parameter to `evaluate_push_constraints` and pass it from `git_http.rs` where it is already resolved from the repository record.
+
+### R2
+
+- [ ] **F4 — Merge-time constraint evaluation hardcodes `default_branch` to `target_branch` instead of using the repo's actual default branch**
+  `crates/gyre-server/src/constraint_check.rs` line 365: The `evaluate_merge_constraints` function sets `default_branch: target_branch.to_string()` in the `TargetContext`. This is the same class of bug as R1 F3 (which was fixed for the push path) but persists in the merge path. The `target_branch` is the MR's target branch — often the default branch, but not necessarily (MRs can target feature branches, release branches, etc.). The repo's actual `default_branch` is available in the calling context: `merge_processor.rs` line 527 shows the `repo` variable is in scope, and `Repository` has `repo.default_branch` (defined at `gyre-domain/src/repository.rs:37`). A CEL constraint referencing `target.default_branch` would get an incorrect value when the MR targets a non-default branch, and the constraint `target.branch == target.default_branch` would always return `true` (since both are set to `target_branch`), making it meaningless. **Fix:** Add a `default_branch: &str` parameter to `evaluate_merge_constraints`, and pass `&repo.default_branch` from `merge_processor.rs`.
+
+- [ ] **F5 — Dry-run button performs superficial client-side string check, not constraint evaluation against repo state**
+  `web/src/lib/ConstraintEditor.svelte` lines 65–93: The spec §7.6 states: "A dry-run button evaluates the constraint set against the current repo state to preview what would pass/fail." The task acceptance criteria (task-007.md line 49) states: "Dry-run evaluation works from approval dialog." The implementation does neither — it performs client-side string heuristics: checking if expressions contain `.`, `==`, or `>=` (line 77), and if allowed-path globs contain `*` or `/` (line 83). It never calls a server endpoint, never compiles CEL expressions, and never evaluates against the actual repository state. Valid CEL like `output.changed_files.size() < 50` would be flagged as "may not be valid CEL" (it lacks `.` at a position the heuristic checks), while the syntactically invalid expression `foo == bar == baz` would pass. This is a superficial stub, not a functional dry-run. **Fix:** Add a server-side endpoint (or extend an existing one) that accepts constraint expressions and evaluates them server-side against the repo's current state using the CEL evaluator in `gyre-domain::constraint_evaluator`. Call this endpoint from the dry-run handler. At minimum, the constraints must be compiled by the real CEL parser to validate syntax — string heuristics are not equivalent.
