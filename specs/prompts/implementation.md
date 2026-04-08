@@ -127,15 +127,41 @@ Before marking a task `ready-for-review`, verify:
 22. **Response completeness — exhaustive field and section consumption:** When implementing a CLI command or display function that renders data from a server response, verifying field *names* (checklist item 21) is necessary but not sufficient — you must also verify field *coverage*:
     - **Read the spec's description of the data surface.** The spec defines what the user should see — not just the data shape, but the content and structure of the display. If the spec describes a "CROSS-WORKSPACE" section in the briefing narrative (e.g., HSI §9), your display function must include it. If the spec shows items with descriptions, spec references, and timestamps, your display must render them — not just titles.
     - **Enumerate ALL fields in the server's response struct.** Read the struct definition (e.g., `BriefingResponse`, `BriefingItem`). List every field name. For each field, verify your display code either renders it or has a justified reason to omit it (e.g., internal ID not useful to the user). A struct with 6 fields (`title`, `description`, `entity_type`, `entity_id`, `spec_path`, `timestamp`) where your code only accesses `title` is silently dropping 5 fields of user-relevant data. This produces output that compiles, runs, and looks plausible — but shows a fraction of what the server provides.
-    - **Enumerate ALL sections/arrays in composite responses.** If a response struct has N array fields (e.g., `completed`, `in_progress`, `cross_workspace`, `exceptions`, `metrics`), your display function must handle all N — not just the ones you remembered. A function that handles 4 of 5 sections has silently dropped a spec-required data surface. List each section name from the struct definition and check it off against your display code.
+    - **Enumerate ALL sections/arrays in composite responses.** If a response struct has N array fields (e.g., `completed`, `in_progress`, `cross_workspace`, `exceptions`, `metrics`), your display function must handle all N — not just the ones you remembered. A function that handles 4 of 5 sections has silently dropped a spec-required data surface. List each section name from the struct definition and check it off against your display code. Run `scripts/check-response-consumption.sh` — it mechanically detects missing sections and under-consumed item fields.
     - **Concrete sweep:** After writing a display function, grep your code for each field name from the server struct. If a field name does not appear in your display code, either add rendering for it or add a code comment explaining why it is excluded (e.g., `// entity_id: internal UUID, not user-facing`). Uncommented omissions are assumed to be accidental drops.
+23. **Spec-type fidelity — no simplification drift:** When a task creates or modifies domain types that are defined in a spec, verify **field-by-field** that your implementation matches the spec's type definition exactly. This applies to types in `gyre-common`, `gyre-domain`, and `gyre-ports`. Common violations:
+    - **Array element simplification:** If the spec defines a field as `field_name: TypeName[]` where `TypeName` is a structured type (e.g., `PersonaRef` with a `.name` property), you MUST define a `TypeName` struct and use `Vec<TypeName>` — NOT `Vec<String>` or `Vec<PrimitiveType>`. Downstream code (CEL evaluators, constraint engines) will need to access fields on each element (e.g., `persona_constraints[0].name`). A `Vec<String>` serializes as `["security"]`, not `[{"name": "security"}]`, breaking all field access patterns.
+    - **Reference type vs. full embedded type:** If the spec says a struct contains `field: FullType` (e.g., `key_binding: KeyBinding` with 8 fields), embed the full type — not a 2-field reference/summary struct. Read the spec's verification algorithms and offline verification sections: if they call `verify(attestation.field)`, the full data must be present in the attestation, not behind a separate lookup. A reference type that requires a repository round-trip defeats the self-containment property the spec relies on for offline verification.
+    - **Enumeration procedure:** For each type the task creates, open the spec section that defines it. List every field the spec defines (name, type, cardinality). Then open your implementation and verify each field exists with the correct type. If a spec field is missing from your struct, add it. If a spec type is simplified in your struct (e.g., `String` where the spec defines a struct), replace it with the correct type.
+    - **Downstream impact check:** After verifying types, grep for usages of the type in other tasks or spec sections. If downstream code needs field access on a nested type (e.g., `input.persona_constraints[0].name`), your type must support that access path. A simplified type that compiles in isolation but breaks downstream consumers is still a flaw.
 
 ## Workflow
 
 1. Read the relevant system specs. These are your source of truth and overarching vision.
 2. Read `specs/tasks/*`. See what work has been done, and determine the next task to complete. Valid progress is `not-started` | `in-progress` | `ready-for-review` | `complete` | `needs-revision`. You should pick the task with the lowest number that is either `not-started` or `needs-revision`. Prioritize `needs-revision` tasks over `not-started` ALWAYS.
-3. Complete the task. Completion criteria is alignment with the task & relevant portion of the spec. A separate team is working in competition with you trying to find bugs & inconsistencies with your work. Your job is to make them not have anything to find.
+3. **If the task is `needs-revision`**, follow the Needs-Revision Workflow below instead of step 4. Otherwise, complete the task normally. Completion criteria is alignment with the task & relevant portion of the spec. A separate team is working in competition with you trying to find bugs & inconsistencies with your work. Your job is to make them not have anything to find.
 4. Before marking the task `ready-for-review`, run the self-verification checklist above.
 5. Update the task status to `ready-for-review`.
 6. Commit your work, using conventional commits, and author: "Implementation <implementation@redhat.com>"
 7. Call `kill $PPID` — this will transfer control to the verifier.
+
+## Needs-Revision Workflow
+
+When a task has status `needs-revision`, the review file contains specific findings that must be addressed. **Findings that survive multiple review rounds indicate the process is failing — not that the finding is unimportant.** Multi-round survivors are the highest-priority items.
+
+**Step 1 — Enumerate open findings.** Read the review file referenced in the task metadata. Identify every unchecked finding (`- [ ]`). Write down the finding ID (e.g., F17) and a one-line summary of what needs to change. If a finding has a parenthetical like "(still open — third round)", it has survived multiple review cycles and requires special attention.
+
+**Step 2 — For each open finding, implement the fix.**
+- Read the cited file(s) and line(s) in the finding.
+- Understand what the finding says is wrong and what the fix should be.
+- Implement the fix.
+- **Immediately verify** the fix addresses the finding: re-read the finding text, then re-read your changed code, and confirm the specific flaw described is no longer present.
+
+**Step 3 — Cross-verify all findings.** After addressing all findings individually, do a final pass:
+- Re-read the entire review file from top to bottom.
+- For each finding (including ones already marked `[x]` from prior rounds), verify the current code does not re-introduce the flaw.
+- For each open finding you just fixed, verify your fix is complete — not partial.
+
+**Step 4 — Run the full self-verification checklist.** Even though this is a revision, run all checklist items — prior fixes may have introduced new issues (e.g., a stale doc comment after changing a response shape).
+
+**Step 5 — Proceed to step 5 of the main workflow** (update status to `ready-for-review`).
