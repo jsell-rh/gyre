@@ -9,8 +9,9 @@
 //! POST /api/v1/specs/:path/approve — approve a spec version
 //! POST /api/v1/specs/:path/revoke  — revoke an approval
 //! GET  /api/v1/specs/:path/history — approval history
-//! POST /api/v1/constraints/validate — validate constraint expressions (dry-run)
-//! GET  /api/v1/constraints/strategy — preview strategy-implied constraints
+//! POST /api/v1/constraints/validate  — validate constraint expression syntax
+//! POST /api/v1/constraints/dry-run   — evaluate constraints against repo state (§7.6)
+//! GET  /api/v1/constraints/strategy  — preview strategy-implied constraints
 
 use axum::{
     extract::{Path, Query, State},
@@ -1213,11 +1214,13 @@ pub struct ValidateConstraintsResponse {
     pub results: Vec<ConstraintValidationResult>,
 }
 
-/// POST /api/v1/constraints/validate — validate constraint expressions (§7.6 dry-run).
+/// POST /api/v1/constraints/validate — validate constraint expression syntax.
 ///
-/// Compiles each CEL expression using the real CEL parser. Also derives scope
-/// constraints from glob patterns and validates them. Returns per-constraint
-/// results indicating whether each expression is syntactically valid CEL.
+/// Compiles each CEL expression using the real CEL parser to check syntax.
+/// Also derives scope constraints from glob patterns and validates them.
+/// Returns per-constraint results indicating whether each expression is
+/// syntactically valid CEL. For full evaluation against repo state, use
+/// `POST /api/v1/constraints/dry-run` instead.
 pub async fn validate_constraints(
     Json(body): Json<ValidateConstraintsRequest>,
 ) -> Result<Json<ValidateConstraintsResponse>, ApiError> {
@@ -1293,6 +1296,299 @@ pub async fn validate_constraints(
         valid: all_valid,
         results,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Constraint dry-run evaluation (authorization-provenance.md §7.6)
+// ---------------------------------------------------------------------------
+
+/// Request body for dry-run constraint evaluation.
+///
+/// Unlike `validate_constraints` (syntax-only), this evaluates constraints
+/// against actual repo state using the domain's CEL evaluator.
+#[derive(Deserialize)]
+pub struct DryRunConstraintsRequest {
+    /// CEL constraint expressions to evaluate.
+    #[serde(default)]
+    pub constraints: Vec<ConstraintEntry>,
+    /// Scope constraints (glob patterns) to evaluate.
+    #[serde(default)]
+    pub scope: Option<ScopeEntry>,
+    /// Repository to evaluate against.
+    pub repo_id: String,
+    /// Workspace context for strategy-implied constraints.
+    pub workspace_id: String,
+}
+
+/// Per-constraint dry-run result with pass/fail status.
+#[derive(Serialize)]
+pub struct DryRunConstraintResult {
+    pub name: String,
+    pub passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Overall dry-run evaluation response.
+#[derive(Serialize)]
+pub struct DryRunConstraintsResponse {
+    pub valid: bool,
+    pub results: Vec<DryRunConstraintResult>,
+}
+
+/// POST /api/v1/constraints/dry-run — evaluate constraints against repo state (§7.6).
+///
+/// Builds a representative CEL evaluation context from the repo's latest commit
+/// diff and workspace configuration, then evaluates all constraints (explicit +
+/// scope + strategy-implied) using the domain's `evaluate_all`. Returns
+/// per-constraint pass/fail results so the approver can preview what would
+/// happen at push/merge time.
+pub async fn dry_run_constraints(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DryRunConstraintsRequest>,
+) -> Result<Json<DryRunConstraintsResponse>, ApiError> {
+    use gyre_common::attestation::{OutputConstraint, ScopeConstraint};
+    use gyre_domain::constraint_evaluator::{
+        self, Action, AgentContext, ConstraintInput, DiffStatsContext, OutputContext, TargetContext,
+    };
+
+    let ws_id = gyre_common::Id::new(&body.workspace_id);
+    let repo_id_val = gyre_common::Id::new(&body.repo_id);
+
+    // Look up the repository to get its path and default branch.
+    let repo = state
+        .repos
+        .find_by_id(&repo_id_val)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("failed to look up repo: {e}")))?
+        .ok_or_else(|| ApiError::NotFound("repository not found".into()))?;
+
+    // Compute output context from the repo's latest commit diff.
+    let output_ctx = compute_latest_diff(&repo.path).await.unwrap_or_else(|| {
+        // Fallback: empty output context (e.g., empty repo with no commits).
+        OutputContext {
+            changed_files: vec![],
+            added_files: vec![],
+            deleted_files: vec![],
+            diff_stats: DiffStatsContext {
+                insertions: 0,
+                deletions: 0,
+            },
+            commit_message: String::new(),
+            commit_sha: String::new(),
+        }
+    });
+
+    // Build a representative agent context from workspace state.
+    let meta_spec_set_sha = match state.meta_spec_sets.get(&ws_id).await {
+        Ok(Some(json)) => {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(json.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+        _ => String::new(),
+    };
+
+    let agent_ctx = AgentContext {
+        id: "dry-run-preview".to_string(),
+        persona: "preview".to_string(),
+        stack_hash: String::new(), // empty-default:ok — dry-run preview, no real agent
+        attestation_level: 0,      // empty-default:ok — dry-run preview, no real agent
+        meta_spec_set_sha,
+        spawned_by: String::new(),
+        task_id: String::new(),
+        container_id: String::new(), // empty-default:ok — dry-run preview, no real agent
+        image_hash: String::new(),   // empty-default:ok — dry-run preview, no real agent
+    };
+
+    let target_ctx = TargetContext {
+        repo_id: body.repo_id.clone(),
+        workspace_id: body.workspace_id.clone(),
+        branch: repo.default_branch.clone(),
+        default_branch: repo.default_branch.clone(),
+    };
+
+    // Build explicit constraints from the request.
+    let mut all_constraints: Vec<OutputConstraint> = body
+        .constraints
+        .iter()
+        .filter(|c| !c.expression.trim().is_empty())
+        .map(|c| OutputConstraint {
+            name: c.name.clone(),
+            expression: c.expression.clone(),
+        })
+        .collect();
+
+    // Add scope constraints if provided.
+    if let Some(scope) = &body.scope {
+        let scope_constraint = ScopeConstraint {
+            allowed_paths: scope.allowed_paths.clone(),
+            forbidden_paths: scope.forbidden_paths.clone(),
+        };
+        constraint_evaluator::derive_path_constraints_for_validation(
+            &scope_constraint,
+            &mut all_constraints,
+        );
+    }
+
+    // Build CEL context and evaluate.
+    let input_content = gyre_common::InputContent {
+        spec_path: String::new(),
+        spec_sha: String::new(),
+        workspace_id: body.workspace_id.clone(),
+        repo_id: body.repo_id.clone(),
+        persona_constraints: vec![],
+        meta_spec_set_sha: agent_ctx.meta_spec_set_sha.clone(),
+        scope: body
+            .scope
+            .as_ref()
+            .map(|s| ScopeConstraint {
+                allowed_paths: s.allowed_paths.clone(),
+                forbidden_paths: s.forbidden_paths.clone(),
+            })
+            .unwrap_or_default(),
+    };
+
+    let ci = ConstraintInput {
+        input: &input_content,
+        output: &output_ctx,
+        agent: &agent_ctx,
+        target: &target_ctx,
+        action: Action::Push,
+    };
+
+    let ctx = constraint_evaluator::build_cel_context(&ci)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("failed to build CEL context: {e}")))?;
+
+    let eval_result = constraint_evaluator::evaluate_all(&all_constraints, &ctx);
+
+    // Map results to per-constraint pass/fail.
+    let mut results = Vec::new();
+    for child in &eval_result.children {
+        results.push(DryRunConstraintResult {
+            name: child.label.clone(),
+            passed: child.valid,
+            error: if child.valid {
+                None
+            } else {
+                Some(child.message.clone())
+            },
+        });
+    }
+
+    // If evaluation stopped early (fail-closed), mark remaining constraints
+    // as not-evaluated.
+    if results.len() < all_constraints.len() {
+        for constraint in all_constraints.iter().skip(results.len()) {
+            results.push(DryRunConstraintResult {
+                name: constraint.name.clone(),
+                passed: false,
+                error: Some("not evaluated (prior constraint failed)".to_string()),
+            });
+        }
+    }
+
+    Ok(Json(DryRunConstraintsResponse {
+        valid: eval_result.valid,
+        results,
+    }))
+}
+
+/// Compute the diff from the latest commit in a repo (HEAD^..HEAD).
+async fn compute_latest_diff(
+    repo_path: &str,
+) -> Option<gyre_domain::constraint_evaluator::OutputContext> {
+    use gyre_domain::constraint_evaluator::{DiffStatsContext, OutputContext};
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+
+    // Get HEAD SHA.
+    let head_out = tokio::process::Command::new(&git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .await
+        .ok()?;
+
+    if !head_out.status.success() {
+        return None;
+    }
+    let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+    // Diff HEAD^..HEAD (latest commit's changes).
+    let diff_out = tokio::process::Command::new(&git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .args(["diff", "--name-status", &format!("{head_sha}^..{head_sha}")])
+        .output()
+        .await
+        .ok()?;
+
+    let mut changed = Vec::new();
+    let mut added = Vec::new();
+    let mut deleted = Vec::new();
+
+    if diff_out.status.success() {
+        let text = String::from_utf8_lossy(&diff_out.stdout);
+        for line in text.lines() {
+            let parts: Vec<&str> = line.splitn(2, '\t').collect();
+            if parts.len() == 2 {
+                let status = parts[0].chars().next().unwrap_or(' ');
+                let file = parts[1].to_string();
+                match status {
+                    'A' => added.push(file.clone()),
+                    'D' => deleted.push(file.clone()),
+                    _ => {}
+                }
+                changed.push(file);
+            }
+        }
+    }
+
+    // Diff stats.
+    let stat_out = tokio::process::Command::new(&git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .args(["diff", "--shortstat", &format!("{head_sha}^..{head_sha}")])
+        .output()
+        .await
+        .ok()?;
+
+    let (insertions, deletions) = if stat_out.status.success() {
+        let stat_text = String::from_utf8_lossy(&stat_out.stdout);
+        crate::constraint_check::parse_shortstat(&stat_text)
+    } else {
+        (0, 0)
+    };
+
+    // Commit message.
+    let msg_out = tokio::process::Command::new(&git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .args(["log", "-1", "--format=%s", &head_sha])
+        .output()
+        .await
+        .ok()?;
+
+    let commit_message = if msg_out.status.success() {
+        String::from_utf8_lossy(&msg_out.stdout).trim().to_string()
+    } else {
+        String::new()
+    };
+
+    Some(OutputContext {
+        changed_files: changed,
+        added_files: added,
+        deleted_files: deleted,
+        diff_stats: DiffStatsContext {
+            insertions,
+            deletions,
+        },
+        commit_message,
+        commit_sha: head_sha,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2849,5 +3145,221 @@ specs:
             "supervised workspace should produce an attestation level constraint, got: {:?}",
             constraints
         );
+    }
+
+    // ── Constraint dry-run evaluation (§7.6) ─────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dry_run_constraints_evaluates_passing_expression() {
+        let state = test_state();
+
+        // Create a real git repo with a commit for diff computation.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@gyre.dev"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::fs::write(repo_path.join("README.md"), "# test\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Create workspace and repo in state.
+        let ws = gyre_domain::Workspace {
+            id: gyre_common::Id::new("ws-dry"),
+            tenant_id: gyre_common::Id::new("default"),
+            name: "DryRun WS".to_string(),
+            slug: "dry-ws".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-dry"),
+            gyre_common::Id::new("ws-dry"),
+            "dry-repo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+
+        // Constraint: "true" always passes.
+        let body = serde_json::json!({
+            "constraints": [
+                { "name": "always pass", "expression": "true" }
+            ],
+            "repo_id": "repo-dry",
+            "workspace_id": "ws-dry"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/constraints/dry-run")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["valid"], true);
+        assert_eq!(body["results"][0]["name"], "always pass");
+        assert_eq!(body["results"][0]["passed"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dry_run_constraints_evaluates_failing_expression() {
+        let state = test_state();
+
+        // Create a real git repo.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@gyre.dev"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::fs::write(repo_path.join("README.md"), "# test\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        // Create workspace and repo.
+        let ws = gyre_domain::Workspace {
+            id: gyre_common::Id::new("ws-dry2"),
+            tenant_id: gyre_common::Id::new("default"),
+            name: "DryRun WS 2".to_string(),
+            slug: "dry-ws-2".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-dry2"),
+            gyre_common::Id::new("ws-dry2"),
+            "dry-repo-2",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+
+        // Constraint: agent.attestation_level >= 99 — always fails for dry-run preview.
+        let body = serde_json::json!({
+            "constraints": [
+                { "name": "impossible level", "expression": "agent.attestation_level >= 99" }
+            ],
+            "repo_id": "repo-dry2",
+            "workspace_id": "ws-dry2"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/constraints/dry-run")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["valid"], false);
+        assert_eq!(body["results"][0]["name"], "impossible level");
+        assert_eq!(body["results"][0]["passed"], false);
+        assert!(body["results"][0]["error"].as_str().is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dry_run_constraints_repo_not_found_returns_404() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state);
+
+        let body = serde_json::json!({
+            "constraints": [{ "name": "test", "expression": "true" }],
+            "repo_id": "nonexistent",
+            "workspace_id": "ws-1"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/constraints/dry-run")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

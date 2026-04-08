@@ -388,9 +388,12 @@ export const api = {
   getSpecProgress: (path) => request(`/specs/${encodeURIComponent(path)}/progress`),
   getPendingSpecs: () => request('/specs/pending'),
   getDriftedSpecs: () => request('/specs/drifted'),
-  // Constraint validation dry-run (authorization-provenance.md §7.6)
+  // Constraint syntax validation (authorization-provenance.md §7.6)
   validateConstraints: (data) =>
     request('/constraints/validate', { method: 'POST', body: JSON.stringify(data) }),
+  // Constraint dry-run evaluation against repo state (authorization-provenance.md §7.6)
+  dryRunConstraints: (data) =>
+    request('/constraints/dry-run', { method: 'POST', body: JSON.stringify(data) }),
   // Strategy-implied constraints preview (authorization-provenance.md §7.6)
   getStrategyConstraints: (queryString) =>
     request(`/constraints/strategy${queryString ? '?' + queryString : ''}`),

@@ -716,7 +716,7 @@ async fn compute_commit_diff(repo_path: &str, commit_sha: &str) -> Option<Output
 }
 
 /// Parse `git diff --shortstat` output for insertions/deletions.
-fn parse_shortstat(text: &str) -> (u64, u64) {
+pub fn parse_shortstat(text: &str) -> (u64, u64) {
     let mut insertions = 0u64;
     let mut deletions = 0u64;
 
@@ -926,6 +926,7 @@ async fn create_violation_notifications(
 mod tests {
     use super::*;
     use gyre_common::attestation::{InputContent, PersonaRef, ScopeConstraint, SignedInput};
+    use gyre_common::message::MessageKind;
 
     #[test]
     fn parse_shortstat_insertions_and_deletions() {
@@ -1068,58 +1069,222 @@ mod tests {
     #[tokio::test]
     async fn evaluate_push_no_attestation_chain_is_noop() {
         let state = crate::mem::test_state();
-        // No attestation stored → should just log and return.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().to_str().unwrap();
+
+        // Subscribe to broadcast before call.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        // No attestation stored → should return early without emitting events.
         evaluate_push_constraints(
             &state,
             "TASK-99",
             "repo-1",
-            "/nonexistent",
+            repo_path,
             "agent-1",
             &Id::new("ws-1"),
             &[],
             "main",
         )
         .await;
-        // No panic = success. The function gracefully degrades.
+
+        // Verify: no events emitted (graceful degradation, no attestation chain).
+        assert!(
+            rx.try_recv().is_err(),
+            "no events should be emitted when there is no attestation chain"
+        );
+    }
+
+    /// Create a temporary git repository with two commits.
+    ///
+    /// Returns (tempdir, initial_commit_sha, second_commit_sha). The second
+    /// commit adds `src/payments/handler.rs` so tests can exercise scope
+    /// constraints against known file paths.
+    fn init_test_git_repo() -> (tempfile::TempDir, String, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+
+        // git init
+        let status = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "git init failed");
+
+        // Configure user for commits.
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@gyre.dev"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        // Initial commit with a README.
+        std::fs::write(repo.join("README.md"), "# test repo\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let out = std::process::Command::new("git")
+            .args(["commit", "-m", "initial commit"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "initial commit failed");
+        let initial_sha = get_head_sha(repo);
+
+        // Second commit: add src/payments/handler.rs.
+        std::fs::create_dir_all(repo.join("src/payments")).unwrap();
+        std::fs::write(repo.join("src/payments/handler.rs"), "pub fn handle() {}\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "src/payments/handler.rs"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let out = std::process::Command::new("git")
+            .args(["commit", "-m", "add payment handler"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "second commit failed");
+        let second_sha = get_head_sha(repo);
+
+        (tmp, initial_sha, second_sha)
+    }
+
+    fn get_head_sha(repo: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    /// Compute the SHA256 of a meta-spec set JSON string (same algorithm as
+    /// `build_agent_context`).
+    fn meta_spec_sha(json: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(json.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Set up the state with a workspace meta-spec set and agent persona so
+    /// that `build_agent_context` populates these fields correctly during
+    /// constraint evaluation.
+    async fn seed_agent_context(
+        state: &crate::AppState,
+        workspace_id: &str,
+        agent_id: &str,
+    ) -> String {
+        let ws_id = Id::new(workspace_id);
+
+        // Store a meta-spec set for the workspace.
+        let meta_set_json = r#"{"workspace_id":"ws-1","personas":{}}"#;
+        state
+            .meta_spec_sets
+            .upsert(&ws_id, meta_set_json)
+            .await
+            .unwrap();
+        let sha = meta_spec_sha(meta_set_json);
+
+        // Store agent persona in KV (same key as build_agent_context reads).
+        state
+            .kv_store
+            .kv_set("agent_personas", agent_id, "security".to_string())
+            .await
+            .unwrap();
+
+        sha
     }
 
     #[tokio::test]
     async fn evaluate_push_with_attestation_chain_runs_constraints() {
+        let (tmp, initial_sha, second_sha) = init_test_git_repo();
+        let repo_path = tmp.path().to_str().unwrap();
+
         let state = crate::mem::test_state();
 
-        // Store a SignedInput attestation for the task.
+        // Seed workspace meta-spec set and agent persona so build_agent_context
+        // produces valid values matching the InputContent.
+        let meta_sha = seed_agent_context(&state, "ws-1", "agent-1").await;
+
+        // Store a SignedInput attestation with a constraint that FAILS when
+        // the commit changes any file (the test commit adds a file, so
+        // output.changed_files.size() > 0 → the constraint output.changed_files.size() == 0 fails).
         let si = make_signed_input(
             vec!["src/payments/**"],
-            vec!["src/auth/**"],
+            vec![],
             vec!["security"],
             vec![OutputConstraint {
-                name: "test constraint".to_string(),
-                expression: "true".to_string(), // always passes
+                name: "no-changes check".to_string(),
+                expression: "output.changed_files.size() == 0".to_string(),
             }],
         );
+        // Update the InputContent's meta_spec_set_sha to match what the workspace produces.
+        let mut si = si;
+        si.content.meta_spec_set_sha = meta_sha;
+
         let att = make_attestation(si, "TASK-100");
         state.chain_attestations.save(&att).await.unwrap();
 
-        // Run evaluation — this will try to compute the diff from a nonexistent
-        // repo path, so it will log a warning and return. But the attestation
-        // lookup should succeed.
+        // Subscribe to the broadcast channel before evaluation.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        // Run push evaluation with real repo path and real commit SHAs.
         evaluate_push_constraints(
             &state,
             "TASK-100",
             "repo-1",
-            "/nonexistent/path",
+            repo_path,
             "agent-1",
             &Id::new("ws-1"),
-            &[(
-                "0".repeat(40),
-                "a".repeat(40),
-                "refs/heads/main".to_string(),
-            )],
+            &[(initial_sha, second_sha, "refs/heads/main".to_string())],
             "main",
         )
         .await;
-        // No panic = success. The function found the attestation but failed
-        // to compute the diff (expected for this test without a real git repo).
+
+        // Assert: ConstraintViolation events emitted to broadcast channel.
+        // The "no-changes check" should fail because the push adds a file.
+        let msg = rx
+            .try_recv()
+            .expect("should have received ConstraintViolation workspace broadcast");
+        assert_eq!(msg.kind, MessageKind::ConstraintViolation);
+        let payload = msg.payload.as_ref().unwrap();
+        assert_eq!(payload["attestation_id"], "att-test");
+        assert_eq!(payload["action"], "push");
+        assert!(
+            payload["constraint_name"]
+                .as_str()
+                .unwrap()
+                .contains("no-changes check")
+                || payload["constraint_name"]
+                    .as_str()
+                    .unwrap()
+                    .contains("scope")
+                || payload["constraint_name"]
+                    .as_str()
+                    .unwrap()
+                    .contains("persona")
+                || payload["constraint_name"]
+                    .as_str()
+                    .unwrap()
+                    .contains("meta-spec"),
+            "violation event should reference a known constraint name, got: {}",
+            payload["constraint_name"]
+        );
+
+        // Verify the agent-directed message was also sent.
+        let msg2 = rx
+            .try_recv()
+            .expect("should have received agent-directed ConstraintViolation");
+        assert_eq!(msg2.kind, MessageKind::ConstraintViolation);
     }
 
     #[tokio::test]
@@ -1242,6 +1407,8 @@ mod tests {
     #[tokio::test]
     async fn evaluate_merge_no_attestation_chain_is_noop() {
         let state = crate::mem::test_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().to_str().unwrap();
 
         // Create a MR with an agent author but no attestation chain.
         let mr = gyre_domain::MergeRequest {
@@ -1271,12 +1438,15 @@ mod tests {
         agent.current_task_id = Some(Id::new("TASK-MERGE-1"));
         state.agents.create(&agent).await.unwrap();
 
-        // No attestation stored for TASK-MERGE-1 → should gracefully degrade.
+        // Subscribe to broadcast before call.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        // No attestation stored for TASK-MERGE-1 → should return early without events.
         evaluate_merge_constraints(
             &state,
             "mr-no-chain",
             "repo-1",
-            "/nonexistent",
+            repo_path,
             "abc123",
             &Id::new("ws-1"),
             "feat/test",
@@ -1284,13 +1454,23 @@ mod tests {
             "main",
         )
         .await;
-        // No panic = success. The function gracefully degrades when no
-        // attestation chain exists.
+
+        // Verify: no events emitted (graceful degradation, no attestation chain).
+        assert!(
+            rx.try_recv().is_err(),
+            "no events should be emitted when there is no attestation chain"
+        );
     }
 
     #[tokio::test]
     async fn evaluate_merge_with_attestation_chain_runs_constraints() {
+        let (tmp, _initial_sha, second_sha) = init_test_git_repo();
+        let repo_path = tmp.path().to_str().unwrap();
+
         let state = crate::mem::test_state();
+
+        // Seed workspace meta-spec set and agent persona.
+        let meta_sha = seed_agent_context(&state, "ws-1", "agent-merge-2").await;
 
         // Create a MR with an agent author.
         let mr = gyre_domain::MergeRequest {
@@ -1320,37 +1500,53 @@ mod tests {
         agent.current_task_id = Some(Id::new("TASK-MERGE-2"));
         state.agents.create(&agent).await.unwrap();
 
-        // Store a SignedInput attestation for the task.
-        let si = make_signed_input(
+        // Store a SignedInput attestation with a constraint that FAILS.
+        let mut si = make_signed_input(
             vec!["src/**"],
             vec![],
             vec!["security"],
             vec![OutputConstraint {
-                name: "merge test constraint".to_string(),
-                expression: "true".to_string(),
+                name: "no-changes merge check".to_string(),
+                expression: "output.changed_files.size() == 0".to_string(),
             }],
         );
+        si.content.meta_spec_set_sha = meta_sha;
         let att = make_attestation(si, "TASK-MERGE-2");
         state.chain_attestations.save(&att).await.unwrap();
 
-        // Run merge evaluation — this will successfully look up the MR,
-        // resolve the agent and task, find the attestation chain, but fail
-        // to compute the diff from a nonexistent repo path (expected).
+        // Subscribe to broadcast before evaluation.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        // Run merge evaluation with the real repo and second commit SHA.
+        // compute_commit_diff will diff second_sha^..second_sha (the second
+        // commit adds src/payments/handler.rs).
         evaluate_merge_constraints(
             &state,
             "mr-with-chain",
             "repo-1",
-            "/nonexistent/path",
-            "abc123def",
+            repo_path,
+            &second_sha,
             &Id::new("ws-1"),
             "feat/provenance",
             "main",
             "main",
         )
         .await;
-        // No panic = success. The function found the MR, resolved the agent
-        // and task, found the attestation chain, but could not compute the
-        // diff (expected without a real git repo).
+
+        // Assert: ConstraintViolation events emitted — the "no-changes merge
+        // check" should fail because the commit has changed files.
+        let msg = rx
+            .try_recv()
+            .expect("should have received ConstraintViolation workspace broadcast for merge");
+        assert_eq!(msg.kind, MessageKind::ConstraintViolation);
+        let payload = msg.payload.as_ref().unwrap();
+        assert_eq!(payload["action"], "merge");
+
+        // Agent-directed message.
+        let msg2 = rx
+            .try_recv()
+            .expect("should have received agent-directed ConstraintViolation for merge");
+        assert_eq!(msg2.kind, MessageKind::ConstraintViolation);
     }
 
     // ── build_agent_context ──────────────────────────────────────────

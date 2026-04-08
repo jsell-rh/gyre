@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §3.2, §8 Phase 2  
 **Depends on:** TASK-006  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [`specs/reviews/task-007.md`](../reviews/task-007.md)  
 **Note:** R5 found 2 findings: F9 (integration tests for push-time and merge-time evaluation use `/nonexistent/path`, causing early exit before constraint evaluation — "no panic" assertion is tautological), F10 (dry-run only validates CEL syntax via `Program::compile`, does not evaluate against repo state as spec §7.6 requires).
 
@@ -64,3 +64,4 @@ When working on this task:
 - feat(provenance): implement authorization provenance Phase 2 — strategy-implied constraints (TASK-007)
 - fix(provenance): address R3 findings — server-fetched strategy constraints display (F6), merge-time integration tests (F7) (TASK-007)
 - fix(provenance): address R4 finding F8 — populate meta_spec_set_sha from workspace, guard attestation_level constraints (TASK-007)
+- fix(provenance): address R5 findings F9, F10 — real git repos in integration tests, dry-run evaluates against repo state (TASK-007)

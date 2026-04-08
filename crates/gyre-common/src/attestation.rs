@@ -44,7 +44,7 @@ pub struct TrustAnchor {
 // ── §2.2 Signed Input ──────────────────────────────────────────────────
 
 /// File-level boundaries of what an authorization permits (§2.2).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScopeConstraint {
     /// Files the agent may modify (e.g., `["src/payments/**"]`).
     /// Empty means "any file".

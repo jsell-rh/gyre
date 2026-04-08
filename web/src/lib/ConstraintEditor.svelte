@@ -4,7 +4,8 @@
    *
    * Shows strategy-implied constraints (read-only) derived from workspace config,
    * allows explicit constraint entry (CEL expression), scope definition (glob patterns),
-   * and a dry-run button to evaluate constraints server-side via the CEL parser.
+   * and a dry-run button to evaluate constraints against the repo's current state
+   * using the server-side CEL evaluator.
    */
   import { api } from './api.js';
 
@@ -82,24 +83,30 @@
         .map(c => ({ name: c.name.trim(), expression: c.expression.trim() }));
       const scope = buildScope();
 
-      // Validate constraints server-side using the real CEL parser (§7.6).
-      const body = { constraints: output_constraints };
+      // Evaluate constraints against the repo's current state using the
+      // server-side CEL evaluator (§7.6). This builds a real evaluation
+      // context from the repo's latest commit diff and workspace config.
+      const body = {
+        constraints: output_constraints,
+        repo_id: repoId,
+        workspace_id: workspaceId,
+      };
       if (scope) {
         body.scope = scope;
       }
 
-      const result = await api.validateConstraints(body);
+      const result = await api.dryRunConstraints(body);
       const issues = [];
       for (const r of result.results) {
-        if (!r.valid) {
-          issues.push(`"${r.name}": ${r.error || 'invalid'}`);
+        if (!r.passed) {
+          issues.push(`"${r.name}": ${r.error || 'failed'}`);
         }
       }
       dryRunResult = issues.length
         ? { valid: false, issues }
         : { valid: true, issues: [] };
     } catch (e) {
-      dryRunResult = { valid: false, issues: [`Validation request failed: ${e.message}`] };
+      dryRunResult = { valid: false, issues: [`Dry-run request failed: ${e.message}`] };
     } finally {
       dryRunning = false;
     }
@@ -186,7 +193,7 @@
     {#if dryRunResult}
       <div class="dry-run-result" class:valid={dryRunResult.valid} class:invalid={!dryRunResult.valid}>
         {#if dryRunResult.valid}
-          <span class="check">All constraints look valid</span>
+          <span class="check">All constraints passed against current repo state</span>
         {:else}
           <ul class="issues">
             {#each dryRunResult.issues as issue}

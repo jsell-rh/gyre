@@ -349,6 +349,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/constraints/validate",
             post(specs::validate_constraints),
         )
+        // Constraint dry-run evaluation (authorization-provenance.md §7.6)
+        .route(
+            "/api/v1/constraints/dry-run",
+            post(specs::dry_run_constraints),
+        )
         // Strategy-implied constraints preview (authorization-provenance.md §7.6)
         .route(
             "/api/v1/constraints/strategy",
