@@ -1035,7 +1035,7 @@ fn print_briefing(briefing: &serde_json::Value) {
                     }
                 }
                 if let Some(completed_at) = agent["completed_at"].as_u64() {
-                    println!("    Completed at: {completed_at}");
+                    println!("    Completed at: {}", format_timestamp(completed_at));
                 }
             }
             println!();
@@ -1088,7 +1088,7 @@ fn print_briefing(briefing: &serde_json::Value) {
     }
 }
 
-/// Print a single briefing item with its details (description, spec_path, timestamp).
+/// Print a single briefing item with its details (description, spec_path, entity_type, entity_id, timestamp).
 fn print_briefing_item(item: &serde_json::Value, prefix: &str) {
     let title = item["title"].as_str().unwrap_or("");
     println!("{prefix}{title}");
@@ -1100,6 +1100,21 @@ fn print_briefing_item(item: &serde_json::Value, prefix: &str) {
     if let Some(spec) = item["spec_path"].as_str() {
         if !spec.is_empty() {
             println!("      (spec: {spec})");
+        }
+    }
+    if let Some(etype) = item["entity_type"].as_str() {
+        if !etype.is_empty() {
+            let eid = item["entity_id"].as_str().unwrap_or("");
+            if !eid.is_empty() {
+                println!("      [{etype}: {eid}]");
+            } else {
+                println!("      [{etype}]");
+            }
+        }
+    }
+    if let Some(ts) = item["timestamp"].as_u64() {
+        if ts > 0 {
+            println!("      ({})", format_timestamp(ts));
         }
     }
 }
