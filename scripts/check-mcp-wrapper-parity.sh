@@ -27,11 +27,21 @@
 #             "snake_case")] produces "enum_variant". These are different
 #             strings — consumers that discriminate on type strings will
 #             silently fail to match MCP values against REST values.
+#   Check 4 — Simplified parameter defaults: MCP handlers that call a shared
+#             assemble_* function but skip stateful parameter resolution that
+#             the REST handler performs before the same call (e.g., looking up
+#             user_workspace_state.get_last_seen() for a `since` default).
+#   Check 5 — Stale route annotations: doc comments like `/// GET /api/v1/...`
+#             on non-handler functions (shared utilities extracted from handlers
+#             that kept the route annotation instead of leaving it on the
+#             actual handler).
 #
 # Origin: specs/reviews/task-010.md F1 (dead depth param), F2/F3 (missing
 #         briefing fields), F4 (edge filter divergence), F5 (hand-built JSON
-#         in closures), F7 (Debug-format enum serialization) — all caused by
-#         MCP handlers reimplementing REST logic instead of delegating.
+#         in closures), F7 (Debug-format enum serialization), F8 (briefing
+#         since-default parity), F9 (stale route annotation after extraction)
+#         — all caused by MCP handlers reimplementing REST logic or carrying
+#         stale metadata after refactoring.
 #
 # Exempt with: // mcp-parity:ok — <reason>
 #
@@ -178,6 +188,176 @@ if [ -n "$DEBUG_FMT" ]; then
         VIOLATIONS=$((VIOLATIONS + 1))
     done <<< "$DEBUG_FMT"
 fi
+
+# ── Check 4: Simplified parameter defaults skipping stateful resolution ──
+# When an MCP handler calls a shared assemble_* function, the parameters
+# it passes must be resolved the same way the REST handler resolves them.
+# The most common failure: the REST handler resolves a "since" parameter
+# via (1) explicit param, (2) user_workspace_state.get_last_seen(), (3)
+# hardcoded fallback — but the MCP handler skips step 2 and falls back
+# directly to the hardcoded default.
+#
+# Detection strategy: for each assemble_* call in mcp.rs, find the
+# corresponding REST handler in api/*.rs that calls the same function.
+# If the REST handler references a stateful resolution function (e.g.,
+# get_last_seen, user_workspace_state) that the MCP handler does not,
+# the MCP handler has a simplified default.
+#
+# Origin: specs/reviews/task-010.md F8 — briefing MCP handler skipped
+#         last_seen_at lookup, producing 24h of data instead of
+#         since-last-visit for returning users.
+
+API_DIR="crates/gyre-server/src/api"
+
+# Find all assemble_* calls in MCP file (non-test only)
+mapfile -t ASSEMBLE_CALLS < <(grep -n 'assemble_[a-z_]*(' "$MCP_FILE" | head -20)
+
+for entry in "${ASSEMBLE_CALLS[@]}"; do
+    [ -z "$entry" ] && continue
+    lineno=$(echo "$entry" | cut -d: -f1)
+
+    # Skip test code
+    if [ "$lineno" -ge "$TEST_BOUNDARY" ]; then
+        continue
+    fi
+
+    # Skip exempted lines
+    line_text=$(sed -n "${lineno}p" "$MCP_FILE")
+    if echo "$line_text" | grep -q 'mcp-parity:ok'; then
+        continue
+    fi
+
+    # Extract the function name (e.g., assemble_briefing)
+    fn_name=$(echo "$line_text" | grep -oP 'assemble_[a-z_]+' | head -1)
+    [ -z "$fn_name" ] && continue
+
+    # Find the REST handler file(s) that define this function
+    REST_FILES=$(grep -rl "pub async fn $fn_name\|pub fn $fn_name" "$API_DIR" 2>/dev/null || true)
+    [ -z "$REST_FILES" ] && continue
+
+    # Check if the REST handler callers of this assemble function use
+    # stateful resolution that the MCP handler should also use.
+    # Look for stateful patterns in a window around each REST call site
+    # (not the whole file — other functions in the file may use different
+    # stateful lookups that are irrelevant to this assemble function).
+    for rest_file in $REST_FILES; do
+        # Find call sites of fn_name in the REST handler file
+        # (exclude the function definition itself)
+        REST_CALL_LINES=$(grep -n "${fn_name}(" "$rest_file" \
+            | grep -v "pub async fn\|pub fn" 2>/dev/null || true)
+        [ -z "$REST_CALL_LINES" ] && continue
+
+        while IFS= read -r rest_call; do
+            [ -z "$rest_call" ] && continue
+            rest_lineno=$(echo "$rest_call" | cut -d: -f1)
+
+            # Check a 50-line window before the REST call for stateful patterns
+            REST_WINDOW_START=$((rest_lineno > 50 ? rest_lineno - 50 : 1))
+            STATEFUL_PATTERNS=$(sed -n "${REST_WINDOW_START},${rest_lineno}p" "$rest_file" \
+                | grep -c 'user_workspace_state\|get_last_seen\|get_user_preference' || true)
+            STATEFUL_PATTERNS=${STATEFUL_PATTERNS:-0}
+
+            if [ "$STATEFUL_PATTERNS" -gt 0 ]; then
+                # The REST caller uses stateful resolution before calling fn_name.
+                # Check if the MCP handler also references these patterns.
+                WINDOW_START=$((lineno > 50 ? lineno - 50 : 1))
+                MCP_STATEFUL=$(sed -n "${WINDOW_START},${lineno}p" "$MCP_FILE" \
+                    | grep -c 'user_workspace_state\|get_last_seen\|get_user_preference' || true)
+                MCP_STATEFUL=${MCP_STATEFUL:-0}
+
+                if [ "$MCP_STATEFUL" -eq 0 ]; then
+                    HANDLER=$(head -n "$lineno" "$MCP_FILE" \
+                        | grep -oP '(strip_prefix\("\K[^"]+|async fn \K[a-z_]+)' \
+                        | tail -1 || echo "unknown")
+
+                    echo ""
+                    echo "SIMPLIFIED PARAMETER DEFAULT: $MCP_FILE:$lineno ($HANDLER → $fn_name)"
+                    echo "  The REST handler in $rest_file:$rest_lineno resolves parameters"
+                    echo "  via stateful lookups (user_workspace_state, get_last_seen, etc.)"
+                    echo "  before calling $fn_name, but the MCP handler passes a simplified"
+                    echo "  default."
+                    echo ""
+                    echo "  The MCP handler must replicate the REST handler's full parameter"
+                    echo "  resolution chain — including intermediate steps that consult user"
+                    echo "  state — to maintain HSI §11 parity."
+                    echo ""
+                    echo "  Exempt with '// mcp-parity:ok — <reason>' on the $fn_name() call line."
+                    VIOLATIONS=$((VIOLATIONS + 1))
+                fi
+            fi
+        done <<< "$REST_CALL_LINES"
+    done
+done
+
+# ── Check 5: Stale route annotations on non-handler functions ────────────
+# When shared functions are extracted from HTTP handlers, route annotation
+# doc comments (/// GET /api/v1/..., /// POST /api/v1/...) sometimes
+# follow the extracted logic instead of staying on the handler. A route
+# annotation on a non-handler function is misleading.
+#
+# Detection: find /// GET|POST|PUT|DELETE|PATCH /api/ doc comments and
+# verify the function they annotate has handler-like extractors (State,
+# Path, Query, Json) in its signature. Functions without extractors are
+# likely shared utilities, not handlers.
+#
+# Origin: specs/reviews/task-010.md F9 — assemble_concept_results had a
+#         stale route annotation from get_graph_concept after extraction.
+
+for src_file in $(find crates/gyre-server/src/ -name '*.rs' -not -path '*/tests/*' 2>/dev/null); do
+    # Find lines with route annotation doc comments
+    ROUTE_ANNOTATIONS=$(grep -n '/// \(GET\|POST\|PUT\|DELETE\|PATCH\) /api/' "$src_file" 2>/dev/null || true)
+    [ -z "$ROUTE_ANNOTATIONS" ] && continue
+
+    while IFS= read -r annotation; do
+        [ -z "$annotation" ] && continue
+        ann_lineno=$(echo "$annotation" | cut -d: -f1)
+        ann_text=$(echo "$annotation" | cut -d: -f2-)
+
+        # Check exemption
+        if echo "$ann_text" | grep -q 'mcp-parity:ok'; then
+            continue
+        fi
+
+        # Find the function signature: scan forward from the annotation line
+        # looking for "pub async fn" or "pub fn" within 10 lines, then
+        # grab the full signature (up to the opening brace or return type)
+        FN_START=$((ann_lineno + 1))
+        FN_END=$((ann_lineno + 20))
+        FN_SIG_BLOCK=$(sed -n "${FN_START},${FN_END}p" "$src_file")
+        FN_FIRST=$(echo "$FN_SIG_BLOCK" | grep -m1 'pub async fn\|pub fn' || true)
+        [ -z "$FN_FIRST" ] && continue
+
+        # Skip zero-parameter functions — they're valid handlers that
+        # just don't need any extractors (e.g., version_handler())
+        if echo "$FN_FIRST" | grep -q '()'; then
+            continue
+        fi
+
+        # Check if the function has handler extractors in its full signature
+        # block (State<, Path<, Query<, Json<) — extractors may be on
+        # subsequent parameter lines. Functions with parameters but no
+        # extractors are shared utilities, not handlers.
+        HAS_EXTRACTORS=$(echo "$FN_SIG_BLOCK" | grep -c 'State<\|Path<\|Query<\|Json<' || true)
+        HAS_EXTRACTORS=${HAS_EXTRACTORS:-0}
+
+        if [ "$HAS_EXTRACTORS" -eq 0 ]; then
+            fn_name=$(echo "$FN_FIRST" | grep -oP '(pub async fn|pub fn) \K[a-z_]+' | head -1)
+            echo ""
+            echo "STALE ROUTE ANNOTATION: $src_file:$ann_lineno"
+            echo "  $ann_text"
+            echo "  This route annotation is on function '$fn_name' which has no handler"
+            echo "  extractors (State, Path, Query, Json). It is likely a shared utility"
+            echo "  function, not an HTTP handler. Route annotations should be on the"
+            echo "  actual handler function."
+            echo ""
+            echo "  Fix: remove the route annotation from this function and ensure the"
+            echo "  actual handler function has the route annotation."
+            echo ""
+            echo "  Exempt with '// mcp-parity:ok — <reason>' on the annotation line."
+            VIOLATIONS=$((VIOLATIONS + 1))
+        fi
+    done <<< "$ROUTE_ANNOTATIONS"
+done
 
 echo ""
 if [ "$VIOLATIONS" -eq 0 ]; then
