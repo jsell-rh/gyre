@@ -265,6 +265,11 @@ Before marking a task `ready-for-review`, verify:
     - **Update field accesses.** For each consumer, update every `["old_field"]` access to use the new field names. If the response shape changed structurally (e.g., from flat text to nested `{diff, explanation}`), update the display logic to render the new structure.
     - **Update doc comments and docs.** Update the client function's doc comment to describe the new response shape. Update `docs/api-reference.md` to reflect the current response format, field names, and types.
     - **Verification procedure:** Run `scripts/check-cli-spec-parity.sh` — Check 10 detects CLI display code that accesses field names not present in the server's SSE complete-event data. **This script is enforced by the pre-commit hook — your commit will fail if it reports violations.**
+52. **SSE event type exhaustiveness — all server-sent event types handled by consumers:** When implementing or modifying an SSE consumer (parser), you MUST handle ALL event types the server sends for that endpoint — not just the subset you are currently fixing or initially implementing. Specifically:
+    - **Enumerate server-sent event types.** Read the server handler for the SSE endpoint and grep for `event("...")` calls. List every distinct event type (e.g., `partial`, `complete`, `error`). Each one is a contract obligation that the consumer must handle.
+    - **Error events must be surfaced.** `event: error` events MUST NEVER be silently ignored. If the server sends an `error` event (e.g., for invalid LLM output, validation failures), the client parser must capture it and the display code must surface the error message to the user (e.g., `eprintln!("Error: {}", error_msg)`). A parser that ignores `error` events causes users to see misleading fallback messages like "No suggestions returned" when the actual problem is an LLM validation failure.
+    - **Fix-sweep trigger:** When fixing an SSE-related finding (e.g., updating field accesses for a `complete` event format change), this is a trigger to sweep all event types for the same endpoint. The fix addresses the named event type; the sweep catches unhandled event types that were introduced at the same time (common pattern: server adds `error` events alongside a format change, but the fix only addresses the format change).
+    - **Verification procedure:** Run `scripts/check-cli-spec-parity.sh` — Check 11 detects SSE client parsers that don't handle all event types the server sends. **This script is enforced by the pre-commit hook — your commit will fail if it reports violations.**
 
 ## Workflow
 
@@ -319,6 +324,7 @@ scripts/check-stale-stub-markers.sh
 scripts/check-silent-result-discard.sh
 scripts/check-llm-endpoint-hygiene.sh
 scripts/check-template-substitution.sh
+scripts/check-cli-spec-parity.sh
 ```
 If any script reports violations, fix them before proceeding. **Do not commit with check script violations.** These scripts exist because prior review rounds found flaws that the checklist alone did not prevent — they are the mechanical backstop.
 

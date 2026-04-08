@@ -472,6 +472,110 @@ if [ -f "$CLI_MAIN" ] && [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
     fi
 fi
 
+# --- Check 11: SSE event type exhaustiveness ---
+# When a server SSE endpoint sends multiple event types (e.g., partial,
+# complete, error), the CLI client parser must handle ALL of them.
+# An unhandled event type (especially "error") causes silent data loss:
+# the parser ignores the event, returns empty results, and the display
+# code shows a misleading fallback message instead of the actual error.
+#
+# Detection: for each SSE-consuming client function, find the corresponding
+# server handler and extract all event("...") types. Then verify the client
+# parser has a branch for each event type.
+#
+# Origin: specs/reviews/task-012.md R3 F7 — CLI parser didn't handle
+#         event: error, causing misleading "No suggestions returned."
+
+if [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
+    # Find SSE-consuming client functions (those that check for event types)
+    SSE_FUNCS=$(awk '
+        /pub async fn [a-z_]+/ {
+            fn_name = ""
+            match($0, /pub async fn ([a-z_]+)/, m)
+            if (m[1] != "") fn_name = m[1]
+            fn_start = NR
+            has_sse = 0
+            endpoint = ""
+        }
+        fn_name != "" && /current_event/ { has_sse = 1 }
+        fn_name != "" && /api\/v1\/[^"]+/ {
+            if (endpoint == "") {
+                match($0, /api\/v1\/[^"]+/)
+                endpoint = substr($0, RSTART, RLENGTH)
+            }
+        }
+        fn_name != "" && has_sse && /^[[:space:]]*\}$/ && NR > fn_start + 5 {
+            if (endpoint != "") print fn_name "|" endpoint "|" fn_start
+            fn_name = ""
+        }
+    ' "$CLI_CLIENT" 2>/dev/null || true)
+
+    if [ -n "$SSE_FUNCS" ]; then
+        while IFS= read -r sse_func; do
+            [ -z "$sse_func" ] && continue
+            FN_NAME=$(echo "$sse_func" | cut -d'|' -f1)
+            ENDPOINT=$(echo "$sse_func" | cut -d'|' -f2)
+            FN_START=$(echo "$sse_func" | cut -d'|' -f3)
+
+            # Find the client function body to extract handled event types
+            FN_END=$(tail -n +"$((FN_START + 1))" "$CLI_CLIENT" \
+                | grep -n '^pub async fn\|^pub fn\|^}$' \
+                | head -1 \
+                | cut -d: -f1 || echo "200")
+            FN_END=$((FN_START + FN_END))
+
+            CLIENT_EVENTS=$(sed -n "${FN_START},${FN_END}p" "$CLI_CLIENT" \
+                | grep -oP 'current_event\s*==\s*"([^"]+)"' \
+                | grep -oP '"[^"]+' \
+                | sed 's/"//g' \
+                | sort -u || true)
+
+            # Find the server handler that produces this SSE stream
+            # by matching the endpoint path to server files
+            for rs_file in "$SERVER_API_DIR"/*.rs; do
+                [ -f "$rs_file" ] || continue
+
+                # Check if this file has event() calls (SSE producer)
+                SERVER_EVENTS=$(grep -oP 'event\("\K[^"]+(?="\))' "$rs_file" 2>/dev/null \
+                    | sort -u || true)
+
+                [ -z "$SERVER_EVENTS" ] && continue
+
+                # Verify the file is related to this endpoint by checking
+                # if the endpoint base name matches the file name
+                ENDPOINT_SEGMENTS=$(echo "$ENDPOINT" | tr '/' '\n' | grep -v 'api\|v1\|{.*}' || true)
+                FILE_BASE=$(basename "$rs_file" .rs)
+                MATCH=0
+                for seg in $ENDPOINT_SEGMENTS; do
+                    if echo "$FILE_BASE" | grep -qi "$(echo "$seg" | sed 's/s$//' | sed 's/-/_/g')" 2>/dev/null; then
+                        MATCH=1
+                        break
+                    fi
+                done
+                [ "$MATCH" -eq 0 ] && continue
+
+                # Check each server event type against client handling
+                for server_event in $SERVER_EVENTS; do
+                    [ -z "$server_event" ] && continue
+                    if ! echo "$CLIENT_EVENTS" | grep -qx "$server_event" 2>/dev/null; then
+                        echo "CLI-SPEC PARITY: SSE client parser does not handle event type '$server_event'"
+                        echo "  Client: $CLI_CLIENT fn $FN_NAME (endpoint: $ENDPOINT)"
+                        echo "  Server: $rs_file sends event(\"$server_event\") but client has no 'current_event == \"$server_event\"' branch"
+                        echo "  Server event types: $SERVER_EVENTS"
+                        echo "  Client handles: ${CLIENT_EVENTS:-<none>}"
+                        if [ "$server_event" = "error" ]; then
+                            echo "  ERROR events must be surfaced to the user — silent ignoring causes misleading fallback messages."
+                        fi
+                        echo "  Fix: Add an 'else if current_event == \"$server_event\"' branch to the SSE parser."
+                        echo ""
+                        FAIL=1
+                    fi
+                done
+            done
+        done <<< "$SSE_FUNCS"
+    fi
+fi
+
 if [ "$FAIL" -eq 0 ]; then
     echo "CLI-spec parity lint passed."
 fi
