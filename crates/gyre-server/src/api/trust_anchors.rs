@@ -79,6 +79,11 @@ pub async fn list_trust_anchors(
     auth: AuthenticatedAgent,
 ) -> Result<Json<Vec<TrustAnchorResponse>>, ApiError> {
     require_admin(&auth)?;
+    if auth.tenant_id != tenant_id {
+        return Err(ApiError::Forbidden(
+            "cannot access trust anchors for a different tenant".to_string(),
+        ));
+    }
     let anchors = state.trust_anchors.list_by_tenant(&tenant_id).await?;
     Ok(Json(anchors.into_iter().map(Into::into).collect()))
 }
@@ -91,6 +96,11 @@ pub async fn create_trust_anchor(
     Json(req): Json<CreateTrustAnchorRequest>,
 ) -> Result<(StatusCode, Json<TrustAnchorResponse>), ApiError> {
     require_admin(&auth)?;
+    if auth.tenant_id != tenant_id {
+        return Err(ApiError::Forbidden(
+            "cannot access trust anchors for a different tenant".to_string(),
+        ));
+    }
 
     // Check for duplicate.
     if state
@@ -132,6 +142,11 @@ pub async fn get_trust_anchor(
     auth: AuthenticatedAgent,
 ) -> Result<Json<TrustAnchorResponse>, ApiError> {
     require_admin(&auth)?;
+    if auth.tenant_id != tenant_id {
+        return Err(ApiError::Forbidden(
+            "cannot access trust anchors for a different tenant".to_string(),
+        ));
+    }
     let anchor = state
         .trust_anchors
         .find_by_id(&tenant_id, &anchor_id)
@@ -148,6 +163,11 @@ pub async fn update_trust_anchor(
     Json(req): Json<UpdateTrustAnchorRequest>,
 ) -> Result<Json<TrustAnchorResponse>, ApiError> {
     require_admin(&auth)?;
+    if auth.tenant_id != tenant_id {
+        return Err(ApiError::Forbidden(
+            "cannot access trust anchors for a different tenant".to_string(),
+        ));
+    }
     let mut anchor = state
         .trust_anchors
         .find_by_id(&tenant_id, &anchor_id)
@@ -185,6 +205,11 @@ pub async fn delete_trust_anchor(
     auth: AuthenticatedAgent,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&auth)?;
+    if auth.tenant_id != tenant_id {
+        return Err(ApiError::Forbidden(
+            "cannot access trust anchors for a different tenant".to_string(),
+        ));
+    }
 
     // Verify it exists before deleting.
     state
@@ -258,7 +283,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/tenants/t1/trust-anchors")
+                    .uri("/api/v1/tenants/default/trust-anchors")
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -281,7 +306,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/tenants/t1/trust-anchors")
+                    .uri("/api/v1/tenants/default/trust-anchors")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -299,7 +324,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/tenants/t1/trust-anchors/tenant-keycloak")
+                    .uri("/api/v1/tenants/default/trust-anchors/tenant-keycloak")
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -319,7 +344,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/api/v1/tenants/t1/trust-anchors/tenant-keycloak")
+                    .uri("/api/v1/tenants/default/trust-anchors/tenant-keycloak")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
@@ -336,7 +361,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/tenants/t1/trust-anchors")
+                    .uri("/api/v1/tenants/default/trust-anchors")
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -353,7 +378,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/api/v1/tenants/t1/trust-anchors/tenant-keycloak")
+                    .uri("/api/v1/tenants/default/trust-anchors/tenant-keycloak")
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -367,7 +392,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/tenants/t1/trust-anchors")
+                    .uri("/api/v1/tenants/default/trust-anchors")
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -396,7 +421,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/tenants/t1/trust-anchors")
+                    .uri("/api/v1/tenants/default/trust-anchors")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -412,7 +437,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/tenants/t1/trust-anchors")
+                    .uri("/api/v1/tenants/default/trust-anchors")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -430,7 +455,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/tenants/t1/trust-anchors/no-such")
+                    .uri("/api/v1/tenants/default/trust-anchors/no-such")
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -441,10 +466,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trust_anchors_tenant_scoped() {
+    async fn trust_anchors_cross_tenant_returns_403() {
         let (app, _state) = app();
 
-        // Create in tenant t1.
+        // Create in own tenant (default).
         let body = serde_json::json!({
             "id": "scoped-anchor",
             "issuer": "https://idp.example.com",
@@ -456,7 +481,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/tenants/t1/trust-anchors")
+                    .uri("/api/v1/tenants/default/trust-anchors")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -466,20 +491,47 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
 
-        // List for tenant t2 should be empty.
+        // Attempt to list trust anchors for a different tenant — must return 403.
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/tenants/t2/trust-anchors")
+                    .uri("/api/v1/tenants/other-tenant/trust-anchors")
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
-        assert_eq!(json.as_array().unwrap().len(), 0);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Attempt to get a specific anchor from a different tenant — must return 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tenants/other-tenant/trust-anchors/scoped-anchor")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Attempt to delete from a different tenant — must return 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/tenants/other-tenant/trust-anchors/scoped-anchor")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

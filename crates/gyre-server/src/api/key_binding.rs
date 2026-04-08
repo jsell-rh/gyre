@@ -70,6 +70,22 @@ pub async fn create_key_binding(
         ApiError::InvalidInput("user_signature must be valid base64-encoded bytes".to_string())
     })?;
 
+    // Verify the user's self-signature proves ownership of the private key (§2.3 step 3).
+    // The user signs the public key bytes as a proof-of-possession.
+    {
+        use ring::signature::{self, UnparsedPublicKey};
+        let peer_public_key = UnparsedPublicKey::new(&signature::ED25519, &public_key_bytes);
+        peer_public_key
+            .verify(&public_key_bytes, &user_signature_bytes)
+            .map_err(|_| {
+                ApiError::InvalidInput(
+                    "user_signature is not a valid Ed25519 signature over the public key — \
+                     proof of private key ownership failed"
+                        .to_string(),
+                )
+            })?;
+    }
+
     // Derive user_identity from auth context.
     let user_identity = if auth.jwt_claims.is_some() {
         // Agent JWT — use "agent:<id>" format.
@@ -156,6 +172,8 @@ pub async fn create_key_binding(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, routing::post, Router};
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -164,6 +182,19 @@ mod tests {
         Router::new()
             .route("/api/v1/auth/key-binding", post(super::create_key_binding))
             .with_state(state)
+    }
+
+    /// Generate a real Ed25519 keypair and return (public_key_bytes, signature_over_pubkey).
+    fn generate_test_keypair() -> (Vec<u8>, Vec<u8>) {
+        use ring::rand::SystemRandom;
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let pub_key = key_pair.public_key().as_ref().to_vec();
+        // Sign the public key bytes as proof-of-possession.
+        let sig = key_pair.sign(&pub_key).as_ref().to_vec();
+        (pub_key, sig)
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -175,13 +206,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_key_binding_success() {
-        use base64::engine::general_purpose::STANDARD;
-        use base64::Engine;
-
-        // Generate a test Ed25519 keypair for the public key.
-        let fake_pubkey = [42u8; 32];
-        let pubkey_b64 = STANDARD.encode(fake_pubkey);
-        let sig_b64 = STANDARD.encode(b"fake-signature");
+        let (pub_key, sig) = generate_test_keypair();
+        let pubkey_b64 = STANDARD.encode(&pub_key);
+        let sig_b64 = STANDARD.encode(&sig);
 
         let body = serde_json::json!({
             "public_key": pubkey_b64,
@@ -205,16 +232,66 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["public_key"], pubkey_b64);
         assert!(json["user_identity"].as_str().unwrap().starts_with("user:"));
-        assert!(json["platform_countersign"].as_str().unwrap().len() > 0);
+        assert!(!json["platform_countersign"]
+            .as_str()
+            .unwrap()
+            .is_empty());
         assert!(json["issued_at"].as_u64().is_some());
         assert!(json["expires_at"].as_u64().is_some());
     }
 
     #[tokio::test]
-    async fn create_key_binding_invalid_pubkey_length() {
-        use base64::engine::general_purpose::STANDARD;
-        use base64::Engine;
+    async fn create_key_binding_invalid_signature_rejected() {
+        // Valid 32-byte public key but wrong signature — must be rejected.
+        let (pub_key, _sig) = generate_test_keypair();
+        let body = serde_json::json!({
+            "public_key": STANDARD.encode(&pub_key),
+            "user_signature": STANDARD.encode(b"this-is-not-a-valid-ed25519-signature-at-all!padding"),
+        });
 
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/key-binding")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_key_binding_mismatched_key_signature_rejected() {
+        // Generate two different keypairs — sign with one, submit the other's public key.
+        let (pub_key_a, _sig_a) = generate_test_keypair();
+        let (_pub_key_b, sig_b) = generate_test_keypair();
+
+        let body = serde_json::json!({
+            "public_key": STANDARD.encode(&pub_key_a),
+            "user_signature": STANDARD.encode(&sig_b),
+        });
+
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/key-binding")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_key_binding_invalid_pubkey_length() {
         let short_key = [1u8; 16]; // Not 32 bytes
         let body = serde_json::json!({
             "public_key": STANDARD.encode(short_key),
@@ -260,12 +337,10 @@ mod tests {
 
     #[tokio::test]
     async fn create_key_binding_ttl_capped_at_24h() {
-        use base64::engine::general_purpose::STANDARD;
-        use base64::Engine;
-
+        let (pub_key, sig) = generate_test_keypair();
         let body = serde_json::json!({
-            "public_key": STANDARD.encode([7u8; 32]),
-            "user_signature": STANDARD.encode(b"sig"),
+            "public_key": STANDARD.encode(&pub_key),
+            "user_signature": STANDARD.encode(&sig),
             "ttl_secs": 999_999  // way more than 24h
         });
 
@@ -290,9 +365,6 @@ mod tests {
 
     #[tokio::test]
     async fn create_key_binding_stored_and_retrievable() {
-        use base64::engine::general_purpose::STANDARD;
-        use base64::Engine;
-
         let state = test_state();
         let app = Router::new()
             .route(
@@ -301,10 +373,10 @@ mod tests {
             )
             .with_state(state.clone());
 
-        let pubkey = [99u8; 32];
+        let (pub_key, sig) = generate_test_keypair();
         let body = serde_json::json!({
-            "public_key": STANDARD.encode(pubkey),
-            "user_signature": STANDARD.encode(b"sig"),
+            "public_key": STANDARD.encode(&pub_key),
+            "user_signature": STANDARD.encode(&sig),
         });
 
         let resp = app
@@ -328,6 +400,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].public_key, pubkey.to_vec());
+        assert_eq!(bindings[0].public_key, pub_key);
     }
 }
