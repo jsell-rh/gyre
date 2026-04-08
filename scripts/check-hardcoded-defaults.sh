@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# Architecture lint: detect hardcoded string-literal defaults where runtime
-# values should be used.
+# Architecture lint: detect hardcoded or empty-default values in evaluation
+# contexts where runtime values should be used.
 #
-# When a runtime value (e.g., repository.default_branch) is available in the
-# calling context but the callee hardcodes a string literal (e.g., "main"),
-# the code silently produces wrong results for non-default configurations.
+# When a runtime value (e.g., repository.default_branch, agent meta_spec_set_sha)
+# is available in the calling context but the callee hardcodes a string literal,
+# uses a wrong variable, or leaves an empty default (String::new(), 0), the code
+# silently produces wrong results — or in the case of empty defaults feeding
+# unconditional constraints, produces false violations on every evaluation.
 #
-# This script detects known hardcoded-default patterns:
+# This script detects known hardcoded/empty-default patterns:
 #   1. default_branch: "main" — should come from the repository record
-#   2. Other patterns can be added as discovered
+#   2. default_branch: target_branch — wrong variable (MR target ≠ repo default)
+#   3. default_branch from suspicious non-repo source
+#   4. Empty defaults in AgentContext fields that feed constraint evaluation
+#
+# See: specs/reviews/task-007.md F3, F4, F8
 #
 # Run by pre-commit and CI.
 
@@ -135,6 +141,52 @@ if [ -n "$TARGETCTX_HITS" ]; then
     FAIL=1
 fi
 
+# ── Check 4: Empty defaults in evaluation context construction ──────────
+# When building evaluation context structs (AgentContext, TargetContext),
+# fields set to String::new() or literal 0 that feed into constraint
+# generation will produce false violations on every evaluation.
+#
+# The pattern: build_agent_context sets `meta_spec_set_sha: String::new()`
+# while derive_strategy_constraints unconditionally generates
+# `agent.meta_spec_set_sha == input.meta_spec_set_sha`.  The empty string
+# always mismatches, causing false violations and (under fail-closed
+# evaluation) blocking all subsequent constraint checks.
+#
+# Exempt: test functions, cfg(test) modules, and lines with // empty-default:ok
+#
+# See: specs/reviews/task-007.md F8
+
+EMPTY_DEFAULT_HITS=$(grep -rn 'AgentContext\|agent_context' "$SERVER_SRC" \
+    --include='*.rs' -A 20 \
+    | grep -E '(meta_spec_set_sha|attestation_level|stack_hash|image_hash|container_id):\s*(String::new\(\)|0[^-9x]|0$|"".to_string)' \
+    | grep -v '#\[cfg(test)\]' \
+    | grep -v 'fn test_' \
+    | grep -v 'mod tests' \
+    | grep -v '// empty-default:ok' \
+    | grep -v '// hardcoded-default:ok' \
+    || true)
+
+if [ -n "$EMPTY_DEFAULT_HITS" ]; then
+    echo ""
+    echo "EMPTY DEFAULT in evaluation context found:"
+    echo "$EMPTY_DEFAULT_HITS" | while IFS= read -r line; do
+        echo "  $line"
+    done
+    echo ""
+    echo "  Evaluation context fields set to String::new() or 0 will cause false"
+    echo "  violations when constraint generators produce constraints against them."
+    echo "  Either populate the field from runtime data (workspace record, KV store,"
+    echo "  agent claims) or guard the constraint generation (don't generate constraints"
+    echo "  for fields with empty/default context values)."
+    echo ""
+    echo "  See: specs/reviews/task-007.md F8 (empty agent context fields)"
+    echo ""
+    echo "  Add '// empty-default:ok' if genuinely intentional (field is not used in"
+    echo "  constraint evaluation or the constraint is properly guarded)."
+    echo ""
+    FAIL=1
+fi
+
 # ── Result ──────────────────────────────────────────────────────────────
 
 if [ "$FAIL" -eq 0 ]; then
@@ -142,6 +194,6 @@ if [ "$FAIL" -eq 0 ]; then
     exit 0
 else
     echo "Fix: Pass the runtime value from the calling context instead of hardcoding."
-    echo "     Add '// hardcoded-default:ok' comment if genuinely intentional."
+    echo "     Add '// hardcoded-default:ok' or '// empty-default:ok' comment if genuinely intentional."
     exit 1
 fi
