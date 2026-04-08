@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §5.3–5.4  
 **Depends on:** TASK-003 (domain types and ports)  
-**Progress:** `ready-for-review`  
+**Progress:** `complete`  
 **Review:** [`specs/reviews/task-004.md`](../reviews/task-004.md)
 
 ## Spec Excerpt

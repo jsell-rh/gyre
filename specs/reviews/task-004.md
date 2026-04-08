@@ -1,8 +1,8 @@
 # Review: TASK-004 — Authorization Provenance Storage Adapters and Migration
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-08 (R1)  
-**Verdict:** needs-revision
+**Date:** 2026-04-08 (R1), 2026-04-08 (R2)  
+**Verdict:** complete
 
 ---
 
@@ -19,3 +19,22 @@
 - [x] [process-revision-complete] **F3 — Missing `workspace_id` index on `chain_attestations` table per spec §5.3.**  
   The spec (authorization-provenance.md §5.3, line 517) states attestations are *"indexed by `id` (content hash), `task_id`, `repo_id`, `workspace_id`."* The migration (up.sql) creates indexes on `task_id`, `commit_sha`, `repo_id+created_at`, and `parent_ref` — but no index on `workspace_id`. The `commit_sha` and `parent_ref` indexes are correct additions (needed by `find_by_commit` and `load_chain`), but the spec-required `workspace_id` index is missing. Fix: add `CREATE INDEX IF NOT EXISTS idx_chain_attestations_workspace ON chain_attestations (workspace_id);` to up.sql and `DROP INDEX IF EXISTS idx_chain_attestations_workspace;` to down.sql.  
   **Files:** `crates/gyre-adapters/migrations/2026-04-07-000047_authorization_provenance/up.sql` (missing index), `crates/gyre-adapters/migrations/2026-04-07-000047_authorization_provenance/down.sql` (missing reverse), spec §5.3 line 517.
+
+---
+
+## R2 — Verification Pass
+
+**Date:** 2026-04-08  
+**Result:** All 3 R1 findings verified resolved. No new findings.
+
+Verified:
+- F1: All 5 `ChainAttestationRepository` query methods now filter by `self.tenant_id`. Tenant isolation tests pass for each method.
+- F2: `find_active_by_identity` now filters by `expires_at > now` alongside `revoked_at.is_null()`. Dedicated test `find_active_excludes_expired_bindings` confirms.
+- F3: `idx_chain_attestations_workspace` index present in up.sql with symmetric DROP in down.sql.
+
+Additional verification:
+- All 34 adapter tests pass (chain_attestation: 17, key_binding: 10, trust_anchor: 7).
+- Schema.rs matches migration DDL for all 3 tables.
+- Port trait implementations match spec §5.4 signature exactly.
+- Down.sql properly reverses all indexes and tables in correct order.
+- No hexagonal boundary violations (adapters import only gyre-common + gyre-ports).
