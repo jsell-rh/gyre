@@ -111,6 +111,16 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/provenance",
             get(provenance::get_provenance),
         )
+        // Attestation verification (TASK-008, §6.4)
+        .route(
+            "/api/v1/repos/:id/attestations/:commit_sha/verification",
+            get(provenance::get_verification),
+        )
+        // Attestation bundle export (TASK-008, §6.3)
+        .route(
+            "/api/v1/repos/:id/attestations/:commit_sha/bundle",
+            get(provenance::get_attestation_bundle),
+        )
         // AI Bill of Materials (M14.3)
         .route("/api/v1/repos/:id/aibom", get(aibom::get_aibom))
         // Agent-commit tracking

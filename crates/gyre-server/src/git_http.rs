@@ -331,11 +331,53 @@ pub async fn git_receive_pack(
         }
     }
 
-    info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
-
-    // M13.2: Resolve agent context (task_id, parent_agent_id, spawned_by) for provenance.
+    // Phase 3 (TASK-008): Enforcement — reject pushes with invalid/missing
+    // attestation chains or constraint violations. Must run synchronously before
+    // returning the response so we can undo refs on failure.
+    //
+    // Resolve agent context first so we have the task_id for chain lookup.
     let (task_id, parent_agent_id, spawned_by_user_id) =
         resolve_agent_context(&state, &auth.agent_id).await;
+
+    if !ref_updates.is_empty() {
+        if let Some(ref tid) = task_id {
+            let constraint_ref_updates: Vec<(String, String, String)> = ref_updates
+                .iter()
+                .map(|u| (u.old_sha.clone(), u.new_sha.clone(), u.refname.clone()))
+                .collect();
+            if let Err(rejection) = crate::constraint_check::enforce_push_constraints(
+                &state,
+                tid,
+                &repo_id,
+                &repo_path,
+                &auth.agent_id,
+                &repo_workspace_id,
+                &constraint_ref_updates,
+                &default_branch,
+            )
+            .await
+            {
+                undo_ref_updates(&repo_path, &ref_updates).await;
+                // Emit PushRejected event.
+                state
+                    .emit_event(
+                        Some(repo_workspace_id.clone()),
+                        gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                        gyre_common::message::MessageKind::PushRejected,
+                        Some(serde_json::json!({
+                            "repo_id": repo_id,
+                            "branch": ref_updates.first().map(|u| u.refname.clone()).unwrap_or_default(),
+                            "agent_id": auth.agent_id,
+                            "reason": rejection,
+                        })),
+                    )
+                    .await;
+                return (StatusCode::FORBIDDEN, rejection).into_response();
+            }
+        }
+    }
+
+    info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
 
     // M13.3: Build X-Gyre-Push-Result JSON header value.
     let branch = ref_updates
@@ -1662,7 +1704,7 @@ pub(crate) async fn detect_dependencies_on_push(
 /// Verify an attestation chain in audit-only mode. Returns a VerificationResult
 /// tree describing what was checked. This does NOT reject pushes — results are
 /// only logged for observability.
-fn verify_attestation_audit_only(
+pub(crate) fn verify_attestation_audit_only(
     attestation: &gyre_common::Attestation,
 ) -> gyre_common::VerificationResult {
     let mut children = Vec::new();

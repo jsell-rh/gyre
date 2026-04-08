@@ -363,6 +363,47 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
+    // Phase 3 (TASK-008): Constraint enforcement — block merge if attestation
+    // chain is invalid or any constraint fails. Evaluated before the merge so we
+    // can fail the queue entry without leaving a dangling merge commit.
+    //
+    // We use the source branch HEAD as the "merge commit" for diff computation
+    // since the actual merge commit doesn't exist yet.
+    if let Some(source_sha) =
+        crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.source_branch))
+            .await
+    {
+        if let Err(reason) = crate::constraint_check::enforce_merge_constraints(
+            state,
+            &mr.id.to_string(),
+            &repo.id.to_string(),
+            &repo.path,
+            &source_sha,
+            &mr.workspace_id,
+            &mr.source_branch,
+            &mr.target_branch,
+            &repo.default_branch,
+        )
+        .await
+        {
+            warn!(
+                entry_id = %entry.id,
+                mr_id = %mr.id,
+                %reason,
+                "constraint enforcement blocked merge"
+            );
+            state
+                .merge_queue
+                .update_status(
+                    &entry.id,
+                    MergeQueueEntryStatus::Failed,
+                    Some(reason),
+                )
+                .await?;
+            return Ok(());
+        }
+    }
+
     // Attempt the merge
     let result = state
         .git_ops

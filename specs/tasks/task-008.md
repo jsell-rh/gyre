@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §6, §7.2, §8 Phase 3  
 **Depends on:** TASK-007  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -63,4 +63,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- feat(provenance): implement authorization provenance Phase 3 — enforcement (TASK-008)

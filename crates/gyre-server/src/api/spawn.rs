@@ -1015,6 +1015,21 @@ pub async fn spawn_agent(
     // Workload attestation claims are stored in state.workload_attestations
     // and queryable via GET /api/v1/agents/{id}/workload.
 
+    // Phase 3 (TASK-008, §7.4): Create workload KeyBinding and DerivedInput
+    // from the parent task's attestation chain, then inject into the agent's
+    // environment via KV store. The agent uses the KeyBinding to sign its
+    // output attestation at push time.
+    if !is_interrogation {
+        create_derived_input_for_agent(
+            &state,
+            &agent.id.to_string(),
+            &req.task_id,
+            &auth.agent_id,
+            now,
+        )
+        .await;
+    }
+
     // Auto-track agent spawn
     let ev = AnalyticsEvent::new(
         new_id(),
@@ -1407,6 +1422,163 @@ pub async fn stop_agent(
     super::budget::decrement_active_agents(&state, &workspace_id).await;
 
     Ok(StatusCode::OK)
+}
+
+// ── Derived Input (Phase 3, §7.4) ─────────────────────────────────────────────
+
+/// Create a workload `KeyBinding` and `DerivedInput` for a newly spawned agent
+/// from the parent task's attestation chain. Stored in KV so the agent can use
+/// the key to sign its output attestation at push time.
+///
+/// Best-effort: if no attestation chain exists for the task, skips silently
+/// (the agent may be for a task that predates the provenance system).
+///
+/// This function CREATES (generates + signs) crypto material — it does not
+/// consume/verify externally-submitted crypto material.
+async fn create_derived_input_for_agent(
+    state: &crate::AppState,
+    agent_id: &str,
+    task_id: &str,
+    spawner_id: &str,
+    now: u64,
+) {
+    // crypto-verify:ok — this function generates+signs new keys, not verifying external input.
+    // Look up parent attestation chain for this task.
+    let attestations = match state.chain_attestations.find_by_task(task_id).await {
+        Ok(atts) if !atts.is_empty() => atts,
+        _ => {
+            tracing::debug!(
+                agent_id = %agent_id,
+                task_id = %task_id,
+                "no attestation chain for task — skipping DerivedInput creation"
+            );
+            return;
+        }
+    };
+
+    // Find the leaf attestation (most recent) to derive from.
+    let parent_att = match attestations.last() {
+        Some(a) => a,
+        None => return,
+    };
+
+    // Generate an ephemeral Ed25519 keypair for the agent's workload KeyBinding.
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = match ring::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, "failed to generate agent keypair: {e}");
+            return;
+        }
+    };
+    let key_pair = match ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()) {
+        Ok(kp) => kp,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, "failed to parse agent keypair: {e}");
+            return;
+        }
+    };
+
+    use ring::signature::KeyPair;
+    let public_key = key_pair.public_key().as_ref().to_vec();
+
+    // Build the workload KeyBinding (§4.5).
+    let kb = gyre_common::KeyBinding {
+        public_key: public_key.clone(),
+        user_identity: format!("agent:{agent_id}"),
+        issuer: state.base_url.clone(),
+        trust_anchor_id: "gyre-oidc".to_string(),
+        issued_at: now,
+        expires_at: now + state.agent_jwt_ttl_secs,
+        user_signature: vec![], // workload-bound — no user signature
+        platform_countersign: vec![], // platform countersign would be added by platform signing
+    };
+
+    // Compute parent_ref as content hash of parent attestation.
+    let parent_bytes = serde_json::to_vec(parent_att).unwrap_or_default();
+    let parent_hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&parent_bytes);
+        hasher.finalize().to_vec()
+    };
+
+    // Sign the derivation with the agent's ephemeral key.
+    let derivation_content = serde_json::json!({
+        "parent_ref": hex::encode(&parent_hash),
+        "agent_id": agent_id,
+        "task_id": task_id,
+    });
+    let derivation_bytes = serde_json::to_vec(&derivation_content).unwrap_or_default();
+    let content_hash = {
+        use ring::digest;
+        digest::digest(&digest::SHA256, &derivation_bytes)
+    };
+    let sig = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
+    // Build the DerivedInput (§4.1).
+    let derived_input = gyre_common::DerivedInput {
+        parent_ref: parent_hash,
+        preconditions: vec![],
+        update: format!("agent:{agent_id} spawned for task:{task_id}"),
+        output_constraints: vec![], // inherited from parent (additive only)
+        signature: sig,
+        key_binding: kb.clone(),
+    };
+
+    // Store in KV so the agent can retrieve its DerivedInput and use it.
+    if let Ok(di_json) = serde_json::to_string(&derived_input) {
+        let _ = state
+            .kv_store
+            .kv_set("agent_derived_inputs", agent_id, di_json)
+            .await;
+    }
+
+    // Store the private key so the agent can sign its output attestation.
+    let _ = state
+        .kv_store
+        .kv_set(
+            "agent_signing_keys",
+            agent_id,
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, pkcs8.as_ref()),
+        )
+        .await;
+
+    // Create an attestation record for this derivation.
+    let new_att = gyre_common::Attestation {
+        id: uuid::Uuid::new_v4().to_string(),
+        input: gyre_common::AttestationInput::Derived(derived_input),
+        output: gyre_common::AttestationOutput {
+            content_hash: vec![],
+            commit_sha: String::new(),
+            agent_signature: None,
+            gate_results: vec![],
+        },
+        metadata: gyre_common::AttestationMetadata {
+            created_at: now,
+            workspace_id: parent_att.metadata.workspace_id.clone(),
+            repo_id: parent_att.metadata.repo_id.clone(),
+            task_id: task_id.to_string(),
+            agent_id: agent_id.to_string(),
+            chain_depth: parent_att.metadata.chain_depth + 1,
+        },
+    };
+
+    if let Err(e) = state.chain_attestations.save(&new_att).await {
+        tracing::warn!(
+            agent_id = %agent_id,
+            error = %e,
+            "failed to save derived attestation for agent"
+        );
+    } else {
+        tracing::info!(
+            agent_id = %agent_id,
+            task_id = %task_id,
+            spawner = %spawner_id,
+            chain_depth = new_att.metadata.chain_depth,
+            "created DerivedInput and workload KeyBinding for agent"
+        );
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

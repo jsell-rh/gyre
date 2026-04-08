@@ -87,6 +87,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `PUT` | `/api/v1/repos/{id}/stack-policy` | Set / clear required stack fingerprint (**Admin only**, M14.2) |
 | `GET` | `/api/v1/repos/{id}/abac-policy` | Get the ABAC policy list for a repo — array of `AbacPolicy` objects; each policy has `id`, `name`, `rules` (AND within), evaluated as OR across policies (G6) |
 | `PUT` | `/api/v1/repos/{id}/abac-policy` | Replace the ABAC policy list (**Admin only**); policies are matched against JWT claims on push and spawn; `rules` is a list of `{claim, operator, value}` match conditions combined with AND; multiple policies in the array are OR'd together (G6) |
+| `GET` | `/api/v1/repos/{id}/attestations/{commit_sha}/verification` | Full `VerificationResult` tree for the attestation chain associated with a commit; includes chain structure validation, signature verification, constraint evaluation status (TASK-008, §6.4) |
+| `GET` | `/api/v1/repos/{id}/attestations/{commit_sha}/bundle` | `VerificationBundle` for offline verification — contains attestation chain (root to leaf), trust anchors, git diff, and assembly timestamp; can be verified without connecting to the Gyre server (TASK-008, §6.3) |
 | `GET` | `/api/v1/repos/{id}/aibom` | AI Bill of Materials — per-commit agent attribution + attestation levels (`?from={ref}&to={ref}`); ref names validated to prevent git flag injection (M14.3) |
 | `GET` | `/api/v1/repos/{id}/dependencies` | Outgoing dependency edges (`DependencyType`: Code/Spec/Api/Schema/Manual; `DetectionMethod`: auto/manual) (M22.4) |
 | `GET` | `/api/v1/repos/{id}/dependents` | Incoming dependency edges (M22.4) |

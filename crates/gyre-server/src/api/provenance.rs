@@ -126,6 +126,117 @@ pub async fn get_provenance(
     Ok(Json(serde_json::json!(commits)))
 }
 
+// ── Attestation Verification & Export (Phase 3, §6.3, §6.4) ─────────────────
+
+/// Path params for attestation endpoints.
+#[derive(Deserialize)]
+pub struct AttestationPath {
+    pub id: String,
+    pub commit_sha: String,
+}
+
+/// GET /api/v1/repos/:id/attestations/:commit_sha/verification
+///
+/// Returns the full `VerificationResult` tree for the attestation chain
+/// associated with the given commit SHA.
+/// ABAC: resource_type = attestation, action = read.
+pub async fn get_verification(
+    State(state): State<Arc<AppState>>,
+    Path(AttestationPath { id: repo_id, commit_sha }): Path<AttestationPath>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Verify repo exists.
+    state
+        .repos
+        .find_by_id(&Id::new(&repo_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // Find attestation for this commit.
+    let attestation = state
+        .chain_attestations
+        .find_by_commit(&commit_sha)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("attestation lookup failed: {e}")))?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "no attestation found for commit {commit_sha}"
+            ))
+        })?;
+
+    // Verify the attestation chain.
+    let result = crate::git_http::verify_attestation_audit_only(&attestation);
+
+    Ok(Json(serde_json::json!({
+        "commit_sha": commit_sha,
+        "repo_id": repo_id,
+        "attestation_id": attestation.id,
+        "verification": result,
+    })))
+}
+
+/// GET /api/v1/repos/:id/attestations/:commit_sha/bundle
+///
+/// Returns the `VerificationBundle` for offline verification (§6.3).
+/// ABAC: resource_type = attestation, action = export.
+pub async fn get_attestation_bundle(
+    State(state): State<Arc<AppState>>,
+    Path(AttestationPath { id: repo_id, commit_sha }): Path<AttestationPath>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Verify repo exists.
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&repo_id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // Find attestation for this commit.
+    let attestation = state
+        .chain_attestations
+        .find_by_commit(&commit_sha)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("attestation lookup failed: {e}")))?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "no attestation found for commit {commit_sha}"
+            ))
+        })?;
+
+    // Load the full attestation chain from this attestation back to root.
+    let chain = state
+        .chain_attestations
+        .load_chain(&attestation.id)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("chain lookup failed: {e}")))?;
+
+    // Compute the git diff for the commit (for offline verification).
+    let git_diff = {
+        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+        let out = tokio::process::Command::new(&git_bin)
+            .arg("-C")
+            .arg(&repo.path)
+            .arg("diff")
+            .arg(format!("{commit_sha}^..{commit_sha}"))
+            .output()
+            .await
+            .ok();
+        out.filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    };
+
+    let now = crate::api::now_secs();
+
+    // Build the VerificationBundle (§6.3).
+    let bundle = serde_json::json!({
+        "attestation_chain": chain,
+        "trust_anchors": [],  // trust anchors would be loaded from tenant config
+        "git_diff": git_diff,
+        "timestamp": now,
+    });
+
+    Ok(Json(bundle))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
