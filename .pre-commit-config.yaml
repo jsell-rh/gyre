@@ -64,6 +64,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: path-scope-binding
+        name: path scope binding
+        description: Verify API handlers bind Path tenant_id/workspace_id to auth context
+        entry: scripts/check-path-scope-binding.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: message-delivery
         name: message delivery parity
         description: Verify dispatch_tx sends are paired with broadcast_tx sends
