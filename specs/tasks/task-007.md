@@ -31,7 +31,7 @@ Strategy-implied constraints come from persona_constraints, meta_spec_set_sha, s
    - Log results and emit violations
    - Do NOT block the merge (audit-only)
 
-3. **Constraint violation notifications** — Create priority-3 Inbox notifications for constraint violations (alongside gate failures)
+3. **Constraint violation notifications** — Create priority-2 Inbox notifications for constraint violations (per §7.5: "priority 2 — high but not critical")
 
 4. **UI: constraint editing at approval time** — Extend the spec approval dialog:
    - Show strategy-implied constraints (read-only)
