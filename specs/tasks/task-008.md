@@ -2,7 +2,8 @@
 
 **Spec reference:** `authorization-provenance.md` §6, §7.2, §8 Phase 3  
 **Depends on:** TASK-007  
-**Progress:** `ready-for-review`
+**Progress:** `needs-revision`  
+**Review:** [specs/reviews/task-008.md](../reviews/task-008.md)
 
 ## Spec Excerpt
 
