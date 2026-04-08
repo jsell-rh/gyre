@@ -479,8 +479,7 @@ fn tool_definitions() -> Value {
                     "properties": {
                         "concept": { "type": "string", "description": "Concept name to search for (case-insensitive substring match)" },
                         "repo_id": { "type": "string", "description": "Repository ID (search within a single repo)" },
-                        "workspace_id": { "type": "string", "description": "Workspace ID (search across all repos in workspace)" },
-                        "depth": { "type": "integer", "description": "Neighbor traversal depth (default 2, max 5)" }
+                        "workspace_id": { "type": "string", "description": "Workspace ID (search across all repos in workspace)" }
                     },
                     "required": ["concept"]
                 }
@@ -1959,11 +1958,6 @@ async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
         Err(_) => return tool_error("missing required field: concept"),
     };
     let pattern = concept.to_lowercase();
-    let _depth = args
-        .get("depth")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(2)
-        .min(5);
 
     // Determine scope: repo_id or workspace_id.
     let repo_ids: Vec<String> = if let Some(repo_id) = get_str(args, "repo_id") {
@@ -2012,7 +2006,7 @@ async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
         for edge in all_edges {
             if edge.deleted_at.is_none()
                 && (matched_node_ids.contains(&edge.source_id.to_string())
-                    || matched_node_ids.contains(&edge.target_id.to_string()))
+                    && matched_node_ids.contains(&edge.target_id.to_string()))
             {
                 matched_edges.push(edge);
             }
@@ -2329,71 +2323,21 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
         }
         // Resolve `since`: explicit param > 24h fallback.
         let since = since_param.unwrap_or_else(|| now_secs().saturating_sub(24 * 3600));
-        // Collect MRs and tasks.
-        let all_mrs = state
-            .merge_requests
-            .list_by_workspace(&ws_id)
-            .await
-            .unwrap_or_default();
-        let all_tasks = state
-            .tasks
-            .list_by_workspace(&ws_id)
-            .await
-            .unwrap_or_default();
-        let completed: Vec<Value> = all_mrs
-            .iter()
-            .filter(|mr| mr.status == gyre_domain::MrStatus::Merged && mr.updated_at >= since)
-            .map(|mr| {
+        // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
+        match crate::api::graph::assemble_briefing(&state, workspace_id, since).await {
+            Ok(briefing) => {
+                let briefing_json = serde_json::to_value(&briefing)
+                    .unwrap_or_else(|e| json!({"error": e.to_string()}));
                 json!({
-                    "title": mr.title,
-                    "description": format!("{} → {}", mr.source_branch, mr.target_branch),
-                    "entity_type": "mr",
-                    "entity_id": mr.id.to_string(),
-                    "timestamp": mr.updated_at,
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&briefing_json).unwrap_or_default()
+                    }]
                 })
-            })
-            .collect();
-        let in_progress: Vec<Value> = all_tasks
-            .iter()
-            .filter(|t| {
-                (t.status == gyre_domain::TaskStatus::InProgress
-                    || t.status == gyre_domain::TaskStatus::Review)
-                    && t.updated_at >= since
-            })
-            .map(|t| {
-                json!({
-                    "title": t.title,
-                    "description": t.description.as_deref().unwrap_or(""),
-                    "entity_type": "task",
-                    "entity_id": t.id.to_string(),
-                    "timestamp": t.updated_at,
-                })
-            })
-            .collect();
-        let mrs_merged = completed.len() as u32;
-        let briefing = json!({
-            "workspace_id": workspace_id,
-            "since": since,
-            "completed": completed,
-            "in_progress": in_progress,
-            "cross_workspace": [],
-            "exceptions": [],
-            "metrics": {
-                "mrs_merged": mrs_merged,
-                "gate_runs": 0,
-                "budget_spent_usd": 0.0,
-                "budget_pct": 0,
-            },
-            "summary": "",
-            "completed_agents": [],
-        });
-        json!({
-            "contents": [{
-                "uri": uri,
-                "mimeType": "application/json",
-                "text": serde_json::to_string_pretty(&briefing).unwrap_or_default()
-            }]
-        })
+            }
+            Err(_) => json!({"error": "failed to assemble briefing"}),
+        }
     } else if let Some(rest) = uri.strip_prefix("notifications://") {
         // notifications://{workspace_id}?min_priority=&max_priority=
         let (workspace_id, min_pri, max_pri) = match rest.split_once('?') {
@@ -2425,25 +2369,10 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             .await
         {
             Ok(notifications) => {
-                let items: Vec<Value> = notifications
-                    .into_iter()
-                    .map(|n| {
-                        json!({
-                            "id": n.id.to_string(),
-                            "workspace_id": n.workspace_id.to_string(),
-                            "notification_type": n.notification_type.as_str(),
-                            "priority": n.priority,
-                            "title": n.title,
-                            "body": n.body,
-                            "entity_ref": n.entity_ref,
-                            "repo_id": n.repo_id,
-                            "resolved_at": n.resolved_at,
-                            "dismissed_at": n.dismissed_at,
-                            "created_at": n.created_at,
-                        })
-                    })
-                    .collect();
-                let result = json!({
+                // Serialize via NotificationResponse for REST parity (HSI §11).
+                let items: Vec<crate::api::users::NotificationResponse> =
+                    notifications.into_iter().map(Into::into).collect();
+                let result = json!({ // mcp-parity:ok — envelope matches REST handler's json!() at users.rs:313; items are NotificationResponse structs
                     "notifications": items,
                     "limit": 50,
                     "offset": 0,
@@ -2471,51 +2400,12 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             Ok(Some(_)) => {}
         }
         // Find the most recent trace for this MR.
+        // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
         match state.traces.get_by_mr(&mr_id_typed).await {
             Ok(Some(trace)) => {
-                let all_span_ids: std::collections::HashSet<&str> =
-                    trace.spans.iter().map(|s| s.span_id.as_str()).collect();
-                let root_spans: Vec<String> = trace
-                    .spans
-                    .iter()
-                    .filter(|s| {
-                        s.parent_span_id
-                            .as_deref()
-                            .map(|pid| !all_span_ids.contains(pid))
-                            .unwrap_or(true)
-                    })
-                    .map(|s| s.span_id.clone())
-                    .collect();
-                let spans: Vec<Value> = trace
-                    .spans
-                    .iter()
-                    .map(|s| {
-                        json!({
-                            "span_id": s.span_id,
-                            "parent_span_id": s.parent_span_id,
-                            "operation_name": s.operation_name,
-                            "service_name": s.service_name,
-                            "kind": s.kind.as_str(),
-                            "start_time": s.start_time,
-                            "duration_us": s.duration_us,
-                            "attributes": s.attributes,
-                            "input_summary": s.input_summary,
-                            "output_summary": s.output_summary,
-                            "status": s.status.as_str(),
-                            "graph_node_id": s.graph_node_id.as_ref().map(|id| id.as_str()),
-                        })
-                    })
-                    .collect();
-                let result = json!({
-                    "id": trace.id.to_string(),
-                    "mr_id": mr_id,
-                    "gate_run_id": trace.gate_run_id.to_string(),
-                    "commit_sha": trace.commit_sha,
-                    "captured_at": trace.captured_at,
-                    "span_count": spans.len(),
-                    "spans": spans,
-                    "root_spans": root_spans,
-                });
+                let response = crate::api::traces::assemble_gate_trace(trace);
+                let result = serde_json::to_value(&response)
+                    .unwrap_or_else(|e| json!({"error": e.to_string()}));
                 json!({
                     "contents": [{
                         "uri": uri,

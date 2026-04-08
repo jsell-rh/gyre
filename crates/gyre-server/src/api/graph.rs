@@ -763,44 +763,22 @@ pub async fn get_workspace_graph(
     }))
 }
 
-/// GET /api/v1/workspaces/{id}/briefing
-/// Returns the HSI-defined briefing for a workspace (HSI §9).
-/// When `?since=` is omitted, uses `last_seen_at` from `user_workspace_state` as default.
-/// Falls back to 24 hours ago if no row exists (first visit). Always returns 200.
-pub async fn get_workspace_briefing(
-    State(state): State<Arc<AppState>>,
-    auth: AuthenticatedAgent,
-    Path(id): Path<String>,
-    Query(q): Query<BriefingQuery>,
-) -> Result<Json<BriefingResponse>, ApiError> {
-    require_workspace(&state, &id).await?;
-
-    // Resolve `since`: explicit param > last_seen_at from user_workspace_state > 24h fallback.
-    let since: u64 = if let Some(s) = q.since {
-        s
-    } else if let Some(uid) = &auth.user_id {
-        let last_seen = state
-            .user_workspace_state
-            .get_last_seen(uid.as_str(), &id)
-            .await
-            .unwrap_or(None);
-        last_seen
-            .map(|ts| ts as u64)
-            .unwrap_or_else(|| now_secs().saturating_sub(24 * 3600))
-    } else {
-        now_secs().saturating_sub(24 * 3600)
-    };
-
-    // Collect MRs and tasks for this workspace.
-    let workspace_id = Id::new(&id);
+/// Core briefing assembly logic shared by both REST and MCP handlers.
+/// Collects MRs, tasks, completed agents, and builds the summary string.
+pub async fn assemble_briefing(
+    state: &AppState,
+    workspace_id: &str,
+    since: u64,
+) -> Result<BriefingResponse, ApiError> {
+    let ws_id = Id::new(workspace_id);
     let all_mrs = state
         .merge_requests
-        .list_by_workspace(&workspace_id)
+        .list_by_workspace(&ws_id)
         .await
         .unwrap_or_default();
     let all_tasks = state
         .tasks
-        .list_by_workspace(&workspace_id)
+        .list_by_workspace(&ws_id)
         .await
         .unwrap_or_default();
 
@@ -855,12 +833,11 @@ pub async fn get_workspace_briefing(
 
     // ── Completed agents section (HSI §4) ────────────────────────────────────
     // Read AgentCompleted Event-tier messages from the message bus for this workspace.
-    let ws_id_obj = Id::new(&id);
     let since_ms = since.saturating_mul(1000); // convert epoch seconds to milliseconds
     let completed_msgs = state
         .messages
         .list_by_workspace(
-            &ws_id_obj,
+            &ws_id,
             Some("agent_completed"),
             Some(since_ms),
             None,
@@ -936,8 +913,8 @@ pub async fn get_workspace_briefing(
         )
     };
 
-    Ok(Json(BriefingResponse {
-        workspace_id: id,
+    Ok(BriefingResponse {
+        workspace_id: workspace_id.to_string(),
         since,
         completed,
         in_progress,
@@ -946,7 +923,39 @@ pub async fn get_workspace_briefing(
         metrics,
         summary,
         completed_agents,
-    }))
+    })
+}
+
+/// GET /api/v1/workspaces/{id}/briefing
+/// Returns the HSI-defined briefing for a workspace (HSI §9).
+/// When `?since=` is omitted, uses `last_seen_at` from `user_workspace_state` as default.
+/// Falls back to 24 hours ago if no row exists (first visit). Always returns 200.
+pub async fn get_workspace_briefing(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+    Query(q): Query<BriefingQuery>,
+) -> Result<Json<BriefingResponse>, ApiError> {
+    require_workspace(&state, &id).await?;
+
+    // Resolve `since`: explicit param > last_seen_at from user_workspace_state > 24h fallback.
+    let since: u64 = if let Some(s) = q.since {
+        s
+    } else if let Some(uid) = &auth.user_id {
+        let last_seen = state
+            .user_workspace_state
+            .get_last_seen(uid.as_str(), &id)
+            .await
+            .unwrap_or(None);
+        last_seen
+            .map(|ts| ts as u64)
+            .unwrap_or_else(|| now_secs().saturating_sub(24 * 3600))
+    } else {
+        now_secs().saturating_sub(24 * 3600)
+    };
+
+    let briefing = assemble_briefing(&state, &id, since).await?;
+    Ok(Json(briefing))
 }
 
 /// POST /api/v1/workspaces/{id}/briefing/ask
