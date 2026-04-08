@@ -87,6 +87,68 @@ if [ -n "$HEURISTIC_HITS" ]; then
     FAIL=1
 fi
 
+# ── Check 3: Hardcoded server-derived display data ─────────────────────
+# Detect Svelte components that locally construct arrays representing
+# server-derived data (strategy-implied constraints, derived policies,
+# etc.) instead of fetching them from the server.
+#
+# The pattern: a file pushes items into a "strategy" or "implied" array
+# inside a $derived block or function body.  This means the component
+# is building a local approximation of what the server's derivation
+# function produces.  Even if the file has OTHER API calls (e.g., for
+# dry-run evaluation), the strategy/implied data itself must be fetched.
+#
+# See: specs/reviews/task-007.md F6
+
+HARDCODED_DISPLAY_HITS=""
+
+# Find files that push items into arrays named *implied* or *strategy*
+# (the hallmark of locally-constructed derived data).
+for file in $(grep -rl 'implied\.push\|strategyConstraints\s*=\s*\[' "$WEB_SRC" --include='*.svelte' --include='*.ts' 2>/dev/null || true); do
+    # Skip files with an explicit opt-out comment
+    if grep -q '// hardcoded-display:ok' "$file" 2>/dev/null; then
+        continue
+    fi
+
+    # Check if the file fetches strategy/implied data from the server.
+    # A valid fetch looks like: api.getStrategyConstraints, api.fetchImplied,
+    # fetch(...strategy...), etc.  We check for any fetch/API call whose
+    # context mentions strategy or implied or derived constraints.
+    HAS_STRATEGY_FETCH=0
+    if grep -qE '(fetch|api\.|getStrategy|fetchImplied|fetchDerived|getImplied).*([Ss]trateg|[Ii]mplied|[Dd]erived)' "$file" 2>/dev/null; then
+        HAS_STRATEGY_FETCH=1
+    fi
+    # Also check the reverse order (strategy keyword before fetch call on same/nearby lines)
+    if grep -qE '([Ss]trateg|[Ii]mplied|[Dd]erived).*(fetch|api\.|await)' "$file" 2>/dev/null; then
+        HAS_STRATEGY_FETCH=1
+    fi
+
+    if [ "$HAS_STRATEGY_FETCH" -eq 0 ]; then
+        HARDCODED_DISPLAY_HITS="$HARDCODED_DISPLAY_HITS  $file\n"
+    fi
+done
+
+if [ -n "$HARDCODED_DISPLAY_HITS" ]; then
+    echo ""
+    echo "HARDCODED SERVER-DERIVED DISPLAY DATA found:"
+    echo -e "$HARDCODED_DISPLAY_HITS"
+    echo "  These files construct strategy-implied/derived data arrays locally"
+    echo "  instead of fetching them from the server.  When a UI section displays"
+    echo "  data that is derived by server-side logic (e.g., strategy-implied"
+    echo "  constraints from workspace config, trust levels, attestation policies),"
+    echo "  the component must fetch the full set via an API call."
+    echo ""
+    echo "  A hardcoded subset (e.g., only 'meta-spec set match') hides constraints"
+    echo "  the user needs to see at approval time.  The server's derive function"
+    echo "  produces the authoritative set."
+    echo ""
+    echo "  See: specs/reviews/task-007.md F6 (hardcoded strategy-implied display)"
+    echo ""
+    echo "  Add '// hardcoded-display:ok' if genuinely intentional."
+    echo ""
+    FAIL=1
+fi
+
 # ── Result ──────────────────────────────────────────────────────────────
 
 if [ "$FAIL" -eq 0 ]; then
