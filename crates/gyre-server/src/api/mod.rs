@@ -23,6 +23,7 @@ pub mod federation;
 pub mod gates;
 pub mod graph;
 pub mod jj;
+pub mod key_binding;
 pub mod llm_config;
 pub mod llm_prompts;
 pub mod merge_deps;
@@ -51,6 +52,7 @@ pub mod stack_attest;
 pub mod tasks;
 pub mod tenants;
 pub mod traces;
+pub mod trust_anchors;
 pub mod users;
 pub mod version;
 pub mod workload;
@@ -366,6 +368,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // Auth / API keys / token introspection (M18)
         .route("/api/v1/auth/api-keys", post(auth::create_api_key))
         .route("/api/v1/auth/token-info", get(auth::token_info))
+        // Key binding (TASK-006, authorization-provenance.md §2.3)
+        .route(
+            "/api/v1/auth/key-binding",
+            post(key_binding::create_key_binding),
+        )
         // Analytics
         .route(
             "/api/v1/analytics/events",
@@ -521,6 +528,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(tenants::get_tenant)
                 .put(tenants::update_tenant)
                 .delete(tenants::delete_tenant),
+        )
+        // Trust anchors (TASK-006, authorization-provenance.md §1.1)
+        .route(
+            "/api/v1/tenants/:id/trust-anchors",
+            get(trust_anchors::list_trust_anchors).post(trust_anchors::create_trust_anchor),
+        )
+        .route(
+            "/api/v1/tenants/:id/trust-anchors/:aid",
+            get(trust_anchors::get_trust_anchor)
+                .put(trust_anchors::update_trust_anchor)
+                .delete(trust_anchors::delete_trust_anchor),
         )
         // Workspaces (M22.1)
         .route(

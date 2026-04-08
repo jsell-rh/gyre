@@ -442,6 +442,52 @@ pub async fn git_receive_pack(
                 })),
             )
             .await;
+
+        // TASK-006: Audit-only attestation chain verification (Phase 1).
+        // Run verification on pushed commits if an attestation chain exists,
+        // but only log the results — never reject.
+        if let Some(ref tid) = task_id_clone {
+            match state_clone.chain_attestations.find_by_task(tid).await {
+                Ok(attestations) if !attestations.is_empty() => {
+                    for att in &attestations {
+                        let result = verify_attestation_audit_only(att);
+                        if result.valid {
+                            tracing::info!(
+                                attestation_id = %att.id,
+                                task_id = %tid,
+                                repo_id = %repo_id_clone,
+                                label = %result.label,
+                                "attestation.verified: chain valid (audit-only)"
+                            );
+                        } else {
+                            tracing::warn!(
+                                attestation_id = %att.id,
+                                task_id = %tid,
+                                repo_id = %repo_id_clone,
+                                label = %result.label,
+                                message = %result.message,
+                                "attestation.chain_invalid: verification failed (audit-only, not rejecting)"
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        task_id = %tid,
+                        repo_id = %repo_id_clone,
+                        "no attestation chain found for task (Phase 1, non-enforcing)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %e,
+                        "failed to query attestation chain (Phase 1, non-blocking)"
+                    );
+                }
+            }
+        }
+
         // Spec lifecycle: auto-create tasks for spec changes on the default branch.
         process_spec_lifecycle(
             &state_clone,
@@ -1589,6 +1635,109 @@ pub(crate) async fn detect_dependencies_on_push(
 }
 
 // ---------------------------------------------------------------------------
+// Audit-only attestation chain verification (TASK-006, Phase 1)
+// ---------------------------------------------------------------------------
+
+/// Verify an attestation chain in audit-only mode. Returns a VerificationResult
+/// tree describing what was checked. This does NOT reject pushes — results are
+/// only logged for observability.
+fn verify_attestation_audit_only(
+    attestation: &gyre_common::Attestation,
+) -> gyre_common::VerificationResult {
+    let mut children = Vec::new();
+
+    // Check 1: Attestation has a valid input.
+    let input_valid = match &attestation.input {
+        gyre_common::AttestationInput::Signed(signed) => {
+            // Verify the signed input has a non-empty spec_path and spec_sha.
+            let spec_ok =
+                !signed.content.spec_path.is_empty() && !signed.content.spec_sha.is_empty();
+            children.push(gyre_common::VerificationResult {
+                label: "signed_input.content".to_string(),
+                valid: spec_ok,
+                message: if spec_ok {
+                    format!(
+                        "spec {}@{}",
+                        signed.content.spec_path,
+                        &signed.content.spec_sha[..8.min(signed.content.spec_sha.len())]
+                    )
+                } else {
+                    "missing spec_path or spec_sha".to_string()
+                },
+                children: vec![],
+            });
+
+            // Check key binding expiry.
+            let now = crate::api::now_secs();
+            let kb_valid = !signed.key_binding.is_expired(now);
+            children.push(gyre_common::VerificationResult {
+                label: "key_binding.expiry".to_string(),
+                valid: kb_valid,
+                message: if kb_valid {
+                    format!("expires at {}", signed.key_binding.expires_at)
+                } else {
+                    format!("expired at {} (now={})", signed.key_binding.expires_at, now)
+                },
+                children: vec![],
+            });
+
+            // Check valid_until.
+            let time_valid = now < signed.valid_until;
+            children.push(gyre_common::VerificationResult {
+                label: "signed_input.valid_until".to_string(),
+                valid: time_valid,
+                message: if time_valid {
+                    format!("valid until {}", signed.valid_until)
+                } else {
+                    format!("expired at {} (now={})", signed.valid_until, now)
+                },
+                children: vec![],
+            });
+
+            spec_ok && kb_valid && time_valid
+        }
+        gyre_common::AttestationInput::Derived(derived) => {
+            let has_parent = !derived.parent_ref.is_empty();
+            children.push(gyre_common::VerificationResult {
+                label: "derived_input.parent_ref".to_string(),
+                valid: has_parent,
+                message: if has_parent {
+                    format!(
+                        "parent: {}",
+                        hex::encode(&derived.parent_ref[..8.min(derived.parent_ref.len())])
+                    )
+                } else {
+                    "missing parent_ref".to_string()
+                },
+                children: vec![],
+            });
+            has_parent
+        }
+    };
+
+    // Check 2: Chain depth is within limits.
+    let depth_valid = attestation.metadata.chain_depth <= 10;
+    children.push(gyre_common::VerificationResult {
+        label: "chain_depth".to_string(),
+        valid: depth_valid,
+        message: format!("depth={} (max=10)", attestation.metadata.chain_depth),
+        children: vec![],
+    });
+
+    let all_valid = input_valid && depth_valid;
+    gyre_common::VerificationResult {
+        label: "attestation_chain_verification".to_string(),
+        valid: all_valid,
+        message: if all_valid {
+            "all checks passed (audit-only)".to_string()
+        } else {
+            "one or more checks failed (audit-only, not rejecting)".to_string()
+        },
+        children,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2073,5 +2222,183 @@ mod tests {
     #[test]
     fn classify_spec_change_unknown_returns_none() {
         assert!(super::classify_spec_change('X', "specs/system/foo.md", None).is_none());
+    }
+
+    // ── Audit-only verification tests (TASK-006) ─────────────────────────
+
+    #[test]
+    fn verify_attestation_audit_only_valid_signed_input() {
+        let kb = gyre_common::KeyBinding {
+            public_key: vec![1; 32],
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://keycloak.example.com".to_string(),
+            trust_anchor_id: "tenant-keycloak".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX, // far in the future
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+
+        let att = gyre_common::Attestation {
+            id: "att-1".to_string(),
+            input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
+                content: gyre_common::InputContent {
+                    spec_path: "specs/system/payments.md".to_string(),
+                    spec_sha: "abc12345".to_string(),
+                    workspace_id: "ws-1".to_string(),
+                    repo_id: "repo-1".to_string(),
+                    persona_constraints: vec![],
+                    meta_spec_set_sha: "def456".to_string(),
+                    scope: gyre_common::ScopeConstraint {
+                        allowed_paths: vec![],
+                        forbidden_paths: vec![],
+                    },
+                },
+                output_constraints: vec![],
+                valid_until: u64::MAX,
+                expected_generation: None,
+                signature: vec![30],
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![40],
+                commit_sha: "sha-abc".to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_700_000_000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: "TASK-007".to_string(),
+                agent_id: "agent-1".to_string(),
+                chain_depth: 0,
+            },
+        };
+
+        let result = super::verify_attestation_audit_only(&att);
+        assert!(result.valid, "result should be valid: {:?}", result);
+        assert_eq!(result.label, "attestation_chain_verification");
+    }
+
+    #[test]
+    fn verify_attestation_audit_only_expired_key_binding() {
+        let kb = gyre_common::KeyBinding {
+            public_key: vec![1; 32],
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://keycloak.example.com".to_string(),
+            trust_anchor_id: "tenant-keycloak".to_string(),
+            issued_at: 1_000_000_000,
+            expires_at: 1_000_000_001, // expired long ago
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+
+        let att = gyre_common::Attestation {
+            id: "att-2".to_string(),
+            input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
+                content: gyre_common::InputContent {
+                    spec_path: "specs/system/payments.md".to_string(),
+                    spec_sha: "abc12345".to_string(),
+                    workspace_id: "ws-1".to_string(),
+                    repo_id: "repo-1".to_string(),
+                    persona_constraints: vec![],
+                    meta_spec_set_sha: String::new(),
+                    scope: gyre_common::ScopeConstraint {
+                        allowed_paths: vec![],
+                        forbidden_paths: vec![],
+                    },
+                },
+                output_constraints: vec![],
+                valid_until: u64::MAX,
+                expected_generation: None,
+                signature: vec![30],
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![40],
+                commit_sha: String::new(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_000_000_000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: "TASK-008".to_string(),
+                agent_id: "agent-2".to_string(),
+                chain_depth: 0,
+            },
+        };
+
+        let result = super::verify_attestation_audit_only(&att);
+        assert!(!result.valid, "result should be invalid: {:?}", result);
+        // Check that the key_binding.expiry child reports invalid.
+        let kb_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "key_binding.expiry")
+            .expect("should have key_binding.expiry child");
+        assert!(!kb_child.valid);
+    }
+
+    #[test]
+    fn verify_attestation_audit_only_excessive_chain_depth() {
+        let kb = gyre_common::KeyBinding {
+            public_key: vec![1; 32],
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://example.com".to_string(),
+            trust_anchor_id: "test".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![],
+            platform_countersign: vec![],
+        };
+
+        let att = gyre_common::Attestation {
+            id: "att-deep".to_string(),
+            input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
+                content: gyre_common::InputContent {
+                    spec_path: "specs/system/x.md".to_string(),
+                    spec_sha: "1234567890abcdef".to_string(),
+                    workspace_id: "ws-1".to_string(),
+                    repo_id: "repo-1".to_string(),
+                    persona_constraints: vec![],
+                    meta_spec_set_sha: String::new(),
+                    scope: gyre_common::ScopeConstraint {
+                        allowed_paths: vec![],
+                        forbidden_paths: vec![],
+                    },
+                },
+                output_constraints: vec![],
+                valid_until: u64::MAX,
+                expected_generation: None,
+                signature: vec![],
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![],
+                commit_sha: String::new(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_700_000_000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: "T".to_string(),
+                agent_id: "A".to_string(),
+                chain_depth: 11, // exceeds limit of 10
+            },
+        };
+
+        let result = super::verify_attestation_audit_only(&att);
+        assert!(!result.valid);
+        let depth_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "chain_depth")
+            .expect("should have chain_depth child");
+        assert!(!depth_child.valid);
     }
 }

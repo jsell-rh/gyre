@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §2, §7.1, §8 Phase 1  
 **Depends on:** TASK-003, TASK-004, TASK-005  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 

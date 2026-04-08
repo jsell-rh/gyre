@@ -123,6 +123,11 @@ pub struct ApproveSpecRequest {
     pub signature: Option<String>,
     /// If approving as an agent persona, set this. If absent, treated as human approval.
     pub persona: Option<String>,
+    /// Optional output constraints for authorization provenance (TASK-006, §7.1).
+    #[serde(default)]
+    pub output_constraints: Vec<gyre_common::OutputConstraint>,
+    /// Optional scope constraint for authorization provenance (TASK-006, §7.1).
+    pub scope: Option<gyre_common::ScopeConstraint>,
 }
 
 #[derive(Deserialize)]
@@ -476,6 +481,122 @@ pub async fn approve_spec(
 
     // Record in approval history.
     let _ = state.spec_approval_history.record(&event).await;
+
+    // TASK-006: Produce SignedInput when a KeyBinding is available (Phase 1, non-enforcing).
+    // Look up the approver's active key binding. If none exists, skip SignedInput
+    // creation (graceful degradation for Phase 1).
+    {
+        let user_identity = &event.approver_id;
+        let active_bindings = state
+            .key_bindings
+            .find_active_by_identity(&auth.tenant_id, user_identity)
+            .await
+            .unwrap_or_default();
+
+        if let Some(key_binding) = active_bindings.into_iter().next() {
+            // Look up ledger entry for workspace_id and repo_id.
+            let entry = state
+                .spec_ledger
+                .find_by_path(&spec_path)
+                .await
+                .ok()
+                .flatten();
+            let workspace_id = entry
+                .as_ref()
+                .and_then(|e| e.workspace_id.clone())
+                .unwrap_or_default();
+            let repo_id = entry
+                .as_ref()
+                .and_then(|e| e.repo_id.clone())
+                .unwrap_or_default();
+
+            // Build persona constraints from the approval persona.
+            let persona_constraints: Vec<gyre_common::PersonaRef> = event
+                .persona
+                .as_ref()
+                .map(|p| vec![gyre_common::PersonaRef { name: p.clone() }])
+                .unwrap_or_default();
+
+            let scope = req.scope.unwrap_or_else(|| gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            });
+
+            let input_content = gyre_common::InputContent {
+                spec_path: spec_path.clone(),
+                spec_sha: req.sha.clone(),
+                workspace_id: workspace_id.clone(),
+                repo_id: repo_id.clone(),
+                persona_constraints,
+                meta_spec_set_sha: String::new(),
+                scope: scope.clone(),
+            };
+
+            // Sign the content hash with the platform key (timestamp witness).
+            let content_bytes = serde_json::to_vec(&input_content).unwrap_or_default();
+            let content_hash = {
+                use ring::digest;
+                digest::digest(&digest::SHA256, &content_bytes)
+            };
+            let signature = state.agent_signing_key.sign_bytes(content_hash.as_ref());
+
+            let signed_input = gyre_common::SignedInput {
+                content: input_content,
+                output_constraints: req.output_constraints.clone(),
+                valid_until: now + 86_400 * 30, // 30 days default validity
+                expected_generation: None,
+                signature,
+                key_binding: key_binding.clone(),
+            };
+
+            // Store as a chain attestation (root node, chain_depth = 0).
+            let attestation_id = {
+                let att_bytes = serde_json::to_vec(&signed_input).unwrap_or_default();
+                let hash = ring::digest::digest(&ring::digest::SHA256, &att_bytes);
+                hex::encode(hash.as_ref())
+            };
+
+            let attestation = gyre_common::Attestation {
+                id: attestation_id.clone(),
+                input: gyre_common::AttestationInput::Signed(signed_input),
+                output: gyre_common::AttestationOutput {
+                    content_hash: content_hash.as_ref().to_vec(),
+                    commit_sha: String::new(), // No commit yet at approval time.
+                    agent_signature: None,
+                    gate_results: vec![],
+                },
+                metadata: gyre_common::AttestationMetadata {
+                    created_at: now,
+                    workspace_id,
+                    repo_id,
+                    task_id: String::new(), // No task yet at approval time.
+                    agent_id: event.approver_id.clone(),
+                    chain_depth: 0,
+                },
+            };
+
+            if let Err(e) = state.chain_attestations.save(&attestation).await {
+                tracing::warn!(
+                    attestation_id = %attestation_id,
+                    error = %e,
+                    "failed to store SignedInput attestation (Phase 1, non-blocking)"
+                );
+            } else {
+                tracing::info!(
+                    attestation_id = %attestation_id,
+                    spec_path = %spec_path,
+                    approver = %event.approver_id,
+                    "attestation.created: SignedInput produced for spec approval"
+                );
+            }
+        } else {
+            tracing::debug!(
+                spec_path = %spec_path,
+                approver = %event.approver_id,
+                "no active KeyBinding for approver — skipping SignedInput creation (Phase 1)"
+            );
+        }
+    }
 
     // Update ledger approval_status based on new approval.
     // For simplicity: any valid approval for the current SHA sets status to Approved.
@@ -1916,5 +2037,168 @@ specs:
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("Spec Registry Index"));
         assert!(text.contains("Design Principles"));
+    }
+
+    // ── TASK-006: SignedInput on spec approval ──────────────────────────
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_creates_signed_input_when_key_binding_exists() {
+        let (app, state) = app_with_spec();
+
+        // Pre-create a KeyBinding for the approver ("user:system" when using test-token).
+        let kb = gyre_common::KeyBinding {
+            public_key: vec![42u8; 32],
+            user_identity: "user:system".to_string(),
+            issuer: "http://localhost:3000".to_string(),
+            trust_anchor_id: "tenant-idp".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+        state.key_bindings.store("default", &kb).await.unwrap();
+
+        // Approve the spec.
+        let body = serde_json::json!({
+            "sha": "a".repeat(40),
+            "output_constraints": [
+                {"name": "scope to design", "expression": "output.changed_files.all(f, f.startsWith(\"specs/\"))"}
+            ],
+            "scope": {
+                "allowed_paths": ["specs/**"],
+                "forbidden_paths": ["src/auth/**"]
+            }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Verify a chain attestation was stored (SignedInput root node).
+        // The attestation is stored by the spec approval handler.
+        // Query by task_id won't work here (task_id is empty at approval time),
+        // but we can check the repo's chain attestations.
+        // Use find_by_repo with a wide time range.
+        let attestations = state
+            .chain_attestations
+            .find_by_repo("", 0, u64::MAX)
+            .await
+            .unwrap();
+        assert!(
+            !attestations.is_empty(),
+            "should have stored a SignedInput attestation"
+        );
+
+        let att = &attestations[0];
+        match &att.input {
+            gyre_common::AttestationInput::Signed(signed) => {
+                assert_eq!(signed.content.spec_path, "system/design-principles.md");
+                assert_eq!(signed.content.spec_sha, "a".repeat(40));
+                assert_eq!(signed.output_constraints.len(), 1);
+                assert_eq!(signed.output_constraints[0].name, "scope to design");
+                assert_eq!(signed.content.scope.allowed_paths, vec!["specs/**"]);
+                assert_eq!(signed.content.scope.forbidden_paths, vec!["src/auth/**"]);
+                assert_eq!(att.metadata.chain_depth, 0);
+            }
+            _ => panic!("expected SignedInput, got DerivedInput"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_without_key_binding_skips_signed_input() {
+        let (app, state) = app_with_spec();
+
+        // No KeyBinding pre-created → should skip SignedInput.
+        let body = serde_json::json!({
+            "sha": "b".repeat(40),
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // No chain attestation should have been stored.
+        let attestations = state
+            .chain_attestations
+            .find_by_repo("", 0, u64::MAX)
+            .await
+            .unwrap();
+        assert!(
+            attestations.is_empty(),
+            "should not store attestation without KeyBinding"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_with_constraints_and_no_scope() {
+        let (app, state) = app_with_spec();
+
+        // Create KeyBinding.
+        let kb = gyre_common::KeyBinding {
+            public_key: vec![99u8; 32],
+            user_identity: "user:system".to_string(),
+            issuer: "http://localhost:3000".to_string(),
+            trust_anchor_id: "tenant-idp".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![],
+            platform_countersign: vec![],
+        };
+        state.key_bindings.store("default", &kb).await.unwrap();
+
+        // Approve with output_constraints but no scope.
+        let body = serde_json::json!({
+            "sha": "c".repeat(40),
+            "output_constraints": [
+                {"name": "no new deps", "expression": "output.changed_files.all(f, f != \"Cargo.toml\")"}
+            ]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let attestations = state
+            .chain_attestations
+            .find_by_repo("", 0, u64::MAX)
+            .await
+            .unwrap();
+        assert_eq!(attestations.len(), 1);
+        match &attestations[0].input {
+            gyre_common::AttestationInput::Signed(signed) => {
+                assert_eq!(signed.output_constraints.len(), 1);
+                // Default scope: no allowed/forbidden paths.
+                assert!(signed.content.scope.allowed_paths.is_empty());
+                assert!(signed.content.scope.forbidden_paths.is_empty());
+            }
+            _ => panic!("expected SignedInput"),
+        }
     }
 }

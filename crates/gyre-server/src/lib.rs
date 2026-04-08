@@ -272,6 +272,12 @@ pub struct AppState {
     pub spec_policies: Arc<dyn gyre_ports::SpecPolicyRepository>,
     /// Merge attestation bundles (persisted).
     pub attestation_store: Arc<dyn gyre_ports::AttestationRepository>,
+    /// Authorization provenance attestation chains (TASK-006).
+    pub chain_attestations: Arc<dyn gyre_ports::ChainAttestationRepository>,
+    /// Ephemeral key bindings for authorization provenance (TASK-006).
+    pub key_bindings: Arc<dyn gyre_ports::KeyBindingRepository>,
+    /// Trust anchors for authorization provenance (TASK-006).
+    pub trust_anchors: Arc<dyn gyre_ports::TrustAnchorRepository>,
     /// Trusted remote Gyre base URLs for cross-instance JWT federation (G11).
     /// Populated from `GYRE_TRUSTED_ISSUERS` (comma-separated list of base URLs).
     pub trusted_issuers: Vec<String>,
@@ -857,6 +863,18 @@ pub fn build_state(
         attestation_store: store!(
             dyn AttestationRepository,
             mem::MemAttestationRepository::default()
+        ),
+        chain_attestations: store!(
+            dyn gyre_ports::ChainAttestationRepository,
+            mem::MemChainAttestationRepository::default()
+        ),
+        key_bindings: store!(
+            dyn gyre_ports::KeyBindingRepository,
+            mem::MemKeyBindingRepository::default()
+        ),
+        trust_anchors: store!(
+            dyn gyre_ports::TrustAnchorRepository,
+            mem::MemTrustAnchorRepository::default()
         ),
         trusted_issuers: std::env::var("GYRE_TRUSTED_ISSUERS")
             .ok()

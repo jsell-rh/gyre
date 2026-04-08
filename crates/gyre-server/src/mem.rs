@@ -2816,6 +2816,9 @@ pub fn test_state() -> Arc<crate::AppState> {
         spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
         spec_policies: Arc::new(MemSpecPolicyRepository::default()),
         attestation_store: Arc::new(MemAttestationRepository::default()),
+        chain_attestations: Arc::new(MemChainAttestationRepository::default()),
+        key_bindings: Arc::new(MemKeyBindingRepository::default()),
+        trust_anchors: Arc::new(MemTrustAnchorRepository::default()),
         trusted_issuers: vec![],
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
@@ -3399,5 +3402,221 @@ impl gyre_ports::MetaSpecBindingRepository for MemMetaSpecBindingRepository {
             .await
             .iter()
             .any(|b| &b.meta_spec_id == meta_spec_id))
+    }
+}
+
+// ── In-memory ChainAttestationRepository ────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemChainAttestationRepository {
+    store: Arc<Mutex<Vec<gyre_common::Attestation>>>,
+}
+
+#[async_trait]
+impl gyre_ports::ChainAttestationRepository for MemChainAttestationRepository {
+    async fn save(&self, attestation: &gyre_common::Attestation) -> Result<()> {
+        let mut store = self.store.lock().await;
+        store.retain(|a| a.id != attestation.id);
+        store.push(attestation.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &str) -> Result<Option<gyre_common::Attestation>> {
+        Ok(self.store.lock().await.iter().find(|a| a.id == id).cloned())
+    }
+
+    async fn load_chain(&self, leaf_id: &str) -> Result<Vec<gyre_common::Attestation>> {
+        let store = self.store.lock().await;
+        let mut chain = Vec::new();
+        let mut current_id = Some(leaf_id.to_string());
+        while let Some(id) = current_id.take() {
+            if let Some(att) = store.iter().find(|a| a.id == id) {
+                current_id = match &att.input {
+                    gyre_common::AttestationInput::Derived(d) => Some(hex::encode(&d.parent_ref)),
+                    _ => None,
+                };
+                chain.push(att.clone());
+            }
+        }
+        chain.reverse(); // root to leaf
+        Ok(chain)
+    }
+
+    async fn find_by_task(&self, task_id: &str) -> Result<Vec<gyre_common::Attestation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|a| a.metadata.task_id == task_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_commit(&self, commit_sha: &str) -> Result<Option<gyre_common::Attestation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|a| a.output.commit_sha == commit_sha)
+            .cloned())
+    }
+
+    async fn find_by_repo(
+        &self,
+        repo_id: &str,
+        since: u64,
+        until: u64,
+    ) -> Result<Vec<gyre_common::Attestation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|a| {
+                a.metadata.repo_id == repo_id
+                    && a.metadata.created_at >= since
+                    && a.metadata.created_at <= until
+            })
+            .cloned()
+            .collect())
+    }
+}
+
+// ── In-memory KeyBindingRepository ──────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemKeyBindingRepository {
+    store: Arc<Mutex<Vec<(String, gyre_common::KeyBinding, bool)>>>, // (tenant_id, binding, invalidated)
+}
+
+#[async_trait]
+impl gyre_ports::KeyBindingRepository for MemKeyBindingRepository {
+    async fn store(&self, tenant_id: &str, binding: &gyre_common::KeyBinding) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .push((tenant_id.to_string(), binding.clone(), false));
+        Ok(())
+    }
+
+    async fn find_by_public_key(
+        &self,
+        tenant_id: &str,
+        public_key: &[u8],
+    ) -> Result<Option<gyre_common::KeyBinding>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|(tid, kb, inv)| tid == tenant_id && kb.public_key == public_key && !inv)
+            .map(|(_, kb, _)| kb.clone()))
+    }
+
+    async fn find_active_by_identity(
+        &self,
+        tenant_id: &str,
+        user_identity: &str,
+    ) -> Result<Vec<gyre_common::KeyBinding>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|(tid, kb, inv)| {
+                tid == tenant_id && kb.user_identity == user_identity && !inv && !kb.is_expired(now)
+            })
+            .map(|(_, kb, _)| kb.clone())
+            .collect())
+    }
+
+    async fn invalidate(&self, tenant_id: &str, public_key: &[u8]) -> Result<()> {
+        for entry in self.store.lock().await.iter_mut() {
+            if entry.0 == tenant_id && entry.1.public_key == public_key {
+                entry.2 = true;
+            }
+        }
+        Ok(())
+    }
+
+    async fn invalidate_all_for_identity(
+        &self,
+        tenant_id: &str,
+        user_identity: &str,
+    ) -> Result<()> {
+        for entry in self.store.lock().await.iter_mut() {
+            if entry.0 == tenant_id && entry.1.user_identity == user_identity {
+                entry.2 = true;
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── In-memory TrustAnchorRepository ─────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemTrustAnchorRepository {
+    store: Arc<Mutex<Vec<(String, gyre_common::TrustAnchor)>>>, // (tenant_id, anchor)
+}
+
+#[async_trait]
+impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
+    async fn create(&self, tenant_id: &str, anchor: &gyre_common::TrustAnchor) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .push((tenant_id.to_string(), anchor.clone()));
+        Ok(())
+    }
+
+    async fn find_by_id(
+        &self,
+        tenant_id: &str,
+        anchor_id: &str,
+    ) -> Result<Option<gyre_common::TrustAnchor>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|(tid, a)| tid == tenant_id && a.id == anchor_id)
+            .map(|(_, a)| a.clone()))
+    }
+
+    async fn list_by_tenant(&self, tenant_id: &str) -> Result<Vec<gyre_common::TrustAnchor>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|(tid, _)| tid == tenant_id)
+            .map(|(_, a)| a.clone())
+            .collect())
+    }
+
+    async fn update(&self, tenant_id: &str, anchor: &gyre_common::TrustAnchor) -> Result<()> {
+        let mut store = self.store.lock().await;
+        if let Some(entry) = store
+            .iter_mut()
+            .find(|(tid, a)| tid == tenant_id && a.id == anchor.id)
+        {
+            entry.1 = anchor.clone();
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, tenant_id: &str, anchor_id: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .retain(|(tid, a)| !(tid == tenant_id && a.id == anchor_id));
+        Ok(())
     }
 }
