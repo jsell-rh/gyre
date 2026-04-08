@@ -152,7 +152,21 @@ Before marking a task `ready-for-review`, verify:
     - **Signatures:** If the handler accepts a `user_signature` or similar field, it must call the corresponding verify function (e.g., `ed25519_verify(public_key, message, signature)`) against the claimed public key and the canonical message. Decoding the signature bytes from base64 and storing them without verification allows any caller to claim ownership of any public key.
     - **Hashes/digests:** If the handler accepts a content hash, it must recompute the hash from the content and compare. Accepting and storing an unverified hash allows callers to submit incorrect digests.
     - **Certificates/proofs:** If the handler accepts a certificate chain or proof, it must validate the chain against a trust anchor. Parsing the certificate format without chain validation provides no security.
-    - **Verification procedure:** For every handler that accepts a field with a cryptographic name (`signature`, `hash`, `digest`, `mac`, `proof`, `certificate`), grep the function body for verification function calls (`verify`, `verify_signature`, `check_signature`, `validate`). If the handler decodes/deserializes the material but never calls a verification function, it is a "decode without verify" flaw. This flaw class is dangerous because the code appears to handle security correctly — it checks formats, validates lengths, rejects malformed input — but never performs the actual cryptographic check.
+    - **Verification procedure:** For every handler that accepts a field with a cryptographic name (`signature`, `hash`, `digest`, `mac`, `proof`, `certificate`), grep the function body for verification function calls (`verify`, `verify_signature`, `check_signature`, `validate`). If the handler decodes/deserializes the material but never calls a verification function, it is a "decode without verify" flaw. This flaw class is dangerous because the code appears to handle security correctly — it checks formats, validates lengths, rejects malformed input — but never performs the actual cryptographic check. Run `scripts/check-crypto-verify.sh` — it mechanically detects this flaw class. **This script is enforced by the pre-commit hook — your commit will fail if it reports violations.**
+28. **Signing entity correctness — who signs what:** When a spec defines a signed data structure (e.g., `SignedInput`, `KeyBinding`, attestation nodes), verify that the **correct entity** produces the signature. The spec will state who signs: user, platform, or both. A `SignedInput.signature` that the spec says must be user-signed MUST NOT be produced with the platform's signing key — even if the code structurally produces a valid signature. The security property at stake is typically non-repudiation or non-forgeability: "a compromised platform cannot forge a user's authorization" requires that the user's private key (not the platform's) produces the signature. Specifically:
+    - **Read the spec's signing model.** For each signed field, identify: (a) who holds the private key, (b) what message is signed, (c) what public key verifies it. If the spec says "user signs with ephemeral key from KeyBinding," the signature must be produced client-side and submitted in the request — the server cannot produce it.
+    - **Platform-signed vs. user-signed fields:** A single data structure may contain BOTH platform-signed and user-signed fields (e.g., `platform_countersignature` vs `user_signature`). Do not conflate them. If the spec defines separate signing steps for different entities, your code must have separate signing paths.
+    - **Verification procedure:** For every `sign_bytes`, `sign`, or signature-production call in your code, identify (a) which key is signing, and (b) which field the signature is stored in. Then read the spec to confirm that key is the correct signer for that field. If the spec says "user signature" but your code uses `state.agent_signing_key` (the platform key), that is a signing entity mismatch — the platform can forge user authorizations.
+29. **Event/message payload spec conformance:** When emitting events, notifications, or messages with structured payloads, verify every field the spec requires is present in the payload. Open the spec section that defines the event kind (e.g., `ConstraintViolation` in §7.5) and enumerate every required field. Then read your payload construction code and confirm each field is present. Common failure modes:
+    - **Field substitution:** The payload includes a field not in the spec schema (e.g., `task_id`) but omits a spec-required field (e.g., `attestation_id`). The substituted field may seem equivalent but breaks consumers that expect the spec schema.
+    - **Missing context fields:** Specs often require a snapshot of evaluation context (e.g., `context_snapshot`) for forensic tracing. These are easy to overlook because the code "works" without them — violations are logged, notifications sent — but the payload is incomplete for debugging.
+    - **Verification procedure:** For each event emission in your code, find the spec definition of that event kind. List every field the spec requires. Check each one off against your payload construction. If a spec field is missing, add it.
+30. **Task file is not source of truth for literal values:** Task files are decomposition artifacts that may contain transcription errors. When a task file specifies a literal value (priority number, field name, endpoint URL, enum variant, constant), **always verify against the spec** before using it in code. If the task says "priority-3" but the spec says "priority 2", follow the spec. Specifically:
+    - **Priority/severity values:** Check the spec section that defines the notification or event type for the correct priority.
+    - **Endpoint URLs:** Check `docs/api-reference.md` and `gyre-server/src/api/mod.rs` for the actual route.
+    - **Field names and types:** Check the spec's type definition, not the task's paraphrase of it.
+    - **When in doubt, cite the spec section number** in a code comment to document which spec statement you followed.
+31. **No hardcoded values where runtime context is available:** When constructing data structures that include configurable or context-dependent values (e.g., `default_branch`, `base_url`, `timezone`), use the runtime value from the calling context — not a hardcoded string literal. Common failure mode: a function that builds a `TargetContext` hardcodes `default_branch: "main".to_string()` even though the repository's actual `default_branch` is available in the calling function. This produces silently wrong results for any non-default configuration. Run `scripts/check-hardcoded-defaults.sh` — it mechanically detects known hardcoded-default patterns. **This script is enforced by the pre-commit hook.** If a hardcoded value is genuinely intentional (e.g., default for newly created repos), add `// hardcoded-default:ok` to exempt it.
 
 ## Workflow
 
@@ -175,12 +189,25 @@ When a task has status `needs-revision`, the review file contains specific findi
 - Understand what the finding says is wrong and what the fix should be.
 - Implement the fix.
 - **Immediately verify** the fix addresses the finding: re-read the finding text, then re-read your changed code, and confirm the specific flaw described is no longer present.
+- **Do not skip findings.** If a finding says "code not fixed" from a prior round, the code MUST be changed. A process-revision patch (e.g., adding a checklist item or check script) does not fix the implementation — it prevents future occurrences. The implementation agent must fix the code itself.
 
 **Step 3 — Cross-verify all findings.** After addressing all findings individually, do a final pass:
 - Re-read the entire review file from top to bottom.
 - For each finding (including ones already marked `[x]` from prior rounds), verify the current code does not re-introduce the flaw.
 - For each open finding you just fixed, verify your fix is complete — not partial.
 
-**Step 4 — Run the full self-verification checklist.** Even though this is a revision, run all checklist items — prior fixes may have introduced new issues (e.g., a stale doc comment after changing a response shape).
+**Step 4 — Run ALL check scripts and verify they pass.** This is mandatory for needs-revision tasks. Run each script and confirm zero violations:
+```bash
+scripts/check-arch.sh
+scripts/check-tenant-filter.sh
+scripts/check-path-scope-binding.sh
+scripts/check-crypto-verify.sh
+scripts/check-hardcoded-defaults.sh
+scripts/check-api-auth.sh
+scripts/check-type-simplification.sh
+```
+If any script reports violations, fix them before proceeding. **Do not commit with check script violations.** These scripts exist because prior review rounds found flaws that the checklist alone did not prevent — they are the mechanical backstop.
 
-**Step 5 — Proceed to step 5 of the main workflow** (update status to `ready-for-review`).
+**Step 5 — Run the full self-verification checklist.** Even though this is a revision, run all checklist items — prior fixes may have introduced new issues (e.g., a stale doc comment after changing a response shape).
+
+**Step 6 — Proceed to step 5 of the main workflow** (update status to `ready-for-review`).

@@ -87,6 +87,22 @@ repos:
         language: script
         pass_filenames: false
 
+      - id: crypto-verify
+        name: crypto verify lint
+        description: Verify handlers that decode crypto input also perform cryptographic verification
+        entry: scripts/check-crypto-verify.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: hardcoded-defaults
+        name: hardcoded defaults lint
+        description: Detect hardcoded string defaults where runtime values should be used
+        entry: scripts/check-hardcoded-defaults.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
