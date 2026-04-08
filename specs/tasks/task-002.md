@@ -42,13 +42,13 @@ The CLI (`crates/gyre-cli/src/main.rs`) currently supports:
    - Output: table of unresolved notifications with priority, type, title, age
    - Sub-commands: `gyre inbox dismiss <id>`, `gyre inbox resolve <id>`
 
-3. **`gyre explore`** — `GET /api/v1/repos/:id/graph?concept=<name>` or `GET /api/v1/workspaces/:id/graph`
+3. **`gyre explore`** — `GET /api/v1/repos/:id/graph/concept/:concept_name` or `GET /api/v1/workspaces/:id/graph/concept/:concept_name`
    - Args: `<concept>` (positional), `--repo <name>`, `--workspace <slug>`
    - Output: table of matching graph nodes with type, name, qualified_name, spec linkage
 
 4. **`gyre trace`** — `GET /api/v1/merge-requests/:id/trace`
    - Args: `<mr-id>` (positional)
-   - Output: chronological SDLC timeline (spec triggers, agent spawns, pushes, gates, merges)
+   - Output: gate trace data (spans, root_spans, service_graph, commit_sha, gate_run_id)
 
 5. **`gyre spec assist`** — `POST /api/v1/repos/:repo_id/specs/assist`
    - Args: `<path>` (positional), `<instruction>` (positional or `--instruction`)
