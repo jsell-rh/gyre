@@ -1,8 +1,8 @@
 # Review: TASK-005 — CEL Constraint Evaluator
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-08 (R1)  
-**Verdict:** needs-revision
+**Date:** 2026-04-08 (R1), 2026-04-08 (R2)  
+**Verdict:** complete
 
 ---
 
@@ -22,3 +22,7 @@
   The test `derive_multiple_persona_constraints` (line 776) validates the broken behavior: it asserts that two separate index-based constraints are generated, but never evaluates them against a CEL context to discover the contradiction.  
   Fix: Replace the per-entry loop with a single membership constraint: `input.persona_constraints.exists(p, p.name == agent.persona)`. This evaluates to true if the agent's persona matches ANY entry in the list — the only interpretation that is semantically coherent for a scalar `agent.persona` field. Update the test to evaluate the generated constraint against a context with multiple persona entries and a matching agent.  
   **Files:** `crates/gyre-domain/src/constraint_evaluator.rs:272-277` (broken loop), `crates/gyre-domain/src/constraint_evaluator.rs:776-798` (test validates broken behavior), spec §3.2 lines 203-207 (persona constraint definition), spec §2.2 line 107 (`PersonaRef[]` type).
+
+## R2 — Verification of F1 Fix
+
+F1 fix verified in commits `81f4fba9` and `950ae59a`. Per-entry persona loop replaced with single membership constraint `input.persona_constraints.exists(p, p.name == agent.persona)`. Round-trip evaluation tests added (match and non-match cases). All 43 constraint evaluator tests pass. No new findings. Task complete.
