@@ -19,8 +19,7 @@ Attestations are stored in the database, indexed by content hash, task_id, repo_
 2. Implement SQLite adapter for `ChainAttestationRepository` (implement `load_chain` as recursive parent_ref walk)
 3. Implement SQLite adapter for `TrustAnchorRepository`
 4. Implement SQLite adapter for `KeyBindingRepository`
-5. Implement PostgreSQL adapters for all three
-6. Add integration tests
+5. Add integration tests
 
 ## Acceptance Criteria
 
@@ -28,7 +27,6 @@ Attestations are stored in the database, indexed by content hash, task_id, repo_
 - [ ] SQLite `ChainAttestationRepository` adapter passes tests
 - [ ] SQLite `TrustAnchorRepository` adapter passes tests
 - [ ] SQLite `KeyBindingRepository` adapter passes tests
-- [ ] PostgreSQL adapters implemented
 - [ ] `load_chain` correctly walks parent_ref to reconstruct full chain
 - [ ] `cargo test --all` passes
 
