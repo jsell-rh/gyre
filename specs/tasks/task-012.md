@@ -81,4 +81,5 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `2bc7f950` feat(git-ops): add read_file method to GitOpsPort (TASK-012)
+- `6cde0c8e` feat(specs-assist): real LLM integration with {diff, explanation} response (TASK-012)
