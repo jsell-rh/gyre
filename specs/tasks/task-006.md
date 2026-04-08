@@ -2,8 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §2, §7.1, §8 Phase 1  
 **Depends on:** TASK-003, TASK-004, TASK-005  
-**Progress:** `needs-revision`  
-**Review:** [`specs/reviews/task-006.md`](../reviews/task-006.md)
+**Progress:** `ready-for-review`  
+**Review:** [`specs/reviews/task-006.md`](../reviews/task-006.md)  
+**Note:** R1 found two findings (F1: tenant isolation, F2: signature verification). Fix committed `28e517d7`. Awaiting R2 verification.
 
 ## Spec Excerpt
 
@@ -60,3 +61,4 @@ When working on this task:
 ## Git Commits
 
 - `aa3e6fbe` feat(server): implement authorization provenance Phase 1 — key binding, signed input, trust anchors (TASK-006)
+- `28e517d7` fix(process): add path scope binding check and crypto verification guidance (TASK-006)
