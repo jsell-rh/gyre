@@ -1,7 +1,7 @@
 # Review: TASK-002 — CLI HSI Parity Commands
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R7)  
+**Date:** 2026-04-07 (R8)  
 **Verdict:** needs-revision
 
 ---
@@ -91,3 +91,11 @@
 - [-] [process-revision-complete] **F18 — Briefing items display only `title`, silently dropping `description`, `spec_path`, and other fields.**  
   The spec §9 (lines 1253-1283) shows each briefing item with detailed content — descriptions ("cargo test failed (3 tests). Agent retried once, still failing."), spec references ("spec: payment-retry.md"), and agent attribution. The server's `BriefingItem` (graph.rs:260-267) includes `description: String`, `spec_path: Option<String>`, `entity_type: String`, `entity_id: Option<String>`, and `timestamp: u64`. The CLI renders only `item["title"]` for all sections (main.rs:986, 998, 1010), discarding every other field. For exceptions, the user sees only a title like "Gate failure: billing-service MR #47" with no indication of what failed or how to respond. For completed items, there is no spec reference or description of what was accomplished. HSI §11 requires CLI parity with the UI — the UI displays these fields. Fix: render `description` below the title when non-empty, append `(spec: {spec_path})` when present, and include `timestamp` for ordering context. The display should match the spec §9 structure at minimum.  
   **Files:** `crates/gyre-cli/src/main.rs:982-1015` (all section rendering loops).
+
+## R8 Findings
+
+- [ ] **F17 (still open — third round).** `print_briefing` still omits the `cross_workspace` section. The function at main.rs:973-1028 is unchanged since R7. The server's `BriefingResponse` (graph.rs:250) includes `cross_workspace: Vec<BriefingItem>` and the HSI §9 narrative (line 1270) explicitly defines a CROSS-WORKSPACE section. The CLI still has no code path to render these items.  
+  **Files:** `crates/gyre-cli/src/main.rs:973-1028`.
+
+- [ ] **F18 (still open — third round).** Briefing items still display only `title`. All four section rendering loops (main.rs:986, 998, 1010 for completed/in_progress/exceptions) print only `item["title"]`. The server's `BriefingItem` (graph.rs:260-267) provides `description: String`, `spec_path: Option<String>`, `entity_type: String`, `entity_id: Option<String>`, and `timestamp: u64` — all silently discarded. HSI §9's briefing narrative (lines 1253-1283) shows descriptions, spec references, and action prompts for each item.  
+  **Files:** `crates/gyre-cli/src/main.rs:982-1015`.
