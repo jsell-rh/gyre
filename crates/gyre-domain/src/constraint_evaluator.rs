@@ -268,11 +268,19 @@ pub fn derive_strategy_constraints(
 ) -> Vec<OutputConstraint> {
     let mut constraints = Vec::new();
 
-    // §3.2 — From persona_constraints: agent must run the specified persona.
-    for (i, persona_ref) in content.persona_constraints.iter().enumerate() {
+    // §3.2 — From persona_constraints: agent persona must match one of the
+    // required personas.  Uses a single membership constraint so that multiple
+    // persona entries are satisfiable (a scalar `agent.persona` cannot equal
+    // two different values simultaneously under AND semantics).
+    if !content.persona_constraints.is_empty() {
+        let names: Vec<&str> = content
+            .persona_constraints
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
         constraints.push(OutputConstraint {
-            name: format!("strategy: agent persona must match '{}'", persona_ref.name),
-            expression: format!("agent.persona == input.persona_constraints[{}].name", i),
+            name: format!("strategy: agent persona must match one of {:?}", names),
+            expression: "input.persona_constraints.exists(p, p.name == agent.persona)".to_string(),
         });
     }
 
@@ -688,7 +696,7 @@ mod tests {
             .expect("should derive persona constraint");
         assert_eq!(
             persona.expression,
-            "agent.persona == input.persona_constraints[0].name"
+            "input.persona_constraints.exists(p, p.name == agent.persona)"
         );
     }
 
@@ -773,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_multiple_persona_constraints() {
+    fn derive_multiple_persona_constraints_produces_single_membership_constraint() {
         let mut content = sample_input_content();
         content.persona_constraints = vec![
             PersonaRef {
@@ -788,13 +796,73 @@ mod tests {
             .iter()
             .filter(|c| c.name.contains("persona"))
             .collect();
-        assert_eq!(persona_constraints.len(), 2);
-        assert!(persona_constraints[0]
-            .expression
-            .contains("persona_constraints[0]"));
-        assert!(persona_constraints[1]
-            .expression
-            .contains("persona_constraints[1]"));
+        // Must produce a single membership constraint, not one per entry.
+        assert_eq!(persona_constraints.len(), 1);
+        assert_eq!(
+            persona_constraints[0].expression,
+            "input.persona_constraints.exists(p, p.name == agent.persona)"
+        );
+    }
+
+    #[test]
+    fn multi_persona_constraint_passes_when_agent_matches_one() {
+        // An agent with persona "security" should satisfy a constraint list
+        // containing ["security", "compliance"] — the agent matches one entry.
+        let mut content = sample_input_content();
+        content.persona_constraints = vec![
+            PersonaRef {
+                name: "security".to_string(),
+            },
+            PersonaRef {
+                name: "compliance".to_string(),
+            },
+        ];
+        let output = sample_output_context();
+        let agent = sample_agent_context(); // persona = "security"
+        let target = sample_target_context();
+        let ci = make_constraint_input(&content, &output, &agent, &target);
+        let ctx = build_cel_context(&ci).unwrap();
+
+        let strategy = derive_strategy_constraints(&content, None, None);
+        let persona = strategy
+            .iter()
+            .find(|c| c.name.contains("persona"))
+            .expect("should have persona constraint");
+        let result = evaluate_constraint(persona, &ctx).unwrap();
+        assert!(
+            result,
+            "agent with persona 'security' should satisfy ['security', 'compliance']"
+        );
+    }
+
+    #[test]
+    fn multi_persona_constraint_fails_when_agent_matches_none() {
+        let mut content = sample_input_content();
+        content.persona_constraints = vec![
+            PersonaRef {
+                name: "security".to_string(),
+            },
+            PersonaRef {
+                name: "compliance".to_string(),
+            },
+        ];
+        let output = sample_output_context();
+        let mut agent = sample_agent_context();
+        agent.persona = "developer".to_string(); // Matches neither entry.
+        let target = sample_target_context();
+        let ci = make_constraint_input(&content, &output, &agent, &target);
+        let ctx = build_cel_context(&ci).unwrap();
+
+        let strategy = derive_strategy_constraints(&content, None, None);
+        let persona = strategy
+            .iter()
+            .find(|c| c.name.contains("persona"))
+            .expect("should have persona constraint");
+        let result = evaluate_constraint(persona, &ctx).unwrap();
+        assert!(
+            !result,
+            "agent with persona 'developer' should NOT satisfy ['security', 'compliance']"
+        );
     }
 
     #[test]

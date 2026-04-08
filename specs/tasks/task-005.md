@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §3  
 **Depends on:** TASK-003 (domain types)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [specs/reviews/task-005.md](../reviews/task-005.md)
 
 ## Spec Excerpt

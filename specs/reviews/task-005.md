@@ -8,7 +8,7 @@
 
 ## R1 Findings
 
-- [-] [process-revision-complete] **F1 — Multiple persona constraints generate logically unsatisfiable CEL expressions — all-must-pass semantics make multi-persona authorization impossible.**  
+- [x] [process-revision-complete] **F1 — Multiple persona constraints generate logically unsatisfiable CEL expressions — all-must-pass semantics make multi-persona authorization impossible.**  
   The spec (authorization-provenance.md §2.2, line 107) defines `persona_constraints: PersonaRef[]` with the note `-- required persona(s) for implementation`, indicating multiple personas are valid. The spec (§3.2, lines 203-207) shows only a single-entry example: `agent.persona == input.persona_constraints[0].name`. The implementation (`constraint_evaluator.rs:272-277`) handles multiple entries by generating one equality constraint per entry:  
   ```rust
   for (i, persona_ref) in content.persona_constraints.iter().enumerate() {
