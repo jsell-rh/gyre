@@ -2,9 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §6, §7.2, §8 Phase 3  
 **Depends on:** TASK-007  
-**Progress:** `ready-for-review`  
+**Progress:** `needs-revision`  
 **Review:** [specs/reviews/task-008.md](../reviews/task-008.md)  
-**Note:** R1 — all 4 findings addressed in commit `717c97bd`. Awaiting R2.
+**Note:** R2 — 2 findings: F1 persists (signing entity mismatch), F5 new (verification endpoint incomplete). F2–F4 resolved.
 
 ## Spec Excerpt
 

@@ -2,7 +2,9 @@
 
 **Spec reference:** `authorization-provenance.md` §4, §5.2, §7.3, §8 Phase 4  
 **Depends on:** TASK-008  
-**Progress:** `ready-for-review`
+**Progress:** `needs-revision`  
+**Review:** [specs/reviews/task-009.md](../reviews/task-009.md)  
+**Note:** R1 — 4 findings: DerivedInput signature not verified (F1), AIBOM summary vs full chain (F2), ProvenanceChain dead code (F3), stale audit-only messages (F4).
 
 ## Spec Excerpt
 
