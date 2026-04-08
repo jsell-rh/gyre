@@ -103,6 +103,22 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: event-payload
+        name: event payload lint
+        description: Verify event payloads include all spec-required fields
+        entry: scripts/check-event-payload.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: notification-priority
+        name: notification priority lint
+        description: Verify notification priorities match spec-defined values
+        entry: scripts/check-notification-priority.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
