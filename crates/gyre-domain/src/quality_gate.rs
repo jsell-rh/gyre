@@ -3,6 +3,10 @@
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
 
+// Re-export GateType and GateStatus from gyre-common so that existing
+// `use gyre_domain::{GateType, GateStatus}` paths continue to resolve.
+pub use gyre_common::{GateStatus, GateType};
+
 /// A quality check that must pass before an MR can be merged.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QualityGate {
@@ -27,36 +31,6 @@ pub struct QualityGate {
 
 fn default_required() -> bool {
     true
-}
-
-/// Discriminant for a quality gate check type.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateType {
-    /// Run a test command; passes when exit code == 0.
-    TestCommand,
-    /// Run a lint command; passes when exit code == 0.
-    LintCommand,
-    /// Require N or more approved reviews.
-    RequiredApprovals,
-    /// Spawn a review agent that examines the MR diff and spec; passes when approved.
-    AgentReview,
-    /// Spawn a validation agent for domain-specific checks; passes when agent reports pass.
-    AgentValidation,
-    /// Observational gate: captures OTel spans from the integration test run.
-    /// Always passes — trace capture is not a quality gate, it is observability.
-    /// Configuration fields: otlp_port, test_command, max_spans, capture_external.
-    TraceCapture,
-}
-
-/// Execution status of one gate check for a specific MR.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateStatus {
-    Pending,
-    Running,
-    Passed,
-    Failed,
 }
 
 /// The result of running one quality gate against one MR.

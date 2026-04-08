@@ -2,6 +2,7 @@ pub mod attestation;
 pub mod completion;
 pub mod conversation;
 pub mod error;
+pub mod gate;
 pub mod graph;
 pub mod id;
 pub mod key_binding;
@@ -20,6 +21,7 @@ pub use attestation::{
 pub use completion::{AgentCompletionSummary, Decision};
 pub use conversation::{ConversationProvenance, TurnCommitLink};
 pub use error::GyreError;
+pub use gate::{GateStatus, GateType};
 pub use graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility};
 pub use id::Id;
 pub use key_binding::KeyBinding;

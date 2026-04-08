@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::gate::{GateStatus, GateType};
 use crate::key_binding::KeyBinding;
 
 // ── §1.1 Trust Anchor ──────────────────────────────────────────────────
@@ -211,10 +212,10 @@ pub struct GateAttestation {
     pub gate_id: String,
     /// Human-readable gate name.
     pub gate_name: String,
-    /// Gate type (e.g., "test_command", "agent_review").
-    pub gate_type: String,
-    /// Gate execution status (e.g., "passed", "failed").
-    pub status: String,
+    /// Quality gate type — matches the gate definition's discriminant (§5.1).
+    pub gate_type: GateType,
+    /// Gate execution status (§5.1).
+    pub status: GateStatus,
     /// Hash of gate output.
     pub output_hash: Vec<u8>,
     /// Optional gate constraint produced by this gate.
@@ -325,8 +326,8 @@ mod tests {
         GateAttestation {
             gate_id: "gate-1".to_string(),
             gate_name: "unit-tests".to_string(),
-            gate_type: "test_command".to_string(),
-            status: "passed".to_string(),
+            gate_type: GateType::TestCommand,
+            status: GateStatus::Passed,
             output_hash: vec![80, 90],
             constraint: Some(sample_gate_constraint()),
             signature: vec![11, 22, 33],
@@ -623,6 +624,15 @@ mod tests {
         let json = serde_json::to_string(&ga).unwrap();
         let back: GateAttestation = serde_json::from_str(&json).unwrap();
         assert_eq!(back.constraint, None);
+    }
+
+    #[test]
+    fn gate_attestation_enum_fields_serialize_snake_case() {
+        let ga = sample_gate_attestation();
+        let json = serde_json::to_string(&ga).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["gate_type"], "test_command");
+        assert_eq!(v["status"], "passed");
     }
 
     // ── Attestation (complete record) ──────────────────────────────────
