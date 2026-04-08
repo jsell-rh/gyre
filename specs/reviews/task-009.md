@@ -1,10 +1,10 @@
 # Review: TASK-009 — Authorization Provenance Phase 4: Full Chains and AIBOM Integration
 
 **Reviewer:** Verifier  
-**Commit:** `55c1fc20`  
-**Round:** R1  
+**Commit:** `e464e0d8`  
+**Round:** R2  
 **Date:** 2026-04-08  
-**Verdict:** NEEDS REVISION — 4 findings
+**Verdict:** COMPLETE — all 4 R1 findings resolved, no new findings
 
 ## Findings
 
@@ -21,3 +21,13 @@
 
 - [-] [process-revision-complete] **F4 — Stale "audit-only" messages in verification results propagated to enforcement and API responses**
   `crates/gyre-server/src/git_http.rs` lines 1833–1837 (`verify_attestation_audit_only`): The function produces result messages saying `"all checks passed (audit-only)"` (valid case, line 1834) and `"one or more checks failed (audit-only, not rejecting)"` (invalid case, line 1836). Phase 3 enforcement (TASK-008) is active — the system now rejects pushes and merges based on these verification results. These messages appear in: (a) the verification endpoint response (`GET .../verification`) as per-node children of the `verify_chain` result, (b) the chain visualization endpoint response (`GET .../chain`) as `node.message` fields in the `ChainNode` structs (provenance.rs line 420: `message: node_result.message`). An API consumer or Explorer user sees `"audit-only, not rejecting"` for invalid nodes in a system that IS rejecting. The constraint_check.rs `log_constraint_results` function was correctly updated by TASK-009 to remove "audit-only" from log messages (diff lines 843, 858), but the `verify_attestation_audit_only` function's result messages were not updated. **Fix:** Update the result messages in `verify_attestation_audit_only` (lines 1834 and 1836) to remove "audit-only" and "not rejecting." For example: `"all structural checks passed"` and `"one or more structural checks failed"`. The function name `verify_attestation_audit_only` can remain (it describes the function's verification scope, not the enforcement mode), but the user-facing messages in the VerificationResult must not claim the system won't reject.
+  **Resolution (commit e464e0d8):** Messages updated to `"all structural checks passed"` and `"one or more structural checks failed"` at git_http.rs lines 1896 and 1898. Log messages in git_http.rs lines 503 and 512 also updated to remove "audit-only" and "not rejecting" language. `scripts/check-stale-enforcement-mode.sh` passes.
+
+### R2
+
+All R1 findings resolved. Verification:
+
+- **F1 (DerivedInput signature):** Ed25519 signature verification now implemented for the `Derived` branch at git_http.rs lines 1820–1848. Key binding expiry check at lines 1850–1876. The final decision combines all checks: `has_parent && sig_valid && kb_valid` (line 1878). The derivation_content JSON fields match between signing (spawn.rs lines 1607–1611: `parent_ref`, `agent_id`, `task_id`) and verification (git_http.rs lines 1824–1828: same fields, same order). `scripts/check-crypto-verify.sh` Class 4 passes — both Signed and Derived branches perform equivalent crypto verification.
+- **F2 (AIBOM full chain):** The full `Vec<Attestation>` chain is now serialized as `"chain": chain` at aibom.rs line 261 instead of the summary object. `Attestation` derives `Serialize` (gyre-common attestation.rs line 231), confirmed by roundtrip tests.
+- **F3 (ProvenanceChain dead code):** `ProvenanceChain` is imported at DetailPanel.svelte line 20 and rendered at lines 3045–3052 within the commit detail view. `scripts/check-dead-components.sh` passes.
+- **F4 (Stale audit-only messages):** VerificationResult messages updated. `scripts/check-stale-enforcement-mode.sh` passes. See resolution note above.

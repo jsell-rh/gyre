@@ -4,7 +4,7 @@
 **Depends on:** TASK-007  
 **Progress:** `ready-for-review`  
 **Review:** [specs/reviews/task-008.md](../reviews/task-008.md)  
-**Note:** R2 — 2 findings: F1 persists (signing entity mismatch), F5 new (verification endpoint incomplete). F2–F4 resolved.
+**Note:** R3 — 2 findings: F1 regression (child key bootstrap failure), F5 persists (Phase 5 output signatures). F2–F4 resolved.
 
 ## Spec Excerpt
 
