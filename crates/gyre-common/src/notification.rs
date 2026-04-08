@@ -42,7 +42,7 @@ pub enum NotificationType {
     SuggestedSpecLink,
     /// Priority 2 — a spec was rejected while agents were implementing it.
     SpecRejected,
-    /// Priority 3 — a constraint violation was detected at push or merge time (§7.5).
+    /// Priority 2 — a constraint violation was detected at push or merge time (§7.5).
     ConstraintViolation,
 }
 
@@ -107,7 +107,7 @@ impl NotificationType {
             Self::AgentEscalation => 5,
             Self::SuggestedSpecLink => 10,
             Self::SpecRejected => 2,
-            Self::ConstraintViolation => 3,
+            Self::ConstraintViolation => 2,
         }
     }
 }

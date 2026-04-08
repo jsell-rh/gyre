@@ -504,6 +504,7 @@ pub async fn git_receive_pack(
                 &agent_id,
                 &push_workspace_id,
                 &constraint_ref_updates,
+                &default_branch_clone,
             )
             .await;
         }

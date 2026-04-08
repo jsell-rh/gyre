@@ -38,6 +38,7 @@ pub async fn evaluate_push_constraints(
     agent_id: &str,
     workspace_id: &Id,
     ref_updates: &[(String, String, String)], // (old_sha, new_sha, refname)
+    default_branch: &str,
 ) {
     // Look up attestation chain for this task.
     let attestations = match state.chain_attestations.find_by_task(task_id).await {
@@ -60,19 +61,20 @@ pub async fn evaluate_push_constraints(
         }
     };
 
-    // Find the root SignedInput in the chain.
-    let signed_input = attestations.iter().find_map(|att| match &att.input {
-        AttestationInput::Signed(si) => Some(si),
+    // Find the root SignedInput in the chain, along with its attestation_id.
+    let signed_input_with_id = attestations.iter().find_map(|att| match &att.input {
+        AttestationInput::Signed(si) => Some((si, &att.id)),
         _ => None,
     });
 
-    let Some(signed_input) = signed_input else {
+    let Some((signed_input, attestation_id)) = signed_input_with_id else {
         tracing::debug!(
             task_id = %task_id,
             "no SignedInput found in attestation chain (Phase 2, skipping)"
         );
         return;
     };
+    let attestation_id = attestation_id.clone();
 
     // Compute the diff for constraint evaluation.
     let diff_info = match compute_push_diff(repo_path, ref_updates).await {
@@ -90,7 +92,12 @@ pub async fn evaluate_push_constraints(
     let agent_ctx = build_agent_context(state, agent_id, task_id).await;
 
     // Look up workspace trust level.
-    let workspace = state.workspaces.find_by_id(workspace_id).await.ok().flatten();
+    let workspace = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await
+        .ok()
+        .flatten();
     let trust_level = workspace
         .as_ref()
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
@@ -142,7 +149,7 @@ pub async fn evaluate_push_constraints(
         repo_id: repo_id.to_string(),
         workspace_id: workspace_id.to_string(),
         branch: branch.clone(),
-        default_branch: "main".to_string(),
+        default_branch: default_branch.to_string(),
     };
 
     let ci = ConstraintInput {
@@ -181,25 +188,27 @@ pub async fn evaluate_push_constraints(
     // If there are violations, emit ConstraintViolation events and create notifications.
     if !result.valid {
         let violations = extract_violations(&result, &all_constraints);
+        // Build context_snapshot from the CEL context components (§7.5).
+        let context_snapshot = serde_json::json!({
+            "input": &signed_input.content,
+            "output": &diff_info,
+            "agent": &agent_ctx,
+            "target": &target_ctx,
+            "action": "push",
+        });
         emit_constraint_violations(
             state,
             &violations,
-            task_id,
+            &attestation_id,
             repo_id,
             agent_id,
             workspace_id,
             "push",
+            &context_snapshot,
         )
         .await;
-        create_violation_notifications(
-            state,
-            &violations,
-            task_id,
-            repo_id,
-            workspace_id,
-            "push",
-        )
-        .await;
+        create_violation_notifications(state, &violations, task_id, repo_id, workspace_id, "push")
+            .await;
     }
 }
 
@@ -279,19 +288,20 @@ pub async fn evaluate_merge_constraints(
         }
     };
 
-    // Find root SignedInput.
-    let signed_input = attestations.iter().find_map(|att| match &att.input {
-        AttestationInput::Signed(si) => Some(si),
+    // Find root SignedInput, along with its attestation_id.
+    let signed_input_with_id = attestations.iter().find_map(|att| match &att.input {
+        AttestationInput::Signed(si) => Some((si, &att.id)),
         _ => None,
     });
 
-    let Some(signed_input) = signed_input else {
+    let Some((signed_input, attestation_id)) = signed_input_with_id else {
         tracing::debug!(
             mr_id = %mr_id,
             "no SignedInput found for merge constraint evaluation (Phase 2)"
         );
         return;
     };
+    let attestation_id = attestation_id.clone();
 
     // Compute diff for the merge commit.
     let diff_info = match compute_commit_diff(repo_path, merge_commit_sha).await {
@@ -309,7 +319,12 @@ pub async fn evaluate_merge_constraints(
     let agent_ctx = build_agent_context(state, &agent_id, &task_id).await;
 
     // Look up workspace trust level.
-    let workspace = state.workspaces.find_by_id(workspace_id).await.ok().flatten();
+    let workspace = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await
+        .ok()
+        .flatten();
     let trust_level = workspace
         .as_ref()
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
@@ -383,14 +398,23 @@ pub async fn evaluate_merge_constraints(
 
     if !result.valid {
         let violations = extract_violations(&result, &all_constraints);
+        // Build context_snapshot from the CEL context components (§7.5).
+        let context_snapshot = serde_json::json!({
+            "input": &signed_input.content,
+            "output": &diff_info,
+            "agent": &agent_ctx,
+            "target": &target_ctx,
+            "action": "merge",
+        });
         emit_constraint_violations(
             state,
             &violations,
-            &task_id,
+            &attestation_id,
             repo_id,
             &agent_id,
             workspace_id,
             "merge",
+            &context_snapshot,
         )
         .await;
         create_violation_notifications(
@@ -705,27 +729,32 @@ fn extract_violations(
 }
 
 /// Emit `ConstraintViolation` Event-tier messages for each violation (§7.5).
+///
+/// Payload conforms to the spec-defined ConstraintViolation schema:
+/// attestation_id, constraint_name, expression, context_snapshot, action,
+/// agent_id, repo_id, timestamp.
 async fn emit_constraint_violations(
     state: &AppState,
     violations: &[ConstraintViolationInfo],
-    task_id: &str,
+    attestation_id: &str,
     repo_id: &str,
     agent_id: &str,
     workspace_id: &Id,
     action: &str,
+    context_snapshot: &serde_json::Value,
 ) {
     let now = crate::api::now_secs();
 
     for violation in violations {
         let payload = serde_json::json!({
+            "attestation_id": attestation_id,
             "constraint_name": violation.constraint_name,
             "expression": violation.expression,
+            "context_snapshot": context_snapshot,
             "action": action,
             "agent_id": agent_id,
             "repo_id": repo_id,
-            "task_id": task_id,
             "timestamp": now,
-            "message": violation.message,
         });
 
         // Broadcast to workspace.
@@ -752,7 +781,7 @@ async fn emit_constraint_violations(
     }
 }
 
-/// Create priority-3 Inbox notifications for constraint violations.
+/// Create priority-2 Inbox notifications for constraint violations (§7.5).
 async fn create_violation_notifications(
     state: &AppState,
     violations: &[ConstraintViolationInfo],
@@ -806,12 +835,15 @@ async fn create_violation_notifications(
                 &tenant_id,
                 now,
             );
-            notif.body = Some(serde_json::json!({
-                "expression": violation.expression,
-                "message": violation.message,
-                "task_id": task_id,
-                "action": action,
-            }).to_string());
+            notif.body = Some(
+                serde_json::json!({
+                    "expression": violation.expression,
+                    "message": violation.message,
+                    "task_id": task_id,
+                    "action": action,
+                })
+                .to_string(),
+            );
             notif.repo_id = Some(repo_id.to_string());
             notif.entity_ref = Some(format!("task:{task_id}"));
 
@@ -981,6 +1013,7 @@ mod tests {
             "agent-1",
             &Id::new("ws-1"),
             &[],
+            "main",
         )
         .await;
         // No panic = success. The function gracefully degrades.
@@ -1013,7 +1046,12 @@ mod tests {
             "/nonexistent/path",
             "agent-1",
             &Id::new("ws-1"),
-            &[("0".repeat(40), "a".repeat(40), "refs/heads/main".to_string())],
+            &[(
+                "0".repeat(40),
+                "a".repeat(40),
+                "refs/heads/main".to_string(),
+            )],
+            "main",
         )
         .await;
         // No panic = success. The function found the attestation but failed
@@ -1034,23 +1072,29 @@ mod tests {
             message: "constraint failed: scope check".to_string(),
         }];
 
+        let context_snapshot = serde_json::json!({"action": "push"});
         emit_constraint_violations(
             &state,
             &violations,
-            "TASK-100",
+            "att-test-1",
             "repo-1",
             "agent-1",
             &ws_id,
             "push",
+            &context_snapshot,
         )
         .await;
 
         // Verify events were emitted via broadcast channel.
         // Each violation emits 2 messages: workspace broadcast + agent-directed.
-        let msg1 = rx.try_recv().expect("should have received workspace broadcast");
+        let msg1 = rx
+            .try_recv()
+            .expect("should have received workspace broadcast");
         assert_eq!(msg1.kind, MessageKind::ConstraintViolation);
         let payload = msg1.payload.as_ref().unwrap();
+        assert_eq!(payload["attestation_id"], "att-test-1");
         assert_eq!(payload["constraint_name"], "scope check");
+        assert_eq!(payload["context_snapshot"]["action"], "push");
         assert_eq!(payload["action"], "push");
         assert_eq!(payload["agent_id"], "agent-1");
 
@@ -1101,15 +1145,8 @@ mod tests {
             message: "constraint failed".to_string(),
         }];
 
-        create_violation_notifications(
-            &state,
-            &violations,
-            "TASK-101",
-            "repo-1",
-            &ws_id,
-            "push",
-        )
-        .await;
+        create_violation_notifications(&state, &violations, "TASK-101", "repo-1", &ws_id, "push")
+            .await;
 
         // Verify notification was created.
         let notifications = state
@@ -1130,7 +1167,7 @@ mod tests {
             notifications[0].notification_type,
             NotificationType::ConstraintViolation
         );
-        assert_eq!(notifications[0].priority, 3);
+        assert_eq!(notifications[0].priority, 2);
         assert!(notifications[0].title.contains("Constraint violation"));
         assert!(notifications[0].title.contains("path scope"));
         assert_eq!(notifications[0].repo_id.as_deref(), Some("repo-1"));
