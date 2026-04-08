@@ -2,8 +2,10 @@
 
 **Spec reference:** `authorization-provenance.md` §6, §7.2, §8 Phase 3  
 **Depends on:** TASK-007  
-**Progress:** `ready-for-review`  
-**Review:** [specs/reviews/task-008.md](../reviews/task-008.md)
+**Progress:** `needs-revision`  
+**Review:** [specs/reviews/task-008.md](../reviews/task-008.md)  
+**Note:** R5 — 1 finding requires code fix:
+- **F6 (NEW):** `verify_output_signatures` verifies gate signatures against `gate.output_hash` (raw SHA-256 bytes) but `gate_executor` signs over a JSON structure containing 5 fields. Sign/verify message mismatch → always fails for valid signatures. Fix: reconstruct the same JSON in verify, or extract a shared `signable_bytes()` helper.
 
 ## Spec Excerpt
 

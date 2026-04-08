@@ -1,10 +1,10 @@
 # Review: TASK-008 — Authorization Provenance Phase 3: Enforcement
 
 **Reviewer:** Verifier  
-**Commit:** `e464e0d8`  
-**Round:** R3  
+**Commit:** `6b3f5f6f`  
+**Round:** R5  
 **Date:** 2026-04-08  
-**Verdict:** NEEDS REVISION — 2 findings (F1 regression from R2 fix, F5 persists; F2–F4 resolved)
+**Verdict:** NEEDS REVISION — 1 finding (F6 new: gate signature message mismatch; F1/F5 resolved)
 
 ## Findings
 
@@ -34,8 +34,27 @@
 
 ### R3
 
-- [-] [process-revision-complete] **F1 (REGRESSION from R2 fix) — Child agent keypair not generated when spawner has no signing key — delegation chain cannot bootstrap (spec §7.4)**
+- [-] [resolved] **F1 (REGRESSION from R2 fix) — Child agent keypair not generated when spawner has no signing key — delegation chain cannot bootstrap (spec §7.4)**
   `crates/gyre-server/src/api/spawn.rs` lines 1481–1494 (`create_derived_input_for_agent`): The R2 fix correctly changed DerivedInput signing to use the spawner's (orchestrator's) key instead of the child's key. However, the fix added an early return at line 1493 when the spawner has no signing key (`kv_get("agent_signing_keys", spawner_id)` returns `None`). This early return exits the function BEFORE the child agent's keypair is generated (lines 1563–1594) and stored (lines 1641–1663). Before the fix, the child always received a signing key (at the old line ~1545). After the fix, if the spawner has no key, the child receives nothing. This creates a bootstrap failure: (a) the first agent is spawned by a human or "system" (`auth.agent_id`), which has no entry in `agent_signing_keys` → early return → first agent gets no signing key, (b) the first agent (acting as orchestrator) tries to spawn a sub-agent → `kv_get("agent_signing_keys", first_agent_id)` fails (was never stored) → early return → sub-agent also gets no key, (c) the chain never bootstraps. The `agent_signing_keys` namespace is only written at line 1645 (inside this same function, after the early return). There is no other code path that populates it. **Impact:** No agent ever receives a signing key, so no agent can ever sign a DerivedInput for its children. The entire delegation chain feature is non-functional. **Fix:** Separate the child keypair generation from the DerivedInput creation. Always generate and store the child agent's keypair (lines 1563–1663) regardless of whether the spawner has a key. Only skip the DerivedInput creation (lines 1597–1639) and attestation record (lines 1665–1704) when the spawner's key is unavailable. Move the early return to after the child key storage, or restructure the function to generate the child's key first (unconditionally), then conditionally create the DerivedInput if the spawner's key exists.
+  **Resolution (R4 commit 6b3f5f6f):** Child keypair generation (Step 1) now executes unconditionally BEFORE the spawner key lookup (Step 2). The child's keypair and KeyBinding are always generated and stored to `agent_signing_keys` and `agent_key_bindings` KV namespaces. Early returns for spawner key unavailability now only skip DerivedInput creation and attestation record, preserving bootstrap capability.
 
-- [-] [process-revision-complete] **F5 (PERSISTS from R2) — Verification endpoint Phase 5 (output signature verification) not implemented — false claim in comment (spec §6.2 Phase 5)**
+- [-] [resolved] **F5 (PERSISTS from R2) — Verification endpoint Phase 5 (output signature verification) not implemented — false claim in comment (spec §6.2 Phase 5)**
   `crates/gyre-server/src/api/provenance.rs` lines 314–315: The comment says `"Phase 5: Output signature verification — Already covered by verify_chain (checks agent_signature and gate signatures)."` This claim is false. `verify_chain` (via `verify_attestation_audit_only`, git_http.rs lines 1707–1902) only verifies INPUT signatures: `SignedInput.signature` (line 1744) and `DerivedInput.signature` (line 1834). It never references `attestation.output.agent_signature` or iterates over `attestation.output.gate_results[].signature`. A grep for `agent_signature` in git_http.rs returns only test fixtures setting the field to `None` (lines 2606, 2681, 2764, 2847, 2934, 3001) — no verification code. The spec §6.2 Phase 5 explicitly requires: (a) `if attestation.output.agent_signature is not null: verify_signature(attestation.output.agent_signature, attestation.output.content_hash)`, (b) `for gate in attestation.output.gate_results: verify_signature(gate.signature, gate.output_hash)`. Gate signatures are real Ed25519 signatures produced by `gate_executor.rs` (lines 249–282) using the platform's signing key. Without Phase 5 verification, the endpoint returns `valid: true` for attestations with forged gate signatures — an attacker who can write to the attestation store can fabricate gate results with arbitrary signature bytes and they will pass verification. **Fix:** Add Phase 5 verification to `get_verification`: (a) if `attestation.output.agent_signature` is not None, verify it against `attestation.output.content_hash` using the agent's key binding, (b) for each gate result in the chain, verify `gate.signature` against `gate.output_hash` using `gate.key_binding.public_key`. Add the results as children of the overall `VerificationResult`. The gate signature verification should mirror the Ed25519 pattern used in the `Signed` and `Derived` branches of `verify_attestation_audit_only`. Consider adding Phase 5 to `verify_chain` itself (where it belongs per the spec algorithm) rather than only in the endpoint, so that the enforcement code paths also benefit.
+  **Resolution (R4 commit 6b3f5f6f):** Phase 5 now implemented via `verify_output_signatures()` function (provenance.rs:642–726). The false comment is removed. Both agent_signature and gate result signatures are verified with Ed25519. However, gate signature verification uses the wrong message content — see R5 F6.
+
+### R5
+
+- [ ] **F6 — Gate signature verified against wrong message content — `verify_output_signatures` checks `gate.output_hash` but `gate_executor` signs a JSON structure (§6.2 Phase 5)**
+  `crates/gyre-server/src/api/provenance.rs` line 689: `peer_key.verify(&gate.output_hash, &gate.signature)` passes `gate.output_hash` (the raw SHA-256 hash of the gate's output text) as the message to verify against. But the gate signature was produced by `gate_executor.rs` (lines 275–283) signing a JSON object: `{"gate_id": gate.id, "gate_name": gate.name, "gate_type": gate.gate_type, "status": status, "output_hash": hex::encode(&output_hash)}`. The `sign_bytes` used for signing is `serde_json::to_vec(&sign_content)` — the serialized JSON bytes. Ed25519 verification requires the exact same message bytes that were signed. Since `sign_message` (JSON bytes containing 5 fields) ≠ `verify_message` (32-byte SHA-256 hash), verification will ALWAYS fail for legitimately signed gate attestations. Every gate signature will report `valid: false` even when the signature is authentic, making the verification endpoint's Phase 5 result systematically incorrect (false negatives). This means the overall `VerificationResult.valid` will be `false` for any attestation with gate results, and the `overall_message` will report "output signature verification failed" — the endpoint appears broken for all gated work. **Fix:** Reconstruct the same JSON structure in `verify_output_signatures` that `gate_executor` uses for signing. Replace line 689 with:
+  ```rust
+  let sign_content = serde_json::json!({
+      "gate_id": gate.gate_id,
+      "gate_name": gate.gate_name,
+      "gate_type": gate.gate_type,
+      "status": gate.status,
+      "output_hash": hex::encode(&gate.output_hash),
+  });
+  let sign_bytes = serde_json::to_vec(&sign_content).unwrap_or_default();
+  let sig_valid = peer_key.verify(&sign_bytes, &gate.signature).is_ok();
+  ```
+  Or, extract the signable content construction into a shared helper function (e.g., `GateAttestation::signable_bytes(&self) -> Vec<u8>`) in `gyre-common` that both `gate_executor` (sign) and `verify_output_signatures` (verify) call, ensuring sign/verify parity by construction.
