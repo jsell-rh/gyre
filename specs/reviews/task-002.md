@@ -1,8 +1,8 @@
 # Review: TASK-002 — CLI HSI Parity Commands
 
 **Reviewer:** Verifier  
-**Date:** 2026-04-07 (R12)  
-**Verdict:** needs-revision
+**Date:** 2026-04-07 (R13)  
+**Verdict:** complete
 
 ---
 
@@ -112,7 +112,7 @@
 
 ## R12 Findings
 
-- [-] [process-revision-complete] **F22 — `print_briefing_item` silently drops `timestamp`, `entity_type`, and `entity_id` from `BriefingItem` — 3 of 6 scalar fields unconsumed.**  
+- [x] [process-revision-complete] **F22 — `print_briefing_item` silently drops `timestamp`, `entity_type`, and `entity_id` from `BriefingItem` — 3 of 6 scalar fields unconsumed.**  
   The server's `BriefingItem` struct (graph.rs:260-267) has 6 fields: `title`, `description`, `entity_type`, `entity_id`, `spec_path`, `timestamp`. The CLI's `print_briefing_item` helper (main.rs:1092-1105) renders only `title`, `description`, and `spec_path`. Three fields are silently dropped with no exclusion comments:
   - **`timestamp: u64`** — tells the user WHEN each item occurred. Without it, completed/in-progress/exception items have no temporal context. The user cannot distinguish a 2-hour-old gate failure from a 2-day-old one. This was explicitly called out in F18's fix instructions ("include `timestamp` for ordering context") but not implemented when F18 was resolved.
   - **`entity_type: String`** — tells the user WHAT kind of entity the item refers to (task, MR, spec, gate_failure). Without it, the user sees only a title and description with no structured indication of the item category.
@@ -140,6 +140,14 @@
   ```
   **Files:** `crates/gyre-cli/src/main.rs:1092-1105` (3 fields unconsumed), `crates/gyre-server/src/api/graph.rs:260-267` (`BriefingItem` struct definition).
 
-- [-] [process-revision-complete] **F23 — `completed_at` in briefing agents renders as raw Unix epoch; `format_timestamp` helper exists and is used by other commands.**  
+- [x] [process-revision-complete] **F23 — `completed_at` in briefing agents renders as raw Unix epoch; `format_timestamp` helper exists and is used by other commands.**  
   The completed_agents display (main.rs:1037-1039) prints `completed_at` as a raw integer: `println!("    Completed at: {completed_at}");`, producing output like "Completed at: 1711324800". The `format_timestamp` helper (main.rs:1151) exists in the same file and is used by `gyre trace` to render human-readable timestamps like "2024-03-24 22:40:00Z". HSI §4 shows agent completion summaries with human-readable times ("Completed by security-review-agent at 14:32 UTC"). The CLI should call `format_timestamp(completed_at)` for consistency with the trace command and spec expectations.  
   **Files:** `crates/gyre-cli/src/main.rs:1037-1039` (raw epoch), `crates/gyre-cli/src/main.rs:1151` (`format_timestamp` helper).
+
+## R13 Findings (verification pass — all clear)
+
+- [x] **F22 verified.** `print_briefing_item` (main.rs:1092-1120) now renders all 6 `BriefingItem` fields: `title`, `description`, `spec_path`, `entity_type`, `entity_id`, and `timestamp` (via `format_timestamp`). Confirmed code matches the fix instructions from F22.
+
+- [x] **F23 verified.** `completed_at` (main.rs:1037-1038) now calls `format_timestamp(completed_at)` instead of raw epoch interpolation. Matches `gyre trace` formatting pattern.
+
+- [x] **Full re-verification (R13):** Independent end-to-end check of all 6 CLI commands against HSI §11 spec signatures, server endpoint URLs (verified in `api/mod.rs` route registrations), response struct field names, SSE event-type discrimination, doc comments, and query parameter passthrough. All 23 findings from R1-R12 confirmed resolved. No new findings. `scripts/check-cli-spec-parity.sh` passes. `scripts/check-response-consumption.sh` flags only pre-existing gaps in non-TASK-002 endpoints.
