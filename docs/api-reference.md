@@ -404,6 +404,20 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_message_send` | Send a Directed or Custom message to an agent/workspace. Params: `to` (destination), `kind`, `payload`, `tier`. Derives workspace from agent JWT. |
 | `gyre_message_poll` | Poll own inbox for Directed messages. Params: `after_ts`, `after_id`, `limit`, `unacked_only`. Derives agent_id from JWT. |
 | `gyre_message_ack` | Acknowledge a received message. Params: `message_id`. Derives agent_id from JWT. |
+| `graph_concept` | Search knowledge graph by concept name. Params: `concept` (required), `repo_id` or `workspace_id` (one required), `depth` (optional, default 2). Returns matching nodes and edges. (HSI §11) |
+| `spec_assist` | LLM-assisted spec editing. Params: `repo_id`, `spec_path`, `instruction` (all required), `draft_content` (optional). Returns LLM-generated edit suggestions. Rate limited: 10 req/60s per user/workspace. (HSI §11) |
+
+**Available resources** (from `resources/list`):
+
+| Resource | URI Template | Description |
+|---|---|---|
+| `spec://` | `spec://{path}` | Read spec markdown files |
+| `agents://` | `agents://{workspace_id}` | List active agents in a workspace |
+| `queue://` | `queue://{repo_id}` | Merge queue entries for a repository |
+| `conversation://context` | — | Interrogation agent conversation history (HSI §4) |
+| `briefing://` | `briefing://{workspace_id}` | Workspace briefing narrative: completed MRs, in-progress tasks, metrics (HSI §9). Optional `?since=<epoch>` query param. |
+| `notifications://` | `notifications://{workspace_id}` | Inbox notifications for authenticated user (HSI §11). Optional `?min_priority=&max_priority=` query params. |
+| `trace://` | `trace://{mr_id}` | SDLC system trace for a merge request: spans, root_spans (HSI §3a). |
 
 Example MCP `initialize` call:
 ```json

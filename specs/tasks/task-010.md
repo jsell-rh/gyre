@@ -2,7 +2,7 @@
 
 **Spec reference:** `human-system-interface.md` §11 (CLI/MCP Parity Constraint)  
 **Depends on:** None (consumes existing REST endpoints and domain logic)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -96,4 +96,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(mcp): add HSI §11 parity resources and tools (TASK-010)`

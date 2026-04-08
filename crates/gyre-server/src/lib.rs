@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod api;

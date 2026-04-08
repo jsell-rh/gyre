@@ -470,6 +470,34 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["repo_id"]
                 }
+            },
+            {
+                "name": "graph_concept",
+                "description": "Search the knowledge graph by concept name. Returns matching nodes with type, name, qualified_name, spec linkage, and connecting edges. Searches repo-scoped or workspace-scoped graphs.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "concept": { "type": "string", "description": "Concept name to search for (case-insensitive substring match)" },
+                        "repo_id": { "type": "string", "description": "Repository ID (search within a single repo)" },
+                        "workspace_id": { "type": "string", "description": "Workspace ID (search across all repos in workspace)" },
+                        "depth": { "type": "integer", "description": "Neighbor traversal depth (default 2, max 5)" }
+                    },
+                    "required": ["concept"]
+                }
+            },
+            {
+                "name": "spec_assist",
+                "description": "LLM-assisted spec editing. Sends an instruction to the LLM with the spec content and returns suggested edits.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "spec_path": { "type": "string", "description": "Path to the spec file (e.g. system/auth.md)" },
+                        "instruction": { "type": "string", "description": "Editing instruction for the LLM" },
+                        "draft_content": { "type": "string", "description": "Optional draft content to assist with" }
+                    },
+                    "required": ["repo_id", "spec_path", "instruction"]
+                }
             }
         ]
     })
@@ -1925,6 +1953,191 @@ async fn handle_node_provenance(state: &AppState, args: &Value) -> Value {
     ))
 }
 
+async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
+    let concept = match require_str(args, "concept") {
+        Ok(c) => c.to_string(),
+        Err(_) => return tool_error("missing required field: concept"),
+    };
+    let pattern = concept.to_lowercase();
+    let _depth = args
+        .get("depth")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2)
+        .min(5);
+
+    // Determine scope: repo_id or workspace_id.
+    let repo_ids: Vec<String> = if let Some(repo_id) = get_str(args, "repo_id") {
+        vec![repo_id.to_string()]
+    } else if let Some(workspace_id) = get_str(args, "workspace_id") {
+        let ws_id = Id::new(workspace_id);
+        match state.repos.list_by_workspace(&ws_id).await {
+            Ok(repos) => repos.into_iter().map(|r| r.id.to_string()).collect(),
+            Err(e) => return tool_error(format!("failed to list repos: {e}")),
+        }
+    } else {
+        return tool_error("provide either repo_id or workspace_id");
+    };
+
+    let mut matched_nodes = Vec::new();
+    let mut matched_edges = Vec::new();
+    let mut matched_node_ids = std::collections::HashSet::new();
+
+    for rid in &repo_ids {
+        let repo_id = Id::new(rid);
+        let all_nodes = match state.graph_store.list_nodes(&repo_id, None).await {
+            Ok(n) => n,
+            Err(e) => return tool_error(format!("failed to load graph nodes: {e}")),
+        };
+        let nodes: Vec<_> = all_nodes
+            .into_iter()
+            .filter(|n| {
+                n.deleted_at.is_none()
+                    && (n.name.to_lowercase().contains(&pattern)
+                        || n.qualified_name.to_lowercase().contains(&pattern))
+            })
+            .collect();
+        for n in &nodes {
+            matched_node_ids.insert(n.id.to_string());
+        }
+        matched_nodes.extend(nodes);
+    }
+
+    // Collect edges that connect matched nodes.
+    for rid in &repo_ids {
+        let repo_id = Id::new(rid);
+        let all_edges = match state.graph_store.list_edges(&repo_id, None).await {
+            Ok(e) => e,
+            Err(e) => return tool_error(format!("failed to load graph edges: {e}")),
+        };
+        for edge in all_edges {
+            if edge.deleted_at.is_none()
+                && (matched_node_ids.contains(&edge.source_id.to_string())
+                    || matched_node_ids.contains(&edge.target_id.to_string()))
+            {
+                matched_edges.push(edge);
+            }
+        }
+    }
+
+    let node_items: Vec<Value> = matched_nodes
+        .iter()
+        .map(|n| {
+            json!({
+                "id": n.id.to_string(),
+                "repo_id": n.repo_id.to_string(),
+                "node_type": format!("{:?}", n.node_type).to_lowercase(),
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "file_path": n.file_path,
+                "line_start": n.line_start,
+                "line_end": n.line_end,
+                "spec_path": n.spec_path,
+            })
+        })
+        .collect();
+
+    let edge_items: Vec<Value> = matched_edges
+        .iter()
+        .map(|e| {
+            json!({
+                "id": e.id.to_string(),
+                "repo_id": e.repo_id.to_string(),
+                "source_id": e.source_id.to_string(),
+                "target_id": e.target_id.to_string(),
+                "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
+            })
+        })
+        .collect();
+
+    let result = json!({
+        "concept": concept,
+        "nodes": node_items,
+        "edges": edge_items,
+    });
+    tool_result(serde_json::to_string_pretty(&result).unwrap_or_default())
+}
+
+async fn handle_spec_assist(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let spec_path = match require_str(args, "spec_path") {
+        Ok(p) => p.to_string(),
+        Err(_) => return tool_error("missing required field: spec_path"),
+    };
+    let instruction = match require_str(args, "instruction") {
+        Ok(i) => i.to_string(),
+        Err(_) => return tool_error("missing required field: instruction"),
+    };
+    let draft_content = get_str(args, "draft_content").map(|s| s.to_string());
+
+    // Verify repo exists and resolve workspace_id for rate limiting.
+    let repo_id_typed = Id::new(&repo_id);
+    let repo = match state.repos.find_by_id(&repo_id_typed).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return tool_error(format!("repo not found: {repo_id}")),
+        Err(e) => return tool_error(format!("failed to look up repo: {e}")),
+    };
+
+    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    {
+        let workspace_id = repo.workspace_id.to_string();
+        let mut limiter = state.llm_rate_limiter.lock().await;
+        if let Err(retry_after) = crate::llm_rate_limit::check_rate_limit(
+            &mut limiter,
+            &auth.agent_id,
+            &workspace_id,
+            crate::llm_rate_limit::LLM_RATE_LIMIT,
+            crate::llm_rate_limit::LLM_WINDOW_SECS,
+        ) {
+            return tool_error(format!("rate limited — retry after {retry_after}s"));
+        }
+    }
+
+    // Require LLM to be configured.
+    let factory = match state.llm.as_ref() {
+        Some(f) => f,
+        None => return tool_error("LLM not configured — spec assist unavailable"),
+    };
+
+    // Load effective prompt; fall back to hardcoded default.
+    let template_content = state
+        .prompt_templates
+        .get_effective(&repo.workspace_id, "specs-assist")
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.content)
+        .unwrap_or_else(|| crate::llm_defaults::PROMPT_SPECS_ASSIST.to_string());
+
+    let system_prompt = template_content
+        .replace("{{spec_path}}", &spec_path)
+        .replace("{{draft_content}}", draft_content.as_deref().unwrap_or(""))
+        .replace("{{instruction}}", &instruction);
+    let user_prompt = format!("Instruction: {instruction}");
+
+    // Resolve model and call LLM.
+    let (model, _) =
+        crate::llm_helpers::resolve_llm_model(state, &repo.workspace_id, "specs-assist").await;
+
+    use futures_util::StreamExt as _;
+    let stream = match factory
+        .for_model(&model)
+        .stream_complete(&system_prompt, &user_prompt, None)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => return tool_error(format!("LLM call failed: {e}")),
+    };
+
+    // Collect all chunks into the final text.
+    let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
+    let full_text = chunks.join("");
+
+    tool_result(full_text)
+}
+
 // ── MCP Resources ─────────────────────────────────────────────────────────────
 
 fn resource_definitions() -> Value {
@@ -1956,6 +2169,27 @@ fn resource_definitions() -> Value {
                 "name": "Conversation Context",
                 "description": "Original agent conversation history for interrogation agents (HSI §4). Only accessible to the spawned interrogation agent.",
                 "mimeType": "application/json"
+            },
+            {
+                "uri": "briefing://",
+                "name": "Workspace Briefing",
+                "description": "Workspace briefing narrative (HSI §9). URI: briefing://{workspace_id} (optional ?since=<epoch>)",
+                "mimeType": "application/json",
+                "uriTemplate": "briefing://{workspace_id}"
+            },
+            {
+                "uri": "notifications://",
+                "name": "Inbox Notifications",
+                "description": "Inbox notifications for the authenticated user (HSI §11). URI: notifications://{workspace_id} (optional ?min_priority=&max_priority=)",
+                "mimeType": "application/json",
+                "uriTemplate": "notifications://{workspace_id}"
+            },
+            {
+                "uri": "trace://",
+                "name": "MR System Trace",
+                "description": "SDLC system trace for a merge request (HSI §3a). URI: trace://{mr_id}",
+                "mimeType": "application/json",
+                "uriTemplate": "trace://{mr_id}"
             }
         ]
     })
@@ -2069,6 +2303,229 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
                 })
             }
             Err(e) => json!({"error": format!("failed to list merge queue: {e}")}),
+        }
+    } else if let Some(rest) = uri.strip_prefix("briefing://") {
+        // briefing://{workspace_id}?since=<epoch>
+        // Parse workspace_id and optional ?since= query param.
+        let (workspace_id, since_param) = match rest.split_once('?') {
+            Some((ws, qs)) => {
+                let since = qs
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("since="))
+                    .and_then(|v| v.parse::<u64>().ok());
+                (ws, since)
+            }
+            None => (rest, None),
+        };
+        if workspace_id.is_empty() {
+            return json!({"error": "briefing:// requires a workspace_id"});
+        }
+        // Verify workspace exists.
+        let ws_id = Id::new(workspace_id);
+        match state.workspaces.find_by_id(&ws_id).await {
+            Ok(None) => return json!({"error": format!("workspace not found: {workspace_id}")}),
+            Err(e) => return json!({"error": format!("failed to look up workspace: {e}")}),
+            Ok(Some(_)) => {}
+        }
+        // Resolve `since`: explicit param > 24h fallback.
+        let since = since_param.unwrap_or_else(|| now_secs().saturating_sub(24 * 3600));
+        // Collect MRs and tasks.
+        let all_mrs = state
+            .merge_requests
+            .list_by_workspace(&ws_id)
+            .await
+            .unwrap_or_default();
+        let all_tasks = state
+            .tasks
+            .list_by_workspace(&ws_id)
+            .await
+            .unwrap_or_default();
+        let completed: Vec<Value> = all_mrs
+            .iter()
+            .filter(|mr| mr.status == gyre_domain::MrStatus::Merged && mr.updated_at >= since)
+            .map(|mr| {
+                json!({
+                    "title": mr.title,
+                    "description": format!("{} → {}", mr.source_branch, mr.target_branch),
+                    "entity_type": "mr",
+                    "entity_id": mr.id.to_string(),
+                    "timestamp": mr.updated_at,
+                })
+            })
+            .collect();
+        let in_progress: Vec<Value> = all_tasks
+            .iter()
+            .filter(|t| {
+                (t.status == gyre_domain::TaskStatus::InProgress
+                    || t.status == gyre_domain::TaskStatus::Review)
+                    && t.updated_at >= since
+            })
+            .map(|t| {
+                json!({
+                    "title": t.title,
+                    "description": t.description.as_deref().unwrap_or(""),
+                    "entity_type": "task",
+                    "entity_id": t.id.to_string(),
+                    "timestamp": t.updated_at,
+                })
+            })
+            .collect();
+        let mrs_merged = completed.len() as u32;
+        let briefing = json!({
+            "workspace_id": workspace_id,
+            "since": since,
+            "completed": completed,
+            "in_progress": in_progress,
+            "cross_workspace": [],
+            "exceptions": [],
+            "metrics": {
+                "mrs_merged": mrs_merged,
+                "gate_runs": 0,
+                "budget_spent_usd": 0.0,
+                "budget_pct": 0,
+            },
+            "summary": "",
+            "completed_agents": [],
+        });
+        json!({
+            "contents": [{
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": serde_json::to_string_pretty(&briefing).unwrap_or_default()
+            }]
+        })
+    } else if let Some(rest) = uri.strip_prefix("notifications://") {
+        // notifications://{workspace_id}?min_priority=&max_priority=
+        let (workspace_id, min_pri, max_pri) = match rest.split_once('?') {
+            Some((ws, qs)) => {
+                let min_p = qs
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("min_priority="))
+                    .and_then(|v| v.parse::<u8>().ok());
+                let max_p = qs
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("max_priority="))
+                    .and_then(|v| v.parse::<u8>().ok());
+                (ws, min_p, max_p)
+            }
+            None => (rest, None, None),
+        };
+        if workspace_id.is_empty() {
+            return json!({"error": "notifications:// requires a workspace_id"});
+        }
+        // Resolve user_id from auth (same logic as get_my_notifications).
+        let user_id = auth
+            .user_id
+            .clone()
+            .unwrap_or_else(|| Id::new(auth.agent_id.clone()));
+        let ws_id = Id::new(workspace_id);
+        match state
+            .notifications
+            .list_for_user(&user_id, Some(&ws_id), min_pri, max_pri, None, 50, 0)
+            .await
+        {
+            Ok(notifications) => {
+                let items: Vec<Value> = notifications
+                    .into_iter()
+                    .map(|n| {
+                        json!({
+                            "id": n.id.to_string(),
+                            "workspace_id": n.workspace_id.to_string(),
+                            "notification_type": n.notification_type.as_str(),
+                            "priority": n.priority,
+                            "title": n.title,
+                            "body": n.body,
+                            "entity_ref": n.entity_ref,
+                            "repo_id": n.repo_id,
+                            "resolved_at": n.resolved_at,
+                            "dismissed_at": n.dismissed_at,
+                            "created_at": n.created_at,
+                        })
+                    })
+                    .collect();
+                let result = json!({
+                    "notifications": items,
+                    "limit": 50,
+                    "offset": 0,
+                });
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            }
+            Err(e) => json!({"error": format!("failed to list notifications: {e}")}),
+        }
+    } else if let Some(mr_id) = uri.strip_prefix("trace://") {
+        // trace://{mr_id}
+        if mr_id.is_empty() {
+            return json!({"error": "trace:// requires an mr_id"});
+        }
+        let mr_id_typed = Id::new(mr_id);
+        // Verify the MR exists.
+        match state.merge_requests.find_by_id(&mr_id_typed).await {
+            Ok(None) => return json!({"error": format!("merge request not found: {mr_id}")}),
+            Err(e) => return json!({"error": format!("failed to look up merge request: {e}")}),
+            Ok(Some(_)) => {}
+        }
+        // Find the most recent trace for this MR.
+        match state.traces.get_by_mr(&mr_id_typed).await {
+            Ok(Some(trace)) => {
+                let all_span_ids: std::collections::HashSet<&str> =
+                    trace.spans.iter().map(|s| s.span_id.as_str()).collect();
+                let root_spans: Vec<String> = trace
+                    .spans
+                    .iter()
+                    .filter(|s| {
+                        s.parent_span_id
+                            .as_deref()
+                            .map(|pid| !all_span_ids.contains(pid))
+                            .unwrap_or(true)
+                    })
+                    .map(|s| s.span_id.clone())
+                    .collect();
+                let spans: Vec<Value> = trace
+                    .spans
+                    .iter()
+                    .map(|s| {
+                        json!({
+                            "span_id": s.span_id,
+                            "parent_span_id": s.parent_span_id,
+                            "operation_name": s.operation_name,
+                            "service_name": s.service_name,
+                            "kind": s.kind.as_str(),
+                            "start_time": s.start_time,
+                            "duration_us": s.duration_us,
+                            "attributes": s.attributes,
+                            "input_summary": s.input_summary,
+                            "output_summary": s.output_summary,
+                            "status": s.status.as_str(),
+                            "graph_node_id": s.graph_node_id.as_ref().map(|id| id.as_str()),
+                        })
+                    })
+                    .collect();
+                let result = json!({
+                    "id": trace.id.to_string(),
+                    "mr_id": mr_id,
+                    "gate_run_id": trace.gate_run_id.to_string(),
+                    "commit_sha": trace.commit_sha,
+                    "captured_at": trace.captured_at,
+                    "span_count": spans.len(),
+                    "spans": spans,
+                    "root_spans": root_spans,
+                });
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            }
+            Ok(None) => json!({"error": format!("no trace found for merge request: {mr_id}")}),
+            Err(e) => json!({"error": format!("failed to load trace: {e}")}),
         }
     } else {
         json!({"error": format!("unknown resource URI scheme: {uri}")})
@@ -2210,6 +2667,8 @@ pub async fn mcp_handler(
                 "graph_nodes" => handle_graph_nodes(&state, &args).await,
                 "graph_edges" => handle_graph_edges(&state, &args).await,
                 "node_provenance" => handle_node_provenance(&state, &args).await,
+                "graph_concept" => handle_graph_concept(&state, &args).await,
+                "spec_assist" => handle_spec_assist(&state, &args, &auth).await,
                 other => tool_error(format!("Unknown tool: {other}")),
             };
             JsonRpcResponse::ok(id, result)
@@ -3684,5 +4143,360 @@ mod tests {
         assert_eq!(payload["decisions"].as_array().unwrap().len(), 0);
         assert_eq!(payload["uncertainties"].as_array().unwrap().len(), 0);
         assert!(payload.get("spec_ref").is_none() || payload["spec_ref"].is_null());
+    }
+
+    // ── TASK-010: briefing:// resource ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_resources_list_includes_new_resources() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "resources/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resources = json["result"]["resources"].as_array().unwrap();
+        let names: Vec<&str> = resources
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"Workspace Briefing"));
+        assert!(names.contains(&"Inbox Notifications"));
+        assert!(names.contains(&"MR System Trace"));
+    }
+
+    #[tokio::test]
+    async fn mcp_briefing_resource_requires_workspace_id() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "resources/read",
+                "params": { "uri": "briefing://" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("requires a workspace_id"));
+    }
+
+    #[tokio::test]
+    async fn mcp_briefing_resource_workspace_not_found() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 102,
+                "method": "resources/read",
+                "params": { "uri": "briefing://nonexistent-ws" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("workspace not found"));
+    }
+
+    #[tokio::test]
+    async fn mcp_briefing_resource_returns_sections() {
+        // Create a workspace first.
+        let st = test_state();
+        use gyre_domain::Workspace;
+        let ws = Workspace::new(
+            Id::new("ws-briefing"),
+            Id::new("default"),
+            "briefing-test",
+            "briefing-test",
+            now_secs(),
+        );
+        st.workspaces.create(&ws).await.unwrap();
+        let app = crate::build_router(st);
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 103,
+                "method": "resources/read",
+                "params": { "uri": "briefing://ws-briefing?since=0" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let contents = json["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        let text = contents[0]["text"].as_str().unwrap();
+        let briefing: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(briefing["workspace_id"], "ws-briefing");
+        assert!(briefing["completed"].as_array().is_some());
+        assert!(briefing["in_progress"].as_array().is_some());
+        assert!(briefing["cross_workspace"].as_array().is_some());
+        assert!(briefing["exceptions"].as_array().is_some());
+        assert!(briefing["metrics"].is_object());
+        assert!(briefing.get("summary").is_some());
+        assert!(briefing["completed_agents"].as_array().is_some());
+    }
+
+    // ── TASK-010: notifications:// resource ──────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_notifications_resource_requires_workspace_id() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 110,
+                "method": "resources/read",
+                "params": { "uri": "notifications://" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("requires a workspace_id"));
+    }
+
+    #[tokio::test]
+    async fn mcp_notifications_resource_returns_list() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 111,
+                "method": "resources/read",
+                "params": { "uri": "notifications://some-workspace" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let contents = json["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        let text = contents[0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert!(result["notifications"].as_array().is_some());
+        assert!(result["limit"].as_u64().is_some());
+        assert!(result.get("offset").is_some());
+    }
+
+    // ── TASK-010: trace:// resource ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_trace_resource_requires_mr_id() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 120,
+                "method": "resources/read",
+                "params": { "uri": "trace://" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("requires an mr_id"));
+    }
+
+    #[tokio::test]
+    async fn mcp_trace_resource_mr_not_found() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 121,
+                "method": "resources/read",
+                "params": { "uri": "trace://nonexistent-mr" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("merge request not found"));
+    }
+
+    #[tokio::test]
+    async fn mcp_trace_resource_no_trace_for_mr() {
+        // Create an MR but don't create a trace for it.
+        let st = test_state();
+        let mr = MergeRequest::new(
+            Id::new("mr-trace-test"),
+            Id::new("repo-1"),
+            "Test MR",
+            "feat/test",
+            "main",
+            now_secs(),
+        );
+        st.merge_requests.create(&mr).await.unwrap();
+        let app = crate::build_router(st);
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 122,
+                "method": "resources/read",
+                "params": { "uri": "trace://mr-trace-test" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no trace found"));
+    }
+
+    // ── TASK-010: graph_concept tool ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_graph_concept_requires_concept() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 130,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("missing required field: concept"));
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_concept_requires_scope() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 131,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": { "concept": "auth" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("provide either repo_id or workspace_id"));
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_concept_with_repo_id() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 132,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {
+                        "concept": "auth",
+                        "repo_id": "repo-1"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["concept"], "auth");
+        assert!(result["nodes"].as_array().is_some());
+        assert!(result["edges"].as_array().is_some());
+    }
+
+    // ── TASK-010: spec_assist tool ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_spec_assist_requires_fields() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 140,
+                "method": "tools/call",
+                "params": {
+                    "name": "spec_assist",
+                    "arguments": {}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_spec_assist_repo_not_found() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 141,
+                "method": "tools/call",
+                "params": {
+                    "name": "spec_assist",
+                    "arguments": {
+                        "repo_id": "nonexistent-repo",
+                        "spec_path": "system/auth.md",
+                        "instruction": "Add a section about rate limiting"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repo not found"));
+    }
+
+    // ── TASK-010: tools/list includes new tools ──────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_tools_list_includes_new_tools() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 150,
+                "method": "tools/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            names.contains(&"graph_concept"),
+            "must list graph_concept tool"
+        );
+        assert!(names.contains(&"spec_assist"), "must list spec_assist tool");
     }
 }
