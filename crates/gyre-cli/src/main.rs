@@ -848,6 +848,11 @@ async fn main() -> Result<()> {
                 println!("No suggestions returned.");
             } else {
                 for op in &ops {
+                    // Check for error events from the server (e.g., invalid LLM output).
+                    if let Some(error_msg) = op["error"].as_str() {
+                        eprintln!("Error: {error_msg}");
+                        continue;
+                    }
                     // Display explanation.
                     if let Some(explanation) = op["explanation"].as_str() {
                         println!();
