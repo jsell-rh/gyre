@@ -912,6 +912,7 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
             gyre_domain::BreakingChangeBehavior::Warn
         );
         assert_eq!(policy.max_version_drift, 3);
+        assert_eq!(policy.stale_dependency_alert_days, 30);
         assert!(policy.require_cascade_tests);
         assert!(policy.auto_create_update_tasks);
     }

@@ -670,6 +670,7 @@ pub async fn git_receive_pack(
                 &state_clone,
                 &repo_id_clone,
                 &repo_path_clone,
+                &update.old_sha,
                 &update.new_sha,
                 &repo_workspace_id_str,
                 &push_tenant_id,
@@ -2048,6 +2049,7 @@ pub(crate) async fn detect_breaking_changes_on_push(
     state: &Arc<AppState>,
     repo_id: &str,
     repo_path: &str,
+    old_sha: &str,
     new_sha: &str,
     workspace_id: &str,
     tenant_id: &str,
@@ -2056,15 +2058,22 @@ pub(crate) async fn detect_breaking_changes_on_push(
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
+    // Use the full push range old_sha..new_sha so that breaking change markers
+    // in interior commits of a multi-commit push are not missed.
+    let range = if old_sha.starts_with("00000000") {
+        new_sha.to_string()
+    } else {
+        format!("{old_sha}..{new_sha}")
+    };
+
     // Get full commit messages from the push. Using %B (full message) ensures
     // BREAKING CHANGE: footers in the commit body are detected.
     let log_out = match Command::new(&git_bin)
         .arg("-C")
         .arg(repo_path)
         .arg("log")
-        .arg("-1")
         .arg("--format=%H%x00%B%x00")
-        .arg(new_sha)
+        .arg(&range)
         .output()
         .await
     {
