@@ -268,6 +268,10 @@ pub struct BriefingItem {
     /// Suggested actions for exception items (HSI §9).
     /// Empty for non-exception sections (completed, in_progress, cross_workspace).
     pub actions: Vec<String>,
+    /// External workspace slug for cross_workspace items (HSI §9).
+    /// Extracted from `target_display` (e.g., "@platform-core/..." → "platform-core").
+    /// None for non-cross_workspace sections.
+    pub source_workspace_slug: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -834,6 +838,7 @@ pub async fn assemble_briefing(
                 .map(|s| s.split('@').next().unwrap_or(s).to_string()),
             timestamp: mr.updated_at,
             actions: Vec::new(),
+            source_workspace_slug: None,
         })
         .collect();
 
@@ -852,6 +857,7 @@ pub async fn assemble_briefing(
             spec_path: t.spec_path.clone(),
             timestamp: t.updated_at,
             actions: Vec::new(),
+            source_workspace_slug: None,
         })
         .collect();
 
@@ -878,8 +884,7 @@ pub async fn assemble_briefing(
                         .target_repo_id
                         .as_ref()
                         .is_some_and(|tid| !ws_repo_ids.contains(tid))
-                    && (link.created_at >= since
-                        || link.stale_since.is_some_and(|t| t >= since))
+                    && (link.created_at >= since || link.stale_since.is_some_and(|t| t >= since))
             })
             .map(|link| BriefingItem {
                 title: format!("Cross-workspace dependency: {}", link.target_path),
@@ -899,6 +904,12 @@ pub async fn assemble_briefing(
                 spec_path: Some(link.source_path.clone()),
                 timestamp: link.stale_since.unwrap_or(link.created_at),
                 actions: Vec::new(),
+                // Extract workspace slug from target_display: "@platform-core/..." → "platform-core"
+                source_workspace_slug: link.target_display.as_ref().and_then(|d| {
+                    d.strip_prefix('@')
+                        .and_then(|s| s.split('/').next())
+                        .map(String::from)
+                }),
             })
             .collect()
     };
@@ -937,6 +948,7 @@ pub async fn assemble_briefing(
                         "Override".to_string(),
                         "Close MR".to_string(),
                     ],
+                    source_workspace_slug: None,
                 });
             }
         }
@@ -964,6 +976,7 @@ pub async fn assemble_briefing(
                     "View Assertion".to_string(),
                     "Dismiss".to_string(),
                 ],
+                source_workspace_slug: None,
             });
         }
 
@@ -987,6 +1000,7 @@ pub async fn assemble_briefing(
                     "View Original MR".to_string(),
                     "Re-open".to_string(),
                 ],
+                source_workspace_slug: None,
             });
         }
 
@@ -1962,6 +1976,11 @@ mod tests {
             briefing.cross_workspace[0].spec_path.as_deref(),
             Some("system/payment-retry.md")
         );
+        // source_workspace_slug extracted from target_display "@platform-core/..."
+        assert_eq!(
+            briefing.cross_workspace[0].source_workspace_slug.as_deref(),
+            Some("platform-core")
+        );
     }
 
     #[tokio::test]
@@ -1995,6 +2014,82 @@ mod tests {
         assert!(
             briefing.cross_workspace.is_empty(),
             "same-workspace links should not appear in cross_workspace section"
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_cross_workspace_stale_since_includes_recently_stale_link() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Link with old created_at (before since) but recent stale_since (after since).
+        // This simulates a dependency whose target SHA advanced after the link was created.
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-stale".to_string(),
+                source_path: "system/payment-retry.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/idempotent-api.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
+                target_display: Some("@platform-core/api-svc/system/idempotent-api.md".to_string()),
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 500,         // before since=1500
+                stale_since: Some(2000), // after since=1500
+            });
+        }
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(
+            briefing.cross_workspace.len(),
+            1,
+            "link with stale_since >= since should be included even when created_at < since"
+        );
+        // Timestamp should prefer stale_since over created_at.
+        assert_eq!(briefing.cross_workspace[0].timestamp, 2000);
+        assert_eq!(
+            briefing.cross_workspace[0].source_workspace_slug.as_deref(),
+            Some("platform-core")
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_cross_workspace_stale_since_excludes_old_stale_link() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Link where both created_at and stale_since are before since — should be excluded.
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-old-stale".to_string(),
+                source_path: "system/billing.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/old-api.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
+                target_display: Some("@other-ws/repo/system/old-api.md".to_string()),
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 500,        // before since=1500
+                stale_since: Some(800), // also before since=1500
+            });
+        }
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(
+            briefing.cross_workspace.is_empty(),
+            "link with both created_at and stale_since before `since` should be excluded"
         );
     }
 

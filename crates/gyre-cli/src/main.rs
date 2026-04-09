@@ -1134,6 +1134,11 @@ fn print_briefing_item(item: &serde_json::Value, prefix: &str) {
             println!("      ({})", format_timestamp(ts));
         }
     }
+    if let Some(ws_slug) = item["source_workspace_slug"].as_str() {
+        if !ws_slug.is_empty() {
+            println!("      (workspace: {ws_slug})");
+        }
+    }
     if let Some(actions) = item["actions"].as_array() {
         if !actions.is_empty() {
             let labels: Vec<&str> = actions.iter().filter_map(|a| a.as_str()).collect();

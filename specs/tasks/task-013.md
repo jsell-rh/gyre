@@ -2,7 +2,7 @@
 
 **Spec reference:** `human-system-interface.md` §9 (Briefing Detail)
 **Depends on:** None (consumes existing notification, gate result, and spec link data)
-**Progress:** `needs-revision`
+**Progress:** `ready-for-review`
 **Review:** [`specs/reviews/task-013.md`](../reviews/task-013.md)
 
 ## Spec Excerpt
@@ -95,3 +95,4 @@ When working on this task:
 - `feat(briefing): implement cross_workspace and exceptions sections (TASK-013)`
 - `fix(briefing): address R1 findings — filter direction, actions field, gate timestamp (TASK-013)`
 - `fix(briefing): address R2 findings — exception type values, cross-workspace timestamp filter (TASK-013)`
+- `fix(briefing): address R3 findings — source_workspace_slug field, stale_since test coverage (TASK-013)`
