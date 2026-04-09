@@ -59,7 +59,7 @@
 
 ## R4 Findings
 
-- [ ] **F9: Premature `Supersedes` deprecation at sync/push time — spec requires approval-time trigger only**
+- [-] [process-revision-complete] **F9: Premature `Supersedes` deprecation at sync/push time — spec requires approval-time trigger only**
 
   spec-links.md §Approval Gates:
 
