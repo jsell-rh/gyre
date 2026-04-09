@@ -393,6 +393,26 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing graph response")
     }
 
+    /// GET /api/v1/workspaces/:workspace_id/repos — list repos in a workspace.
+    pub async fn list_workspace_repos(&self, workspace_id: &str) -> Result<Vec<serde_json::Value>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/workspaces/{workspace_id}/repos",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list workspace repos failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing repos response")
+    }
+
     /// Resolve a repo name to its ID within a workspace.
     /// Lists repos in the workspace and matches by name.
     pub async fn resolve_repo_name(&self, workspace_id: &str, repo_name: &str) -> Result<String> {
@@ -501,6 +521,174 @@ impl GyreClient {
             }
         }
         Ok(ops)
+    }
+
+    // ── Dependency graph endpoints ──────────────────────────────────────────
+
+    /// GET /api/v1/repos/:id/dependencies — outgoing deps from this repo.
+    pub async fn list_dependencies(&self, repo_id: &str) -> Result<Vec<serde_json::Value>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/repos/{repo_id}/dependencies",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list dependencies failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing dependencies response")
+    }
+
+    /// GET /api/v1/repos/:id/dependents — repos that depend on this repo.
+    pub async fn list_dependents(&self, repo_id: &str) -> Result<Vec<serde_json::Value>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/repos/{repo_id}/dependents",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list dependents failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing dependents response")
+    }
+
+    /// GET /api/v1/dependencies/graph — tenant-wide dependency graph.
+    pub async fn get_dependency_graph(&self) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/dependencies/graph", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get dependency graph failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing graph response")
+    }
+
+    /// GET /api/v1/repos/:id/blast-radius — transitive dependents.
+    pub async fn get_blast_radius(&self, repo_id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/repos/{repo_id}/blast-radius",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get blast radius failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing blast radius response")
+    }
+
+    /// GET /api/v1/dependencies/stale — all stale dependency edges.
+    pub async fn list_stale_dependencies(
+        &self,
+        workspace_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/dependencies/stale", self.base_url))
+            .header("Authorization", self.auth_header());
+        if let Some(ws) = workspace_id {
+            req = req.query(&[("workspace_id", ws)]);
+        }
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list stale dependencies failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing stale dependencies response")
+    }
+
+    /// GET /api/v1/dependencies/breaking — unacknowledged breaking changes.
+    pub async fn list_breaking_changes(&self) -> Result<Vec<serde_json::Value>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/dependencies/breaking", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list breaking changes failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing breaking changes response")
+    }
+
+    /// POST /api/v1/repos/:id/dependencies — add a manual dependency.
+    pub async fn add_dependency(
+        &self,
+        repo_id: &str,
+        target_repo_id: &str,
+        dep_type: &str,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({
+            "target_repo_id": target_repo_id,
+            "dependency_type": dep_type,
+        });
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/v1/repos/{repo_id}/dependencies",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("add dependency failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing add dependency response")
+    }
+
+    /// POST /api/v1/dependencies/breaking/:id/acknowledge
+    pub async fn acknowledge_breaking_change(&self, id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/v1/dependencies/breaking/{id}/acknowledge",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            anyhow::bail!("acknowledge breaking change failed (HTTP {status}): {text}");
+        }
+        Ok(())
     }
 
     /// Call POST /api/v1/release/prepare and return the JSON response.

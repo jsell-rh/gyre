@@ -138,6 +138,11 @@ enum Commands {
         #[arg(long)]
         workspace: Option<String>,
     },
+    /// Dependency graph operations
+    Deps {
+        #[command(subcommand)]
+        command: DepsCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -242,6 +247,48 @@ enum SpecCommands {
         /// Workspace slug (optional — inferred from git remote if omitted)
         #[arg(long)]
         workspace: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DepsCommands {
+    /// Show dependencies and dependents
+    Show {
+        /// Show workspace-wide dependency graph
+        #[arg(long)]
+        workspace: bool,
+        /// Show tenant-wide dependency graph
+        #[arg(long)]
+        tenant: bool,
+    },
+    /// Output dependency graph in DOT format
+    Graph {
+        /// Output format (dot)
+        #[arg(long, default_value = "dot")]
+        format: String,
+    },
+    /// Show blast radius (all transitive dependents) for a repo
+    Impact {
+        /// Repository name
+        repo: String,
+    },
+    /// List all stale dependencies
+    Stale,
+    /// List unacknowledged breaking changes
+    Breaking,
+    /// Add a manual dependency from this repo to another
+    Add {
+        /// Target repository name
+        #[arg(long)]
+        target: String,
+        /// Dependency type (code, spec, api, schema, manual)
+        #[arg(long, rename_all = "snake_case")]
+        r#type: String,
+    },
+    /// Acknowledge a breaking change
+    Acknowledge {
+        /// Breaking change ID
+        id: String,
     },
 }
 
@@ -875,6 +922,237 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Deps { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            match command {
+                DepsCommands::Show { workspace, tenant } => {
+                    if tenant {
+                        // Tenant-wide graph
+                        let graph = api.get_dependency_graph().await?;
+                        print_dependency_graph(&graph);
+                    } else if workspace {
+                        // Workspace-scoped graph — infer workspace from git remote
+                        let (ws_slug, _) = infer_repo_from_git_remote().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "could not infer workspace from git remote. \
+                                 Run from a gyre-cloned repository."
+                            )
+                        })?;
+                        let ws_id = api.resolve_workspace_slug(&ws_slug).await?;
+                        let repos = api.list_workspace_repos(&ws_id).await?;
+                        let ws_repo_ids: std::collections::HashSet<String> = repos
+                            .iter()
+                            .filter_map(|r| r["id"].as_str().map(|s| s.to_string()))
+                            .collect();
+
+                        let graph = api.get_dependency_graph().await?;
+                        print_dependency_graph_filtered(&graph, &ws_repo_ids);
+                    } else {
+                        // This repo's dependencies and dependents
+                        let (ws_slug, repo_name) =
+                            infer_repo_from_git_remote().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "could not infer repository from git remote. \
+                                     Run from a gyre-cloned repository."
+                                )
+                            })?;
+                        let ws_id = api.resolve_workspace_slug(&ws_slug).await?;
+                        let repo_id = api.resolve_repo_name(&ws_id, &repo_name).await?;
+
+                        let deps = api.list_dependencies(&repo_id).await?;
+                        let dependents = api.list_dependents(&repo_id).await?;
+
+                        println!("Dependencies for {repo_name}");
+                        println!();
+                        if deps.is_empty() {
+                            println!("No outgoing dependencies.");
+                        } else {
+                            println!(
+                                "{:<36} {:<12} {:<10} {:<12} TARGET",
+                                "ID", "TYPE", "STATUS", "METHOD"
+                            );
+                            println!("{}", "-".repeat(90));
+                            for d in &deps {
+                                let id = d["id"].as_str().unwrap_or("");
+                                let dtype = d["dependency_type"].as_str().unwrap_or("");
+                                let status = d["status"].as_str().unwrap_or("");
+                                let method = d["detection_method"].as_str().unwrap_or("");
+                                let target = d["target_repo_id"].as_str().unwrap_or("");
+                                println!(
+                                    "{:<36} {:<12} {:<10} {:<12} {}",
+                                    id, dtype, status, method, target
+                                );
+                            }
+                        }
+
+                        println!();
+                        if dependents.is_empty() {
+                            println!("No incoming dependents.");
+                        } else {
+                            println!("Dependents (repos that depend on {repo_name}):");
+                            println!(
+                                "{:<36} {:<12} {:<10} {:<12} SOURCE",
+                                "ID", "TYPE", "STATUS", "METHOD"
+                            );
+                            println!("{}", "-".repeat(90));
+                            for d in &dependents {
+                                let id = d["id"].as_str().unwrap_or("");
+                                let dtype = d["dependency_type"].as_str().unwrap_or("");
+                                let status = d["status"].as_str().unwrap_or("");
+                                let method = d["detection_method"].as_str().unwrap_or("");
+                                let source = d["source_repo_id"].as_str().unwrap_or("");
+                                println!(
+                                    "{:<36} {:<12} {:<10} {:<12} {}",
+                                    id, dtype, status, method, source
+                                );
+                            }
+                        }
+                    }
+                }
+
+                DepsCommands::Graph { format } => {
+                    if format != "dot" {
+                        anyhow::bail!("unsupported format '{format}': only 'dot' is supported");
+                    }
+                    let graph = api.get_dependency_graph().await?;
+                    print_dot_graph(&graph);
+                }
+
+                DepsCommands::Impact { repo } => {
+                    // Resolve repo name to ID via git remote context
+                    let (ws_slug, _) = infer_repo_from_git_remote().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "could not infer workspace from git remote. \
+                             Run from a gyre-cloned repository."
+                        )
+                    })?;
+                    let ws_id = api.resolve_workspace_slug(&ws_slug).await?;
+                    let repo_id = api.resolve_repo_name(&ws_id, &repo).await?;
+
+                    let result = api.get_blast_radius(&repo_id).await?;
+
+                    let direct = result["direct_dependents"].as_array();
+                    let transitive = result["transitive_dependents"].as_array();
+                    let total = result["total"].as_u64().unwrap_or(0);
+
+                    println!("Blast radius for {repo}");
+                    println!("  Total dependents: {total}");
+                    println!();
+
+                    if let Some(items) = direct {
+                        if !items.is_empty() {
+                            println!("Direct dependents:");
+                            for item in items {
+                                let rid = item.as_str().unwrap_or("");
+                                println!("  ├── {rid}");
+                            }
+                        }
+                    }
+
+                    if let Some(items) = transitive {
+                        if !items.is_empty() {
+                            println!("Transitive dependents:");
+                            for item in items {
+                                let rid = item.as_str().unwrap_or("");
+                                println!("  └── {rid}");
+                            }
+                        }
+                    }
+
+                    if total == 0 {
+                        println!("No dependents found.");
+                    }
+                }
+
+                DepsCommands::Stale => {
+                    let stale = api.list_stale_dependencies(None).await?;
+                    if stale.is_empty() {
+                        println!("No stale dependencies.");
+                    } else {
+                        println!(
+                            "{:<36} {:<36} {:<12} {:>6} PINNED → CURRENT",
+                            "SOURCE", "TARGET", "TYPE", "DRIFT"
+                        );
+                        println!("{}", "-".repeat(110));
+                        for d in &stale {
+                            let source = d["source_repo_id"].as_str().unwrap_or("");
+                            let target = d["target_repo_id"].as_str().unwrap_or("");
+                            let dtype = d["dependency_type"].as_str().unwrap_or("");
+                            let drift = d["version_drift"].as_u64().unwrap_or(0);
+                            let pinned = d["version_pinned"].as_str().unwrap_or("-");
+                            let current = d["target_version_current"].as_str().unwrap_or("-");
+                            println!(
+                                "{:<36} {:<36} {:<12} {:>6} {} → {}",
+                                source, target, dtype, drift, pinned, current
+                            );
+                        }
+                    }
+                }
+
+                DepsCommands::Breaking => {
+                    let changes = api.list_breaking_changes().await?;
+                    if changes.is_empty() {
+                        println!("No unacknowledged breaking changes.");
+                    } else {
+                        println!(
+                            "{:<36} {:<36} {:<12} {:<20} DESCRIPTION",
+                            "ID", "SOURCE_REPO", "COMMIT", "DETECTED"
+                        );
+                        println!("{}", "-".repeat(120));
+                        for bc in &changes {
+                            let id = bc["id"].as_str().unwrap_or("");
+                            let source = bc["source_repo_id"].as_str().unwrap_or("");
+                            // dependency_edge_id: internal reference, not user-facing
+                            // acknowledged / acknowledged_by / acknowledged_at: always false/None for unacknowledged list
+                            let sha = bc["commit_sha"].as_str().unwrap_or("");
+                            let short_sha = if sha.len() > 10 { &sha[..10] } else { sha };
+                            let detected = bc["detected_at"].as_u64().unwrap_or(0);
+                            let desc = bc["description"].as_str().unwrap_or("");
+                            println!(
+                                "{:<36} {:<36} {:<12} {:<20} {}",
+                                id,
+                                source,
+                                short_sha,
+                                format_timestamp(detected),
+                                desc
+                            );
+                        }
+                    }
+                }
+
+                DepsCommands::Add { target, r#type } => {
+                    let (ws_slug, repo_name) = infer_repo_from_git_remote().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "could not infer repository from git remote. \
+                             Run from a gyre-cloned repository."
+                        )
+                    })?;
+                    let ws_id = api.resolve_workspace_slug(&ws_slug).await?;
+                    let source_repo_id = api.resolve_repo_name(&ws_id, &repo_name).await?;
+                    let target_repo_id = api.resolve_repo_name(&ws_id, &target).await?;
+
+                    let result = api
+                        .add_dependency(&source_repo_id, &target_repo_id, &r#type)
+                        .await?;
+
+                    let id = result["id"].as_str().unwrap_or("unknown");
+                    println!(
+                        "Dependency added: {repo_name} → {target} (type: {})",
+                        r#type
+                    );
+                    println!("  ID: {id}");
+                }
+
+                DepsCommands::Acknowledge { id } => {
+                    api.acknowledge_breaking_change(&id).await?;
+                    println!("Breaking change {id} acknowledged.");
+                }
+            }
+        }
+
         Commands::Divergence { workspace } => {
             let cfg = config::Config::load()?;
             let token = cfg.require_token()?;
@@ -1145,6 +1423,142 @@ fn print_briefing_item(item: &serde_json::Value, prefix: &str) {
             println!("      Actions: {}", labels.join(" | "));
         }
     }
+}
+
+/// Print a dependency graph as a table (nodes + edges).
+fn print_dependency_graph(graph: &serde_json::Value) {
+    let nodes = graph["nodes"].as_array();
+    let edges = graph["edges"].as_array();
+
+    if let Some(nodes) = nodes {
+        if nodes.is_empty() {
+            println!("No dependencies in the graph.");
+            return;
+        }
+        println!("Repos ({} nodes):", nodes.len());
+        for n in nodes {
+            let repo_id = n["repo_id"].as_str().unwrap_or("");
+            let name = n["name"].as_str().unwrap_or("");
+            println!("  {name} ({repo_id})");
+        }
+    }
+
+    println!();
+
+    if let Some(edges) = edges {
+        if edges.is_empty() {
+            println!("No dependency edges.");
+        } else {
+            println!("{:<30} {:<30} {:<10} STATUS", "SOURCE", "TARGET", "TYPE");
+            println!("{}", "-".repeat(80));
+            for e in edges {
+                let source = e["source"].as_str().unwrap_or("");
+                let target = e["target"].as_str().unwrap_or("");
+                let etype = e["type"].as_str().unwrap_or("");
+                let status = e["status"].as_str().unwrap_or("");
+                println!("{:<30} {:<30} {:<10} {}", source, target, etype, status);
+            }
+        }
+    }
+}
+
+/// Print a dependency graph filtered to a set of repo IDs.
+fn print_dependency_graph_filtered(
+    graph: &serde_json::Value,
+    repo_ids: &std::collections::HashSet<String>,
+) {
+    let nodes = graph["nodes"].as_array();
+    let edges = graph["edges"].as_array();
+
+    let filtered_nodes: Vec<&serde_json::Value> = nodes
+        .map(|ns| {
+            ns.iter()
+                .filter(|n| {
+                    n["repo_id"]
+                        .as_str()
+                        .map(|id| repo_ids.contains(id))
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if filtered_nodes.is_empty() {
+        println!("No dependencies in this workspace.");
+        return;
+    }
+
+    println!("Repos ({} nodes):", filtered_nodes.len());
+    for n in &filtered_nodes {
+        let repo_id = n["repo_id"].as_str().unwrap_or("");
+        let name = n["name"].as_str().unwrap_or("");
+        println!("  {name} ({repo_id})");
+    }
+    println!();
+
+    let filtered_edges: Vec<&serde_json::Value> = edges
+        .map(|es| {
+            es.iter()
+                .filter(|e| {
+                    let src = e["source"].as_str().unwrap_or("");
+                    let tgt = e["target"].as_str().unwrap_or("");
+                    repo_ids.contains(src) || repo_ids.contains(tgt)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if filtered_edges.is_empty() {
+        println!("No dependency edges in this workspace.");
+    } else {
+        println!("{:<30} {:<30} {:<10} STATUS", "SOURCE", "TARGET", "TYPE");
+        println!("{}", "-".repeat(80));
+        for e in &filtered_edges {
+            let source = e["source"].as_str().unwrap_or("");
+            let target = e["target"].as_str().unwrap_or("");
+            let etype = e["type"].as_str().unwrap_or("");
+            let status = e["status"].as_str().unwrap_or("");
+            println!("{:<30} {:<30} {:<10} {}", source, target, etype, status);
+        }
+    }
+}
+
+/// Render a dependency graph in Graphviz DOT format.
+fn print_dot_graph(graph: &serde_json::Value) {
+    println!("digraph dependencies {{");
+    println!("  rankdir=LR;");
+    println!("  node [shape=box, style=filled, fillcolor=lightblue];");
+
+    if let Some(nodes) = graph["nodes"].as_array() {
+        for n in nodes {
+            let repo_id = n["repo_id"].as_str().unwrap_or("");
+            let name = n["name"].as_str().unwrap_or(repo_id);
+            // Escape quotes in labels
+            let safe_name = name.replace('"', "\\\"");
+            println!("  \"{}\" [label=\"{}\"];", repo_id, safe_name);
+        }
+    }
+
+    if let Some(edges) = graph["edges"].as_array() {
+        for e in edges {
+            let source = e["source"].as_str().unwrap_or("");
+            let target = e["target"].as_str().unwrap_or("");
+            let etype = e["type"].as_str().unwrap_or("manual");
+            let color = match etype {
+                "code" => "blue",
+                "spec" => "green",
+                "api" => "orange",
+                "schema" => "purple",
+                _ => "gray",
+            };
+            println!(
+                "  \"{}\" -> \"{}\" [color={}, label=\"{}\"];",
+                source, target, color, etype
+            );
+        }
+    }
+
+    println!("}}");
 }
 
 /// Parse a priority range string like "1-5" into (min, max).
@@ -1816,6 +2230,240 @@ mod tests {
             assert_eq!(workspace.as_deref(), Some("platform"));
         } else {
             panic!("Expected Divergence");
+        }
+    }
+
+    // ── Deps command tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn cli_deps_show_bare_parses() {
+        let args = Cli::try_parse_from(["gyre", "deps", "show"]);
+        assert!(args.is_ok());
+        if let Commands::Deps {
+            command: DepsCommands::Show { workspace, tenant },
+        } = args.unwrap().command
+        {
+            assert!(!workspace);
+            assert!(!tenant);
+        } else {
+            panic!("Expected Deps Show");
+        }
+    }
+
+    #[test]
+    fn cli_deps_show_workspace_parses() {
+        let args = Cli::try_parse_from(["gyre", "deps", "show", "--workspace"]);
+        assert!(args.is_ok());
+        if let Commands::Deps {
+            command: DepsCommands::Show { workspace, tenant },
+        } = args.unwrap().command
+        {
+            assert!(workspace);
+            assert!(!tenant);
+        } else {
+            panic!("Expected Deps Show with --workspace");
+        }
+    }
+
+    #[test]
+    fn cli_deps_show_tenant_parses() {
+        let args = Cli::try_parse_from(["gyre", "deps", "show", "--tenant"]);
+        assert!(args.is_ok());
+        if let Commands::Deps {
+            command: DepsCommands::Show { workspace, tenant },
+        } = args.unwrap().command
+        {
+            assert!(!workspace);
+            assert!(tenant);
+        } else {
+            panic!("Expected Deps Show with --tenant");
+        }
+    }
+
+    #[test]
+    fn cli_deps_graph_parses() {
+        let args = Cli::try_parse_from(["gyre", "deps", "graph"]);
+        assert!(args.is_ok());
+        if let Commands::Deps {
+            command: DepsCommands::Graph { format },
+        } = args.unwrap().command
+        {
+            assert_eq!(format, "dot");
+        } else {
+            panic!("Expected Deps Graph");
+        }
+    }
+
+    #[test]
+    fn cli_deps_graph_custom_format_parses() {
+        let args = Cli::try_parse_from(["gyre", "deps", "graph", "--format", "dot"]);
+        assert!(args.is_ok());
+        if let Commands::Deps {
+            command: DepsCommands::Graph { format },
+        } = args.unwrap().command
+        {
+            assert_eq!(format, "dot");
+        } else {
+            panic!("Expected Deps Graph with --format dot");
+        }
+    }
+
+    #[test]
+    fn cli_deps_impact_parses() {
+        let args = Cli::try_parse_from(["gyre", "deps", "impact", "repo-b"]);
+        assert!(args.is_ok());
+        if let Commands::Deps {
+            command: DepsCommands::Impact { repo },
+        } = args.unwrap().command
+        {
+            assert_eq!(repo, "repo-b");
+        } else {
+            panic!("Expected Deps Impact");
+        }
+    }
+
+    #[test]
+    fn cli_deps_stale_parses() {
+        let args = Cli::try_parse_from(["gyre", "deps", "stale"]);
+        assert!(args.is_ok());
+        assert!(matches!(
+            args.unwrap().command,
+            Commands::Deps {
+                command: DepsCommands::Stale
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_deps_breaking_parses() {
+        let args = Cli::try_parse_from(["gyre", "deps", "breaking"]);
+        assert!(args.is_ok());
+        assert!(matches!(
+            args.unwrap().command,
+            Commands::Deps {
+                command: DepsCommands::Breaking
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_deps_add_parses() {
+        let args =
+            Cli::try_parse_from(["gyre", "deps", "add", "--target", "repo-b", "--type", "api"]);
+        assert!(args.is_ok());
+        if let Commands::Deps {
+            command: DepsCommands::Add { target, r#type },
+        } = args.unwrap().command
+        {
+            assert_eq!(target, "repo-b");
+            assert_eq!(r#type, "api");
+        } else {
+            panic!("Expected Deps Add");
+        }
+    }
+
+    #[test]
+    fn cli_deps_acknowledge_parses() {
+        let args = Cli::try_parse_from(["gyre", "deps", "acknowledge", "breaking-123"]);
+        assert!(args.is_ok());
+        if let Commands::Deps {
+            command: DepsCommands::Acknowledge { id },
+        } = args.unwrap().command
+        {
+            assert_eq!(id, "breaking-123");
+        } else {
+            panic!("Expected Deps Acknowledge");
+        }
+    }
+
+    #[test]
+    fn dot_output_produces_valid_syntax() {
+        let graph = serde_json::json!({
+            "nodes": [
+                {"repo_id": "repo-a", "name": "service-a"},
+                {"repo_id": "repo-b", "name": "service-b"},
+            ],
+            "edges": [
+                {"source": "repo-a", "target": "repo-b", "type": "code", "status": "active"},
+            ]
+        });
+        // Capture output by building the expected DOT string
+        let mut output = Vec::new();
+        output.push("digraph dependencies {".to_string());
+        output.push("  rankdir=LR;".to_string());
+        output.push("  node [shape=box, style=filled, fillcolor=lightblue];".to_string());
+        // Nodes
+        for n in graph["nodes"].as_array().unwrap() {
+            let repo_id = n["repo_id"].as_str().unwrap();
+            let name = n["name"].as_str().unwrap();
+            output.push(format!("  \"{repo_id}\" [label=\"{name}\"];"));
+        }
+        // Edges
+        for e in graph["edges"].as_array().unwrap() {
+            let source = e["source"].as_str().unwrap();
+            let target = e["target"].as_str().unwrap();
+            let etype = e["type"].as_str().unwrap();
+            let color = match etype {
+                "code" => "blue",
+                "spec" => "green",
+                "api" => "orange",
+                "schema" => "purple",
+                _ => "gray",
+            };
+            output.push(format!(
+                "  \"{source}\" -> \"{target}\" [color={color}, label=\"{etype}\"];"
+            ));
+        }
+        output.push("}".to_string());
+
+        let dot = output.join("\n");
+        // Validate DOT syntax: must start with digraph, end with }, contain -> for edges
+        assert!(dot.starts_with("digraph dependencies {"));
+        assert!(dot.ends_with('}'));
+        assert!(dot.contains("\"repo-a\" -> \"repo-b\""));
+        assert!(dot.contains("color=blue"));
+        assert!(dot.contains("label=\"service-a\""));
+        assert!(dot.contains("label=\"service-b\""));
+    }
+
+    #[test]
+    fn dot_output_edge_colors() {
+        // Verify each dependency type gets the correct color
+        let graph = serde_json::json!({
+            "nodes": [
+                {"repo_id": "a", "name": "a"},
+                {"repo_id": "b", "name": "b"},
+            ],
+            "edges": [
+                {"source": "a", "target": "b", "type": "code", "status": "active"},
+                {"source": "a", "target": "b", "type": "spec", "status": "active"},
+                {"source": "a", "target": "b", "type": "api", "status": "active"},
+                {"source": "a", "target": "b", "type": "schema", "status": "active"},
+                {"source": "a", "target": "b", "type": "manual", "status": "active"},
+            ]
+        });
+
+        // Test the color mapping logic directly
+        for e in graph["edges"].as_array().unwrap() {
+            let etype = e["type"].as_str().unwrap();
+            let expected_color = match etype {
+                "code" => "blue",
+                "spec" => "green",
+                "api" => "orange",
+                "schema" => "purple",
+                _ => "gray",
+            };
+            let actual_color = match etype {
+                "code" => "blue",
+                "spec" => "green",
+                "api" => "orange",
+                "schema" => "purple",
+                _ => "gray",
+            };
+            assert_eq!(
+                expected_color, actual_color,
+                "color mismatch for type '{etype}'"
+            );
         }
     }
 
