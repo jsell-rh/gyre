@@ -3,7 +3,7 @@
 **Spec reference:** `dependency-graph.md` §Breaking Change Detection, §Enforcement Policies  
 **Depends on:** None (builds on M22.4 dependency graph infrastructure)  
 **Progress:** `ready-for-review`  
-**Review:** [specs/reviews/task-020.md](../reviews/task-020.md) — R5 needs-revision (1 finding)
+**Review:** [specs/reviews/task-020.md](../reviews/task-020.md) — R5 addressed
 
 ## Spec Excerpt
 
@@ -110,3 +110,4 @@ When working on this task:
 
 - `feat(deps): implement breaking change detection and enforcement (TASK-020)`
 - `2e39a167 fix(deps): address TASK-020 R2 findings — require_cascade_tests, %B format, production test`
+- `3756e17b fix(deps): resolve dependent repo workspace for tasks/notifications (TASK-020 R5 F1)`
