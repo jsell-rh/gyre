@@ -868,8 +868,9 @@ pub async fn assemble_briefing(
         links
             .iter()
             .filter(|link| {
-                // Our spec (source) depends on an external spec (target) that changed.
+                // Our spec (source) depends on an external spec (target).
                 // source_repo_id IN workspace, target_repo_id NOT IN workspace.
+                // Filter by created_at (link creation/refresh) OR stale_since (target SHA advanced).
                 link.source_repo_id
                     .as_ref()
                     .is_some_and(|sid| ws_repo_ids.contains(sid))
@@ -877,17 +878,18 @@ pub async fn assemble_briefing(
                         .target_repo_id
                         .as_ref()
                         .is_some_and(|tid| !ws_repo_ids.contains(tid))
-                    && link.created_at >= since
+                    && (link.created_at >= since
+                        || link.stale_since.is_some_and(|t| t >= since))
             })
             .map(|link| BriefingItem {
-                title: format!("Dependency updated: {}", link.target_path),
+                title: format!("Cross-workspace dependency: {}", link.target_path),
                 description: link
                     .target_display
                     .as_ref()
-                    .map(|d| format!("{d} was updated"))
+                    .map(|d| format!("Depends on {d} (link type: {:?})", link.link_type))
                     .unwrap_or_else(|| {
                         format!(
-                            "{} changed (link type: {:?})",
+                            "Depends on {} (link type: {:?})",
                             link.target_path, link.link_type
                         )
                     }),
@@ -895,7 +897,7 @@ pub async fn assemble_briefing(
                 entity_id: Some(link.id.clone()),
                 // spec_path = our local spec that is affected (so user can navigate to it)
                 spec_path: Some(link.source_path.clone()),
-                timestamp: link.created_at,
+                timestamp: link.stale_since.unwrap_or(link.created_at),
                 actions: Vec::new(),
             })
             .collect()
@@ -953,7 +955,7 @@ pub async fn assemble_briefing(
             items.push(BriefingItem {
                 title: n.title.clone(),
                 description: n.body.clone().unwrap_or_default(),
-                entity_type: "assertion_failure".to_string(),
+                entity_type: "spec_assertion_failure".to_string(),
                 entity_id: n.entity_ref.clone(),
                 spec_path: n.entity_ref.clone(),
                 timestamp: n.created_at as u64,
@@ -973,7 +975,7 @@ pub async fn assemble_briefing(
             items.push(BriefingItem {
                 title: format!("MR reverted: {}", mr.title),
                 description: format!("{} → {} (reverted)", mr.source_branch, mr.target_branch),
-                entity_type: "mr_revert".to_string(),
+                entity_type: "reverted".to_string(),
                 entity_id: Some(mr.id.to_string()),
                 spec_path: mr
                     .spec_ref
@@ -1950,7 +1952,7 @@ mod tests {
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
         assert_eq!(briefing.cross_workspace.len(), 1);
-        // Title references the external dependency (target) that changed.
+        // Title references the external dependency (target).
         assert!(briefing.cross_workspace[0]
             .title
             .contains("idempotent-api.md"));
@@ -2113,7 +2115,7 @@ mod tests {
         let assertions: Vec<_> = briefing
             .exceptions
             .iter()
-            .filter(|e| e.entity_type == "assertion_failure")
+            .filter(|e| e.entity_type == "spec_assertion_failure")
             .collect();
         assert_eq!(assertions.len(), 1);
         assert!(assertions[0].title.contains("Spec assertion failed"));
@@ -2150,7 +2152,7 @@ mod tests {
         let reverts: Vec<_> = briefing
             .exceptions
             .iter()
-            .filter(|e| e.entity_type == "mr_revert")
+            .filter(|e| e.entity_type == "reverted")
             .collect();
         assert_eq!(reverts.len(), 1);
         assert!(reverts[0].title.contains("Broken migration"));
