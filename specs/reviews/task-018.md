@@ -1,11 +1,10 @@
-# TASK-018 Review — R1
+# TASK-018 Review
 
-**Reviewer:** Verifier  
-**Verdict:** `needs-revision` (2 findings)
+**Reviewer:** Verifier
 
 ---
 
-## Findings
+## R1 — `needs-revision` (2 findings)
 
 - [-] [process-revision-complete] **F1: Wrong git notes ref namespace — task-vs-spec transcription error**
 
@@ -66,3 +65,34 @@
   - `crates/gyre-server/src/gate_executor.rs:307` — passes single leaf
   - `crates/gyre-server/src/merge_processor.rs:564-586` — passes single attestation
   - All tests that round-trip a single attestation
+
+---
+
+## R2 — `needs-revision` (1 finding)
+
+F1 and F2 are fully addressed:
+- `CHAIN_ATTESTATION_NOTES_REF` is now `"refs/notes/attestations"` (attestation.rs:50). No stale references to `chain-attestations` anywhere in the codebase.
+- `attach_chain_attestation_note` takes `chain: &[Attestation]` (attestation.rs:65). `read_chain_attestation_note` returns `Option<Vec<Attestation>>` (attestation.rs:129). `write_chain_note_if_committed` loads the full chain via `load_chain` (attestation.rs:185). Callers in `merge_processor.rs` (lines 565, 587) load full chains. Tests use `sample_chain` with 2-node chains and verify round-trip equality.
+
+- [ ] **F3: Race condition between legacy and chain note writes — spec-required chain attestation may be silently overwritten**
+
+  In `merge_processor.rs`, the legacy `AttestationBundle` write (line 517) and the new chain attestation write (line 569, inside `attach_chain_attestation_note`) both target `refs/notes/attestations` with `-f` as fire-and-forget `tokio::spawn` tasks. There is no ordering guarantee between them.
+
+  Timeline:
+  1. Line 517: `tokio::spawn(...)` — legacy write fires (JoinHandle dropped)
+  2. Lines 559–566: Two `await`ed database queries (`find_by_commit`, `load_chain`)
+  3. Line 569: `attach_chain_attestation_note(...)` `.await` — serializes JSON, spawns another `tokio::spawn` for the chain write, returns
+
+  Both spawned tasks execute `git notes add -f` on the same ref. Whichever git command completes last determines the note content. The database queries in step 2 make it *likely* the legacy write (step 1) finishes before the chain write (step 3) starts — but there is no guarantee. With a fast in-memory database and a slow-to-start git process, the legacy write could complete after the chain write.
+
+  If the legacy write wins the race, the git note contains `AttestationBundle` JSON. `read_chain_attestation_note` attempts to parse it as `Vec<Attestation>`, fails, and returns `None` — silently losing the chain attestation from git notes.
+
+  The acceptance criterion states "chain overwrites legacy on same ref per spec." The spec §5.3 requires the chain attestation at `refs/notes/attestations`. A non-deterministic race means this requirement is not reliably met.
+
+  **Fix options** (either is sufficient):
+  - Await the legacy write's JoinHandle before starting the chain write, ensuring sequential ordering.
+  - Skip the legacy note write when a chain attestation exists for the same commit (the chain overwrites it anyway, and the legacy `AttestationBundle` is separately persisted in the attestation store at line 550–553).
+
+  **Affected code:**
+  - `crates/gyre-server/src/merge_processor.rs:517` — legacy write `tokio::spawn` (JoinHandle dropped)
+  - `crates/gyre-server/src/merge_processor.rs:569` — chain write via `attach_chain_attestation_note`
