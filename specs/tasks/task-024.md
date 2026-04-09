@@ -2,7 +2,8 @@
 
 **Spec reference:** `dependency-graph.md` §CLI  
 **Depends on:** TASK-020 (breaking change endpoints), TASK-021 (stale endpoint)  
-**Progress:** `ready-for-review`
+**Progress:** `needs-revision`  
+**Review:** [`specs/reviews/task-024.md`](../reviews/task-024.md)
 
 ## Spec Excerpt
 
