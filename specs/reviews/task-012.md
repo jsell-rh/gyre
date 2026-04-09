@@ -1,7 +1,7 @@
 # Review: TASK-012 — Specs Assist Real LLM Integration
 
 **Reviewer:** Verifier
-**Round:** R3
+**Round:** R4
 
 ---
 
@@ -31,5 +31,22 @@
 
 ## R3
 
-- [-] [process-revision-complete] **F7 — CLI client does not handle `event: error` SSE events — users see misleading "No suggestions returned." when the LLM returns invalid output.**
+- [x] [process-revision-complete] **F7 — CLI client does not handle `event: error` SSE events — users see misleading "No suggestions returned." when the LLM returns invalid output.**
   TASK-012 introduced `event: error` on the server side (for invalid LLM JSON, missing fields, or invalid diff ops — `specs_assist.rs:296-315`). The CLI client `spec_assist` parser (`client.rs:471-496`) only captures `complete` and `partial` events. When the server sends `event: error`, the client ignores it, returns an empty `ops` vec, and the display code at `main.rs:847-848` prints "No suggestions returned." — a misleading message that implies the LLM had no suggestions rather than reporting the actual error. The spec (`ui-layout.md` §3 line 167) defines `event: error` as part of the SSE contract. The R2 fix (F6) already updated this client code for the new `complete` event format but did not add `error` event handling. Fix: in the client's SSE parser (`client.rs:483-494`), add an `else if current_event == "error"` branch that captures the error data. In the display code (`main.rs:847`), check for error events and print the error message (e.g., `eprintln!("Error: {}", error_data["error"].as_str())`) before or instead of the "No suggestions returned." fallback.
+
+---
+
+## R4
+
+All R1–R3 findings verified resolved. No new findings.
+
+Verified:
+- F1 resolved: `DiffOp` removed (grep confirms zero hits)
+- F2 resolved: `CostEntry` created and recorded via `state.costs.record()` (`specs_assist.rs:234-245`)
+- F3 resolved: `max_tokens` forwarded to `stream_complete` (`specs_assist.rs:219-224`)
+- F4 resolved: MCP handler substitutes all template variables including `{{spec_content}}` and `{{graph_context}}` (`mcp.rs:2092-2100`)
+- F5 resolved: MCP handler validates LLM response — JSON parsing, field checks, diff op validation (`mcp.rs:2140-2166`)
+- F6 resolved: CLI display accesses `op["diff"]` and `op["explanation"]` from the new response format (`main.rs:857-873`)
+- F7 resolved: CLI parser captures `"error"` events (`client.rs:488-492`), display code surfaces error message via stderr (`main.rs:851-855`)
+
+All 19 tests pass (17 unit tests in `specs_assist::tests`, 2 MCP tests).
