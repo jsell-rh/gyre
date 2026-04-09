@@ -17,7 +17,7 @@
 
 ## R2 Findings
 
-- [ ] **F5: Inbound extends drift-review tasks assigned to wrong repo/workspace**
+- [-] [process-revision-complete] **F5: Inbound extends drift-review tasks assigned to wrong repo/workspace**
 
   In step 6b (inbound staleness detection, `spec_registry.rs:639-662`), `create_drift_review_task` is called with `source_repo_id` and `source_workspace_id` from `sync_spec_ledger`'s parameters — these are the **pushed repo's** IDs. For inbound links, the extending spec (the link's source) lives in a **different** repo. The link's own `source_repo_id` field (`SpecLinkEntry.source_repo_id`) contains the correct repo ID, but the `stale_extends` collection (line 628-636) only captures `(source_path, target_path)` — the link's `source_repo_id` is discarded.
 
@@ -27,7 +27,7 @@
 
   **Fix:** Include `source_repo_id` (and resolve its workspace_id) in the `stale_extends` collection. Pass the link's `source_repo_id` to `create_drift_review_task` instead of `sync_spec_ledger`'s `source_repo_id`. Also update the test to use distinct repo IDs for the pushed repo vs. the inbound link's source repo.
 
-- [ ] **F6: Duplicate drift-review task creation for same-repo extends links**
+- [-] [process-revision-complete] **F6: Duplicate drift-review task creation for same-repo extends links**
 
   When an extends link's source AND target are both in the current manifest and the target's SHA changed, both step 6 (outbound) and step 6b (inbound) process the same link's side effects:
 
@@ -48,7 +48,7 @@
   })
   ```
 
-- [ ] **F7: Drift-review task creation limited to `extends` links — spec requires ALL link types**
+- [-] [process-revision-complete] **F7: Drift-review task creation limited to `extends` links — spec requires ALL link types**
 
   spec-links.md §Automatic Staleness Detection defines a 6-step algorithm where steps 1-3 are generic (all link types) and steps 4-6 are type-specific notes:
 
