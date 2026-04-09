@@ -212,6 +212,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: wildcard-exclusion
+        name: wildcard exclusion
+        description: Detect wildcard catch-all match arms on spec-enforced enums
+        entry: scripts/check-wildcard-exclusion.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
