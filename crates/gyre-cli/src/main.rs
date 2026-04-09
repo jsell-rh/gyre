@@ -1525,17 +1525,21 @@ fn print_dependency_graph_filtered(
 
 /// Render a dependency graph in Graphviz DOT format.
 fn print_dot_graph(graph: &serde_json::Value) {
-    println!("digraph dependencies {{");
-    println!("  rankdir=LR;");
-    println!("  node [shape=box, style=filled, fillcolor=lightblue];");
+    let mut stdout = std::io::stdout();
+    write_dot_graph(graph, &mut stdout).expect("failed to write DOT output");
+}
+
+fn write_dot_graph(graph: &serde_json::Value, w: &mut dyn std::io::Write) -> std::io::Result<()> {
+    writeln!(w, "digraph dependencies {{")?;
+    writeln!(w, "  rankdir=LR;")?;
+    writeln!(w, "  node [shape=box, style=filled, fillcolor=lightblue];")?;
 
     if let Some(nodes) = graph["nodes"].as_array() {
         for n in nodes {
             let repo_id = n["repo_id"].as_str().unwrap_or("");
             let name = n["name"].as_str().unwrap_or(repo_id);
-            // Escape quotes in labels
             let safe_name = name.replace('"', "\\\"");
-            println!("  \"{}\" [label=\"{}\"];", repo_id, safe_name);
+            writeln!(w, "  \"{}\" [label=\"{}\"];", repo_id, safe_name)?;
         }
     }
 
@@ -1551,14 +1555,16 @@ fn print_dot_graph(graph: &serde_json::Value) {
                 "schema" => "purple",
                 _ => "gray",
             };
-            println!(
+            writeln!(
+                w,
                 "  \"{}\" -> \"{}\" [color={}, label=\"{}\"];",
                 source, target, color, etype
-            );
+            )?;
         }
     }
 
-    println!("}}");
+    writeln!(w, "}}")?;
+    Ok(())
 }
 
 /// Parse a priority range string like "1-5" into (min, max).
@@ -2387,48 +2393,23 @@ mod tests {
                 {"source": "repo-a", "target": "repo-b", "type": "code", "status": "active"},
             ]
         });
-        // Capture output by building the expected DOT string
-        let mut output = Vec::new();
-        output.push("digraph dependencies {".to_string());
-        output.push("  rankdir=LR;".to_string());
-        output.push("  node [shape=box, style=filled, fillcolor=lightblue];".to_string());
-        // Nodes
-        for n in graph["nodes"].as_array().unwrap() {
-            let repo_id = n["repo_id"].as_str().unwrap();
-            let name = n["name"].as_str().unwrap();
-            output.push(format!("  \"{repo_id}\" [label=\"{name}\"];"));
-        }
-        // Edges
-        for e in graph["edges"].as_array().unwrap() {
-            let source = e["source"].as_str().unwrap();
-            let target = e["target"].as_str().unwrap();
-            let etype = e["type"].as_str().unwrap();
-            let color = match etype {
-                "code" => "blue",
-                "spec" => "green",
-                "api" => "orange",
-                "schema" => "purple",
-                _ => "gray",
-            };
-            output.push(format!(
-                "  \"{source}\" -> \"{target}\" [color={color}, label=\"{etype}\"];"
-            ));
-        }
-        output.push("}".to_string());
 
-        let dot = output.join("\n");
-        // Validate DOT syntax: must start with digraph, end with }, contain -> for edges
+        let mut buf = Vec::new();
+        write_dot_graph(&graph, &mut buf).unwrap();
+        let dot = String::from_utf8(buf).unwrap();
+
         assert!(dot.starts_with("digraph dependencies {"));
-        assert!(dot.ends_with('}'));
+        assert!(dot.trim_end().ends_with('}'));
         assert!(dot.contains("\"repo-a\" -> \"repo-b\""));
         assert!(dot.contains("color=blue"));
         assert!(dot.contains("label=\"service-a\""));
         assert!(dot.contains("label=\"service-b\""));
+        assert!(dot.contains("rankdir=LR;"));
+        assert!(dot.contains("node [shape=box, style=filled, fillcolor=lightblue];"));
     }
 
     #[test]
     fn dot_output_edge_colors() {
-        // Verify each dependency type gets the correct color
         let graph = serde_json::json!({
             "nodes": [
                 {"repo_id": "a", "name": "a"},
@@ -2443,28 +2424,15 @@ mod tests {
             ]
         });
 
-        // Test the color mapping logic directly
-        for e in graph["edges"].as_array().unwrap() {
-            let etype = e["type"].as_str().unwrap();
-            let expected_color = match etype {
-                "code" => "blue",
-                "spec" => "green",
-                "api" => "orange",
-                "schema" => "purple",
-                _ => "gray",
-            };
-            let actual_color = match etype {
-                "code" => "blue",
-                "spec" => "green",
-                "api" => "orange",
-                "schema" => "purple",
-                _ => "gray",
-            };
-            assert_eq!(
-                expected_color, actual_color,
-                "color mismatch for type '{etype}'"
-            );
-        }
+        let mut buf = Vec::new();
+        write_dot_graph(&graph, &mut buf).unwrap();
+        let dot = String::from_utf8(buf).unwrap();
+
+        assert!(dot.contains("color=blue"), "code type should be blue");
+        assert!(dot.contains("color=green"), "spec type should be green");
+        assert!(dot.contains("color=orange"), "api type should be orange");
+        assert!(dot.contains("color=purple"), "schema type should be purple");
+        assert!(dot.contains("color=gray"), "manual type should be gray");
     }
 
     // ── Helper function tests ───────────────────────────────────────────────
