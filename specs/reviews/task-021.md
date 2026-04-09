@@ -44,7 +44,7 @@
 
 ### Findings
 
-- [ ] **F1: Test `test_time_based_staleness_recovery_on_version_change` does not test recovery — it tests persistence (duplicate of `test_time_based_staleness_persists_across_cycles`).**
+- [-] [process-revision-complete] **F1: Test `test_time_based_staleness_recovery_on_version_change` does not test recovery — it tests persistence (duplicate of `test_time_based_staleness_persists_across_cycles`).**
   `dep_staleness.rs:555` — the test's doc comment says "Multi-cycle recovery test: verifies
   that a stale edge reverts to Active when the dependency is genuinely updated (version
   changes)." The test name explicitly claims to test recovery on version change. But the
@@ -69,3 +69,6 @@
   instead of calling `latest_semver_tag` directly) so the test can simulate a version change
   between cycles. Option (a) is lower effort; option (b) is more thorough but requires
   refactoring the job's version resolution.
+  Process guard: implementation prompt item 75 (no aspirational test names),
+  verifier prompt (aspirational test names detection target),
+  `scripts/check-aspirational-test-names.sh` (mechanical detection — pre-commit enforced).

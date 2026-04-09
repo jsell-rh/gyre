@@ -260,6 +260,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: aspirational-test-names
+        name: aspirational test name lint
+        description: Detect tests whose names claim behavior their bodies admit they don't exercise
+        entry: scripts/check-aspirational-test-names.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

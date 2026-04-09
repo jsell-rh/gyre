@@ -1,0 +1,7 @@
+# Aspirational test name exemptions
+# One test function name per line. Tests listed here are excluded from
+# check-aspirational-test-names.sh. Add exemptions only when the test
+# name is intentionally different from the tested behavior and a comment
+# in the test body explains why.
+#
+# Format: test_function_name
