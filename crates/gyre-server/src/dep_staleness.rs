@@ -8,6 +8,7 @@
 //! - Creates auto-tasks for stale dependencies if `auto_create_update_tasks` is enabled.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use gyre_common::Id;
@@ -18,6 +19,21 @@ use crate::AppState;
 
 /// Run one pass of the dependency staleness check.
 pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
+    run_once_with(state, |path| {
+        Box::pin(async move { crate::version_compute::latest_semver_tag(&path).await })
+    })
+    .await
+}
+
+/// Run one pass of the dependency staleness check with an injectable version
+/// resolver. The `resolve_version` closure maps a repo path to its current
+/// semver version (if any). Production callers use `latest_semver_tag`; tests
+/// can inject controlled responses.
+pub async fn run_once_with<F, Fut>(state: &Arc<AppState>, resolve_version: F) -> anyhow::Result<()>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
     let now = crate::api::now_secs();
 
     let all_edges = state.dependencies.list_all().await?;
@@ -75,7 +91,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
             .find(|r| r.id.as_str() == edge.target_repo_id.as_str());
 
         let target_version = if let Some(repo) = target_repo {
-            crate::version_compute::latest_semver_tag(&repo.path).await
+            resolve_version(repo.path.clone()).await
         } else {
             None
         };
@@ -119,10 +135,12 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
             }
         }
 
-        // Check time-based staleness.
+        // Check time-based staleness. Use updated_edge.last_verified_at (not the
+        // stored edge value) so that a version change within this cycle correctly
+        // resets the clock and prevents a stale-on-arrival false positive.
         if policy.stale_dependency_alert_days > 0 {
             let threshold_secs = policy.stale_dependency_alert_days as u64 * 86400;
-            if now.saturating_sub(edge.last_verified_at) > threshold_secs {
+            if now.saturating_sub(updated_edge.last_verified_at) > threshold_secs {
                 is_stale = true;
                 debug!(
                     source = %edge.source_repo_id,
@@ -550,9 +568,12 @@ mod tests {
     }
 
     /// Multi-cycle recovery test: verifies that a stale edge reverts to Active
-    /// when the dependency is genuinely updated (version changes).
+    /// when the dependency is genuinely updated (version changes). Uses injectable
+    /// version resolution to simulate a version bump between cycles.
     #[tokio::test]
     async fn test_time_based_staleness_recovery_on_version_change() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
         let state = test_state();
 
         let ws = gyre_domain::Workspace::new(
@@ -579,13 +600,33 @@ mod tests {
         create_repo(&state, "repo-rc-s", "repo-rc-s", "ws-recover").await;
         create_repo(&state, "repo-rc-t", "repo-rc-t", "ws-recover").await;
 
-        // Edge with old last_verified_at and a specific target_version_current.
+        // Edge with old last_verified_at and a known pinned version.
         let mut edge = create_edge("repo-rc-s", "repo-rc-t", Some("1.0.0"), 0);
         edge.target_version_current = Some("1.0.0".to_string());
         state.dependencies.save(&edge).await.unwrap();
 
-        // Cycle 1: should become Stale (time-based: 30+ days).
-        run_once(&state).await.unwrap();
+        // Track how many times the resolver is called to return different versions.
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        // Cycle 1: resolver returns "1.0.0" (same as current → no version change
+        // → last_verified_at stays at 0 → time-based staleness triggers).
+        run_once_with(&state, |_path| {
+            let cc = call_count_clone.clone();
+            async move {
+                let n = cc.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    // Cycle 1: version unchanged.
+                    Some("1.0.0".to_string())
+                } else {
+                    // Cycle 2: version bumped — simulates a real dependency update.
+                    Some("2.0.0".to_string())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
         let after_cycle1 = state
             .dependencies
             .find_by_id(&edge.id)
@@ -593,27 +634,33 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(after_cycle1.status, DependencyStatus::Stale);
+        // last_verified_at should NOT have been updated (version didn't change).
+        assert_eq!(after_cycle1.last_verified_at, 0);
 
-        // Simulate the target version changing by updating the edge's
-        // target_version_current to differ from what version resolution returns.
-        // Since we can't control latest_semver_tag in tests (it returns None for
-        // test repos), the version_changed check will see None != Some("1.0.0")
-        // which counts as a change, updating last_verified_at to now.
-        // Then the time-based check will pass (now - now = 0 < threshold).
-        //
-        // Actually, latest_semver_tag returns None for test repos without git tags,
-        // and the current target_version_current after cycle 1 will be None (set by
-        // the job). So on cycle 2, None == None → no version change → staleness persists.
-        // This test verifies the persistence path — true recovery requires a git repo
-        // with tags, which is an integration test concern.
-        run_once(&state).await.unwrap();
+        // Cycle 2: resolver returns "2.0.0" (different from stored "1.0.0"
+        // → version_changed = true → last_verified_at updated to now
+        // → time-based check: now - now = 0 < threshold → not stale → reverts to Active).
+        run_once_with(&state, |_path| async { Some("2.0.0".to_string()) })
+            .await
+            .unwrap();
+
         let after_cycle2 = state
             .dependencies
             .find_by_id(&edge.id)
             .await
             .unwrap()
             .unwrap();
-        // Without a real git repo, version never changes, so staleness persists.
-        assert_eq!(after_cycle2.status, DependencyStatus::Stale);
+        assert_eq!(
+            after_cycle2.status,
+            DependencyStatus::Active,
+            "edge should revert to Active after dependency version changes"
+        );
+        // last_verified_at should have been updated to now.
+        assert_ne!(after_cycle2.last_verified_at, 0);
+        // target_version_current should reflect the new version.
+        assert_eq!(
+            after_cycle2.target_version_current,
+            Some("2.0.0".to_string())
+        );
     }
 }
