@@ -8,7 +8,7 @@
 
 ## Findings
 
-- [ ] **F1: Missing push-time inbound staleness detection (spec §Automatic Staleness Detection)**
+- [-] [process-revision-complete] **F1: Missing push-time inbound staleness detection (spec §Automatic Staleness Detection)**
 
   The spec says: *"When any spec changes (new SHA), the forge: 1. Queries `spec_links` for all links where `target_path` matches the changed spec. 2. Marks those links as `stale`."*
 
@@ -18,7 +18,7 @@
 
   **Fix:** After updating ledger entries in step 4 of `sync_spec_ledger` (where changed SHAs are detected at line 353), scan the links store for all links where `target_path` matches any spec whose SHA changed, and mark those links as `"stale"` with `stale_since = now`.
 
-- [ ] **F2: Missing drift-review task creation (spec §Automatic Staleness Detection step 3, acceptance criterion 3)**
+- [-] [process-revision-complete] **F2: Missing drift-review task creation (spec §Automatic Staleness Detection step 3, acceptance criterion 3)**
 
   The spec §Automatic Staleness Detection step 3 says *"Creates drift-review tasks in the source specs' repos."* The task's acceptance criterion says *"Extends parent spec change triggers drift-review in extending specs."*
 
@@ -26,7 +26,7 @@
 
   **Fix:** When an `extends` link becomes stale (either at push time or in the staleness job), create a drift-review task (or notification with actionable context) in the extending spec's repo, in addition to marking `drift_status`.
 
-- [ ] **F3: Missing approval invalidation for `extends` links (spec §Approval Gates)**
+- [-] [process-revision-complete] **F3: Missing approval invalidation for `extends` links (spec §Approval Gates)**
 
   The spec's Approval Gates table says for `extends`: *"When target changes, source's approval is invalidated (it may need to incorporate the parent's changes)."*
 
@@ -36,7 +36,7 @@
 
   **Fix:** In the `Extends` handling block, after marking `drift_status = "drifted"`, also set `source_entry.approval_status = ApprovalStatus::Pending` to invalidate the extending spec's approval.
 
-- [ ] **F4: No test coverage for `extends` push-time drift behavior (acceptance criterion 6)**
+- [-] [process-revision-complete] **F4: No test coverage for `extends` push-time drift behavior (acceptance criterion 6)**
 
   The acceptance criterion says *"Tests cover each link type enforcement."* Tests exist for `DependsOn` (2 tests in `specs.rs`), `Supersedes` (1 test in `specs.rs`), and the staleness job (6 tests in `spec_link_staleness.rs`). However, there is NO test verifying that a pushed spec change triggers `extends`-link staleness marking or drift status update in `sync_spec_ledger`.
 
