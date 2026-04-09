@@ -100,15 +100,18 @@
 
 ## R9 Findings
 
-- [x] **F19 (resolved R10).** `print_briefing` now renders the `completed_agents` section (main.rs:992-1031) with agent_id, spec_ref, decisions (string and object forms with reasoning/confidence), and uncertainties. Fixed in commit `1d64ad87`.
+- [-] [process-revision-complete] **F19 (resolved R10).** `print_briefing` now renders the `completed_agents` section (main.rs:992-1031) with agent_id, spec_ref, decisions (string and object forms with reasoning/confidence), and uncertainties. Fixed in commit `1d64ad87`.
+  **Process fixes:** Covered by implementation checklist item #23 (response completeness — enumerate ALL sections/arrays in composite responses, list every `Vec<T>` field, check each off against display code) and `scripts/check-response-consumption.sh` (pre-commit enforced).
 
 ## R10 Findings
 
-- [x] **F20 (resolved R12).** `gyre divergence` now renders `entity_ref` (main.rs:891,894-896). Fixed in commit `6f62f335`.
+- [-] [process-revision-complete] **F20 (resolved R12).** `gyre divergence` now renders `entity_ref` (main.rs:891,894-896). Fixed in commit `6f62f335`.
+  **Process fixes:** Covered by implementation checklist item #23 (response completeness — item struct scalar field coverage, enumerate ALL pub fields of each consumed struct) and `scripts/check-response-consumption.sh` checks 4-5 (pre-commit enforced).
 
 ## R11 Findings
 
-- [x] **F21 (resolved R12).** `completed_agents` now renders `conversation_sha` (main.rs:1032-1035) and `completed_at` (main.rs:1037-1039). Fixed in commit `6f62f335`.
+- [-] [process-revision-complete] **F21 (resolved R12).** `completed_agents` now renders `conversation_sha` (main.rs:1032-1035) and `completed_at` (main.rs:1037-1039). Fixed in commit `6f62f335`.
+  **Process fixes:** Covered by implementation checklist item #23 (response completeness — item struct scalar field coverage) and `scripts/check-response-consumption.sh` checks 4-5 (pre-commit enforced).
 
 ## R12 Findings
 
