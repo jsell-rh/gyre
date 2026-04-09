@@ -150,7 +150,7 @@ All prior findings are resolved. One new finding identified.
 
 ### Findings
 
-- [-] [process-revision-complete] **F1: `process_breaking_changes` sets task and notification `workspace_id` to the pushed repo's workspace, not the dependent repo's workspace.**
+- [x] [process-revision-complete] **F1: `process_breaking_changes` sets task and notification `workspace_id` to the pushed repo's workspace, not the dependent repo's workspace.**
   The spec says "For each dependent repo: a. Create a task ... b. Notify the dependent
   repo's orchestrator via MCP." The task should be associated with the DEPENDENT repo's
   workspace, and notifications should go to the DEPENDENT repo's workspace members. But
@@ -180,3 +180,15 @@ All prior findings are resolved. One new finding identified.
   Then use `dep_workspace_id` for `task.workspace_id`, notification member lookup, and
   per-dependent broadcast targeting. Add a test assertion:
   `assert_eq!(tasks[0].workspace_id.as_str(), repo_a_workspace_id);`.
+  **Resolved in `3756e17b`:** `dep_workspace_id` resolved from `state.repos.find_by_id(&dep_edge.source_repo_id)` inside the loop. Task, notification, and broadcast all use `dep_workspace_id`. Test uses distinct workspace IDs (`"ws-dependent"` / `"ws-pushed"`) and asserts `tasks[0].workspace_id == "ws-dependent"`.
+
+## R6 — complete, 0 findings (R1–R5 findings resolved)
+
+All prior findings are resolved. R5 F1 fix verified in `3756e17b`:
+- `dep_workspace_id` correctly resolved from the dependent repo's record inside the loop
+- Fallback to pushed repo's workspace when repo lookup fails (defensive)
+- `task.workspace_id`, `list_by_workspace`, `notify_rich`, and `emit_event` all use `dep_workspace_id`
+- Broadcast moved inside the per-dependent loop (correct per spec §3b: "For each dependent repo: Notify")
+- Test uses distinct workspace IDs and asserts `tasks[0].workspace_id.as_str() == "ws-dependent"`
+- `check-dependent-scope-resolution.sh` script added for mechanical detection
+- All 1943 tests pass, all check scripts pass
