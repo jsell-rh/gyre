@@ -8,7 +8,7 @@
 
 ## Findings
 
-- [ ] **F1 (Medium): BFS-based `compute_chain_depth` underestimates longest path in DAGs with diamond dependencies**
+- [-] [process-revision-complete] **F1 (Medium): BFS-based `compute_chain_depth` underestimates longest path in DAGs with diamond dependencies**
 
   **File:** `crates/gyre-server/src/spec_patrol.rs:297-319`
 
@@ -22,7 +22,7 @@
 
   **Fix:** Replace BFS with a longest-path algorithm (topological sort + DP, or DFS + memoization). Add a test with a diamond where path lengths to the convergent node differ (e.g., `a→g` direct + `a→b→c→d→e→f→g` 6-hop, assert depth from `a` is 6).
 
-- [ ] **F2 (Low): Notification deduplication silently drops error-severity findings**
+- [-] [process-revision-complete] **F2 (Low): Notification deduplication silently drops error-severity findings**
 
   **File:** `crates/gyre-server/src/spec_patrol.rs:383-388`
 
