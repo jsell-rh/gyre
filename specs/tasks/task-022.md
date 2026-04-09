@@ -80,4 +80,4 @@ When working on this task:
 
 ## Git Commits
 
-_(to be updated after commit)_
+- `bfb1ef58` feat(deps): cascade testing for dependent repos (TASK-022)
