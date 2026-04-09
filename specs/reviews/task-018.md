@@ -96,3 +96,21 @@ F1 and F2 are fully addressed:
   **Affected code:**
   - `crates/gyre-server/src/merge_processor.rs:517` — legacy write `tokio::spawn` (JoinHandle dropped)
   - `crates/gyre-server/src/merge_processor.rs:569` — chain write via `attach_chain_attestation_note`
+
+---
+
+## R3 — `complete` (0 findings)
+
+F1, F2, and F3 are all fully addressed:
+
+- **F1** (wrong ref namespace): `CHAIN_ATTESTATION_NOTES_REF = "refs/notes/attestations"` (attestation.rs:50). Zero references to `chain-attestations` in the codebase.
+- **F2** (single attestation instead of full chain): `attach_chain_attestation_note` takes `&[Attestation]` (attestation.rs:65), `read_chain_attestation_note` returns `Option<Vec<Attestation>>` (attestation.rs:129), `write_chain_note_if_committed` loads full chain via `load_chain` (attestation.rs:185). Merge processor loads full chains in both resolution paths (find_by_commit at line 532, find_by_task fallback at line 557). Tests use `sample_chain` with 2-node chains and verify full round-trip equality.
+- **F3** (race condition): Merge processor now writes EITHER the chain attestation OR the legacy `AttestationBundle` — never both. The `chain_note_written` boolean (merge_processor.rs:524) gates the legacy fallback (line 579). No concurrent writes to `refs/notes/attestations` are possible for the same commit. Gate executor path (`write_chain_note_if_committed` at gate_executor.rs:307) has no competing legacy write.
+
+All acceptance criteria verified:
+1. Chain attestation written as git note on relevant commit ✓
+2. Git note stored under `refs/notes/attestations` ✓
+3. Reading returns full chain `Vec<Attestation>` ✓
+4. Dual-write: chain takes priority, legacy only when no chain available ✓
+5. Tests verify round-trip, commit isolation, overwrite, dual-write, and full field preservation ✓
+6. `cargo test --all` passes (35 attestation-related tests) ✓

@@ -2,8 +2,8 @@
 
 **Spec reference:** `authorization-provenance.md` §5.3  
 **Depends on:** TASK-008 (Phase 3: attestation chains are produced)  
-**Progress:** `ready-for-review`  
-**Review:** [R1–R2](../reviews/task-018.md) — R2: 1 finding (F3)
+**Progress:** `complete`  
+**Review:** [R1–R3](../reviews/task-018.md) — R3: 0 findings
 
 ## Spec Excerpt
 
