@@ -18,6 +18,7 @@ struct SpecPolicyRow {
     require_approved_spec: i32,
     warn_stale_spec: i32,
     require_current_spec: i32,
+    enforce_manifest: i32,
 }
 
 impl SpecPolicyRow {
@@ -27,6 +28,7 @@ impl SpecPolicyRow {
             require_approved_spec: self.require_approved_spec != 0,
             warn_stale_spec: self.warn_stale_spec != 0,
             require_current_spec: self.require_current_spec != 0,
+            enforce_manifest: self.enforce_manifest != 0,
         }
     }
 }
@@ -39,6 +41,7 @@ struct NewSpecPolicyRow<'a> {
     require_approved_spec: i32,
     warn_stale_spec: i32,
     require_current_spec: i32,
+    enforce_manifest: i32,
 }
 
 #[async_trait]
@@ -69,6 +72,7 @@ impl SpecPolicyRepository for PgStorage {
                 require_approved_spec: if policy.require_approved_spec { 1 } else { 0 },
                 warn_stale_spec: if policy.warn_stale_spec { 1 } else { 0 },
                 require_current_spec: if policy.require_current_spec { 1 } else { 0 },
+                enforce_manifest: if policy.enforce_manifest { 1 } else { 0 },
             };
             diesel::insert_into(spec_policies::table)
                 .values(&row)
@@ -79,6 +83,7 @@ impl SpecPolicyRepository for PgStorage {
                     spec_policies::require_approved_spec.eq(row.require_approved_spec),
                     spec_policies::warn_stale_spec.eq(row.warn_stale_spec),
                     spec_policies::require_current_spec.eq(row.require_current_spec),
+                    spec_policies::enforce_manifest.eq(row.enforce_manifest),
                 ))
                 .execute(&mut *conn)
                 .context("upsert spec policy")?;

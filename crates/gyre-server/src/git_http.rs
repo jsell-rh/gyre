@@ -377,6 +377,49 @@ pub async fn git_receive_pack(
         }
     }
 
+    // TASK-017: Manifest enforcement — reject pushes with unregistered spec files.
+    // spec-registry.md §Manifest Rules rule 1 + §Ledger Sync on Push step 4.
+    // Only check pushes that update the default branch.
+    {
+        let default_ref = format!("refs/heads/{default_branch}");
+        for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
+            // Read manifest to build the set of registered spec paths.
+            let manifest_paths =
+                crate::spec_registry::read_manifest_paths(&repo_path, &update.new_sha).await;
+            // Check spec policy for this repo.
+            let enforce = state
+                .spec_policies
+                .get_for_repo(&repo_id)
+                .await
+                .map(|p| p.enforce_manifest)
+                .unwrap_or(false);
+            if let Err(rejection) = crate::spec_registry::check_manifest_coverage(
+                &repo_path,
+                &update.new_sha,
+                &manifest_paths,
+                enforce,
+            )
+            .await
+            {
+                undo_ref_updates(&repo_path, &ref_updates).await;
+                state
+                    .emit_event(
+                        Some(repo_workspace_id.clone()),
+                        gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                        gyre_common::message::MessageKind::PushRejected,
+                        Some(serde_json::json!({
+                            "repo_id": repo_id,
+                            "branch": default_branch,
+                            "agent_id": auth.agent_id,
+                            "reason": rejection,
+                        })),
+                    )
+                    .await;
+                return (StatusCode::FORBIDDEN, rejection).into_response();
+            }
+        }
+    }
+
     info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
 
     // M13.3: Build X-Gyre-Push-Result JSON header value.

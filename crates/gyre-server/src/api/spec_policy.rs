@@ -25,6 +25,7 @@ pub struct SpecPolicyResponse {
     pub require_approved_spec: bool,
     pub warn_stale_spec: bool,
     pub require_current_spec: bool,
+    pub enforce_manifest: bool,
 }
 
 impl SpecPolicyResponse {
@@ -35,6 +36,7 @@ impl SpecPolicyResponse {
             require_approved_spec: policy.require_approved_spec,
             warn_stale_spec: policy.warn_stale_spec,
             require_current_spec: policy.require_current_spec,
+            enforce_manifest: policy.enforce_manifest,
         }
     }
 }
@@ -153,6 +155,7 @@ mod tests {
         assert!(!json["require_approved_spec"].as_bool().unwrap());
         assert!(!json["warn_stale_spec"].as_bool().unwrap());
         assert!(!json["require_current_spec"].as_bool().unwrap());
+        assert!(!json["enforce_manifest"].as_bool().unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -292,6 +295,49 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(json["require_spec_ref"].as_bool().unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_enforce_manifest_round_trips() {
+        let (app, _state) = app_with_repo();
+        let body = serde_json::json!({
+            "require_spec_ref": false,
+            "require_approved_spec": false,
+            "warn_stale_spec": false,
+            "require_current_spec": false,
+            "enforce_manifest": true
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-1/spec-policy")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["enforce_manifest"].as_bool().unwrap());
+
+        // GET reflects persisted value.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/spec-policy")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["enforce_manifest"].as_bool().unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]

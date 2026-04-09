@@ -190,6 +190,24 @@ pub fn parse_manifest(yaml: &str) -> Result<SpecManifest, serde_yaml::Error> {
     serde_yaml::from_str(yaml)
 }
 
+/// Read the manifest from a commit and return the set of registered spec paths.
+///
+/// Returns an empty set if the manifest is absent or unparseable.
+pub async fn read_manifest_paths(repo_path: &str, sha: &str) -> std::collections::HashSet<String> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let yaml = match read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await {
+        Some(content) => content,
+        None => return std::collections::HashSet::new(),
+    };
+    match parse_manifest(&yaml) {
+        Ok(m) => m.specs.iter().map(|e| e.path.clone()).collect(),
+        Err(e) => {
+            warn!(repo_path, "spec-registry: failed to parse manifest: {e}");
+            std::collections::HashSet::new()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Ledger types (runtime state tracked per spec)
 // ---------------------------------------------------------------------------
@@ -644,9 +662,7 @@ pub async fn sync_spec_ledger(
         for (source_path, target_path, link_repo_id, link_type) in &inbound_stale_links {
             // Look up source spec's ledger entry for workspace_id (F5).
             let maybe_source = ledger.find_by_path(source_path).await.ok().flatten();
-            let ws_id = maybe_source
-                .as_ref()
-                .and_then(|e| e.workspace_id.clone());
+            let ws_id = maybe_source.as_ref().and_then(|e| e.workspace_id.clone());
 
             // Step 3 (generic): drift-review task for stale inbound links.
             // Excludes `references` — spec says "No mechanical enforcement."
@@ -680,8 +696,15 @@ pub async fn sync_spec_ledger(
         }
     }
 
-    // 7. Warn about spec files not in manifest.
-    check_unregistered_specs(&git_bin, repo_path, new_sha, &manifest_paths).await;
+    // 7. Warn about spec files not in manifest (warn-only; enforcement
+    //    happens synchronously in the push handler via check_manifest_coverage).
+    for path in find_unregistered_specs(&git_bin, repo_path, new_sha, &manifest_paths).await {
+        warn!(
+            spec_path = %path,
+            "spec-registry: file under specs/ is not registered in manifest.yaml — \
+             add it to specs/manifest.yaml to enable lifecycle tracking"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -853,15 +876,17 @@ async fn get_blob_sha(
     }
 }
 
-/// Warn about any `specs/*.md` files not listed in the manifest.
+/// Find `specs/*.md` files not listed in the manifest.
 ///
 /// Uses `git ls-tree -r --name-only <sha> specs/` to enumerate spec files.
-async fn check_unregistered_specs(
+/// Returns the list of relative spec paths (e.g. `"system/new-spec.md"`) that
+/// are NOT in the manifest.  Excludes `index.md`, `prior-art/`, `milestones/`.
+async fn find_unregistered_specs(
     git_bin: &str,
     repo_path: &str,
     sha: &str,
     manifest_paths: &std::collections::HashSet<String>,
-) {
+) -> Vec<String> {
     let out = Command::new(git_bin)
         .arg("-C")
         .arg(repo_path)
@@ -875,9 +900,10 @@ async fn check_unregistered_specs(
 
     let out = match out {
         Ok(o) if o.status.success() => o,
-        _ => return,
+        _ => return Vec::new(),
     };
 
+    let mut unregistered = Vec::new();
     let text = String::from_utf8_lossy(&out.stdout);
     for line in text.lines() {
         // Only check .md files under specs/ (excluding manifest.yaml and index.md).
@@ -885,7 +911,7 @@ async fn check_unregistered_specs(
             continue;
         }
         let relative = line.strip_prefix("specs/").unwrap_or(line);
-        // Skip index.md and prior-art/ directory.
+        // Skip index.md, prior-art/, and milestones/ directories.
         if relative == "index.md"
             || relative.starts_with("prior-art/")
             || relative.starts_with("milestones/")
@@ -893,12 +919,53 @@ async fn check_unregistered_specs(
             continue;
         }
         if !manifest_paths.contains(relative) {
+            unregistered.push(relative.to_string());
+        }
+    }
+    unregistered
+}
+
+/// Check manifest coverage: reject or warn about unregistered spec files.
+///
+/// spec-registry.md §Ledger Sync on Push step 4: "For files under `specs/` not
+/// in manifest: reject push (or warn, policy-dependent)."
+///
+/// When `enforce` is true, returns `Err` with a rejection message listing the
+/// unregistered files and a fix hint.  When `enforce` is false, logs warnings
+/// only and returns `Ok(())`.
+pub async fn check_manifest_coverage(
+    repo_path: &str,
+    sha: &str,
+    manifest_paths: &std::collections::HashSet<String>,
+    enforce: bool,
+) -> Result<(), String> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let unregistered = find_unregistered_specs(&git_bin, repo_path, sha, manifest_paths).await;
+
+    if unregistered.is_empty() {
+        return Ok(());
+    }
+
+    if enforce {
+        let file_list = unregistered
+            .iter()
+            .map(|p| format!("  - {p}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Err(format!(
+            "push rejected: spec files not registered in specs/manifest.yaml:\n\
+             {file_list}\n\
+             fix: add entries to specs/manifest.yaml for the files listed above"
+        ))
+    } else {
+        for path in &unregistered {
             warn!(
-                spec_path = %relative,
+                spec_path = %path,
                 "spec-registry: file under specs/ is not registered in manifest.yaml — \
                  add it to specs/manifest.yaml to enable lifecycle tracking"
             );
         }
+        Ok(())
     }
 }
 
@@ -1521,8 +1588,7 @@ specs:
             store
                 .iter()
                 .filter(|l| {
-                    l.stale_since == Some(now)
-                        && changed_set.contains(l.target_path.as_str())
+                    l.stale_since == Some(now) && changed_set.contains(l.target_path.as_str())
                 })
                 .map(|l| {
                     (
@@ -1538,9 +1604,7 @@ specs:
         // Apply side effects (matching new step 6b logic — uses link's repo, not pushed repo).
         for (source_path, target_path, link_repo_id, link_type) in &inbound_stale_links {
             let maybe_source = ledger.find_by_path(source_path).await.ok().flatten();
-            let ws_id = maybe_source
-                .as_ref()
-                .and_then(|e| e.workspace_id.clone());
+            let ws_id = maybe_source.as_ref().and_then(|e| e.workspace_id.clone());
 
             // Step 3: drift-review task using link's source_repo_id (F5).
             create_drift_review_task(
@@ -1851,6 +1915,205 @@ specs:
             all_tasks.len(),
             0,
             "references links must not produce drift-review tasks (no mechanical enforcement)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TASK-017: Manifest enforcement tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a temp git repo with the given files committed.
+    /// Returns (repo_path_string, sha_string).
+    async fn make_test_repo(files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        // git init + initial commit
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .expect("git command failed");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@test.com"]);
+        run(&["config", "user.name", "Test"]);
+
+        for (file_path, content) in files {
+            let full = dir.path().join(file_path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, content).unwrap();
+            run(&["add", file_path]);
+        }
+
+        run(&["commit", "-m", "initial"]);
+        let sha = run(&["rev-parse", "HEAD"]);
+
+        (dir, sha)
+    }
+
+    #[tokio::test]
+    async fn find_unregistered_specs_detects_missing_entries() {
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", "version: 1\nspecs:\n  - path: system/registered.md\n    title: Registered\n    owner: user:test\n"),
+            ("specs/system/registered.md", "# Registered"),
+            ("specs/system/unregistered.md", "# Unregistered"),
+        ]).await;
+
+        let manifest_paths: std::collections::HashSet<String> =
+            ["system/registered.md".to_string()].into_iter().collect();
+        let result =
+            find_unregistered_specs("git", dir.path().to_str().unwrap(), &sha, &manifest_paths)
+                .await;
+
+        assert_eq!(result, vec!["system/unregistered.md"]);
+    }
+
+    #[tokio::test]
+    async fn find_unregistered_specs_excludes_index_priorart_milestones() {
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", "version: 1\nspecs: []\n"),
+            ("specs/index.md", "# Index"),
+            ("specs/prior-art/comparison.md", "# Prior Art"),
+            ("specs/milestones/m1.md", "# Milestone 1"),
+        ])
+        .await;
+
+        let manifest_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let result =
+            find_unregistered_specs("git", dir.path().to_str().unwrap(), &sha, &manifest_paths)
+                .await;
+
+        assert!(
+            result.is_empty(),
+            "index.md, prior-art/, milestones/ should be excluded, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_unregistered_specs_ignores_non_md_files() {
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", "version: 1\nspecs: []\n"),
+            ("specs/system/notes.txt", "just a text file"),
+            ("specs/system/diagram.png", "fake png"),
+        ])
+        .await;
+
+        let manifest_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let result =
+            find_unregistered_specs("git", dir.path().to_str().unwrap(), &sha, &manifest_paths)
+                .await;
+
+        assert!(
+            result.is_empty(),
+            "non-.md files should be ignored, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_unregistered_specs_all_registered() {
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", "version: 1\nspecs:\n  - path: system/a.md\n    title: A\n    owner: user:t\n  - path: dev/b.md\n    title: B\n    owner: user:t\n"),
+            ("specs/system/a.md", "# A"),
+            ("specs/dev/b.md", "# B"),
+        ]).await;
+
+        let manifest_paths: std::collections::HashSet<String> =
+            ["system/a.md".to_string(), "dev/b.md".to_string()]
+                .into_iter()
+                .collect();
+        let result =
+            find_unregistered_specs("git", dir.path().to_str().unwrap(), &sha, &manifest_paths)
+                .await;
+
+        assert!(
+            result.is_empty(),
+            "all specs are registered, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_manifest_coverage_enforce_rejects_with_message() {
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", "version: 1\nspecs: []\n"),
+            ("specs/system/orphan.md", "# Orphan"),
+        ])
+        .await;
+
+        let manifest_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let result = check_manifest_coverage(
+            dir.path().to_str().unwrap(),
+            &sha,
+            &manifest_paths,
+            true, // enforce
+        )
+        .await;
+
+        let err = result.expect_err("should reject when enforce=true");
+        assert!(
+            err.contains("push rejected"),
+            "error should mention rejection: {err}"
+        );
+        assert!(
+            err.contains("system/orphan.md"),
+            "error should list unregistered file: {err}"
+        );
+        assert!(err.contains("fix:"), "error should include fix hint: {err}");
+    }
+
+    #[tokio::test]
+    async fn check_manifest_coverage_warn_only_returns_ok() {
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", "version: 1\nspecs: []\n"),
+            ("specs/system/orphan.md", "# Orphan"),
+        ])
+        .await;
+
+        let manifest_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let result = check_manifest_coverage(
+            dir.path().to_str().unwrap(),
+            &sha,
+            &manifest_paths,
+            false, // warn only
+        )
+        .await;
+
+        assert!(result.is_ok(), "should not reject when enforce=false");
+    }
+
+    #[tokio::test]
+    async fn check_manifest_coverage_no_violations_returns_ok() {
+        let (dir, sha) = make_test_repo(&[
+            (
+                "specs/manifest.yaml",
+                "version: 1\nspecs:\n  - path: system/ok.md\n    title: OK\n    owner: user:t\n",
+            ),
+            ("specs/system/ok.md", "# OK"),
+        ])
+        .await;
+
+        let manifest_paths: std::collections::HashSet<String> =
+            ["system/ok.md".to_string()].into_iter().collect();
+        let result = check_manifest_coverage(
+            dir.path().to_str().unwrap(),
+            &sha,
+            &manifest_paths,
+            true, // enforce
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "should accept when all specs are registered"
         );
     }
 }

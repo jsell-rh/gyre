@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-registry.md` §The Manifest  
 **Depends on:** None (manifest parsing and push-time spec registry hook already exist)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
