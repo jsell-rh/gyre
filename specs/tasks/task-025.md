@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §Querying the Graph (CLI)  
 **Depends on:** TASK-019 (query endpoints: dependents, dependencies, stale-links, conflicts)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -60,4 +60,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+_(listed after commit)_

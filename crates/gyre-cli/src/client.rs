@@ -52,6 +52,19 @@ pub struct MrResponse {
     pub status: String,
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Percent-encode a spec path for use as a single URL path segment.
+/// Encodes `/` as `%2F` so axum receives the full path in one `:path` param.
+fn encode_spec_path(path: &str) -> String {
+    path.chars()
+        .map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            _ => format!("%{:02X}", c as u32),
+        })
+        .collect()
+}
+
 // ── Client implementation ─────────────────────────────────────────────────────
 
 impl GyreClient {
@@ -523,6 +536,98 @@ impl GyreClient {
         Ok(ops)
     }
 
+    // ── Spec link endpoints ─────────────────────────────────────────────────
+
+    /// GET /api/v1/specs/:path/links — outbound and inbound links for one spec.
+    pub async fn get_spec_links(&self, spec_path: &str) -> Result<Vec<serde_json::Value>> {
+        let encoded = encode_spec_path(spec_path);
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/specs/{encoded}/links", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get spec links failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing spec links response")
+    }
+
+    /// GET /api/v1/specs/:path/dependents — specs that depend on this one.
+    pub async fn get_spec_dependents(&self, spec_path: &str) -> Result<Vec<serde_json::Value>> {
+        let encoded = encode_spec_path(spec_path);
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/specs/{encoded}/dependents",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get spec dependents failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing spec dependents response")
+    }
+
+    /// GET /api/v1/specs/graph — full tenant-wide spec dependency graph.
+    pub async fn get_spec_graph(&self) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/specs/graph", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get spec graph failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing spec graph response")
+    }
+
+    /// GET /api/v1/specs/stale-links — all stale links across the tenant.
+    pub async fn get_stale_spec_links(&self) -> Result<Vec<serde_json::Value>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/specs/stale-links", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get stale spec links failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing stale spec links response")
+    }
+
+    /// GET /api/v1/specs/conflicts — all active conflicts.
+    pub async fn get_spec_conflicts(&self) -> Result<Vec<serde_json::Value>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/specs/conflicts", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get spec conflicts failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing spec conflicts response")
+    }
+
     // ── Dependency graph endpoints ──────────────────────────────────────────
 
     /// GET /api/v1/repos/:id/dependencies — outgoing deps from this repo.
@@ -736,5 +841,31 @@ mod tests {
     fn auth_header_format() {
         let c = GyreClient::new("http://localhost:3333".to_string(), "mytoken".to_string());
         assert_eq!(c.auth_header(), "Bearer mytoken");
+    }
+
+    #[test]
+    fn encode_spec_path_simple() {
+        assert_eq!(encode_spec_path("identity.md"), "identity.md");
+    }
+
+    #[test]
+    fn encode_spec_path_with_slash() {
+        assert_eq!(
+            encode_spec_path("system/identity-security.md"),
+            "system%2Fidentity-security.md"
+        );
+    }
+
+    #[test]
+    fn encode_spec_path_with_spaces() {
+        assert_eq!(
+            encode_spec_path("my spec/file name.md"),
+            "my%20spec%2Ffile%20name.md"
+        );
+    }
+
+    #[test]
+    fn encode_spec_path_preserves_unreserved() {
+        assert_eq!(encode_spec_path("a-b_c.d~e"), "a-b_c.d~e");
     }
 }

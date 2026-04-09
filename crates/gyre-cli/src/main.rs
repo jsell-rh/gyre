@@ -248,6 +248,26 @@ enum SpecCommands {
         #[arg(long)]
         workspace: Option<String>,
     },
+    /// Show all links for a spec (outbound and inbound)
+    Links {
+        /// Spec file path (e.g., system/identity-security.md)
+        path: String,
+    },
+    /// Show specs that depend on the given spec
+    Dependents {
+        /// Spec file path (e.g., system/source-control.md)
+        path: String,
+    },
+    /// Display the tenant-wide spec dependency graph
+    Graph {
+        /// Output format: "text" (default) or "dot" (Graphviz DOT)
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// List all stale links across the tenant
+    StaleLinks,
+    /// List all active conflicts
+    Conflicts,
 }
 
 #[derive(Subcommand)]
@@ -837,86 +857,131 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Spec {
-            command:
+        Commands::Spec { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            match command {
                 SpecCommands::Assist {
                     path,
                     instruction,
                     repo,
                     workspace,
-                },
-        } => {
-            let cfg = config::Config::load()?;
-            let token = cfg.require_token()?;
-            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+                } => {
+                    // Resolve repo ID: from explicit flags, or infer from git remote
+                    let (ws_slug, repo_name) = match (workspace, repo) {
+                        (Some(ws), Some(r)) => (ws, r),
+                        (Some(ws), None) => {
+                            let (_, rn) = infer_repo_from_git_remote().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "could not infer repository from git remote. \
+                                     Use --repo <name> to specify."
+                                )
+                            })?;
+                            (ws, rn)
+                        }
+                        (None, Some(repo_name)) => {
+                            let (ws, _) = infer_repo_from_git_remote().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "could not infer workspace from git remote. \
+                                     Use --workspace <slug> --repo <name> to specify."
+                                )
+                            })?;
+                            (ws, repo_name)
+                        }
+                        (None, None) => infer_repo_from_git_remote().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "could not infer repository from git remote. \
+                                 Use --workspace <slug> --repo <name> to specify, \
+                                 or run from a gyre-cloned repository."
+                            )
+                        })?,
+                    };
 
-            // Resolve repo ID: from explicit flags, or infer from git remote
-            let (ws_slug, repo_name) = match (workspace, repo) {
-                (Some(ws), Some(r)) => (ws, r),
-                (Some(ws), None) => {
-                    // Workspace given but no repo — try to infer repo from git remote
-                    let (_, rn) = infer_repo_from_git_remote().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "could not infer repository from git remote. \
-                             Use --repo <name> to specify."
-                        )
-                    })?;
-                    (ws, rn)
-                }
-                (None, Some(repo_name)) => {
-                    // Repo given without workspace — infer workspace from git remote
-                    let (ws, _) = infer_repo_from_git_remote().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "could not infer workspace from git remote. \
-                             Use --workspace <slug> --repo <name> to specify."
-                        )
-                    })?;
-                    (ws, repo_name)
-                }
-                (None, None) => {
-                    // Try to infer both from git remote
-                    infer_repo_from_git_remote().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "could not infer repository from git remote. \
-                             Use --workspace <slug> --repo <name> to specify, \
-                             or run from a gyre-cloned repository."
-                        )
-                    })?
-                }
-            };
+                    let workspace_id = api.resolve_workspace_slug(&ws_slug).await?;
+                    let repo_id = api.resolve_repo_name(&workspace_id, &repo_name).await?;
 
-            let workspace_id = api.resolve_workspace_slug(&ws_slug).await?;
-            let repo_id = api.resolve_repo_name(&workspace_id, &repo_name).await?;
+                    println!("Requesting spec assist for {path}...");
+                    let ops = api.spec_assist(&repo_id, &path, &instruction).await?;
 
-            println!("Requesting spec assist for {path}...");
-            let ops = api.spec_assist(&repo_id, &path, &instruction).await?;
-
-            if ops.is_empty() {
-                println!("No suggestions returned.");
-            } else {
-                for op in &ops {
-                    // Check for error events from the server (e.g., invalid LLM output).
-                    if let Some(error_msg) = op["error"].as_str() {
-                        eprintln!("Error: {error_msg}");
-                        continue;
-                    }
-                    // Display explanation.
-                    if let Some(explanation) = op["explanation"].as_str() {
-                        println!();
-                        println!("Explanation: {explanation}");
-                    }
-                    // Display diff operations.
-                    if let Some(diff) = op["diff"].as_array() {
-                        println!();
-                        for d in diff {
-                            let op_type = d["op"].as_str().unwrap_or("unknown");
-                            let path = d["path"].as_str().unwrap_or("");
-                            let content = d["content"].as_str().unwrap_or("");
-                            println!("  [{op_type}] {path}");
-                            for line in content.lines() {
-                                println!("    {line}");
+                    if ops.is_empty() {
+                        println!("No suggestions returned.");
+                    } else {
+                        for op in &ops {
+                            if let Some(error_msg) = op["error"].as_str() {
+                                eprintln!("Error: {error_msg}");
+                                continue;
+                            }
+                            if let Some(explanation) = op["explanation"].as_str() {
+                                println!();
+                                println!("Explanation: {explanation}");
+                            }
+                            if let Some(diff) = op["diff"].as_array() {
+                                println!();
+                                for d in diff {
+                                    let op_type = d["op"].as_str().unwrap_or("unknown");
+                                    let path = d["path"].as_str().unwrap_or("");
+                                    let content = d["content"].as_str().unwrap_or("");
+                                    println!("  [{op_type}] {path}");
+                                    for line in content.lines() {
+                                        println!("    {line}");
+                                    }
+                                }
                             }
                         }
+                    }
+                }
+
+                SpecCommands::Links { path } => {
+                    let links = api.get_spec_links(&path).await?;
+                    if links.is_empty() {
+                        println!("No links found for {path}.");
+                    } else {
+                        println!("Links for {path}");
+                        println!();
+                        print_spec_links_table(&links);
+                    }
+                }
+
+                SpecCommands::Dependents { path } => {
+                    let deps = api.get_spec_dependents(&path).await?;
+                    if deps.is_empty() {
+                        println!("No specs depend on {path}.");
+                    } else {
+                        println!("Specs that depend on {path}");
+                        println!();
+                        print_spec_links_table(&deps);
+                    }
+                }
+
+                SpecCommands::Graph { format } => {
+                    let graph = api.get_spec_graph().await?;
+                    let fmt = format.as_deref().unwrap_or("text");
+                    match fmt {
+                        "dot" => print_spec_dot_graph(&graph),
+                        "text" => print_spec_graph_text(&graph),
+                        other => {
+                            anyhow::bail!("unsupported format '{other}': use 'text' or 'dot'");
+                        }
+                    }
+                }
+
+                SpecCommands::StaleLinks => {
+                    let links = api.get_stale_spec_links().await?;
+                    if links.is_empty() {
+                        println!("No stale spec links.");
+                    } else {
+                        print_spec_links_table(&links);
+                    }
+                }
+
+                SpecCommands::Conflicts => {
+                    let links = api.get_spec_conflicts().await?;
+                    if links.is_empty() {
+                        println!("No active conflicts.");
+                    } else {
+                        print_spec_links_table(&links);
                     }
                 }
             }
@@ -1559,6 +1624,156 @@ fn write_dot_graph(graph: &serde_json::Value, w: &mut dyn std::io::Write) -> std
                 w,
                 "  \"{}\" -> \"{}\" [color={}, label=\"{}\"];",
                 source, target, color, etype
+            )?;
+        }
+    }
+
+    writeln!(w, "}}")?;
+    Ok(())
+}
+
+/// Display a list of SpecLinkResponse items as a table.
+fn print_spec_links_table(links: &[serde_json::Value]) {
+    println!(
+        "{:<14} {:<40} {:<40} {:<8} STALE SINCE",
+        "TYPE", "SOURCE", "TARGET", "STATUS"
+    );
+    println!("{}", "-".repeat(120));
+    for link in links {
+        let link_type = link["link_type"].as_str().unwrap_or("");
+        let source = link["source_path"].as_str().unwrap_or("");
+        let target = link["target_path"].as_str().unwrap_or("");
+        let target_display = link["target_display"].as_str().unwrap_or(target);
+        let status = link["status"].as_str().unwrap_or("");
+        // id: internal UUID, not user-facing
+        // target_repo_id: internal UUID, not user-facing
+        // target_sha: internal hash, not user-facing
+        // reason: shown inline below if present
+        // created_at: creation time less relevant than staleness
+        let stale_since = link["stale_since"]
+            .as_u64()
+            .map(format_timestamp)
+            .unwrap_or_else(|| "-".to_string());
+        let display_target = if target_display != target {
+            target_display
+        } else {
+            target
+        };
+        println!(
+            "{:<14} {:<40} {:<40} {:<8} {}",
+            link_type, source, display_target, status, stale_since
+        );
+        if let Some(reason) = link["reason"].as_str() {
+            if !reason.is_empty() {
+                println!("             reason: {reason}");
+            }
+        }
+    }
+}
+
+/// Print a SpecGraphResponse as a text summary.
+fn print_spec_graph_text(graph: &serde_json::Value) {
+    let nodes = graph["nodes"].as_array();
+    let edges = graph["edges"].as_array();
+
+    if let Some(nodes) = nodes {
+        if nodes.is_empty() {
+            println!("No specs in the graph.");
+            return;
+        }
+        println!("Specs ({} nodes):", nodes.len());
+        for n in nodes {
+            let path = n["path"].as_str().unwrap_or("");
+            let title = n["title"].as_str().unwrap_or("");
+            let approval = n["approval_status"].as_str().unwrap_or("");
+            if title.is_empty() {
+                println!("  {path} [{approval}]");
+            } else {
+                println!("  {path} — {title} [{approval}]");
+            }
+        }
+    }
+
+    println!();
+
+    if let Some(edges) = edges {
+        if edges.is_empty() {
+            println!("No spec links.");
+        } else {
+            println!("{:<40} {:<14} {:<40} STATUS", "SOURCE", "TYPE", "TARGET");
+            println!("{}", "-".repeat(100));
+            for e in edges {
+                let source = e["source"].as_str().unwrap_or("");
+                let target = e["target"].as_str().unwrap_or("");
+                let link_type = e["link_type"].as_str().unwrap_or("");
+                let status = e["status"].as_str().unwrap_or("");
+                // reason: omitted in summary view
+                println!("{:<40} {:<14} {:<40} {}", source, link_type, target, status);
+            }
+        }
+    }
+}
+
+/// Print a SpecGraphResponse as Graphviz DOT format.
+fn print_spec_dot_graph(graph: &serde_json::Value) {
+    let mut stdout = std::io::stdout();
+    write_spec_dot_graph(graph, &mut stdout).expect("failed to write DOT output");
+}
+
+/// Write a SpecGraphResponse as Graphviz DOT format.
+fn write_spec_dot_graph(
+    graph: &serde_json::Value,
+    w: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    writeln!(w, "digraph specs {{")?;
+    writeln!(w, "  rankdir=LR;")?;
+    writeln!(w, "  node [shape=box, style=filled];")?;
+
+    if let Some(nodes) = graph["nodes"].as_array() {
+        for n in nodes {
+            let path = n["path"].as_str().unwrap_or("");
+            let title = n["title"].as_str().unwrap_or(path);
+            let approval = n["approval_status"].as_str().unwrap_or("");
+            let fillcolor = match approval {
+                "approved" | "Approved" => "palegreen",
+                "rejected" | "Rejected" => "lightcoral",
+                "pending" | "Pending" => "lightyellow",
+                _ => "lightblue",
+            };
+            let safe_title = title.replace('"', "\\\"");
+            let safe_path = path.replace('"', "\\\"");
+            writeln!(
+                w,
+                "  \"{}\" [label=\"{}\\n[{}]\", fillcolor={}];",
+                safe_path, safe_title, approval, fillcolor
+            )?;
+        }
+    }
+
+    if let Some(edges) = graph["edges"].as_array() {
+        for e in edges {
+            let source = e["source"].as_str().unwrap_or("");
+            let target = e["target"].as_str().unwrap_or("");
+            let link_type = e["link_type"].as_str().unwrap_or("");
+            let status = e["status"].as_str().unwrap_or("");
+            // reason: not shown in DOT graph (visual medium uses color/style instead)
+            let (color, style) = match link_type {
+                "implements" => ("blue", "solid"),
+                "depends_on" => ("green", "solid"),
+                "supersedes" => ("gray", "solid"),
+                "conflicts_with" => ("red", "solid"),
+                "extends" => ("orange", "solid"),
+                "references" => ("gray", "dotted"),
+                _ => ("gray", "solid"),
+            };
+            let penwidth = if status == "stale" { "2.0" } else { "1.0" };
+            let edge_color = if status == "stale" { "gold" } else { color };
+            let safe_source = source.replace('"', "\\\"");
+            let safe_target = target.replace('"', "\\\"");
+            writeln!(
+                w,
+                "  \"{}\" -> \"{}\" [color={}, style={}, penwidth={}, label=\"{}\"];",
+                safe_source, safe_target, edge_color, style, penwidth, link_type
             )?;
         }
     }
@@ -2491,5 +2706,188 @@ mod tests {
     fn days_to_ymd_known_date() {
         // 2024-01-01 is day 19723 since epoch
         assert_eq!(days_to_ymd(19723), (2024, 1, 1));
+    }
+
+    // ── Spec link CLI tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn cli_spec_links_parses() {
+        let args = Cli::try_parse_from(["gyre", "spec", "links", "system/identity-security.md"]);
+        assert!(args.is_ok());
+        if let Commands::Spec {
+            command: SpecCommands::Links { path },
+        } = args.unwrap().command
+        {
+            assert_eq!(path, "system/identity-security.md");
+        } else {
+            panic!("Expected Spec Links");
+        }
+    }
+
+    #[test]
+    fn cli_spec_dependents_parses() {
+        let args = Cli::try_parse_from(["gyre", "spec", "dependents", "system/source-control.md"]);
+        assert!(args.is_ok());
+        if let Commands::Spec {
+            command: SpecCommands::Dependents { path },
+        } = args.unwrap().command
+        {
+            assert_eq!(path, "system/source-control.md");
+        } else {
+            panic!("Expected Spec Dependents");
+        }
+    }
+
+    #[test]
+    fn cli_spec_graph_text_default() {
+        let args = Cli::try_parse_from(["gyre", "spec", "graph"]);
+        assert!(args.is_ok());
+        if let Commands::Spec {
+            command: SpecCommands::Graph { format },
+        } = args.unwrap().command
+        {
+            assert_eq!(format, None);
+        } else {
+            panic!("Expected Spec Graph");
+        }
+    }
+
+    #[test]
+    fn cli_spec_graph_dot_format() {
+        let args = Cli::try_parse_from(["gyre", "spec", "graph", "--format", "dot"]);
+        assert!(args.is_ok());
+        if let Commands::Spec {
+            command: SpecCommands::Graph { format },
+        } = args.unwrap().command
+        {
+            assert_eq!(format.as_deref(), Some("dot"));
+        } else {
+            panic!("Expected Spec Graph with dot format");
+        }
+    }
+
+    #[test]
+    fn cli_spec_stale_links_parses() {
+        let args = Cli::try_parse_from(["gyre", "spec", "stale-links"]);
+        assert!(args.is_ok());
+        assert!(matches!(
+            args.unwrap().command,
+            Commands::Spec {
+                command: SpecCommands::StaleLinks
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_spec_conflicts_parses() {
+        let args = Cli::try_parse_from(["gyre", "spec", "conflicts"]);
+        assert!(args.is_ok());
+        assert!(matches!(
+            args.unwrap().command,
+            Commands::Spec {
+                command: SpecCommands::Conflicts
+            }
+        ));
+    }
+
+    #[test]
+    fn write_spec_dot_graph_basic() {
+        let graph = serde_json::json!({
+            "nodes": [
+                {"path": "system/auth.md", "title": "Authentication", "approval_status": "approved"},
+                {"path": "system/api.md", "title": "API Layer", "approval_status": "pending"}
+            ],
+            "edges": [
+                {"source": "system/api.md", "target": "system/auth.md", "link_type": "depends_on", "status": "active"},
+                {"source": "system/api.md", "target": "system/auth.md", "link_type": "references", "status": "stale"}
+            ]
+        });
+
+        let mut buf = Vec::new();
+        write_spec_dot_graph(&graph, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        assert!(output.contains("digraph specs {"));
+        assert!(output.contains("rankdir=LR;"));
+        // Nodes with approval-based coloring
+        assert!(output.contains("system/auth.md"));
+        assert!(output.contains("Authentication"));
+        assert!(output.contains("fillcolor=palegreen"));
+        assert!(output.contains("fillcolor=lightyellow"));
+        // Edges with type-based coloring
+        assert!(output.contains("color=green"));
+        assert!(output.contains("style=solid"));
+        assert!(output.contains("label=\"depends_on\""));
+        // Stale link highlighted in gold
+        assert!(output.contains("color=gold"));
+        assert!(output.contains("style=dotted"));
+        assert!(output.contains("label=\"references\""));
+        assert!(output.ends_with("}\n"));
+    }
+
+    #[test]
+    fn write_spec_dot_graph_empty() {
+        let graph = serde_json::json!({"nodes": [], "edges": []});
+        let mut buf = Vec::new();
+        write_spec_dot_graph(&graph, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("digraph specs {"));
+        assert!(output.ends_with("}\n"));
+    }
+
+    #[test]
+    fn write_spec_dot_graph_all_link_types() {
+        let graph = serde_json::json!({
+            "nodes": [
+                {"path": "a.md", "title": "A", "approval_status": "approved"},
+                {"path": "b.md", "title": "B", "approval_status": "rejected"},
+                {"path": "c.md", "title": "C", "approval_status": "other"}
+            ],
+            "edges": [
+                {"source": "a.md", "target": "b.md", "link_type": "implements", "status": "active"},
+                {"source": "a.md", "target": "b.md", "link_type": "depends_on", "status": "active"},
+                {"source": "a.md", "target": "b.md", "link_type": "supersedes", "status": "active"},
+                {"source": "a.md", "target": "b.md", "link_type": "conflicts_with", "status": "active"},
+                {"source": "a.md", "target": "b.md", "link_type": "extends", "status": "active"},
+                {"source": "a.md", "target": "b.md", "link_type": "references", "status": "active"}
+            ]
+        });
+
+        let mut buf = Vec::new();
+        write_spec_dot_graph(&graph, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+
+        // Node colors
+        assert!(output.contains("fillcolor=palegreen"));
+        assert!(output.contains("fillcolor=lightcoral"));
+        assert!(output.contains("fillcolor=lightblue"));
+
+        // Edge colors per link type
+        assert!(output.contains("color=blue")); // implements
+        assert!(output.contains("color=green")); // depends_on
+        assert!(output.contains("color=gray")); // supersedes
+        assert!(output.contains("color=red")); // conflicts_with
+        assert!(output.contains("color=orange")); // extends
+                                                  // references: gray + dotted
+        let has_dotted = output
+            .lines()
+            .any(|l| l.contains("references") && l.contains("dotted"));
+        assert!(has_dotted, "references edge should use dotted style");
+    }
+
+    #[test]
+    fn write_spec_dot_graph_escapes_quotes() {
+        let graph = serde_json::json!({
+            "nodes": [
+                {"path": "a\"b.md", "title": "Test \"quotes\"", "approval_status": "pending"}
+            ],
+            "edges": []
+        });
+
+        let mut buf = Vec::new();
+        write_spec_dot_graph(&graph, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains(r#"a\"b.md"#));
+        assert!(output.contains(r#"Test \"quotes\""#));
     }
 }
