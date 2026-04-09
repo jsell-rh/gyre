@@ -1,9 +1,9 @@
 # Review: TASK-024 — Dep Graph CLI Commands
 
 **Reviewer:** Verifier  
-**Round:** R1  
-**Commit:** `bb7ff9d7`  
-**Verdict:** needs-revision
+**Round:** R2  
+**Commit:** `70bdd9b7`  
+**Verdict:** complete
 
 ---
 
