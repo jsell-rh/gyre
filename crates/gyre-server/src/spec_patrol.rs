@@ -8,7 +8,7 @@
 //! - Dangling implementations: an `implements` link points to a spec that was deleted
 //! - Deep dependency chains: specs with >5 levels of `depends_on` (decomposition smell)
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{ApprovalStatus, WorkspaceRole};
@@ -274,7 +274,7 @@ fn check_deep_dependency_chains(links: &[SpecLinkEntry], findings: &mut Vec<Patr
         .chain(adj.values().flat_map(|vs| vs.iter().copied()))
         .collect();
 
-    // BFS from each node to find max depth of depends_on chain.
+    // Compute longest depends_on chain depth from each node via DFS + memoization.
     for &start in &all_nodes {
         let depth = compute_chain_depth(start, &adj);
         if depth > 5 {
@@ -293,29 +293,39 @@ fn check_deep_dependency_chains(links: &[SpecLinkEntry], findings: &mut Vec<Patr
     }
 }
 
-/// Compute the longest `depends_on` chain depth from a given node using BFS.
+/// Compute the longest `depends_on` chain depth from a given node.
+///
+/// Uses DFS with memoization to find the longest path in a DAG. BFS would
+/// find shortest paths, which underestimates chain depth for diamond
+/// dependency patterns where the same node is reachable via paths of
+/// different lengths. DFS + memoization correctly computes the longest
+/// path by caching the maximum depth reachable from each node without
+/// preventing revisitation via longer paths.
 fn compute_chain_depth<'a>(start: &'a str, adj: &HashMap<&'a str, Vec<&'a str>>) -> usize {
-    let mut max_depth = 0usize;
-    let mut queue: VecDeque<(&str, usize)> = VecDeque::new();
-    let mut visited: HashSet<&str> = HashSet::new();
-    visited.insert(start);
-    queue.push_back((start, 0));
+    let mut memo: HashMap<&str, usize> = HashMap::new();
+    dfs_longest_path(start, adj, &mut memo)
+}
 
-    while let Some((node, depth)) = queue.pop_front() {
-        if depth > max_depth {
-            max_depth = depth;
-        }
-        if let Some(targets) = adj.get(node) {
-            for &target in targets {
-                if !visited.contains(target) {
-                    visited.insert(target);
-                    queue.push_back((target, depth + 1));
-                }
-            }
-        }
+/// DFS helper: returns the longest path length from `node` to any leaf.
+fn dfs_longest_path<'a>(
+    node: &'a str,
+    adj: &HashMap<&'a str, Vec<&'a str>>,
+    memo: &mut HashMap<&'a str, usize>,
+) -> usize {
+    if let Some(&cached) = memo.get(node) {
+        return cached;
     }
-
-    max_depth
+    let max_child = if let Some(targets) = adj.get(node) {
+        targets
+            .iter()
+            .map(|&t| 1 + dfs_longest_path(t, adj, memo))
+            .max()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    memo.insert(node, max_child);
+    max_child
 }
 
 // ---------------------------------------------------------------------------
@@ -372,20 +382,12 @@ pub async fn create_notifications_for_error_findings(
         }
     }
 
-    // Create notifications per workspace.
-    let mut notified_workspaces: HashSet<String> = HashSet::new();
-
+    // Create notifications per finding — each error finding creates a notification
+    // for every Admin/Developer member in the relevant workspace.
     for finding in &error_findings {
         let Some((_, workspace_id)) = spec_context.get(&finding.spec_path) else {
             continue;
         };
-
-        // Avoid duplicate notifications per workspace for multiple findings.
-        let ws_key = format!("{}:{}", workspace_id, finding.finding_type);
-        if notified_workspaces.contains(&ws_key) {
-            continue;
-        }
-        notified_workspaces.insert(ws_key);
 
         // Resolve tenant_id from workspace.
         let tenant_id = match state.workspaces.find_by_id(&Id::new(workspace_id)).await {
@@ -1100,6 +1102,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn patrol_creates_notifications_for_multiple_same_type_error_findings() {
+        let state = test_state();
+        let now = 2_000_000u64;
+
+        // Set up workspace + repo + members.
+        let ws = make_workspace("ws1");
+        state.workspaces.create(&ws).await.unwrap();
+
+        let repo = make_repo("repo1", "ws1");
+        state.repos.create(&repo).await.unwrap();
+
+        let admin = make_membership("admin1", "ws1", WorkspaceRole::Admin);
+        state.workspace_memberships.create(&admin).await.unwrap();
+
+        // Seed ledger entries for context resolution.
+        let spec_a = make_ledger_entry("system/spec-a.md", "sha1", ApprovalStatus::Approved);
+        let spec_b = make_ledger_entry("system/spec-b.md", "sha2", ApprovalStatus::Approved);
+        let spec_c = make_ledger_entry("system/spec-c.md", "sha3", ApprovalStatus::Approved);
+        state.spec_ledger.save(&spec_a).await.unwrap();
+        state.spec_ledger.save(&spec_b).await.unwrap();
+        state.spec_ledger.save(&spec_c).await.unwrap();
+
+        // Create 3 error-severity findings of the same type (dangling_implementation).
+        // All 3 must produce notifications — no deduplication.
+        let findings = vec![
+            PatrolFinding {
+                finding_type: "dangling_implementation".to_string(),
+                severity: "error".to_string(),
+                spec_path: "system/spec-a.md".to_string(),
+                detail: "Implements 'system/deleted-1.md' which no longer exists".to_string(),
+                suggested_action: "Remove or update the link".to_string(),
+            },
+            PatrolFinding {
+                finding_type: "dangling_implementation".to_string(),
+                severity: "error".to_string(),
+                spec_path: "system/spec-b.md".to_string(),
+                detail: "Implements 'system/deleted-2.md' which no longer exists".to_string(),
+                suggested_action: "Remove or update the link".to_string(),
+            },
+            PatrolFinding {
+                finding_type: "dangling_implementation".to_string(),
+                severity: "error".to_string(),
+                spec_path: "system/spec-c.md".to_string(),
+                detail: "Implements 'system/deleted-3.md' which no longer exists".to_string(),
+                suggested_action: "Remove or update the link".to_string(),
+            },
+        ];
+
+        create_notifications_for_error_findings(&state, &findings, now).await;
+
+        // Admin should get 3 notifications — one per finding.
+        let admin_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("admin1"),
+                Some(&Id::new("ws1")),
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            admin_notifs.len(),
+            3,
+            "each error finding should create a notification — no deduplication"
+        );
+
+        // Verify each notification references a different spec_path.
+        let mut entity_refs: Vec<String> = admin_notifs
+            .iter()
+            .filter_map(|n| n.entity_ref.clone())
+            .collect();
+        entity_refs.sort();
+        assert_eq!(
+            entity_refs,
+            vec![
+                "system/spec-a.md".to_string(),
+                "system/spec-b.md".to_string(),
+                "system/spec-c.md".to_string(),
+            ]
+        );
+
+        // All should have priority 3.
+        for notif in &admin_notifs {
+            assert_eq!(notif.priority, 3);
+        }
+    }
+
+    #[tokio::test]
     async fn patrol_no_notifications_for_warning_findings() {
         let state = test_state();
         let now = 2_000_000u64;
@@ -1169,6 +1263,25 @@ mod tests {
         adj.insert("e", vec!["f"]);
         // a→b→d (2), a→c→d (2), a→c→e→f (3) — max is 3
         assert_eq!(compute_chain_depth("a", &adj), 3);
+    }
+
+    #[test]
+    fn chain_depth_asymmetric_diamond() {
+        // Diamond with unequal-length paths: a→g direct (1 hop) + a→b→c→d→e→f→g (6 hops).
+        // BFS would visit g at depth 1 via the direct edge and never revisit it,
+        // reporting max_depth=5 (from f). The correct longest path from a is 6.
+        let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+        adj.insert("a", vec!["b", "g"]); // direct shortcut a→g + long path a→b
+        adj.insert("b", vec!["c"]);
+        adj.insert("c", vec!["d"]);
+        adj.insert("d", vec!["e"]);
+        adj.insert("e", vec!["f"]);
+        adj.insert("f", vec!["g"]);
+        assert_eq!(compute_chain_depth("a", &adj), 6);
+        // Node b has depth 5 (b→c→d→e→f→g).
+        assert_eq!(compute_chain_depth("b", &adj), 5);
+        // Node g is a leaf — depth 0.
+        assert_eq!(compute_chain_depth("g", &adj), 0);
     }
 
     #[test]

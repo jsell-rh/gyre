@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §Accountability Agent Integration  
 **Depends on:** TASK-016 (staleness job), TASK-019 (query endpoints and cycle detection)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [`specs/reviews/task-023.md`](../reviews/task-023.md)
 
 ## Spec Excerpt
@@ -89,3 +89,4 @@ When working on this task:
 ## Git Commits
 
 - `feat(spec-links): implement accountability agent patrol (TASK-023)`
+- `fix(spec-patrol): address R1 findings — longest-path algorithm and notification dedup (TASK-023)`
