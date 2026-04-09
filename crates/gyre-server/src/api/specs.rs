@@ -2594,11 +2594,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Sync: supersedes marks target deprecated
+    // Sync: supersedes does NOT deprecate target at push time (F9).
+    // Deprecation only happens in approve_spec (spec-links.md §Approval Gates:
+    // "When source is approved, target is automatically set to deprecated").
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn sync_supersedes_marks_target_deprecated() {
+    async fn sync_supersedes_does_not_deprecate_target_at_push_time() {
         use crate::spec_registry::SpecLinksStore;
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -2630,17 +2632,15 @@ specs:
     owner: user:jsell
 "#;
 
-        // Simulate what sync_spec_ledger does for link processing only
-        // (we can't call the full function without a real git repo).
-        // Instead, directly test the ledger logic using parsed manifest data.
         let manifest = crate::spec_registry::parse_manifest(manifest_yaml).unwrap();
         {
             let mut l = ledger.lock().await;
-            // Simulate new-spec being added.
+            // Source spec is Pending (not approved).
             seed_spec(&mut l, "system/new-spec.md", ApprovalStatus::Pending);
         }
 
-        // Process links as sync_spec_ledger would.
+        // Process links as sync_spec_ledger would — store links but do NOT
+        // deprecate the target (no Supersedes match arm in sync_spec_ledger).
         {
             let mut new_links: Vec<crate::spec_registry::SpecLinkEntry> = Vec::new();
             for entry in &manifest.specs {
@@ -2661,24 +2661,22 @@ specs:
                     });
                 }
             }
-            let mut l = ledger.lock().await;
-            for link in &new_links {
-                if link.link_type == crate::spec_registry::SpecLinkType::Supersedes {
-                    if let Some(target_entry) = l.get_mut(&link.target_path) {
-                        target_entry.approval_status = ApprovalStatus::Deprecated;
-                    }
-                }
-            }
+            // No type-specific enforcement for Supersedes at sync time.
+            // The link is stored, but the target is NOT deprecated.
             let mut store = links_store.lock().await;
             store.extend(new_links);
         }
 
-        // Verify target was deprecated.
+        // Verify target was NOT deprecated — it retains its original Approved status.
         let l = ledger.lock().await;
         let old = l.get("development/old-spec.md").unwrap();
-        assert_eq!(old.approval_status, ApprovalStatus::Deprecated);
+        assert_eq!(
+            old.approval_status,
+            ApprovalStatus::Approved,
+            "supersedes link should NOT deprecate target at push time — only approve_spec should"
+        );
 
-        // Verify link was stored.
+        // Verify link was stored correctly.
         let store = links_store.lock().await;
         assert_eq!(store.len(), 1);
         assert_eq!(

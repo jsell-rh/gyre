@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §Link Types, §Forge-Maintained Spec Graph  
 **Depends on:** None (spec links store and approval flow already exist)  
-**Progress:** `needs-revision`
+**Progress:** `ready-for-review`
 **Review:** [`specs/reviews/task-016.md`](../reviews/task-016.md)
 
 ## Spec Excerpt

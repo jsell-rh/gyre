@@ -287,7 +287,7 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 /// - Changed SHA: update SHA, reset `approval_status = Pending` if `auto_invalidate_on_change`.
 /// - Entry in ledger but not manifest: mark `Deprecated`.
 /// - Files under `specs/` not in manifest: log a warning.
-/// - `supersedes` links: target spec is marked Deprecated in ledger.
+/// - `supersedes` links: no push-time action (deprecation handled by approve_spec).
 /// - ALL stale links: drift-review Task created in the source spec's repo
 ///   (spec-links.md §Automatic Staleness Detection step 3).
 /// - `extends` links: if the target SHA changed, the extending spec's drift_status = "drifted"
@@ -548,22 +548,10 @@ pub async fn sync_spec_ledger(
             }
 
             // Type-specific enforcement.
+            // Note: Supersedes deprecation is handled ONLY in approve_spec
+            // (spec-links.md §Approval Gates: "When source is approved, target
+            // is automatically set to deprecated"). No push-time action here.
             match link.link_type {
-                SpecLinkType::Supersedes => {
-                    if let Ok(Some(mut target_entry)) = ledger.find_by_path(&link.target_path).await
-                    {
-                        if target_entry.approval_status != ApprovalStatus::Deprecated {
-                            info!(
-                                source = %link.source_path,
-                                target = %link.target_path,
-                                "spec-registry: supersedes link — marking target deprecated"
-                            );
-                            target_entry.approval_status = ApprovalStatus::Deprecated;
-                            target_entry.updated_at = now;
-                            let _ = ledger.save(&target_entry).await;
-                        }
-                    }
-                }
                 SpecLinkType::Extends => {
                     // For extends links with stale target: mark extending spec as drifted
                     // and invalidate approval.
