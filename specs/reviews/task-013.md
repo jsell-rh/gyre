@@ -1,36 +1,40 @@
 # Review: TASK-013 — Briefing Data Assembly (Cross-Workspace & Exceptions)
 
 **Reviewer:** Verifier
-**Round:** R1
-**Verdict:** `needs-revision` (3 findings)
+**Round:** R2
+**Verdict:** `needs-revision` (2 findings)
 
 ---
 
-## Findings
+## R1 Findings (all resolved)
 
-- [-] [process-revision-complete] **F1: Cross-workspace filter direction is inverted relative to spec and link convention.**
-  - **Spec (HSI §9):** "platform-core updated idempotent-api.md. Your payment-retry.md depends on it." — The cross_workspace section shows external specs that OUR specs depend on, where the external spec has changed.
-  - **Link convention (`spec_registry.rs:484-486`):** `source_path = entry.path` (the local spec being scanned), `target = the dependency it references`. When `link_type = DependsOn`: source DependsOn target.
-  - **Implementation (`graph.rs:868-872`):** Filters `target_repo_id` in workspace AND `source_repo_id` NOT in workspace → finds links where EXTERNAL specs depend on US.
-  - **Should filter:** `source_repo_id` in workspace (our spec declares the link) AND `target_repo_id` NOT in workspace (the dependency is external). This matches the spec narrative: our spec depends on an external spec that was updated.
-  - **Test data also inverted (`graph.rs:1905-1912`):** The test creates a link with `source = external-repo` and `target = repo-1` (local), so it matches the inverted filter. Both filter and test verify the wrong relationship.
-  - **Fix:** Swap the filter conditions: `source_repo_id.is_some_and(|sid| ws_repo_ids.contains(sid))` AND `target_repo_id.is_some_and(|tid| !ws_repo_ids.contains(tid))`. Update test data to use the correct direction (source = local spec, target = external spec). Update title/description to reference the external dependency (target) that changed.
+- [x] **F1: Cross-workspace filter direction is inverted relative to spec and link convention.** — Fixed in `ec71a1f1`. Filter now correctly checks `source_repo_id IN workspace AND target_repo_id NOT IN workspace`. Test data updated to match.
 
-- [-] [process-revision-complete] **F2: Missing `actions` field on exception items — spec violation.**
-  - **Spec (HSI §9, line 1316):** `"exceptions": [{"type": "...", "entity_id": "...", "summary": "...", "actions": [...]}]`
-  - **Task plan (step 2):** "Actions are static labels per type (e.g., gate_failure → ['View Diff', 'View Output', 'Override', 'Close MR'])"
-  - **Implementation:** `BriefingItem` has no `actions` field. Exception items serialize without actions, dropping the spec-required data entirely.
-  - **Fix:** Add `pub actions: Vec<String>` to `BriefingItem` (defaulting to empty for non-exception sections), and populate with static labels per exception type: gate_failure → `["View Diff", "View Test Output", "Override", "Close MR"]`, assertion_failure → appropriate actions, mr_revert → appropriate actions. Alternatively, create a separate `ExceptionItem` type with the `actions` field.
+- [x] **F2: Missing `actions` field on exception items — spec violation.** — Fixed in `ec71a1f1`. `actions: Vec<String>` added to `BriefingItem` with static labels per exception type.
 
-- [-] [process-revision-complete] **F3: Gate results not filtered by gate result timestamp — old failures leak into briefing.**
-  - **Implementation (`graph.rs:901-907`):** Filters MRs by `mr.updated_at >= since`, then includes ALL failed gate results for those MRs regardless of when the failure occurred.
-  - **Semantic issue:** If an MR was updated recently (e.g., reviewer added at time 2000, after `since=1500`) but the gate failure happened at time 500 (before `since`), that old gate failure appears in the briefing. The briefing shows "since your last visit" — old failures shouldn't appear.
-  - **Test gap (`graph.rs:1981-2014`):** The test creates both MR (`updated_at: 2000`) and gate result (`finished_at: Some(2000)`) with timestamps after `since=1500`, so the test passes even without the missing filter.
-  - **Fix:** Add `gr.finished_at.map_or(false, |t| t >= since)` to the inner gate result filter at line 907:
+- [x] **F3: Gate results not filtered by gate result timestamp — old failures leak into briefing.** — Fixed in `ec71a1f1`. Inner filter now checks `gr.finished_at.map_or(false, |t| t >= since)`. Test case added for MR updated after `since` with gate result finished before `since`.
+
+## R2 Findings
+
+- [ ] **F4: Exception `entity_type` values don't match the spec-defined type enum — consumers matching spec values will miss these items.**
+  - **Spec (HSI §9, line 1316):** The response field definition states:
+    - `"spec_assertion_failure"` — spec assertion validation failure
+    - `"reverted"` — MR with Reverted status
+  - **Implementation (`graph.rs:956`):** Uses `"assertion_failure"` instead of `"spec_assertion_failure"`.
+  - **Implementation (`graph.rs:976`):** Uses `"mr_revert"` instead of `"reverted"`.
+  - **Impact:** Any downstream consumer (UI, CLI, MCP client) checking for the spec-defined values (`"spec_assertion_failure"`, `"reverted"`) will fail to match these exception items. Note that other parts of the codebase already use `"reverted"` for `MrStatus::Reverted` (see `merge_deps.rs:265`, `specs.rs:1156`, `merge_requests.rs:202`), so the briefing is inconsistent with both the spec and existing serialization conventions.
+  - **Tests also use wrong values:** Lines 2116 (`"assertion_failure"`) and 2153 (`"mr_revert"`) — tests must be updated alongside the fix.
+  - **Fix:** Change line 956 to `entity_type: "spec_assertion_failure".to_string()` and line 976 to `entity_type: "reverted".to_string()`. Update the test filter predicates at lines 2116 and 2153 to match.
+
+- [ ] **F5: Cross-workspace filter comment claims "target that changed" but `created_at` filter cannot detect target changes — only detects link recreation on source push.**
+  - **Spec (HSI §9, line 1271):** "platform-core updated idempotent-api.md. Your payment-retry.md depends on it." — The trigger for cross_workspace entries is the external dependency (target) being updated.
+  - **Comment (`graph.rs:871`):** "Our spec (source) depends on an external spec (target) that changed." — Correct description of spec intent.
+  - **Filter (`graph.rs:880`):** `link.created_at >= since` — But `created_at` is set to `now` each time the source spec's repo is pushed (`spec_registry.rs:495`), because the link store does a full refresh per source-spec push (`spec_registry.rs:545-551`). This timestamp reflects when the local repo was last pushed, NOT when the external dependency changed.
+  - **Consequence:** (a) Every push to any workspace repo causes ALL its cross-workspace links to appear as "Dependency updated" in the next briefing — false positives. (b) If the external spec is updated but the local repo isn't re-pushed, the link's `created_at` isn't refreshed and the briefing misses the update — false negative.
+  - **`SpecLinkEntry.stale_since`** (`spec_registry.rs:227`) was designed for exactly this purpose ("Timestamp when link became stale — target SHA advanced") but is never populated in the current codebase.
+  - **Fix:** Add `stale_since` to the filter disjunction so the feature works correctly when staleness detection is implemented upstream:
     ```rust
-    for gr in results.iter().filter(|gr| {
-        gr.status == GateStatus::Failed
-            && gr.finished_at.map_or(false, |t| t >= since)
-    }) {
+    && (link.created_at >= since
+        || link.stale_since.is_some_and(|t| t >= since))
     ```
-    Add a test case with an MR updated after `since` but gate result finished before `since` to verify the old failure is excluded.
+    This preserves current behavior (new links appear) AND adds support for detecting target changes when `stale_since` is eventually populated. Also update the title from `"Dependency updated: {target_path}"` to `"Cross-workspace dependency: {target_path}"` to avoid claiming the dependency was "updated" when the filter cannot verify this. Update the `timestamp` field (line 898) to prefer `stale_since` when available: `timestamp: link.stale_since.unwrap_or(link.created_at)`.
