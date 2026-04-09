@@ -1820,6 +1820,23 @@ pub(crate) async fn detect_dependencies_on_push(
     let source_id = Id::new(repo_id);
     let now = crate::api::now_secs();
 
+    // Look up the source repo's workspace_id for policy lookup (TASK-021 F1).
+    let source_workspace_id = all_repos
+        .iter()
+        .find(|r| r.id.as_str() == repo_id)
+        .map(|r| r.workspace_id.to_string());
+
+    // Resolve workspace dependency policy for push-time staleness detection.
+    let policy = if let Some(ws_id) = &source_workspace_id {
+        state
+            .dependency_policies
+            .get_for_workspace(&Id::new(ws_id))
+            .await
+            .unwrap_or_default()
+    } else {
+        gyre_domain::DependencyPolicy::default()
+    };
+
     for path_dep in path_deps {
         // Extract basename: "../other-repo" -> "other-repo"
         let basename = std::path::Path::new(&path_dep)
@@ -1856,6 +1873,22 @@ pub(crate) async fn detect_dependencies_on_push(
                 edge.version_drift = crate::version_compute::compute_version_drift(pinned, current);
             }
 
+            // Push-time staleness: set status to Stale if drift exceeds policy (TASK-021 F1).
+            if policy.max_version_drift > 0 {
+                if let Some(d) = edge.version_drift {
+                    if d > policy.max_version_drift {
+                        edge.status = gyre_domain::DependencyStatus::Stale;
+                        tracing::debug!(
+                            source = repo_id,
+                            target = %target_repo.id,
+                            drift = d,
+                            threshold = policy.max_version_drift,
+                            "dep-detection: version drift exceeds threshold at push time"
+                        );
+                    }
+                }
+            }
+
             if let Err(e) = state.dependencies.save(&edge).await {
                 warn!("dep-detection: failed to save edge: {e}");
             } else {
@@ -1864,8 +1897,55 @@ pub(crate) async fn detect_dependencies_on_push(
                     target_repo = %target_repo.id,
                     version_pinned = ?edge.version_pinned,
                     version_drift = ?edge.version_drift,
+                    status = ?edge.status,
                     "auto-detected Cargo.toml path dependency"
                 );
+
+                // Create auto-task for stale dependency at push time (TASK-021 F1).
+                if edge.status == gyre_domain::DependencyStatus::Stale
+                    && policy.auto_create_update_tasks
+                {
+                    let source_name = all_repos
+                        .iter()
+                        .find(|r| r.id.as_str() == repo_id)
+                        .map(|r| r.name.as_str())
+                        .unwrap_or(repo_id);
+                    let target_name = target_repo.name.as_str();
+
+                    let title = if let (Some(pinned), Some(current)) =
+                        (&edge.version_pinned, &target_version)
+                    {
+                        format!("Update {target_name} dependency from {pinned} to {current}")
+                    } else {
+                        format!("Update stale dependency on {target_name}")
+                    };
+
+                    let task_id = Id::new(uuid::Uuid::new_v4().to_string());
+                    let mut task = gyre_domain::Task::new(task_id, &title, now);
+                    task.priority = gyre_domain::TaskPriority::Medium;
+                    task.labels = vec![
+                        "dependency-update".to_string(),
+                        "stale-dependency".to_string(),
+                        "auto-created".to_string(),
+                    ];
+                    task.description = Some(format!(
+                        "Dependency on '{target_name}' in repo '{source_name}' is stale. \
+                         Pinned version: {}. Current version: {}. Drift: {} versions.",
+                        edge.version_pinned.as_deref().unwrap_or("unknown"),
+                        target_version.as_deref().unwrap_or("unknown"),
+                        edge.version_drift
+                            .map(|d| d.to_string())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                    ));
+                    if let Some(ws_id) = &source_workspace_id {
+                        task.workspace_id = Id::new(ws_id);
+                    }
+                    task.repo_id = source_id.clone();
+
+                    if let Err(e) = state.tasks.create(&task).await {
+                        warn!("dep-detection: failed to create auto-task: {e}");
+                    }
+                }
             }
         }
     }

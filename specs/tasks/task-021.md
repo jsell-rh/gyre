@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §Version Drift Tracking, API (`GET /api/v1/deps/stale`)  
 **Depends on:** None (builds on M22.4 dependency graph infrastructure)  
-**Progress:** `needs-revision`
+**Progress:** `ready-for-review`
 **Review:** [specs/reviews/task-021.md](../reviews/task-021.md) — R1 needs-revision (2 findings)
 
 ## Spec Excerpt
