@@ -97,3 +97,4 @@ When working on this task:
 
 - `e36336eb` feat(deps): implement version drift tracking and stale dependency detection (TASK-021)
 - `a17b5201` fix(deps): push-time staleness detection and multi-cycle persistence (TASK-021 R1)
+- `11966ac4` fix(deps): injectable version resolver and time-based staleness recovery (TASK-021 R2 F1)
