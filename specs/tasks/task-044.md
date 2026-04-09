@@ -2,10 +2,10 @@
 
 **Spec reference:** `authorization-provenance.md` §7.6 (Human-System Interface amendments)
 
-**Progress:** `not-started`
+**Progress:** `complete`
 
 **Commits:**
-(none yet)
+(implemented in feat/explorer-canvas branch — ConstraintEditor.svelte (379 lines) and ProvenanceChain.svelte (262 lines) fully built and integrated into DetailPanel.svelte)
 
 ---
 

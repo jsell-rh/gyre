@@ -2,10 +2,10 @@
 
 **Spec reference:** `lsp-call-graph.md` §Phase 2: Rust
 
-**Progress:** `not-started`
+**Progress:** `complete`
 
 **Commits:**
-(none yet)
+(implemented in feat/explorer-canvas branch — lsp_call_graph.rs fully built with rust-analyzer LSP subprocess, 22 unit tests, wired into graph_extraction.rs extraction pipeline)
 
 ---
 
