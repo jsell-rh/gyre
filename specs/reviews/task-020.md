@@ -4,7 +4,7 @@
 
 ### Findings
 
-- [ ] **F1: `DependencyPolicy` omits spec-defined `require_cascade_tests` field.**
+- [-] [process-revision-complete] **F1: `DependencyPolicy` omits spec-defined `require_cascade_tests` field.**
   The spec excerpt (`dependency-graph.md` §Enforcement Policies) defines 5 policy fields:
   `breaking_change_behavior`, `max_version_drift`, `stale_dependency_alert_days`,
   `require_cascade_tests`, and `auto_create_update_tasks`. The implementation's
@@ -14,7 +14,7 @@
   "Workspace dependency policy is created in TASK-020 (`require_cascade_tests` flag)" — the
   downstream task depends on this field existing. The default value per spec is `true`.
 
-- [ ] **F2: `BREAKING CHANGE:` footer detection is silently broken — git log format strips commit body.**
+- [-] [process-revision-complete] **F2: `BREAKING CHANGE:` footer detection is silently broken — git log format strips commit body.**
   `detect_breaking_changes_on_push` (`git_http.rs:1834-1843`) uses
   `git log -1 --format="%H %s"` — `%s` outputs only the subject line. The commit body (where
   `BREAKING CHANGE:` footers appear per the conventional commit spec) is discarded before reaching
@@ -29,7 +29,7 @@
   Fix: use `--format="%H %s%n%b"` or `--format="%H %B"` to include the body, and adjust
   `detect_breaking_commits` to handle multi-line input per commit.
 
-- [ ] **F3: `test_breaking_change_auto_creates_task` is self-confirming — does not test production code.**
+- [-] [process-revision-complete] **F3: `test_breaking_change_auto_creates_task` is self-confirming — does not test production code.**
   The test (`dependencies.rs` test module) manually creates a task via `state.tasks.create(&task)`
   and then asserts that `state.tasks.list_by_repo(&repo_a)` returns it. The production function
   `detect_breaking_changes_on_push` is never called. The test proves that
