@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §5.3  
 **Depends on:** TASK-008 (Phase 3: attestation chains are produced)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [R1–R2](../reviews/task-018.md) — R2: 1 finding (F3)
 
 ## Spec Excerpt
@@ -75,3 +75,4 @@ When working on this task:
 
 - `feat(attestation): implement git notes storage for chain attestations (TASK-018)`
 - `fix(attestation): use spec-correct ref and full chain for git notes (TASK-018)`
+- `fix(attestation): eliminate race between legacy and chain git note writes (TASK-018)`

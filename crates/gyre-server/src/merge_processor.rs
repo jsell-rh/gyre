@@ -509,95 +509,108 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             let bundle =
                 crate::attestation::sign_attestation(attestation, &state.agent_signing_key);
 
-            // Attach as a git note under refs/notes/attestations.
-            let bundle_json = serde_json::to_string(&bundle).unwrap_or_default();
-            let repo_path = repo.path.clone();
-            let sha_for_note = merge_commit_sha.clone();
-            let bundle_json_for_note = bundle_json.clone();
-            tokio::spawn(async move {
-                let out = tokio::process::Command::new("git")
-                    .args([
-                        "-C",
-                        &repo_path,
-                        "notes",
-                        "--ref=refs/notes/attestations",
-                        "add",
-                        "-f",
-                        "-m",
-                        &bundle_json_for_note,
-                        &sha_for_note,
-                    ])
-                    .output()
-                    .await;
-                match out {
-                    Ok(o) if o.status.success() => {
-                        tracing::info!(sha = %sha_for_note, "attestation note attached");
-                    }
-                    Ok(o) => {
-                        tracing::warn!(
-                            sha = %sha_for_note,
-                            stderr = %String::from_utf8_lossy(&o.stderr),
-                            "git notes failed — attestation stored in memory only"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(sha = %sha_for_note, error = %e, "git not found — attestation stored in memory only");
-                    }
-                }
-            });
-
-            // Persist attestation bundle.
+            // Persist attestation bundle in the attestation store (always).
             let _ = state
                 .attestation_store
                 .save(&updated_mr.id.to_string(), &bundle)
                 .await;
             info!(mr_id = %updated_mr.id, sha = %merge_commit_sha, "attestation bundle created and stored");
 
-            // §5.3 location 2 — Dual-write: also attach the full chain attestation
-            // as a git note under refs/notes/attestations (overwrites the legacy
-            // note above). Load the full chain for offline verification portability.
-            if let Ok(Some(chain_att)) = state
-                .chain_attestations
-                .find_by_commit(&merge_commit_sha)
-                .await
-            {
-                // Load the full chain (root to leaf) from the database.
-                let chain = match state.chain_attestations.load_chain(&chain_att.id).await {
-                    Ok(c) if !c.is_empty() => c,
-                    _ => vec![chain_att],
-                };
-                crate::attestation::attach_chain_attestation_note(
-                    &repo.path,
-                    &merge_commit_sha,
-                    &chain,
-                )
-                .await;
-            } else if let Some(ref agent_id) = updated_mr.author_agent_id {
-                // Fallback: look up by agent's task if no commit-indexed attestation.
-                if let Ok(Some(agent)) = state.agents.find_by_id(agent_id).await {
-                    if let Some(ref task_id) = agent.current_task_id {
-                        if let Ok(atts) = state
-                            .chain_attestations
-                            .find_by_task(task_id.as_str())
-                            .await
-                        {
-                            if let Some(leaf) = atts.iter().max_by_key(|a| a.metadata.chain_depth) {
-                                // Load the full chain from the leaf.
-                                let chain =
-                                    match state.chain_attestations.load_chain(&leaf.id).await {
-                                        Ok(c) if !c.is_empty() => c,
-                                        _ => vec![leaf.clone()],
-                                    };
-                                crate::attestation::attach_chain_attestation_note(
-                                    &repo.path,
-                                    &merge_commit_sha,
-                                    &chain,
-                                )
-                                .await;
+            // §5.3 location 2 — Git note on refs/notes/attestations.
+            // During the dual-write period, we write EITHER the chain attestation
+            // OR the legacy AttestationBundle — never both — to avoid a race
+            // condition between two fire-and-forget tokio::spawn writes to the
+            // same ref. The chain attestation takes priority when available.
+            let chain_note_written = {
+                let mut written = false;
+                if let Ok(Some(chain_att)) = state
+                    .chain_attestations
+                    .find_by_commit(&merge_commit_sha)
+                    .await
+                {
+                    // Load the full chain (root to leaf) from the database.
+                    let chain = match state.chain_attestations.load_chain(&chain_att.id).await {
+                        Ok(c) if !c.is_empty() => c,
+                        _ => vec![chain_att],
+                    };
+                    crate::attestation::attach_chain_attestation_note(
+                        &repo.path,
+                        &merge_commit_sha,
+                        &chain,
+                    )
+                    .await;
+                    written = true;
+                } else if let Some(ref agent_id) = updated_mr.author_agent_id {
+                    // Fallback: look up by agent's task if no commit-indexed attestation.
+                    if let Ok(Some(agent)) = state.agents.find_by_id(agent_id).await {
+                        if let Some(ref task_id) = agent.current_task_id {
+                            if let Ok(atts) = state
+                                .chain_attestations
+                                .find_by_task(task_id.as_str())
+                                .await
+                            {
+                                if let Some(leaf) =
+                                    atts.iter().max_by_key(|a| a.metadata.chain_depth)
+                                {
+                                    // Load the full chain from the leaf.
+                                    let chain =
+                                        match state.chain_attestations.load_chain(&leaf.id).await {
+                                            Ok(c) if !c.is_empty() => c,
+                                            _ => vec![leaf.clone()],
+                                        };
+                                    crate::attestation::attach_chain_attestation_note(
+                                        &repo.path,
+                                        &merge_commit_sha,
+                                        &chain,
+                                    )
+                                    .await;
+                                    written = true;
+                                }
                             }
                         }
                     }
                 }
+                written
+            };
+
+            // Legacy fallback: write the AttestationBundle as a git note only
+            // when no chain attestation was written, avoiding a race on the
+            // same refs/notes/attestations ref.
+            if !chain_note_written {
+                let bundle_json = serde_json::to_string(&bundle).unwrap_or_default();
+                let repo_path = repo.path.clone();
+                let sha_for_note = merge_commit_sha.clone();
+                tokio::spawn(async move {
+                    let out = tokio::process::Command::new("git")
+                        .args([
+                            "-C",
+                            &repo_path,
+                            "notes",
+                            "--ref=refs/notes/attestations",
+                            "add",
+                            "-f",
+                            "-m",
+                            &bundle_json,
+                            &sha_for_note,
+                        ])
+                        .output()
+                        .await;
+                    match out {
+                        Ok(o) if o.status.success() => {
+                            tracing::info!(sha = %sha_for_note, "legacy attestation note attached");
+                        }
+                        Ok(o) => {
+                            tracing::warn!(
+                                sha = %sha_for_note,
+                                stderr = %String::from_utf8_lossy(&o.stderr),
+                                "git notes failed — attestation stored in memory only"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(sha = %sha_for_note, error = %e, "git not found — attestation stored in memory only");
+                        }
+                    }
+                });
             }
 
             // TASK-007 (Phase 2): Merge-time constraint evaluation (audit-only).
