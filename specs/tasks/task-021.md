@@ -94,4 +94,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `e36336eb` feat(deps): implement version drift tracking and stale dependency detection (TASK-021)
