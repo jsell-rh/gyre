@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §Breaking Change Detection, §Enforcement Policies  
 **Depends on:** None (builds on M22.4 dependency graph infrastructure)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [specs/reviews/task-020.md](../reviews/task-020.md) — R3 needs-revision (1 finding)
 
 ## Spec Excerpt
