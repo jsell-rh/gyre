@@ -28,7 +28,7 @@ Missing entirely:
 - API contract parsing (openapi, proto, mcp)
 - Reconciliation logic (orphan detection, version updates)
 
-The `DependencyType` enum already has all needed variants (`Code`, `Spec`, `Api`, `Schema`, `Manual`). The `DetectionMethod` enum already has `CargoToml`, `PackageJson`, `GoMod`, `PyprojectToml`, `ManifestYaml`, `ApiContract`, `Manual`.
+The `DependencyType` enum already has all needed variants (`Code`, `Spec`, `Api`, `Schema`, `Manual`). The `DetectionMethod` enum currently has: `CargoToml`, `PackageJson`, `GoMod`, `ManifestLink`, `OpenApiRef`, `ProtoImport`, `McpToolRef`, `Manual`. Note: there is no `PyprojectToml` variant yet — add it as part of this task. Use `ManifestLink` (not "ManifestYaml") for spec manifest detection, and `OpenApiRef`/`ProtoImport`/`McpToolRef` (not a single "ApiContract") for API contract detection.
 
 ## Implementation Plan
 
@@ -39,7 +39,7 @@ The `DependencyType` enum already has all needed variants (`Code`, `Spec`, `Api`
 
 2. **Spec manifest link extraction:**
    - Parse `specs/manifest.yaml` for entries with cross-repo links (`@workspace/repo/path` format)
-   - Create `DependencyEdge` with `DependencyType::Spec` and `DetectionMethod::ManifestYaml`
+   - Create `DependencyEdge` with `DependencyType::Spec` and `DetectionMethod::ManifestLink`
 
 3. **API contract detection:**
    - Detect presence of `openapi.yaml`/`swagger.json` — create `Api` dependency edges to repos whose services are referenced
