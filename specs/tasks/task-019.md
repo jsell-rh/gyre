@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §Mechanical Gates (Merge Gates), §Querying the Graph, §Cycle Detection  
 **Depends on:** TASK-016 (staleness job and approval gates must be operational)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -96,4 +96,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(spec-links): implement merge gates, query endpoints, and cycle detection (TASK-019)`

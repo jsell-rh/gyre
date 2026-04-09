@@ -420,6 +420,34 @@ pub async fn git_receive_pack(
         }
     }
 
+    // TASK-019: Cycle detection — reject pushes that create cycles in spec links.
+    // spec-links.md §Cycle Detection: "The forge rejects manifest changes that
+    // would create cycles in the spec graph."
+    {
+        let default_ref = format!("refs/heads/{default_branch}");
+        for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
+            if let Err(rejection) =
+                crate::spec_registry::check_spec_link_cycles(&repo_path, &update.new_sha).await
+            {
+                undo_ref_updates(&repo_path, &ref_updates).await;
+                state
+                    .emit_event(
+                        Some(repo_workspace_id.clone()),
+                        gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                        gyre_common::message::MessageKind::PushRejected,
+                        Some(serde_json::json!({
+                            "repo_id": repo_id,
+                            "branch": default_branch,
+                            "agent_id": auth.agent_id,
+                            "reason": rejection,
+                        })),
+                    )
+                    .await;
+                return (StatusCode::FORBIDDEN, rejection).into_response();
+            }
+        }
+    }
+
     info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
 
     // M13.3: Build X-Gyre-Push-Result JSON header value.

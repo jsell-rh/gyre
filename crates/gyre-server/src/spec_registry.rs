@@ -970,6 +970,115 @@ pub async fn check_manifest_coverage(
 }
 
 // ---------------------------------------------------------------------------
+// Cycle detection for spec link graph (TASK-019)
+// spec-links.md §Cycle Detection: "The forge rejects manifest changes that
+// would create cycles in the spec graph."
+// Only `depends_on` and `implements` links are checked.
+// `conflicts_with` is bidirectional by nature (not a cycle).
+// `references` and `supersedes` are excluded from cycle detection.
+// ---------------------------------------------------------------------------
+
+/// Check the manifest's spec links for cycles in `depends_on` and `implements`
+/// link types. Returns `Ok(())` if no cycles, `Err(message)` with the cycle
+/// path if a cycle is detected.
+pub async fn check_spec_link_cycles(repo_path: &str, sha: &str) -> Result<(), String> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+
+    let manifest_yaml = match read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await {
+        Some(content) => content,
+        None => return Ok(()), // No manifest — no cycles possible.
+    };
+
+    let manifest = match parse_manifest(&manifest_yaml) {
+        Ok(m) => m,
+        Err(_) => return Ok(()), // Parse error handled by sync_spec_ledger.
+    };
+
+    detect_link_cycles(&manifest)
+}
+
+/// Detect cycles in the spec link graph from a parsed manifest.
+/// Only checks `depends_on` and `implements` links.
+pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    // Build adjacency list: source → [targets] for cycle-relevant link types.
+    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+    for entry in &manifest.specs {
+        for link in &entry.links {
+            match link.link_type {
+                SpecLinkType::DependsOn | SpecLinkType::Implements => {
+                    // For cross-workspace targets, use only the path portion.
+                    let target_path = match parse_cross_workspace_target(&link.target) {
+                        CrossWorkspaceTarget::SameRepo { path } => path,
+                        CrossWorkspaceTarget::CrossRepo { path, .. } => path,
+                        CrossWorkspaceTarget::CrossWorkspace { path, .. } => path,
+                    };
+                    adj.entry(entry.path.clone()).or_default().push(target_path);
+                }
+                _ => {} // Skip conflicts_with, references, supersedes, extends.
+            }
+        }
+    }
+
+    // DFS-based cycle detection from each node.
+    let all_nodes: HashSet<&str> = adj
+        .keys()
+        .map(|s| s.as_str())
+        .chain(adj.values().flat_map(|vs| vs.iter().map(|v| v.as_str())))
+        .collect();
+
+    for start_node in &all_nodes {
+        // BFS from each neighbor of start_node to see if we can reach start_node.
+        if let Some(targets) = adj.get(*start_node) {
+            for target in targets {
+                if target == *start_node {
+                    return Err(format!(
+                        "spec link cycle detected: {} → {}",
+                        start_node, start_node
+                    ));
+                }
+                let mut visited: HashSet<String> = HashSet::new();
+                let mut queue: VecDeque<String> = VecDeque::new();
+                let mut parent: HashMap<String, String> = HashMap::new();
+                queue.push_back(target.clone());
+                parent.insert(target.clone(), start_node.to_string());
+                while let Some(node) = queue.pop_front() {
+                    if node == *start_node {
+                        // Reconstruct cycle path.
+                        let mut path = vec![start_node.to_string()];
+                        let mut cur = node.clone();
+                        while cur != *start_node || path.len() == 1 {
+                            path.push(cur.clone());
+                            cur = match parent.get(&cur) {
+                                Some(p) => p.clone(),
+                                None => break,
+                            };
+                        }
+                        path.reverse();
+                        return Err(format!("spec link cycle detected: {}", path.join(" → ")));
+                    }
+                    if visited.contains(&node) {
+                        continue;
+                    }
+                    visited.insert(node.clone());
+                    if let Some(node_targets) = adj.get(&node) {
+                        for next in node_targets {
+                            if !visited.contains(next) {
+                                parent.entry(next.clone()).or_insert(node.clone());
+                                queue.push_back(next.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -2114,6 +2223,218 @@ specs:
         assert!(
             result.is_ok(),
             "should accept when all specs are registered"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TASK-019: Cycle detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cycle_detection_no_cycles() {
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/b.md
+  - path: system/b.md
+    title: B
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/c.md
+  - path: system/c.md
+    title: C
+    owner: user:test
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(result.is_ok(), "no cycle should be detected: {result:?}");
+    }
+
+    #[test]
+    fn cycle_detection_simple_cycle() {
+        // A depends_on B depends_on C depends_on A → rejected.
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/b.md
+  - path: system/b.md
+    title: B
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/c.md
+  - path: system/c.md
+    title: C
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/a.md
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(result.is_err(), "cycle should be detected");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("spec link cycle detected"), "msg: {msg}");
+    }
+
+    #[test]
+    fn cycle_detection_implements_cycle() {
+        // A implements B implements A → rejected.
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: implements
+        target: system/b.md
+  - path: system/b.md
+    title: B
+    owner: user:test
+    links:
+      - type: implements
+        target: system/a.md
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(result.is_err(), "implements cycle should be detected");
+    }
+
+    #[test]
+    fn cycle_detection_excludes_conflicts_with() {
+        // conflicts_with is bidirectional by nature — not a cycle.
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: conflicts_with
+        target: system/b.md
+  - path: system/b.md
+    title: B
+    owner: user:test
+    links:
+      - type: conflicts_with
+        target: system/a.md
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(
+            result.is_ok(),
+            "conflicts_with should not trigger cycle detection"
+        );
+    }
+
+    #[test]
+    fn cycle_detection_excludes_references() {
+        // references links are excluded from cycle detection.
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: references
+        target: system/b.md
+  - path: system/b.md
+    title: B
+    owner: user:test
+    links:
+      - type: references
+        target: system/a.md
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(
+            result.is_ok(),
+            "references should not trigger cycle detection"
+        );
+    }
+
+    #[test]
+    fn cycle_detection_excludes_supersedes() {
+        // supersedes links are excluded from cycle detection.
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: supersedes
+        target: system/b.md
+  - path: system/b.md
+    title: B
+    owner: user:test
+    links:
+      - type: supersedes
+        target: system/a.md
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(
+            result.is_ok(),
+            "supersedes should not trigger cycle detection"
+        );
+    }
+
+    #[test]
+    fn cycle_detection_self_loop() {
+        // A depends_on A → rejected.
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/a.md
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(result.is_err(), "self-loop should be detected");
+    }
+
+    #[test]
+    fn cycle_detection_mixed_types_cycle() {
+        // A depends_on B implements A → cycle (both types are checked).
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/b.md
+  - path: system/b.md
+    title: B
+    owner: user:test
+    links:
+      - type: implements
+        target: system/a.md
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(
+            result.is_err(),
+            "mixed depends_on/implements cycle should be detected"
         );
     }
 }

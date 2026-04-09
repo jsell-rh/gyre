@@ -337,6 +337,109 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
+    // TASK-019: Check spec link merge gates.
+    // spec-links.md §Merge Gates: when an MR references a spec, the forge checks
+    // that spec's links for supersession, conflicts, and unimplemented dependencies.
+    if let Some(spec_ref) = mr.spec_ref.as_deref() {
+        // Parse "path@sha" to get the spec path.
+        let spec_path = spec_ref
+            .rsplit_once('@')
+            .map(|(p, _)| p)
+            .unwrap_or(spec_ref);
+
+        // Collect links for the referenced spec without holding lock across awaits.
+        let relevant_links: Vec<crate::spec_registry::SpecLinkEntry> = {
+            let links = state.spec_links_store.lock().await;
+            links
+                .iter()
+                .filter(|l| l.source_path == spec_path || l.target_path == spec_path)
+                .cloned()
+                .collect()
+        };
+
+        // Check 1: If the spec is superseded (has an inbound `supersedes` link
+        // from another spec), reject the merge.
+        for link in &relevant_links {
+            if link.link_type == crate::spec_registry::SpecLinkType::Supersedes
+                && link.target_path == spec_path
+            {
+                let reason = format!(
+                    "spec '{}' has been superseded by '{}'. Update your spec_ref.",
+                    spec_path, link.source_path
+                );
+                warn!(entry_id = %entry.id, %reason, "spec link merge gate blocked merge");
+                state
+                    .merge_queue
+                    .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
+                    .await?;
+                return Ok(());
+            }
+        }
+
+        // Check 2: If the spec has a `conflicts_with` link to an approved spec,
+        // block the merge.
+        for link in &relevant_links {
+            if link.link_type == crate::spec_registry::SpecLinkType::ConflictsWith
+                && link.source_path == spec_path
+            {
+                if let Ok(Some(conflicting)) =
+                    state.spec_ledger.find_by_path(&link.target_path).await
+                {
+                    if conflicting.approval_status == crate::spec_registry::ApprovalStatus::Approved
+                    {
+                        let reason = format!(
+                            "spec '{}' conflicts with approved spec '{}' — resolve the conflict first",
+                            spec_path, link.target_path
+                        );
+                        warn!(entry_id = %entry.id, %reason, "spec link merge gate blocked merge");
+                        state
+                            .merge_queue
+                            .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Check 3: If the spec has `depends_on` links where the target spec's
+        // implementation is incomplete, add a warning (not a block).
+        for link in &relevant_links {
+            if link.link_type == crate::spec_registry::SpecLinkType::DependsOn
+                && link.source_path == spec_path
+            {
+                if let Ok(Some(target)) = state.spec_ledger.find_by_path(&link.target_path).await {
+                    if target.approval_status != crate::spec_registry::ApprovalStatus::Approved {
+                        warn!(
+                            entry_id = %entry.id,
+                            mr_id = %mr.id,
+                            spec_path = %spec_path,
+                            dependency = %link.target_path,
+                            dep_status = %target.approval_status,
+                            "spec dependency not yet implemented (warning only, not blocking merge)"
+                        );
+                        state
+                            .emit_event(
+                                Some(mr.workspace_id.clone()),
+                                gyre_common::message::Destination::Workspace(
+                                    mr.workspace_id.clone(),
+                                ),
+                                gyre_common::message::MessageKind::StaleSpecWarning,
+                                Some(serde_json::json!({
+                                    "mr_id": mr.id.to_string(),
+                                    "spec_path": spec_path,
+                                    "dependency": link.target_path,
+                                    "dependency_status": target.approval_status.to_string(),
+                                    "warning": "dependency spec implementation not yet complete",
+                                })),
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+
     // Check quality gates before merging.
     match crate::gate_executor::check_gates_for_mr(state, &mr.id).await {
         Ok(true) => {} // all passed or no gates

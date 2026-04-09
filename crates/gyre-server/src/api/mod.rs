@@ -343,6 +343,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/specs/drifted", get(specs::list_drifted_specs))
         .route("/api/v1/specs/index", get(specs::spec_index))
         .route("/api/v1/specs/graph", get(specs::get_spec_graph))
+        // TASK-019: Spec link query endpoints (spec-links.md §Querying the Graph)
+        // These fixed-path routes must be registered before `:path` routes.
+        .route("/api/v1/specs/stale-links", get(specs::get_stale_links))
+        .route("/api/v1/specs/conflicts", get(specs::get_conflicts))
         .route("/api/v1/specs/:path", get(specs::get_spec))
         .route("/api/v1/specs/:path/approve", post(specs::approve_spec))
         .route(
@@ -355,6 +359,14 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(specs::spec_approval_history),
         )
         .route("/api/v1/specs/:path/links", get(specs::get_spec_links))
+        .route(
+            "/api/v1/specs/:path/dependents",
+            get(specs::get_spec_dependents),
+        )
+        .route(
+            "/api/v1/specs/:path/dependencies",
+            get(specs::get_spec_dependencies),
+        )
         .route(
             "/api/v1/specs/:path/progress",
             get(specs::get_spec_progress),
