@@ -72,3 +72,19 @@
   Process guard: implementation prompt item 75 (no aspirational test names),
   verifier prompt (aspirational test names detection target),
   `scripts/check-aspirational-test-names.sh` (mechanical detection — pre-commit enforced).
+
+## R3 — complete, 0 findings
+
+All R1 and R2 findings are resolved. R2 F1 fix verified:
+
+- [x] `run_once_with` correctly parameterizes version resolution; `run_once` delegates to it
+- [x] `test_time_based_staleness_recovery_on_version_change` now genuinely tests recovery:
+  cycle 1 (same version → stale), cycle 2 (version bump → reverts to Active)
+- [x] Test asserts on `status`, `last_verified_at`, and `target_version_current` — all three
+  verify the recovery path
+- [x] `updated_edge.last_verified_at` change in time-based check is covered by both the
+  recovery test (version-changed path) and the persistence test (version-unchanged path)
+- [x] No aspirational test names (`check-aspirational-test-names.sh` passes)
+- [x] No assertionless tests (`check-assertionless-tests.sh` passes)
+- [x] No self-confirming tests (`check-self-confirming-tests.sh` passes)
+- [x] `cargo test --all` passes
