@@ -112,7 +112,7 @@ All prior findings are resolved. Two new findings identified.
 
 ### Findings
 
-- [-] [process-revision-complete] **F1: `detect_breaking_changes_on_push` only checks the tip commit — interior commits in multi-commit pushes are missed.**
+- [x] [process-revision-complete] **F1: `detect_breaking_changes_on_push` only checks the tip commit — interior commits in multi-commit pushes are missed.**
   `git_http.rs:2065` uses `git log -1 --format=%H%x00%B%x00 NEW_SHA`, which limits detection
   to the single tip commit. In a multi-commit push (e.g., 5 commits pushed at once), breaking
   change markers (`feat!:`, `BREAKING CHANGE:` footer) in interior commits are silently missed.
@@ -129,7 +129,7 @@ All prior findings are resolved. Two new findings identified.
   Process guard: `scripts/check-push-commit-range.sh` (new), implementation prompt item 72,
   verifier prompt addition (push handler tip-only detection).
 
-- [-] [process-revision-complete] **F2: `test_dependency_policy_default` does not assert `stale_dependency_alert_days` default (spec value: 30).**
+- [x] [process-revision-complete] **F2: `test_dependency_policy_default` does not assert `stale_dependency_alert_days` default (spec value: 30).**
   The spec defines 5 policy fields with defaults. `test_dependency_policy_default`
   (dependencies.rs:910–916) checks 4: `breaking_change_behavior` (Warn), `max_version_drift`
   (3), `require_cascade_tests` (true, added in R3), `auto_create_update_tasks` (true).
@@ -142,3 +142,41 @@ All prior findings are resolved. Two new findings identified.
   `test_dependency_policy_default` (after line 914).
   Process guard: implementation prompt item 73 (default-test assertion field exhaustiveness),
   verifier prompt addition (default-test assertion field gaps).
+  **Resolved in `2270efe7`:** assertion added at line 915.
+
+## R5 — needs-revision, 1 finding (R1–R4 findings resolved)
+
+All prior findings are resolved. One new finding identified.
+
+### Findings
+
+- [ ] **F1: `process_breaking_changes` sets task and notification `workspace_id` to the pushed repo's workspace, not the dependent repo's workspace.**
+  The spec says "For each dependent repo: a. Create a task ... b. Notify the dependent
+  repo's orchestrator via MCP." The task should be associated with the DEPENDENT repo's
+  workspace, and notifications should go to the DEPENDENT repo's workspace members. But
+  `process_breaking_changes` (`git_http.rs:1913-2037`) receives `workspace_id` from the
+  call site at line 675 (`&repo_workspace_id_str` — the pushed repo's workspace) and uses
+  it for all side effects:
+  - **Task workspace_id** (line 1971): `task.workspace_id = Id::new(workspace_id)` — should
+    be the dependent repo's workspace. The dependent repo's workspace_id is available via
+    `state.repos.find_by_id(&dep_edge.source_repo_id)` → `repo.workspace_id`.
+  - **Notifications** (lines 1982-2007): `list_by_workspace(&Id::new(workspace_id))` queries
+    members of the pushed repo's workspace. The spec says "Notify the dependent repo's
+    orchestrator" — notifications should go to the dependent repo's workspace members.
+  - **MCP broadcast** (lines 2029-2036): `Destination::Workspace(Id::new(workspace_id))`
+    broadcasts to the pushed repo's workspace. Should broadcast to each dependent repo's
+    workspace.
+  In same-workspace deployments this is invisible, but in multi-workspace tenants (where
+  cross-workspace dependencies exist via the tenant-wide dependency graph), tasks appear in
+  the wrong workspace, notifications go to the wrong people, and MCP broadcasts reach the
+  wrong orchestrators. The test `test_breaking_change_auto_creates_task` doesn't assert
+  `task.workspace_id`, so the mismatch is untested.
+  Fix: Inside the `for dep_edge in dependents` loop, look up the dependent repo's workspace:
+  ```rust
+  let dep_workspace_id = state.repos.find_by_id(&dep_edge.source_repo_id).await
+      .ok().flatten().map(|r| r.workspace_id.clone())
+      .unwrap_or_else(|| Id::new(workspace_id));
+  ```
+  Then use `dep_workspace_id` for `task.workspace_id`, notification member lookup, and
+  per-dependent broadcast targeting. Add a test assertion:
+  `assert_eq!(tasks[0].workspace_id.as_str(), repo_a_workspace_id);`.
