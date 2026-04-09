@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §Cascade Testing  
 **Depends on:** TASK-020 (breaking change detection must be operational)  
-**Progress:** `needs-revision`
+**Progress:** `ready-for-review`
 **Review:** [`specs/reviews/task-022.md`](../reviews/task-022.md)
 
 ## Spec Excerpt
