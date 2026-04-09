@@ -1926,6 +1926,17 @@ pub(crate) async fn process_breaking_changes(
 
     for (commit_sha, description) in breaking_commits {
         for dep_edge in dependents {
+            // Resolve the dependent repo's workspace — the task and notifications
+            // belong to the dependent repo's workspace, not the pushed repo's.
+            let dep_workspace_id = state
+                .repos
+                .find_by_id(&dep_edge.source_repo_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.workspace_id.clone())
+                .unwrap_or_else(|| Id::new(workspace_id));
+
             // Create a BreakingChange record.
             let bc_id = Id::new(uuid::Uuid::new_v4().to_string());
             let bc = BreakingChange::new(
@@ -1968,7 +1979,7 @@ pub(crate) async fn process_breaking_changes(
                     "Repo '{repo_name}' pushed a breaking change (commit {commit_sha}): {description}. \
                      Update this repo's dependency to accommodate the change."
                 ));
-                task.workspace_id = Id::new(workspace_id);
+                task.workspace_id = dep_workspace_id.clone();
                 task.repo_id = dep_edge.source_repo_id.clone();
 
                 if let Err(e) = state.tasks.create(&task).await {
@@ -1976,10 +1987,10 @@ pub(crate) async fn process_breaking_changes(
                 }
             }
 
-            // Notify workspace members about the breaking change.
+            // Notify workspace members of the DEPENDENT repo about the breaking change.
             let members = state
                 .workspace_memberships
-                .list_by_workspace(&Id::new(workspace_id))
+                .list_by_workspace(&dep_workspace_id)
                 .await
                 .unwrap_or_default();
 
@@ -1994,7 +2005,7 @@ pub(crate) async fn process_breaking_changes(
 
                 crate::notifications::notify_rich(
                     state,
-                    Id::new(workspace_id),
+                    dep_workspace_id.clone(),
                     member.user_id.clone(),
                     gyre_common::NotificationType::CrossWorkspaceSpecChange,
                     format!("Breaking change in {repo_name}: {description}"),
@@ -2005,6 +2016,24 @@ pub(crate) async fn process_breaking_changes(
                 )
                 .await;
             }
+
+            // Broadcast to the dependent repo's workspace orchestrators.
+            let payload = serde_json::json!({
+                "event": "breaking_change_detected",
+                "source_repo_id": repo_id,
+                "source_repo_name": repo_name,
+                "descriptions": [description],
+                "dependent_repo_ids": [dep_edge.source_repo_id.as_str()],
+            });
+
+            state
+                .emit_event(
+                    Some(dep_workspace_id.clone()),
+                    gyre_common::message::Destination::Workspace(dep_workspace_id),
+                    gyre_common::MessageKind::Custom("breaking_change_detected".to_string()),
+                    Some(payload),
+                )
+                .await;
         }
 
         tracing::info!(
@@ -2015,25 +2044,6 @@ pub(crate) async fn process_breaking_changes(
             dependents.len(),
         );
     }
-
-    // Send a broadcast event to notify dependent repo orchestrators via the message bus.
-    let descriptions: Vec<&str> = breaking_commits.iter().map(|(_, d)| d.as_str()).collect();
-    let payload = serde_json::json!({
-        "event": "breaking_change_detected",
-        "source_repo_id": repo_id,
-        "source_repo_name": repo_name,
-        "descriptions": descriptions,
-        "dependent_repo_ids": dependents.iter().map(|e| e.source_repo_id.as_str()).collect::<Vec<_>>(),
-    });
-
-    state
-        .emit_event(
-            Some(Id::new(workspace_id)),
-            gyre_common::message::Destination::Workspace(Id::new(workspace_id)),
-            gyre_common::MessageKind::Custom("breaking_change_detected".to_string()),
-            Some(payload),
-        )
-        .await;
 }
 
 /// Detect breaking changes on push and propagate to dependent repos.

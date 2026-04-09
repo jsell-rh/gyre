@@ -606,10 +606,14 @@ mod tests {
     }
 
     async fn create_repo(state: &Arc<AppState>, name: &str) -> Id {
+        create_repo_in_workspace(state, name, "proj-1").await
+    }
+
+    async fn create_repo_in_workspace(state: &Arc<AppState>, name: &str, workspace_id: &str) -> Id {
         use gyre_domain::Repository;
         let repo = Repository::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
-            Id::new("proj-1"),
+            Id::new(workspace_id),
             name,
             format!("/tmp/{name}.git"),
             0,
@@ -1223,9 +1227,11 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
     async fn test_breaking_change_auto_creates_task() {
         // Invoke the production code path (process_breaking_changes) to verify
         // that breaking change records, edge status updates, and tasks are created.
+        // Uses distinct workspace IDs to verify scope resolution per checklist item 74.
         let state = setup();
-        let repo_a = create_repo(&state, "task-auto-a").await;
-        let repo_b = create_repo(&state, "task-auto-b").await;
+        // Repo A (dependent) is in ws-dependent; Repo B (depended-on/pushed) is in ws-pushed.
+        let repo_a = create_repo_in_workspace(&state, "task-auto-a", "ws-dependent").await;
+        let repo_b = create_repo_in_workspace(&state, "task-auto-b", "ws-pushed").await;
 
         // A depends on B.
         let edge = DependencyEdge::new(
@@ -1240,18 +1246,22 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
         );
         state.dependencies.save(&edge).await.unwrap();
 
-        let breaking_commits = vec![("sha-break".to_string(), "removed deprecated API".to_string())];
+        let breaking_commits = vec![(
+            "sha-break".to_string(),
+            "removed deprecated API".to_string(),
+        )];
         let dependents = vec![edge.clone()];
         let policy = gyre_domain::DependencyPolicy::default(); // auto_create_update_tasks = true
 
-        // Call the production function that creates records, updates edges, and creates tasks.
+        // Call the production function with the PUSHED repo's workspace.
+        // The function must resolve the dependent repo's workspace internally.
         crate::git_http::process_breaking_changes(
             &state,
             &breaking_commits,
             &dependents,
             repo_b.as_str(),
             "task-auto-b",
-            "ws-1",
+            "ws-pushed",
             "tenant-1",
             &policy,
             2000,
@@ -1287,6 +1297,8 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
         assert!(tasks[0].labels.contains(&"breaking-change".to_string()));
         assert!(tasks[0].labels.contains(&"auto-created".to_string()));
         assert!(tasks[0].labels.contains(&"dependency-update".to_string()));
+        // Verify the task is in the DEPENDENT repo's workspace, not the pushed repo's.
+        assert_eq!(tasks[0].workspace_id.as_str(), "ws-dependent");
     }
 
     // ── Acknowledgment clears edge status test ─────────────────────────
