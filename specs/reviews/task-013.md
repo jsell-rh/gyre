@@ -22,7 +22,7 @@
 
 ## R3 Findings
 
-- [ ] **F6: Missing `source_workspace_slug` field in cross_workspace items — spec-excerpt field omission.**
+- [-] [process-revision-complete] **F6: Missing `source_workspace_slug` field in cross_workspace items — spec-excerpt field omission.**
   - **Spec (HSI §9, line 1315):** `"cross_workspace": [{"source_workspace_slug": "...", "spec_path": "...", "summary": "..."}]` — `source_workspace_slug` is a required field.
   - **Task plan (line 50):** Explicitly says "Populate each entry: `source_workspace_slug` (from `target_display`), `spec_path`, `summary`."
   - **Spec narrative (line 1271):** "↔ platform-core updated idempotent-api.md" — the external workspace identity ("platform-core") is the primary information conveyed to the user.
@@ -36,7 +36,7 @@
     ```
     Update the test `briefing_cross_workspace_populated_when_linked_spec_changes` to assert on `source_workspace_slug` (expected: `"platform-core"` given `target_display: "@platform-core/api-svc/system/idempotent-api.md"`).
 
-- [ ] **F7: `stale_since` disjunction added in R2 has zero test coverage — untested code path.**
+- [-] [process-revision-complete] **F7: `stale_since` disjunction added in R2 has zero test coverage — untested code path.**
   - **R2 fix (`graph.rs:881-882`):** Added `|| link.stale_since.is_some_and(|t| t >= since)` to the cross_workspace filter and `timestamp: link.stale_since.unwrap_or(link.created_at)` to the timestamp field.
   - **All tests:** Every test sets `stale_since: None` (lines 1946, 1987, 2201). No test exercises the `stale_since: Some(...)` path.
   - **Impact:** The `stale_since` path is the semantically correct mechanism for detecting dependency changes (as R2's own analysis confirmed — `created_at` produces false positives on every source push). Yet this path has zero test coverage. If someone accidentally removes the `stale_since` check, no test would fail.
