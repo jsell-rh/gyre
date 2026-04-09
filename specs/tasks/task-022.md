@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §Cascade Testing  
 **Depends on:** TASK-020 (breaking change detection must be operational)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -80,4 +80,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+_(to be updated after commit)_

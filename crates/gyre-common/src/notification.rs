@@ -44,6 +44,10 @@ pub enum NotificationType {
     SpecRejected,
     /// Priority 2 — a constraint violation was detected at push or merge time (§7.5).
     ConstraintViolation,
+    /// Priority 4 — cascade test triggered for a dependent repo after a merge.
+    CascadeTestTriggered,
+    /// Priority 3 — cascade test failed in a dependent repo.
+    CascadeTestFailed,
 }
 
 impl NotificationType {
@@ -65,6 +69,8 @@ impl NotificationType {
             Self::SuggestedSpecLink => "SuggestedSpecLink",
             Self::SpecRejected => "SpecRejected",
             Self::ConstraintViolation => "ConstraintViolation",
+            Self::CascadeTestTriggered => "CascadeTestTriggered",
+            Self::CascadeTestFailed => "CascadeTestFailed",
         }
     }
 
@@ -86,6 +92,8 @@ impl NotificationType {
             "SuggestedSpecLink" => Some(Self::SuggestedSpecLink),
             "SpecRejected" => Some(Self::SpecRejected),
             "ConstraintViolation" => Some(Self::ConstraintViolation),
+            "CascadeTestTriggered" => Some(Self::CascadeTestTriggered),
+            "CascadeTestFailed" => Some(Self::CascadeTestFailed),
             _ => None,
         }
     }
@@ -108,6 +116,8 @@ impl NotificationType {
             Self::SuggestedSpecLink => 10,
             Self::SpecRejected => 2,
             Self::ConstraintViolation => 2,
+            Self::CascadeTestTriggered => 4,
+            Self::CascadeTestFailed => 3,
         }
     }
 }
@@ -211,6 +221,8 @@ mod tests {
             NotificationType::SuggestedSpecLink,
             NotificationType::SpecRejected,
             NotificationType::ConstraintViolation,
+            NotificationType::CascadeTestTriggered,
+            NotificationType::CascadeTestFailed,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));

@@ -801,6 +801,16 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 )
                 .await;
             }
+
+            // TASK-022: Cascade testing — trigger test tasks in dependent repos.
+            trigger_cascade_tests(
+                state,
+                &repo.id.to_string(),
+                &repo.name,
+                &merge_commit_sha,
+                &updated_mr.workspace_id,
+            )
+            .await;
         }
         Ok(MergeResult::Conflict { message }) => {
             warn!(entry_id = %entry.id, reason = %message, "merge conflict");
@@ -827,4 +837,667 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Trigger cascade tests for all repos that depend on the merged repo.
+///
+/// When `require_cascade_tests` is enabled in the workspace dependency policy
+/// and a merge completes in `merged_repo_id`, this function:
+/// 1. Queries the dependency graph for all repos depending on the merged repo
+/// 2. Creates a cascade test task in each dependent repo
+/// 3. Emits a `cascade_test_triggered` event to the dependent repo's workspace
+/// 4. Notifies workspace members of the cascade test
+pub(crate) async fn trigger_cascade_tests(
+    state: &AppState,
+    merged_repo_id: &str,
+    merged_repo_name: &str,
+    merge_commit_sha: &str,
+    workspace_id: &Id,
+) {
+    // Check workspace dependency policy.
+    let policy = state
+        .dependency_policies
+        .get_for_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    if !policy.require_cascade_tests {
+        return;
+    }
+
+    // Query dependency graph for all repos depending on the merged repo.
+    let dependents = match state
+        .dependencies
+        .list_dependents(&Id::new(merged_repo_id))
+        .await
+    {
+        Ok(deps) => deps,
+        Err(e) => {
+            warn!("cascade-test: failed to list dependents for {merged_repo_id}: {e}");
+            return;
+        }
+    };
+
+    if dependents.is_empty() {
+        return;
+    }
+
+    let now = crate::api::now_secs();
+    let sha_short = &merge_commit_sha[..8.min(merge_commit_sha.len())];
+
+    for dep_edge in &dependents {
+        // Resolve the dependent repo's workspace — the task belongs to
+        // the dependent repo's workspace, not the merged repo's.
+        let dep_repo = state
+            .repos
+            .find_by_id(&dep_edge.source_repo_id)
+            .await
+            .ok()
+            .flatten();
+
+        let dep_workspace_id = dep_repo
+            .as_ref()
+            .map(|r| r.workspace_id.clone())
+            .unwrap_or_else(|| workspace_id.clone());
+
+        let dep_repo_name = dep_repo
+            .as_ref()
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| dep_edge.source_repo_id.to_string());
+
+        // Create a cascade test task in the dependent repo.
+        let task_id = Id::new(Uuid::new_v4().to_string());
+        let mut task = gyre_domain::Task::new(
+            task_id,
+            format!("Cascade test: {dep_repo_name} against {merged_repo_name}@{sha_short}"),
+            now,
+        );
+        task.priority = TaskPriority::High;
+        task.labels = vec!["cascade-test".to_string(), "auto-created".to_string()];
+        task.description = Some(format!(
+            "Repo '{merged_repo_name}' merged commit {merge_commit_sha}. \
+             Run tests in '{dep_repo_name}' against the new version to verify compatibility."
+        ));
+        task.workspace_id = dep_workspace_id.clone();
+        task.repo_id = dep_edge.source_repo_id.clone();
+
+        if let Err(e) = state.tasks.create(&task).await {
+            warn!("cascade-test: failed to create task for {dep_repo_name}: {e}");
+        }
+
+        // Emit a cascade_test_triggered event to the dependent repo's workspace.
+        let payload = serde_json::json!({
+            "event": "cascade_test_triggered",
+            "merged_repo_id": merged_repo_id,
+            "merged_repo_name": merged_repo_name,
+            "merge_commit_sha": merge_commit_sha,
+            "dependent_repo_id": dep_edge.source_repo_id.as_str(),
+            "dependent_repo_name": dep_repo_name,
+            "task_id": task.id.as_str(),
+        });
+
+        state
+            .emit_event(
+                Some(dep_workspace_id.clone()),
+                gyre_common::message::Destination::Workspace(dep_workspace_id.clone()),
+                gyre_common::MessageKind::Custom("cascade_test_triggered".to_string()),
+                Some(payload),
+            )
+            .await;
+
+        // Notify workspace members of the dependent repo.
+        let members = state
+            .workspace_memberships
+            .list_by_workspace(&dep_workspace_id)
+            .await
+            .unwrap_or_default();
+
+        for member in &members {
+            let body_json = serde_json::json!({
+                "merged_repo": merged_repo_name,
+                "merge_commit_sha": merge_commit_sha,
+                "dependent_repo": dep_repo_name,
+                "task_id": task.id.as_str(),
+            })
+            .to_string();
+
+            crate::notifications::notify_rich(
+                state,
+                dep_workspace_id.clone(),
+                member.user_id.clone(),
+                gyre_common::NotificationType::CascadeTestTriggered,
+                format!(
+                    "Cascade test triggered: {dep_repo_name} against {merged_repo_name}@{sha_short}"
+                ),
+                "default",
+                Some(body_json),
+                Some(dep_edge.source_repo_id.to_string()),
+                Some(merged_repo_id.to_string()),
+            )
+            .await;
+        }
+
+        info!(
+            merged_repo = merged_repo_id,
+            dependent_repo = dep_edge.source_repo_id.as_str(),
+            "cascade test task created for dependent repo"
+        );
+    }
+
+    info!(
+        merged_repo = merged_repo_id,
+        dependent_count = dependents.len(),
+        "cascade testing triggered for {} dependent repo(s)",
+        dependents.len(),
+    );
+}
+
+/// Report the result of a cascade test and handle failures.
+///
+/// Called when a cascade test task completes. On failure:
+/// 1. Creates a follow-up task in the dependent repo with failure details
+/// 2. Emits a `cascade_test_failed` event to the workspace orchestrator
+/// 3. Sends CascadeTestFailed notifications to workspace members
+///
+/// On success, emits a `cascade_test_passed` activity event.
+pub(crate) async fn report_cascade_test_result(
+    state: &AppState,
+    task: &gyre_domain::Task,
+    passed: bool,
+    failure_details: Option<&str>,
+) {
+    let now = crate::api::now_secs();
+
+    if passed {
+        // Emit cascade_test_passed activity event.
+        state
+            .emit_event(
+                Some(task.workspace_id.clone()),
+                gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
+                gyre_common::MessageKind::Custom("cascade_test_passed".to_string()),
+                Some(serde_json::json!({
+                    "event": "cascade_test_passed",
+                    "task_id": task.id.as_str(),
+                    "repo_id": task.repo_id.as_str(),
+                    "title": &task.title,
+                })),
+            )
+            .await;
+
+        info!(
+            task_id = task.id.as_str(),
+            repo_id = task.repo_id.as_str(),
+            "cascade test passed"
+        );
+    } else {
+        let details = failure_details.unwrap_or("Cascade test failed — see task for details");
+
+        // Create a follow-up task in the dependent repo with failure details.
+        let follow_up_id = Id::new(Uuid::new_v4().to_string());
+        let mut follow_up = gyre_domain::Task::new(
+            follow_up_id,
+            format!("Cascade test failure: {}", task.title),
+            now,
+        );
+        follow_up.priority = TaskPriority::High;
+        follow_up.labels = vec![
+            "cascade-test-failure".to_string(),
+            "auto-created".to_string(),
+        ];
+        follow_up.description = Some(format!(
+            "Cascade test failed. Original task: {}. Details: {}",
+            task.title, details
+        ));
+        follow_up.workspace_id = task.workspace_id.clone();
+        follow_up.repo_id = task.repo_id.clone();
+
+        if let Err(e) = state.tasks.create(&follow_up).await {
+            warn!("cascade-test: failed to create follow-up task: {e}");
+        }
+
+        // Emit cascade_test_failed event to workspace orchestrator.
+        let payload = serde_json::json!({
+            "event": "cascade_test_failed",
+            "task_id": task.id.as_str(),
+            "follow_up_task_id": follow_up.id.as_str(),
+            "repo_id": task.repo_id.as_str(),
+            "title": &task.title,
+            "failure_details": details,
+        });
+
+        state
+            .emit_event(
+                Some(task.workspace_id.clone()),
+                gyre_common::message::Destination::Workspace(task.workspace_id.clone()),
+                gyre_common::MessageKind::Custom("cascade_test_failed".to_string()),
+                Some(payload),
+            )
+            .await;
+
+        // Notify workspace members of cascade test failure.
+        let members = state
+            .workspace_memberships
+            .list_by_workspace(&task.workspace_id)
+            .await
+            .unwrap_or_default();
+
+        for member in &members {
+            let body_json = serde_json::json!({
+                "task_id": task.id.as_str(),
+                "follow_up_task_id": follow_up.id.as_str(),
+                "repo_id": task.repo_id.as_str(),
+                "failure_details": details,
+            })
+            .to_string();
+
+            crate::notifications::notify_rich(
+                state,
+                task.workspace_id.clone(),
+                member.user_id.clone(),
+                gyre_common::NotificationType::CascadeTestFailed,
+                format!("Cascade test failed: {}", task.title),
+                "default",
+                Some(body_json),
+                Some(task.repo_id.to_string()),
+                None,
+            )
+            .await;
+        }
+
+        info!(
+            task_id = task.id.as_str(),
+            repo_id = task.repo_id.as_str(),
+            "cascade test failed, follow-up task created"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::test_state;
+    use gyre_common::Id;
+    use gyre_domain::{
+        DependencyEdge, DependencyPolicy, DependencyType, DetectionMethod, Repository,
+    };
+
+    async fn create_repo_in_workspace(
+        state: &AppState,
+        name: &str,
+        workspace_id: &str,
+    ) -> Repository {
+        let repo = Repository::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(workspace_id),
+            name,
+            format!("/tmp/{name}.git"),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        repo
+    }
+
+    async fn create_dependency(state: &AppState, source_repo_id: &Id, target_repo_id: &Id) {
+        let edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            source_repo_id.clone(),
+            target_repo_id.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "target-crate",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn trigger_cascade_tests_creates_tasks_for_dependents() {
+        let state = test_state();
+
+        let repo_b = create_repo_in_workspace(&state, "repo-b", "ws-1").await;
+        let repo_a = create_repo_in_workspace(&state, "repo-a", "ws-1").await;
+
+        // repo-a depends on repo-b
+        create_dependency(&state, &repo_a.id, &repo_b.id).await;
+
+        // Enable cascade testing
+        let policy = DependencyPolicy {
+            require_cascade_tests: true,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-1"), &policy)
+            .await
+            .unwrap();
+
+        trigger_cascade_tests(
+            &state,
+            repo_b.id.as_str(),
+            "repo-b",
+            "abc123def456",
+            &Id::new("ws-1"),
+        )
+        .await;
+
+        // Verify a cascade test task was created in repo-a
+        let tasks = state.tasks.list_by_repo(&repo_a.id).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].title.contains("repo-a"));
+        assert!(tasks[0].title.contains("repo-b"));
+        assert!(tasks[0].title.contains("abc123de")); // sha_short
+        assert_eq!(tasks[0].priority, TaskPriority::High);
+        assert!(tasks[0].labels.contains(&"cascade-test".to_string()));
+        assert!(tasks[0].labels.contains(&"auto-created".to_string()));
+        assert_eq!(tasks[0].workspace_id.as_str(), "ws-1");
+        assert_eq!(tasks[0].repo_id.as_str(), repo_a.id.as_str());
+    }
+
+    #[tokio::test]
+    async fn trigger_cascade_tests_skips_when_policy_disabled() {
+        let state = test_state();
+
+        let repo_b = create_repo_in_workspace(&state, "repo-b", "ws-1").await;
+        let repo_a = create_repo_in_workspace(&state, "repo-a", "ws-1").await;
+
+        create_dependency(&state, &repo_a.id, &repo_b.id).await;
+
+        // Disable cascade testing
+        let policy = DependencyPolicy {
+            require_cascade_tests: false,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-1"), &policy)
+            .await
+            .unwrap();
+
+        trigger_cascade_tests(
+            &state,
+            repo_b.id.as_str(),
+            "repo-b",
+            "abc123def456",
+            &Id::new("ws-1"),
+        )
+        .await;
+
+        // No tasks should be created
+        let tasks = state.tasks.list_by_repo(&repo_a.id).await.unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trigger_cascade_tests_creates_task_per_dependent() {
+        let state = test_state();
+
+        let repo_b = create_repo_in_workspace(&state, "repo-b", "ws-1").await;
+        let repo_a = create_repo_in_workspace(&state, "repo-a", "ws-1").await;
+        let repo_c = create_repo_in_workspace(&state, "repo-c", "ws-1").await;
+        let repo_d = create_repo_in_workspace(&state, "repo-d", "ws-1").await;
+
+        // All depend on repo-b
+        create_dependency(&state, &repo_a.id, &repo_b.id).await;
+        create_dependency(&state, &repo_c.id, &repo_b.id).await;
+        create_dependency(&state, &repo_d.id, &repo_b.id).await;
+
+        let policy = DependencyPolicy {
+            require_cascade_tests: true,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-1"), &policy)
+            .await
+            .unwrap();
+
+        trigger_cascade_tests(
+            &state,
+            repo_b.id.as_str(),
+            "repo-b",
+            "sha12345",
+            &Id::new("ws-1"),
+        )
+        .await;
+
+        // Each dependent repo gets its own task
+        let tasks_a = state.tasks.list_by_repo(&repo_a.id).await.unwrap();
+        let tasks_c = state.tasks.list_by_repo(&repo_c.id).await.unwrap();
+        let tasks_d = state.tasks.list_by_repo(&repo_d.id).await.unwrap();
+
+        assert_eq!(tasks_a.len(), 1);
+        assert_eq!(tasks_c.len(), 1);
+        assert_eq!(tasks_d.len(), 1);
+
+        assert!(tasks_a[0].title.contains("repo-a"));
+        assert!(tasks_c[0].title.contains("repo-c"));
+        assert!(tasks_d[0].title.contains("repo-d"));
+    }
+
+    #[tokio::test]
+    async fn trigger_cascade_tests_no_dependents_is_noop() {
+        let state = test_state();
+
+        let repo_b = create_repo_in_workspace(&state, "repo-b", "ws-1").await;
+
+        let policy = DependencyPolicy {
+            require_cascade_tests: true,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-1"), &policy)
+            .await
+            .unwrap();
+
+        trigger_cascade_tests(
+            &state,
+            repo_b.id.as_str(),
+            "repo-b",
+            "sha12345",
+            &Id::new("ws-1"),
+        )
+        .await;
+
+        // No tasks since no dependents exist
+        let all_tasks = state.tasks.list().await.unwrap();
+        assert!(all_tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trigger_cascade_tests_resolves_dependent_workspace() {
+        let state = test_state();
+
+        let repo_b = create_repo_in_workspace(&state, "repo-b", "ws-MERGED").await;
+        let repo_a = create_repo_in_workspace(&state, "repo-a", "ws-DEPENDENT").await;
+
+        create_dependency(&state, &repo_a.id, &repo_b.id).await;
+
+        let policy = DependencyPolicy {
+            require_cascade_tests: true,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-MERGED"), &policy)
+            .await
+            .unwrap();
+
+        trigger_cascade_tests(
+            &state,
+            repo_b.id.as_str(),
+            "repo-b",
+            "sha12345",
+            &Id::new("ws-MERGED"),
+        )
+        .await;
+
+        // Task should be in the dependent repo's workspace, not the merged repo's
+        let tasks = state.tasks.list_by_repo(&repo_a.id).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].workspace_id.as_str(),
+            "ws-DEPENDENT",
+            "task should be in the dependent repo's workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_cascade_test_result_passed_no_follow_up_task() {
+        let state = test_state();
+
+        let repo_a = create_repo_in_workspace(&state, "repo-a", "ws-1").await;
+
+        let mut task = gyre_domain::Task::new(
+            Id::new("cascade-task-1"),
+            "Cascade test: repo-a against repo-b@abc12345",
+            1000,
+        );
+        task.labels = vec!["cascade-test".to_string(), "auto-created".to_string()];
+        task.workspace_id = Id::new("ws-1");
+        task.repo_id = repo_a.id.clone();
+        state.tasks.create(&task).await.unwrap();
+
+        report_cascade_test_result(&state, &task, true, None).await;
+
+        // No follow-up task should be created for a passing test
+        let tasks = state.tasks.list_by_repo(&repo_a.id).await.unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "only the original cascade test task should exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_cascade_test_result_failed_creates_follow_up_task() {
+        let state = test_state();
+
+        let repo_a = create_repo_in_workspace(&state, "repo-a", "ws-1").await;
+
+        let mut task = gyre_domain::Task::new(
+            Id::new("cascade-task-2"),
+            "Cascade test: repo-a against repo-b@abc12345",
+            1000,
+        );
+        task.labels = vec!["cascade-test".to_string(), "auto-created".to_string()];
+        task.workspace_id = Id::new("ws-1");
+        task.repo_id = repo_a.id.clone();
+        state.tasks.create(&task).await.unwrap();
+
+        report_cascade_test_result(
+            &state,
+            &task,
+            false,
+            Some("Tests failed: 3 failures in integration tests"),
+        )
+        .await;
+
+        // A follow-up task should be created
+        let tasks = state.tasks.list_by_repo(&repo_a.id).await.unwrap();
+        assert_eq!(tasks.len(), 2, "original + follow-up task");
+
+        let follow_up = tasks
+            .iter()
+            .find(|t| t.labels.contains(&"cascade-test-failure".to_string()))
+            .expect("follow-up task should have cascade-test-failure label");
+
+        assert!(follow_up.title.contains("Cascade test failure"));
+        assert_eq!(follow_up.priority, TaskPriority::High);
+        assert!(follow_up.labels.contains(&"auto-created".to_string()));
+        assert_eq!(follow_up.workspace_id.as_str(), "ws-1");
+        assert_eq!(follow_up.repo_id.as_str(), repo_a.id.as_str());
+        assert!(follow_up
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("Tests failed: 3 failures"));
+    }
+
+    #[tokio::test]
+    async fn report_cascade_test_failure_notifies_workspace_members() {
+        let state = test_state();
+
+        let repo_a = create_repo_in_workspace(&state, "repo-a", "ws-1").await;
+
+        // Add a workspace member
+        let membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("member-1"),
+            Id::new("user-1"),
+            Id::new("ws-1"),
+            gyre_domain::WorkspaceRole::Developer,
+            Id::new("admin"),
+            1000,
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+
+        let mut task = gyre_domain::Task::new(
+            Id::new("cascade-task-3"),
+            "Cascade test: repo-a against repo-b@abc12345",
+            1000,
+        );
+        task.labels = vec!["cascade-test".to_string(), "auto-created".to_string()];
+        task.workspace_id = Id::new("ws-1");
+        task.repo_id = repo_a.id.clone();
+        state.tasks.create(&task).await.unwrap();
+
+        report_cascade_test_result(&state, &task, false, Some("test failure")).await;
+
+        // Verify notification was created for the workspace member
+        let notifications = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-1"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !notifications.is_empty(),
+            "workspace member should be notified"
+        );
+        let notif = &notifications[0];
+        assert_eq!(
+            notif.notification_type,
+            gyre_common::NotificationType::CascadeTestFailed
+        );
+        assert!(notif.title.contains("Cascade test failed"));
+    }
+
+    #[tokio::test]
+    async fn trigger_cascade_tests_default_policy_enables_cascade() {
+        let state = test_state();
+
+        let repo_b = create_repo_in_workspace(&state, "repo-b", "ws-1").await;
+        let repo_a = create_repo_in_workspace(&state, "repo-a", "ws-1").await;
+
+        create_dependency(&state, &repo_a.id, &repo_b.id).await;
+
+        // Default policy has require_cascade_tests: true
+        // (no explicit policy set — uses default)
+
+        trigger_cascade_tests(
+            &state,
+            repo_b.id.as_str(),
+            "repo-b",
+            "sha12345",
+            &Id::new("ws-1"),
+        )
+        .await;
+
+        // Default policy enables cascade testing, so task should be created
+        let tasks = state.tasks.list_by_repo(&repo_a.id).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+    }
 }
