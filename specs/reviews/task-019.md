@@ -69,7 +69,7 @@ R1 findings F1 and F2 are resolved. F1 fix correctly inverts the match to explic
 
 ## Findings
 
-- [ ] **F3: `get_conflicts` endpoint returns all `conflicts_with` links instead of only active conflicts**
+- [-] [process-revision-complete] **F3: `get_conflicts` endpoint returns all `conflicts_with` links instead of only active conflicts**
 
   **Location:** `crates/gyre-server/src/api/specs.rs:1206-1215`
 
