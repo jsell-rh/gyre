@@ -345,6 +345,54 @@ Before marking a task `ready-for-review`, verify:
       - **Combine into one write:** Merge both payloads into a single write operation to the shared resource.
     - **Verification procedure:** For every `tokio::spawn` call whose JoinHandle is dropped (not `.await`ed or stored in a variable), check whether any subsequent code in the same function writes to the same resource. "Same resource" for git notes means the same `--ref=` value on the same repo. If a dropped-handle spawn and a later write target the same resource → fire-and-forget race condition. Run `scripts/check-concurrent-shared-write.sh` — it mechanically detects multiple `tokio::spawn` calls in the same function that reference the same git notes ref. **This script is enforced by the pre-commit hook — your commit will fail if it reports violations.** Exempt with `// concurrent-write:ok — <reason>`.
 
+66. **No wildcard catch-all on spec-enforced exclusion lists — safe default is inclusion:** When a spec defines an explicit list of types to EXCLUDE from a behavior (e.g., "exclude `conflicts_with`, `references`, and `supersedes` from cycle detection"), the match statement must enumerate the EXCLUDED types explicitly in the skip arm, and use the wildcard (or explicit multi-variant match) for the INCLUDED arm. An empty `_ => {}` catch-all on the skip side silently excludes any variant not listed in the active arms — including types the spec does NOT exclude. Specifically:
+    - **Invert the match structure.** Instead of listing the included types and catching everything else:
+      ```rust
+      // WRONG: wildcard silently excludes extends (and any future type)
+      match link.link_type {
+          DependsOn | Implements => { /* process */ }
+          _ => {} // silently skips extends, conflicts_with, references, supersedes
+      }
+      ```
+      List the excluded types and catch everything else:
+      ```rust
+      // RIGHT: wildcard includes extends (and any future type) — safe default
+      match link.link_type {
+          ConflictsWith | References | Supersedes => {} // spec-excluded from cycle detection
+          _ => { /* process — includes DependsOn, Implements, Extends, future types */ }
+      }
+      ```
+    - **When the "include" set is small and known:** It's also acceptable to enumerate ALL included types explicitly, but you MUST still enumerate ALL excluded types with a comment citing the spec section:
+      ```rust
+      match link.link_type {
+          DependsOn | Implements | Extends => { /* process */ }
+          ConflictsWith | References | Supersedes => {} // spec-links.md §Cycle Detection
+      }
+      ```
+    - **Why this matters:** A wildcard on the "skip" side is dangerous because NEW enum variants added in the future will be silently excluded. A wildcard on the "include" side is safe because new variants will default to being processed — which may produce a false positive (caught by tests) but never a silent false negative (missed processing). The safe default is to include, not exclude.
+    - **Verification procedure:** Run `scripts/check-wildcard-exclusion.sh` — it detects empty wildcard catch-alls (`_ => {}`) in match blocks on spec-enforced enum types (`SpecLinkType`, `GateType`, `GateStatus`, `ApprovalStatus`). **This script is enforced by the pre-commit hook — your commit will fail if it reports violations.** Exempt with `// wildcard:ok — <reason>` when the wildcard genuinely should skip all unlisted types (e.g., an approval-gate match where only 3 link types have gate behavior and the others have no action).
+67. **Bidirectional relationship filter completeness — both directions for symmetric link types:** When a spec defines a relationship as bidirectional or symmetric (e.g., `conflicts_with` is "bidirectional by nature"), every query, filter, or enforcement check involving that relationship type MUST check BOTH directions: `source_path == spec_path` AND `target_path == spec_path`. A unidirectional check only catches the case where the spec being queried is the one that DECLARED the link — it misses the reverse case where another spec declared a `conflicts_with` link targeting this spec. Specifically:
+    - **Identify symmetric relationships from the spec.** Read the spec's relationship definitions. Any relationship described as "bidirectional," "symmetric," "mutual," or "by nature" requires both-direction checking. `conflicts_with` is the canonical example — if A conflicts with B, then B conflicts with A regardless of which spec declared the link.
+    - **Check both directions in filters.** For every filter on a symmetric link type:
+      ```rust
+      // WRONG: only checks outbound (link.source_path == my_spec)
+      if link.link_type == ConflictsWith && link.source_path == spec_path { ... }
+
+      // RIGHT: checks both directions
+      if link.link_type == ConflictsWith
+          && (link.source_path == spec_path || link.target_path == spec_path)
+      {
+          let other_spec = if link.source_path == spec_path {
+              &link.target_path
+          } else {
+              &link.source_path
+          };
+          // check other_spec's status...
+      }
+      ```
+    - **Tests must cover both directions.** Write two tests: one where the spec under test is the source of the link, and one where it is the target. A test that only covers the outbound direction will pass even with a unidirectional check, masking the bug.
+    - **Verification procedure:** For every filter on `ConflictsWith` (or any spec-defined bidirectional link type), verify the filter includes both `source_path == spec_path` and `target_path == spec_path`. If only one direction is checked, the other direction silently passes through without enforcement.
+
 ## Workflow
 
 1. Read the relevant system specs. These are your source of truth and overarching vision.
@@ -407,6 +455,7 @@ scripts/check-cli-spec-parity.sh
 scripts/check-nested-time-scope.sh
 scripts/check-type-discriminator-values.sh
 scripts/check-concurrent-shared-write.sh
+scripts/check-wildcard-exclusion.sh
 ```
 If any script reports violations, fix them before proceeding. **Do not commit with check script violations.** These scripts exist because prior review rounds found flaws that the checklist alone did not prevent — they are the mechanical backstop.
 

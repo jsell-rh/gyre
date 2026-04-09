@@ -8,7 +8,7 @@
 
 ## Findings
 
-- [ ] **F1: Cycle detection excludes `extends` links — spec only excludes three types**
+- [-] [process-revision-complete] **F1: Cycle detection excludes `extends` links — spec only excludes three types**
 
   **Location:** `crates/gyre-server/src/spec_registry.rs:1009-1019`
 
@@ -35,7 +35,7 @@
 
   A test for `extends` cycle detection is also missing.
 
-- [ ] **F2: Merge gate `conflicts_with` check is unidirectional — spec requires bidirectional**
+- [-] [process-revision-complete] **F2: Merge gate `conflicts_with` check is unidirectional — spec requires bidirectional**
 
   **Location:** `crates/gyre-server/src/merge_processor.rs:381-402`
 
