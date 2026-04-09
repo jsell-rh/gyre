@@ -150,7 +150,7 @@ All prior findings are resolved. One new finding identified.
 
 ### Findings
 
-- [ ] **F1: `process_breaking_changes` sets task and notification `workspace_id` to the pushed repo's workspace, not the dependent repo's workspace.**
+- [-] [process-revision-complete] **F1: `process_breaking_changes` sets task and notification `workspace_id` to the pushed repo's workspace, not the dependent repo's workspace.**
   The spec says "For each dependent repo: a. Create a task ... b. Notify the dependent
   repo's orchestrator via MCP." The task should be associated with the DEPENDENT repo's
   workspace, and notifications should go to the DEPENDENT repo's workspace members. But

@@ -1276,6 +1276,7 @@ async fn emit_constraint_violations(
     action: &str,
     context_snapshot: &serde_json::Value,
 ) {
+    // caller-scope:ok — violations are pre-computed for same workspace, broadcasts are workspace-scoped
     let now = crate::api::now_secs();
 
     for violation in violations {

@@ -252,6 +252,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: dependent-scope-resolution
+        name: dependent scope resolution lint
+        description: Detect functions that use caller workspace_id for dependent entities instead of resolving each entity's own scope
+        entry: scripts/check-dependent-scope-resolution.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

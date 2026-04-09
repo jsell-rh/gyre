@@ -116,6 +116,7 @@ async fn seed_system_views_if_needed(
     workspace_id: &str,
     tenant_id: &str,
 ) -> Result<(), ApiError> {
+    // caller-scope:ok — iterates static system defaults, all scoped to the same workspace
     let wid = Id::new(workspace_id);
     let views = state
         .saved_views

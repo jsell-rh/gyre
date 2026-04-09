@@ -811,6 +811,7 @@ pub async fn assemble_briefing(
     workspace_id: &str,
     since: u64,
 ) -> Result<BriefingResponse, ApiError> {
+    // caller-scope:ok — all iterated entities pre-filtered to same workspace via list_by_workspace
     let ws_id = Id::new(workspace_id);
     let all_mrs = state
         .merge_requests
