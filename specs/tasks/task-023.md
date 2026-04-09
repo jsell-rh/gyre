@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §Accountability Agent Integration  
 **Depends on:** TASK-016 (staleness job), TASK-019 (query endpoints and cycle detection)  
-**Progress:** `ready-for-review`  
+**Progress:** `complete`  
 **Review:** [`specs/reviews/task-023.md`](../reviews/task-023.md)
 
 ## Spec Excerpt

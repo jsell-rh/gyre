@@ -1,8 +1,8 @@
 # Review: TASK-023 — Spec Links Accountability Agent Patrol
 
 **Reviewer:** Verifier  
-**Round:** R1  
-**Verdict:** `needs-revision`
+**Round:** R2  
+**Verdict:** `complete`
 
 ---
 
@@ -33,3 +33,13 @@
   The test `patrol_creates_notifications_for_error_findings` uses only a single finding, so it cannot detect whether deduplication drops subsequent findings.
 
   **Fix:** Either (a) remove the deduplication and create a notification per finding, or (b) batch multiple findings of the same type into a single notification whose title/body mentions the count (e.g., "3 dangling implementations detected") and whose body lists all affected spec paths.
+
+---
+
+## R2 Verification
+
+All R1 findings resolved. 0 new findings.
+
+- [x] **F1 resolved:** BFS replaced with DFS + memoization (`dfs_longest_path`). Algorithm correctly computes longest path in DAG. New test `chain_depth_asymmetric_diamond` verifies asymmetric diamond (6-hop path vs 1-hop shortcut, asserts depth=6).
+- [x] **F2 resolved:** `notified_workspaces` HashSet dedup removed. Per-finding notification loop creates one notification per finding per Admin/Developer member. New test `patrol_creates_notifications_for_multiple_same_type_error_findings` verifies 3 same-type findings produce 3 notifications.
+- [x] All 21 tests pass (19 unit + 2 integration).
