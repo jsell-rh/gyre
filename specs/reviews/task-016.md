@@ -1,8 +1,8 @@
 # Review: TASK-016 — Spec Links: Staleness Job & Approval Gate Enforcement
 
 **Reviewer:** Verifier  
-**Round:** R4  
-**Verdict:** `needs-revision`
+**Round:** R5  
+**Verdict:** `complete`
 
 ---
 
@@ -59,27 +59,30 @@
 
 ## R4 Findings
 
-- [-] [process-revision-complete] **F9: Premature `Supersedes` deprecation at sync/push time — spec requires approval-time trigger only**
+- [x] [process-revision-complete] **F9: Premature `Supersedes` deprecation at sync/push time — spec requires approval-time trigger only**
 
-  spec-links.md §Approval Gates:
+  Fixed: The `SpecLinkType::Supersedes` match arm was removed from `sync_spec_ledger` step 6. The doc comment on `sync_spec_ledger` was updated to reflect "no push-time action." The test `sync_supersedes_marks_target_deprecated` was renamed to `sync_supersedes_does_not_deprecate_target_at_push_time` and now asserts the target retains its `Approved` status (not deprecated) when a supersedes link is processed at sync time. The `approve_spec` handler (lines 697-750) remains the sole deprecation trigger, correctly gated on approval.
 
-  > | `supersedes` | When source is approved, target is automatically set to `deprecated`. Code referencing target gets flagged. |
+---
 
-  The `approve_spec` handler (`specs.rs:697-750`) correctly deprecates the target spec **when the superseding spec is approved**. However, `sync_spec_ledger` (`spec_registry.rs:552-566`) ALSO deprecates the target spec **unconditionally at push/sync time**, regardless of whether the source spec is approved:
+## R5 Findings
 
-  ```rust
-  SpecLinkType::Supersedes => {
-      if let Ok(Some(mut target_entry)) = ledger.find_by_path(&link.target_path).await {
-          if target_entry.approval_status != ApprovalStatus::Deprecated {
-              target_entry.approval_status = ApprovalStatus::Deprecated;
-              // ...
-          }
-      }
-  }
-  ```
+_None._
 
-  No guard checks `source_entry.approval_status == Approved` before deprecating. This means any user or agent can deprecate another team's spec simply by pushing a manifest declaring `supersedes: their-spec.md` — no approval review required. The `sync_supersedes_marks_target_deprecated` test (`specs.rs:2601`) confirms this: it seeds the source spec as `Pending` (not approved) and asserts deprecation happens.
+All acceptance criteria verified:
 
-  The correct deprecation logic already exists in `approve_spec` (lines 697-750). The sync-time deprecation is a duplicate, premature trigger that contradicts the spec's "when source is approved" condition.
-
-  **Fix:** Remove the `SpecLinkType::Supersedes` match arm from `sync_spec_ledger` step 6 (`spec_registry.rs:552-566`). The `approve_spec` handler already handles this correctly. Update or remove the `sync_supersedes_marks_target_deprecated` test (`specs.rs:2601-2688`) since it tests the premature behavior.
+- [x] `DependsOn` approval gate rejects when dependency implementation is incomplete — `approve_blocked_by_depends_on_gate` test (specs.rs:2290)
+- [x] `Supersedes` approval marks target spec as Deprecated — `approve_supersedes_marks_target_deprecated` test (specs.rs:2406)
+- [x] Push-time inbound staleness: step 6b marks ALL inbound links stale immediately — `inbound_staleness_marks_non_extends_links_stale` test (spec_registry.rs:1397)
+- [x] `Extends` parent spec change invalidates `approval_status` to Pending — `extends_outbound_staleness_marks_drifted_and_invalidates_approval` + `inbound_extends_staleness_full_side_effects` tests
+- [x] `Extends` parent spec change creates drift-review Task entity — `extends_staleness_creates_drift_review_task` test (spec_registry.rs:1360)
+- [x] Staleness job resolves current SHAs and marks mismatched links stale — `staleness_job_detects_sha_mismatch` test (spec_link_staleness.rs:364)
+- [x] Stale links produce notifications for workspace members (Admin/Developer only, Viewer excluded) — `staleness_job_creates_notifications_for_workspace_members` test (spec_link_staleness.rs:452)
+- [x] Test: extends push-time behavior (stale link + drift_status + approval invalidation + task creation) — 4 tests in spec_registry.rs
+- [x] Test: inbound staleness for non-extends link types at push time — `inbound_staleness_marks_non_extends_links_stale` test
+- [x] `Supersedes` deprecation only triggers at approval time (F9) — sync-time test confirms no deprecation, approve-time test confirms deprecation
+- [x] Tests cover each approval gate link type: implements (2069), conflicts_with (2185), depends_on (2290/2346), supersedes (2406), extends (spec_registry.rs)
+- [x] `cargo test --all` passes — 1871 tests, 0 failures
+- [x] `references` links excluded from enforcement — `no_drift_review_task_for_references_links` test (spec_registry.rs:1796)
+- [x] Duplicate dedup for same-repo links — `no_duplicate_drift_review_for_same_repo_extends` test (spec_registry.rs:1643)
+- [x] Notification priority for `CrossWorkspaceSpecChange` is 4, matching HSI §8 spec

@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §Link Types, §Forge-Maintained Spec Graph  
 **Depends on:** None (spec links store and approval flow already exist)  
-**Progress:** `ready-for-review`
+**Progress:** `complete`
 **Review:** [`specs/reviews/task-016.md`](../reviews/task-016.md)
 
 ## Spec Excerpt
@@ -56,9 +56,13 @@ Full review history at [`specs/reviews/task-016.md`](../reviews/task-016.md). Cu
 
 - **F8:** Drift-review tasks created for `references` links, but spec says "No mechanical enforcement" for references — fixed
 
-### R4 (1 finding — OPEN)
+### R4 (1 finding — addressed)
 
-- **F9:** Premature `Supersedes` deprecation at sync/push time. The `sync_spec_ledger` function deprecates the target spec unconditionally when processing a `supersedes` link, but the spec says deprecation should only happen **when the superseding spec is approved** (§Approval Gates). The correct logic already exists in `approve_spec`. The sync-time deprecation is a duplicate, premature trigger.
+- **F9:** Premature `Supersedes` deprecation at sync/push time — fixed
+
+### R5 (0 findings — COMPLETE)
+
+All acceptance criteria verified. No findings.
 
 ## Implementation Plan
 
