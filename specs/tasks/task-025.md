@@ -2,7 +2,8 @@
 
 **Spec reference:** `spec-links.md` §Querying the Graph (CLI)  
 **Depends on:** TASK-019 (query endpoints: dependents, dependencies, stale-links, conflicts)  
-**Progress:** `ready-for-review`
+**Progress:** `complete`  
+**Review:** [specs/reviews/task-025.md](../reviews/task-025.md)
 
 ## Spec Excerpt
 
