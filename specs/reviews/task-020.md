@@ -90,7 +90,7 @@ R1 findings F1–F3 are now resolved in commit `2e39a167`:
 
 ### Findings
 
-- [-] [process-revision-complete] **F1: R2 fix added `require_cascade_tests` field but no test asserts on it.**
+- [x] [process-revision-complete] **F1: R2 fix added `require_cascade_tests` field but no test asserts on it.**
   The `test_dependency_policy_set_and_get` test (`dependencies.rs:930-956`) explicitly sets
   `require_cascade_tests: false` (line 934) but the assertion block (lines 950-956) checks
   `breaking_change_behavior`, `max_version_drift`, `stale_dependency_alert_days`, and
@@ -104,3 +104,37 @@ R1 findings F1–F3 are now resolved in commit `2e39a167`:
   Fix: Add `assert!(!retrieved.require_cascade_tests)` to `test_dependency_policy_set_and_get`
   (after line 956) and `assert!(policy.require_cascade_tests)` to `test_dependency_policy_default`
   (after line 915).
+  **Resolved in `b32dea76`:** both assertions added.
+
+## R4 — needs-revision, 2 findings (R1–R3 findings resolved)
+
+All prior findings are resolved. Two new findings identified.
+
+### Findings
+
+- [ ] **F1: `detect_breaking_changes_on_push` only checks the tip commit — interior commits in multi-commit pushes are missed.**
+  `git_http.rs:2065` uses `git log -1 --format=%H%x00%B%x00 NEW_SHA`, which limits detection
+  to the single tip commit. In a multi-commit push (e.g., 5 commits pushed at once), breaking
+  change markers (`feat!:`, `BREAKING CHANGE:` footer) in interior commits are silently missed.
+  The spec says "When a push to Repo B is detected as a breaking change (semver major bump via
+  conventional commit)" — no restriction to tip-only. The acceptance criterion says "Breaking
+  changes detected from conventional commits on push" — plural "commits." Other push-time
+  functions in the same file correctly use `old_sha..new_sha` range (line 933–936) to iterate
+  all pushed commits. The function signature lacks `old_sha`, which is available at the call
+  site (line 669, via `update.old_sha`).
+  Fix: (1) Add `old_sha: &str` parameter to `detect_breaking_changes_on_push`. (2) Replace
+  `git log -1 ... new_sha` with `git log --format=%H%x00%B%x00 old_sha..new_sha` (same
+  pattern as line 933–936). (3) Handle the `00000000...` case for new branches (use just
+  `new_sha` without range). (4) Update the call site at line 669 to pass `&update.old_sha`.
+
+- [ ] **F2: `test_dependency_policy_default` does not assert `stale_dependency_alert_days` default (spec value: 30).**
+  The spec defines 5 policy fields with defaults. `test_dependency_policy_default`
+  (dependencies.rs:910–916) checks 4: `breaking_change_behavior` (Warn), `max_version_drift`
+  (3), `require_cascade_tests` (true, added in R3), `auto_create_update_tasks` (true).
+  Missing: `stale_dependency_alert_days` (expected 30). The R3 fix correctly added
+  `require_cascade_tests` but did not sweep for other missing assertions — the same gap
+  pattern (field without assertion in default test) applies to `stale_dependency_alert_days`.
+  The `test_dependency_policy_set_and_get` test DOES assert on this field (custom value 60),
+  but the default value 30 is never verified.
+  Fix: Add `assert_eq!(policy.stale_dependency_alert_days, 30);` to
+  `test_dependency_policy_default` (after line 914).
