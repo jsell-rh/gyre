@@ -288,8 +288,10 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 /// - Entry in ledger but not manifest: mark `Deprecated`.
 /// - Files under `specs/` not in manifest: log a warning.
 /// - `supersedes` links: target spec is marked Deprecated in ledger.
-/// - `extends` links: if the target SHA changed, the extending spec's drift_status = "drifted",
-///   approval_status is invalidated to Pending, and a drift-review Task is created.
+/// - ALL stale links: drift-review Task created in the source spec's repo
+///   (spec-links.md §Automatic Staleness Detection step 3).
+/// - `extends` links: if the target SHA changed, the extending spec's drift_status = "drifted"
+///   and approval_status is invalidated to Pending.
 /// - Push-time inbound staleness: when a spec's SHA changes, ALL existing links targeting
 ///   that spec are marked stale immediately (spec-links.md §Automatic Staleness Detection).
 /// - Cross-workspace `@` targets: resolved to target_repo_id via workspace slug lookup.
@@ -528,6 +530,23 @@ pub async fn sync_spec_ledger(
                 }
             }
 
+            // Step 3 (generic): Create drift-review tasks for ALL stale links.
+            // spec-links.md §Automatic Staleness Detection step 3: "Creates
+            // drift-review tasks in the source specs' repos."
+            if link.status == "stale" {
+                create_drift_review_task(
+                    tasks,
+                    &link.source_path,
+                    &link.target_path,
+                    &link.link_type,
+                    source_repo_id,
+                    source_workspace_id,
+                    now,
+                )
+                .await;
+            }
+
+            // Type-specific enforcement.
             match link.link_type {
                 SpecLinkType::Supersedes => {
                     if let Ok(Some(mut target_entry)) = ledger.find_by_path(&link.target_path).await
@@ -545,12 +564,10 @@ pub async fn sync_spec_ledger(
                     }
                 }
                 SpecLinkType::Extends => {
-                    // For extends links with stale target: mark extending spec as drifted,
-                    // invalidate approval, and create a drift-review task.
+                    // For extends links with stale target: mark extending spec as drifted
+                    // and invalidate approval.
                     // spec-links.md §Approval Gates: "When target changes, source's
                     // approval is invalidated."
-                    // spec-links.md §Automatic Staleness Detection step 3: "Creates
-                    // drift-review tasks in the source specs' repos."
                     if link.status == "stale" {
                         info!(
                             source = %link.source_path,
@@ -561,7 +578,6 @@ pub async fn sync_spec_ledger(
                             ledger.find_by_path(&link.source_path).await
                         {
                             source_entry.drift_status = "drifted".to_string();
-                            // F3: Invalidate extending spec's approval.
                             source_entry.approval_status = ApprovalStatus::Pending;
                             source_entry.updated_at = now;
                             let _ = ledger.save(&source_entry).await;
@@ -569,17 +585,6 @@ pub async fn sync_spec_ledger(
                                 spec_path = %link.source_path,
                                 "spec-registry: approval invalidated (extends target changed)"
                             );
-
-                            // F2: Create drift-review task entity.
-                            create_drift_review_task(
-                                tasks,
-                                &link.source_path,
-                                &link.target_path,
-                                source_repo_id,
-                                source_workspace_id,
-                                now,
-                            )
-                            .await;
                         }
                     }
                 }
@@ -624,41 +629,61 @@ pub async fn sync_spec_ledger(
             }
         }
         // Drop the lock before doing ledger updates and task creation.
-        // Collect extends links that need additional side effects.
-        let stale_extends: Vec<(String, String)> = store
+        // Collect ALL stale inbound links for side effects.
+        // - Includes source_repo_id and link_type for correct task assignment (F5).
+        // - Covers all link types for drift-review task creation (F7).
+        // - Excludes links from the current manifest (already processed in step 6) (F6).
+        let inbound_stale_links: Vec<(String, String, Option<String>, SpecLinkType)> = store
             .iter()
             .filter(|l| {
-                l.link_type == SpecLinkType::Extends
-                    && l.stale_since == Some(now)
+                l.stale_since == Some(now)
                     && changed_set.contains(l.target_path.as_str())
+                    && !manifest_paths.contains(&l.source_path)
             })
-            .map(|l| (l.source_path.clone(), l.target_path.clone()))
+            .map(|l| {
+                (
+                    l.source_path.clone(),
+                    l.target_path.clone(),
+                    l.source_repo_id.clone(),
+                    l.link_type.clone(),
+                )
+            })
             .collect();
         drop(store);
 
-        // Apply extends side effects for inbound stale links.
-        for (source_path, target_path) in &stale_extends {
-            if let Ok(Some(mut source_entry)) = ledger.find_by_path(source_path).await {
-                source_entry.drift_status = "drifted".to_string();
-                source_entry.approval_status = ApprovalStatus::Pending;
-                source_entry.updated_at = now;
-                let _ = ledger.save(&source_entry).await;
-                info!(
-                    spec_path = %source_path,
-                    "spec-registry: inbound extends — approval invalidated, drift_status = drifted"
-                );
-            }
+        // Apply side effects for inbound stale links.
+        for (source_path, target_path, link_repo_id, link_type) in &inbound_stale_links {
+            // Look up source spec's ledger entry for workspace_id (F5).
+            let maybe_source = ledger.find_by_path(source_path).await.ok().flatten();
+            let ws_id = maybe_source
+                .as_ref()
+                .and_then(|e| e.workspace_id.clone());
 
-            // Create drift-review task for the extending spec.
+            // Step 3 (generic): drift-review task for ALL stale inbound links.
             create_drift_review_task(
                 tasks,
                 source_path,
                 target_path,
-                source_repo_id,
-                source_workspace_id,
+                link_type,
+                link_repo_id.as_deref(),
+                ws_id.as_deref(),
                 now,
             )
             .await;
+
+            // Step 4 (extends-specific): drift_status + approval invalidation.
+            if *link_type == SpecLinkType::Extends {
+                if let Some(mut source_entry) = maybe_source {
+                    source_entry.drift_status = "drifted".to_string();
+                    source_entry.approval_status = ApprovalStatus::Pending;
+                    source_entry.updated_at = now;
+                    let _ = ledger.save(&source_entry).await;
+                    info!(
+                        spec_path = %source_path,
+                        "spec-registry: inbound extends — approval invalidated, drift_status = drifted"
+                    );
+                }
+            }
         }
     }
 
@@ -670,14 +695,15 @@ pub async fn sync_spec_ledger(
 // Drift-review task creation helper (TASK-016 F2)
 // ---------------------------------------------------------------------------
 
-/// Create a drift-review Task entity when an `extends` link becomes stale.
+/// Create a drift-review Task entity when any link becomes stale.
 ///
 /// spec-links.md §Automatic Staleness Detection step 3: "Creates drift-review tasks
-/// in the source specs' repos."
+/// in the source specs' repos." This applies to ALL link types, not just extends.
 async fn create_drift_review_task(
     tasks: Option<&Arc<dyn gyre_ports::TaskRepository>>,
     source_path: &str,
     target_path: &str,
+    link_type: &SpecLinkType,
     source_repo_id: Option<&str>,
     source_workspace_id: Option<&str>,
     now: u64,
@@ -690,13 +716,13 @@ async fn create_drift_review_task(
 
     let task_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
     let title = format!(
-        "Drift review: '{}' extends '{}' which has changed",
-        source_path, target_path
+        "Drift review: '{}' {} '{}' which has changed",
+        source_path, link_type, target_path
     );
     let description = format!(
-        "The parent spec '{}' has changed (new SHA). The extending spec '{}' may need to \
-         incorporate the parent's changes. Review the extending spec and update if necessary.",
-        target_path, source_path
+        "The target spec '{}' has changed (new SHA). The source spec '{}' has a '{}' \
+         link to it and may need to be re-evaluated.",
+        target_path, source_path, link_type
     );
 
     let mut task = gyre_domain::Task::new(task_id, title, now);
@@ -711,6 +737,7 @@ async fn create_drift_review_task(
         warn!(
             source = %source_path,
             target = %target_path,
+            link_type = %link_type,
             error = %e,
             "spec-registry: failed to create drift-review task"
         );
@@ -719,7 +746,8 @@ async fn create_drift_review_task(
             task_id = %task.id,
             source = %source_path,
             target = %target_path,
-            "spec-registry: drift-review task created for extends link"
+            link_type = %link_type,
+            "spec-registry: drift-review task created"
         );
     }
 }
@@ -1247,11 +1275,12 @@ specs:
         target: &str,
         link_type: SpecLinkType,
         target_sha: Option<&str>,
+        source_repo_id: &str,
     ) -> SpecLinkEntry {
         SpecLinkEntry {
             id: id.to_string(),
             source_path: source.to_string(),
-            source_repo_id: Some("repo1".to_string()),
+            source_repo_id: Some(source_repo_id.to_string()),
             link_type,
             target_path: target.to_string(),
             target_repo_id: None,
@@ -1294,6 +1323,7 @@ specs:
             "system/parent.md",
             SpecLinkType::Extends,
             Some("old_sha_123"),
+            "repo1",
         );
 
         // Check target SHA against ledger (same logic as step 6 in sync_spec_ledger).
@@ -1343,6 +1373,7 @@ specs:
             Some(&tasks),
             "system/extending.md",
             "system/parent.md",
+            &SpecLinkType::Extends,
             Some("repo1"),
             Some("ws1"),
             2_000_000,
@@ -1389,6 +1420,7 @@ specs:
             "system/target.md",
             SpecLinkType::DependsOn,
             Some("old_sha_123"),
+            "repo1",
         );
         let implements_link = make_test_link(
             "impl-link",
@@ -1396,6 +1428,7 @@ specs:
             "system/target.md",
             SpecLinkType::Implements,
             Some("old_sha_123"),
+            "repo1",
         );
         {
             let mut store = links_store.lock().await;
@@ -1453,13 +1486,16 @@ specs:
             make_test_ledger_entry("system/child.md", "child_sha", ApprovalStatus::Approved);
         ledger.save(&extending).await.unwrap();
 
-        // Pre-existing inbound extends link.
+        // Pre-existing inbound extends link — uses a DISTINCT source_repo_id
+        // from the pushed repo to verify F5: task is created in the link's repo,
+        // not the pushed repo.
         let extends_link = make_test_link(
             "ext-inbound",
             "system/child.md",
             "system/parent.md",
             SpecLinkType::Extends,
             Some("old_parent_sha"),
+            "repo_LINK_SOURCE",
         );
         {
             let mut store = links_store.lock().await;
@@ -1485,38 +1521,54 @@ specs:
             }
         }
 
-        // Collect stale extends links for side effects.
-        let stale_extends: Vec<(String, String)> = {
+        // Collect ALL stale inbound links for side effects (matching new step 6b logic).
+        let inbound_stale_links: Vec<(String, String, Option<String>, SpecLinkType)> = {
             let store = links_store.lock().await;
             store
                 .iter()
                 .filter(|l| {
-                    l.link_type == SpecLinkType::Extends
-                        && l.stale_since == Some(now)
+                    l.stale_since == Some(now)
                         && changed_set.contains(l.target_path.as_str())
                 })
-                .map(|l| (l.source_path.clone(), l.target_path.clone()))
+                .map(|l| {
+                    (
+                        l.source_path.clone(),
+                        l.target_path.clone(),
+                        l.source_repo_id.clone(),
+                        l.link_type.clone(),
+                    )
+                })
                 .collect()
         };
 
-        // Apply extends side effects.
-        for (source_path, target_path) in &stale_extends {
-            if let Ok(Some(mut source_entry)) = ledger.find_by_path(source_path).await {
-                source_entry.drift_status = "drifted".to_string();
-                source_entry.approval_status = ApprovalStatus::Pending;
-                source_entry.updated_at = now;
-                ledger.save(&source_entry).await.unwrap();
-            }
+        // Apply side effects (matching new step 6b logic — uses link's repo, not pushed repo).
+        for (source_path, target_path, link_repo_id, link_type) in &inbound_stale_links {
+            let maybe_source = ledger.find_by_path(source_path).await.ok().flatten();
+            let ws_id = maybe_source
+                .as_ref()
+                .and_then(|e| e.workspace_id.clone());
 
+            // Step 3: drift-review task using link's source_repo_id (F5).
             create_drift_review_task(
                 Some(&tasks),
                 source_path,
                 target_path,
-                Some("repo1"),
-                Some("ws1"),
+                link_type,
+                link_repo_id.as_deref(),
+                ws_id.as_deref(),
                 now,
             )
             .await;
+
+            // Step 4: extends-specific side effects.
+            if *link_type == SpecLinkType::Extends {
+                if let Some(mut source_entry) = maybe_source {
+                    source_entry.drift_status = "drifted".to_string();
+                    source_entry.approval_status = ApprovalStatus::Pending;
+                    source_entry.updated_at = now;
+                    ledger.save(&source_entry).await.unwrap();
+                }
+            }
         }
 
         // Verify link is stale.
@@ -1535,13 +1587,16 @@ specs:
         assert_eq!(child.drift_status, "drifted");
         assert_eq!(child.approval_status, ApprovalStatus::Pending);
 
-        // Verify drift-review task was created.
+        // Verify drift-review task was created with the LINK's repo ID (F5),
+        // not the pushed repo's ID.
         let all_tasks = tasks.list().await.unwrap();
         assert_eq!(all_tasks.len(), 1);
         let task = &all_tasks[0];
         assert!(task.title.contains("Drift review"));
         assert_eq!(task.spec_path, Some("system/child.md".to_string()));
         assert_eq!(task.labels, vec!["drift-review".to_string()]);
+        assert_eq!(task.repo_id, gyre_common::Id::new("repo_LINK_SOURCE"));
+        assert_eq!(task.workspace_id, gyre_common::Id::new("ws1"));
     }
 
     /// Inbound staleness detection does not re-stamp already-stale links.
@@ -1556,6 +1611,7 @@ specs:
             "system/target.md",
             SpecLinkType::DependsOn,
             Some("old_sha"),
+            "repo1",
         );
         link.status = "stale".to_string();
         link.stale_since = Some(999_000);
@@ -1584,5 +1640,158 @@ specs:
         let store = links_store.lock().await;
         let link = store.iter().find(|l| l.id == "already-stale").unwrap();
         assert_eq!(link.stale_since, Some(999_000));
+    }
+
+    /// F6: When an extends link's source AND target are both in the current manifest
+    /// and the target's SHA changed, step 6 (outbound) and step 6b (inbound) must
+    /// NOT both create drift-review tasks. Step 6b excludes manifest source paths.
+    #[tokio::test]
+    async fn no_duplicate_drift_review_for_same_repo_extends() {
+        use crate::mem::{MemSpecLedgerRepository, MemTaskRepository};
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let tasks: Arc<dyn gyre_ports::TaskRepository> = Arc::new(MemTaskRepository::default());
+        let now = 2_000_000u64;
+
+        // Both specs in the same repo/manifest.
+        let parent =
+            make_test_ledger_entry("system/parent.md", "new_sha_999", ApprovalStatus::Approved);
+        ledger.save(&parent).await.unwrap();
+
+        let extending =
+            make_test_ledger_entry("system/extending.md", "ext_sha", ApprovalStatus::Approved);
+        ledger.save(&extending).await.unwrap();
+
+        // Manifest paths (both specs are in the manifest).
+        let manifest_paths: std::collections::HashSet<String> = [
+            "system/parent.md".to_string(),
+            "system/extending.md".to_string(),
+        ]
+        .into_iter()
+        .collect();
+
+        // Step 6 (outbound): create stale link and task #1.
+        let mut link = make_test_link(
+            "ext-same-repo",
+            "system/extending.md",
+            "system/parent.md",
+            SpecLinkType::Extends,
+            Some("old_sha"),
+            "repo1",
+        );
+        link.status = "stale".to_string();
+        link.stale_since = Some(now);
+
+        // Generic task creation (as step 6 does for all stale links).
+        create_drift_review_task(
+            Some(&tasks),
+            &link.source_path,
+            &link.target_path,
+            &link.link_type,
+            Some("repo1"),
+            Some("ws1"),
+            now,
+        )
+        .await;
+
+        // Add the stale link to the store (as step 6 does after processing).
+        {
+            let mut store = links_store.lock().await;
+            store.push(link);
+        }
+
+        // Step 6b (inbound): scan for stale links targeting changed specs.
+        let changed_set: std::collections::HashSet<&str> =
+            ["system/parent.md"].iter().copied().collect();
+
+        // Collect inbound stale links — EXCLUDING manifest source paths (F6 fix).
+        let inbound_stale_links: Vec<(String, String, Option<String>, SpecLinkType)> = {
+            let store = links_store.lock().await;
+            store
+                .iter()
+                .filter(|l| {
+                    l.stale_since == Some(now)
+                        && changed_set.contains(l.target_path.as_str())
+                        && !manifest_paths.contains(&l.source_path)
+                })
+                .map(|l| {
+                    (
+                        l.source_path.clone(),
+                        l.target_path.clone(),
+                        l.source_repo_id.clone(),
+                        l.link_type.clone(),
+                    )
+                })
+                .collect()
+        };
+
+        // The link's source_path ("system/extending.md") IS in manifest_paths,
+        // so it should be excluded from inbound processing.
+        assert!(
+            inbound_stale_links.is_empty(),
+            "same-repo extends link should be excluded from step 6b"
+        );
+
+        // Only 1 task should exist (from step 6), not 2.
+        let all_tasks = tasks.list().await.unwrap();
+        assert_eq!(all_tasks.len(), 1);
+    }
+
+    /// F7: Drift-review tasks are created for ALL stale link types, not just extends.
+    /// spec-links.md §Automatic Staleness Detection step 3 is generic.
+    #[tokio::test]
+    async fn drift_review_task_created_for_non_extends_stale_links() {
+        use crate::mem::MemTaskRepository;
+
+        let tasks: Arc<dyn gyre_ports::TaskRepository> = Arc::new(MemTaskRepository::default());
+
+        // Create drift-review tasks for various non-extends link types.
+        create_drift_review_task(
+            Some(&tasks),
+            "system/consumer.md",
+            "system/dependency.md",
+            &SpecLinkType::DependsOn,
+            Some("repo_consumer"),
+            Some("ws_consumer"),
+            2_000_000,
+        )
+        .await;
+
+        create_drift_review_task(
+            Some(&tasks),
+            "system/impl.md",
+            "system/parent_spec.md",
+            &SpecLinkType::Implements,
+            Some("repo_impl"),
+            Some("ws_impl"),
+            2_000_000,
+        )
+        .await;
+
+        let all_tasks = tasks.list().await.unwrap();
+        assert_eq!(all_tasks.len(), 2);
+
+        // Verify depends_on task.
+        let dep_task = all_tasks
+            .iter()
+            .find(|t| t.spec_path == Some("system/consumer.md".to_string()))
+            .unwrap();
+        assert!(dep_task.title.contains("depends_on"));
+        assert!(dep_task.title.contains("system/dependency.md"));
+        assert_eq!(dep_task.labels, vec!["drift-review".to_string()]);
+        assert_eq!(dep_task.repo_id, gyre_common::Id::new("repo_consumer"));
+        assert_eq!(dep_task.workspace_id, gyre_common::Id::new("ws_consumer"));
+
+        // Verify implements task.
+        let impl_task = all_tasks
+            .iter()
+            .find(|t| t.spec_path == Some("system/impl.md".to_string()))
+            .unwrap();
+        assert!(impl_task.title.contains("implements"));
+        assert!(impl_task.title.contains("system/parent_spec.md"));
+        assert_eq!(impl_task.labels, vec!["drift-review".to_string()]);
+        assert_eq!(impl_task.repo_id, gyre_common::Id::new("repo_impl"));
     }
 }
