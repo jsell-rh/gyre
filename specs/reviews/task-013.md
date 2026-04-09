@@ -16,7 +16,7 @@
 
 ## R2 Findings
 
-- [ ] **F4: Exception `entity_type` values don't match the spec-defined type enum — consumers matching spec values will miss these items.**
+- [ ] [process-revision-complete] **F4: Exception `entity_type` values don't match the spec-defined type enum — consumers matching spec values will miss these items.**
   - **Spec (HSI §9, line 1316):** The response field definition states:
     - `"spec_assertion_failure"` — spec assertion validation failure
     - `"reverted"` — MR with Reverted status
@@ -26,7 +26,7 @@
   - **Tests also use wrong values:** Lines 2116 (`"assertion_failure"`) and 2153 (`"mr_revert"`) — tests must be updated alongside the fix.
   - **Fix:** Change line 956 to `entity_type: "spec_assertion_failure".to_string()` and line 976 to `entity_type: "reverted".to_string()`. Update the test filter predicates at lines 2116 and 2153 to match.
 
-- [ ] **F5: Cross-workspace filter comment claims "target that changed" but `created_at` filter cannot detect target changes — only detects link recreation on source push.**
+- [ ] [process-revision-complete] **F5: Cross-workspace filter comment claims "target that changed" but `created_at` filter cannot detect target changes — only detects link recreation on source push.**
   - **Spec (HSI §9, line 1271):** "platform-core updated idempotent-api.md. Your payment-retry.md depends on it." — The trigger for cross_workspace entries is the external dependency (target) being updated.
   - **Comment (`graph.rs:871`):** "Our spec (source) depends on an external spec (target) that changed." — Correct description of spec intent.
   - **Filter (`graph.rs:880`):** `link.created_at >= since` — But `created_at` is set to `now` each time the source spec's repo is pushed (`spec_registry.rs:495`), because the link store does a full refresh per source-spec push (`spec_registry.rs:545-551`). This timestamp reflects when the local repo was last pushed, NOT when the external dependency changed.
