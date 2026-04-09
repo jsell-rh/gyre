@@ -1876,106 +1876,55 @@ pub(crate) async fn detect_dependencies_on_push(
 
 /// Check pushed commits for conventional commit breaking change markers.
 ///
+/// Input is expected to be null-delimited records from
+/// `git log --format="%H%x00%B%x00"` — each record is `SHA\0FULL_MESSAGE\0`.
+/// Using the full message (`%B`) ensures `BREAKING CHANGE:` footers in the
+/// commit body are detected, not just the `!` marker in the subject line.
+///
 /// Returns a list of `(commit_sha, description)` tuples for each breaking commit.
 pub(crate) fn detect_breaking_commits(commit_log: &str) -> Vec<(String, String)> {
     let mut results = Vec::new();
-    for line in commit_log.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+    // Split on null bytes. The format produces [SHA, MESSAGE, SHA, MESSAGE, ...].
+    let parts: Vec<&str> = commit_log.split('\0').collect();
+    // Process pairs: parts[0]=SHA, parts[1]=MESSAGE, parts[2]=SHA, parts[3]=MESSAGE, ...
+    let mut i = 0;
+    while i + 1 < parts.len() {
+        let sha = parts[i].trim();
+        let message = parts[i + 1].trim();
+        i += 2;
+        if sha.is_empty() || message.is_empty() {
             continue;
         }
-        // Each line is expected to be "sha subject" from `git log --format="%H %s"`.
-        let (sha, message) = match line.split_once(' ') {
-            Some((s, m)) => (s.to_string(), m),
-            None => continue,
-        };
-        if let Some(parsed) = crate::version_compute::parse_conventional(&sha, message) {
+        if let Some(parsed) = crate::version_compute::parse_conventional(sha, message) {
             if parsed.is_breaking {
-                results.push((sha, parsed.description));
+                results.push((sha.to_string(), parsed.description));
             }
         }
     }
     results
 }
 
-/// Detect breaking changes on push and propagate to dependent repos.
+/// Process detected breaking commits: create BreakingChange records, update
+/// dependency edge status, and create high-priority tasks in dependent repos.
 ///
-/// When a push to a repo contains conventional commit breaking change markers
-/// (`feat!:`, `BREAKING CHANGE:` footer), this function:
-/// 1. Identifies all repos that depend on the pushed repo
-/// 2. Creates BreakingChange records for each affected dependency edge
-/// 3. Updates dependency edge status to `Breaking`
-/// 4. Creates high-priority tasks in dependent repos (if policy allows)
-/// 5. Sends notifications to workspace members
-pub(crate) async fn detect_breaking_changes_on_push(
+/// This is the core side-effect-producing logic extracted from
+/// `detect_breaking_changes_on_push` so it can be tested without a git repo.
+pub(crate) async fn process_breaking_changes(
     state: &Arc<AppState>,
+    breaking_commits: &[(String, String)],
+    dependents: &[gyre_domain::DependencyEdge],
     repo_id: &str,
-    repo_path: &str,
-    new_sha: &str,
+    repo_name: &str,
     workspace_id: &str,
     tenant_id: &str,
+    policy: &gyre_domain::DependencyPolicy,
+    now: u64,
 ) {
     use gyre_common::Id;
     use gyre_domain::{BreakingChange, DependencyStatus, TaskPriority};
 
-    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-
-    // Get commit messages from the push. We check the single pushed commit and
-    // its subject line for conventional commit breaking markers.
-    let log_out = match Command::new(&git_bin)
-        .arg("-C")
-        .arg(repo_path)
-        .arg("log")
-        .arg("-1")
-        .arg("--format=%H %s")
-        .arg(new_sha)
-        .output()
-        .await
-    {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return,
-    };
-
-    let commit_log = String::from_utf8_lossy(&log_out);
-    let breaking_commits = detect_breaking_commits(&commit_log);
-
-    if breaking_commits.is_empty() {
-        return;
-    }
-
-    // Query the dependency graph: "What repos depend on this repo?"
-    let dependents = match state.dependencies.list_dependents(&Id::new(repo_id)).await {
-        Ok(deps) => deps,
-        Err(e) => {
-            warn!("breaking-change: failed to list dependents for {repo_id}: {e}");
-            return;
-        }
-    };
-
-    if dependents.is_empty() {
-        return;
-    }
-
-    let repo_name = state
-        .repos
-        .find_by_id(&Id::new(repo_id))
-        .await
-        .ok()
-        .flatten()
-        .map(|r| r.name.clone())
-        .unwrap_or_else(|| repo_id.to_string());
-
-    let now = crate::api::now_secs();
-
-    // Get the workspace's dependency policy.
-    let policy = state
-        .dependency_policies
-        .get_for_workspace(&Id::new(workspace_id))
-        .await
-        .unwrap_or_default();
-
-    for (commit_sha, description) in &breaking_commits {
-        for dep_edge in &dependents {
+    for (commit_sha, description) in breaking_commits {
+        for dep_edge in dependents {
             // Create a BreakingChange record.
             let bc_id = Id::new(uuid::Uuid::new_v4().to_string());
             let bc = BreakingChange::new(
@@ -2084,6 +2033,95 @@ pub(crate) async fn detect_breaking_changes_on_push(
             Some(payload),
         )
         .await;
+}
+
+/// Detect breaking changes on push and propagate to dependent repos.
+///
+/// When a push to a repo contains conventional commit breaking change markers
+/// (`feat!:`, `BREAKING CHANGE:` footer), this function:
+/// 1. Identifies all repos that depend on the pushed repo
+/// 2. Creates BreakingChange records for each affected dependency edge
+/// 3. Updates dependency edge status to `Breaking`
+/// 4. Creates high-priority tasks in dependent repos (if policy allows)
+/// 5. Sends notifications to workspace members
+pub(crate) async fn detect_breaking_changes_on_push(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    repo_path: &str,
+    new_sha: &str,
+    workspace_id: &str,
+    tenant_id: &str,
+) {
+    use gyre_common::Id;
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+
+    // Get full commit messages from the push. Using %B (full message) ensures
+    // BREAKING CHANGE: footers in the commit body are detected.
+    let log_out = match Command::new(&git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("log")
+        .arg("-1")
+        .arg("--format=%H%x00%B%x00")
+        .arg(new_sha)
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+
+    let commit_log = String::from_utf8_lossy(&log_out);
+    let breaking_commits = detect_breaking_commits(&commit_log);
+
+    if breaking_commits.is_empty() {
+        return;
+    }
+
+    // Query the dependency graph: "What repos depend on this repo?"
+    let dependents = match state.dependencies.list_dependents(&Id::new(repo_id)).await {
+        Ok(deps) => deps,
+        Err(e) => {
+            warn!("breaking-change: failed to list dependents for {repo_id}: {e}");
+            return;
+        }
+    };
+
+    if dependents.is_empty() {
+        return;
+    }
+
+    let repo_name = state
+        .repos
+        .find_by_id(&Id::new(repo_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| repo_id.to_string());
+
+    let now = crate::api::now_secs();
+
+    // Get the workspace's dependency policy.
+    let policy = state
+        .dependency_policies
+        .get_for_workspace(&Id::new(workspace_id))
+        .await
+        .unwrap_or_default();
+
+    process_breaking_changes(
+        state,
+        &breaking_commits,
+        &dependents,
+        repo_id,
+        &repo_name,
+        workspace_id,
+        tenant_id,
+        &policy,
+        now,
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------

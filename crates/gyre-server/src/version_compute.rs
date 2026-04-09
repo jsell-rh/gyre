@@ -27,8 +27,11 @@ pub struct ParsedCommit {
     pub is_breaking: bool,
 }
 
-/// Parse a single commit subject line into a `ParsedCommit`.
-/// Returns `None` if the message does not match the conventional format.
+/// Parse a conventional commit message into a `ParsedCommit`.
+/// Accepts the full commit message (subject + body). The subject line is
+/// extracted from the first line; `BREAKING CHANGE:` footers are detected
+/// anywhere in the message body. Returns `None` if the message does not
+/// match the conventional format.
 pub fn parse_conventional(sha: &str, message: &str) -> Option<ParsedCommit> {
     let subject = message.lines().next().unwrap_or("").trim();
     let has_breaking_footer = message.contains("BREAKING CHANGE:");
@@ -186,10 +189,11 @@ pub async fn commits_since(
         None => to_ref.to_string(),
     };
 
-    // Use %x00 (null) as field separator and %x01 (SOH) as record separator
-    // to safely handle multi-line commit messages.
+    // Use %x00 (null) as field separator between SHA and full message (%B),
+    // and %x01 (SOH) as record separator between commits. Using %B (full
+    // message) ensures BREAKING CHANGE: footers in the body are included.
     let output = tokio::process::Command::new("git")
-        .args(["log", "--pretty=format:%H%x00%s", &range])
+        .args(["log", "--pretty=format:%H%x00%B%x01", &range])
         .current_dir(repo_path)
         .output()
         .await?;
@@ -201,15 +205,19 @@ pub async fn commits_since(
 
     let text = String::from_utf8(output.stdout)?;
     let commits = text
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(2, '\x00');
+        .split('\x01')
+        .filter_map(|record| {
+            let record = record.trim();
+            if record.is_empty() {
+                return None;
+            }
+            let mut parts = record.splitn(2, '\x00');
             let sha = parts.next()?.trim().to_string();
-            let subject = parts.next().unwrap_or("").trim().to_string();
+            let message = parts.next().unwrap_or("").trim().to_string();
             if sha.is_empty() {
                 None
             } else {
-                Some((sha, subject))
+                Some((sha, message))
             }
         })
         .collect();

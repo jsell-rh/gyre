@@ -421,6 +421,7 @@ pub struct DependencyPolicyResponse {
     pub breaking_change_behavior: gyre_domain::BreakingChangeBehavior,
     pub max_version_drift: u32,
     pub stale_dependency_alert_days: u32,
+    pub require_cascade_tests: bool,
     pub auto_create_update_tasks: bool,
 }
 
@@ -430,6 +431,7 @@ impl From<gyre_domain::DependencyPolicy> for DependencyPolicyResponse {
             breaking_change_behavior: p.breaking_change_behavior,
             max_version_drift: p.max_version_drift,
             stale_dependency_alert_days: p.stale_dependency_alert_days,
+            require_cascade_tests: p.require_cascade_tests,
             auto_create_update_tasks: p.auto_create_update_tasks,
         }
     }
@@ -440,6 +442,7 @@ pub struct UpdateDependencyPolicyRequest {
     pub breaking_change_behavior: Option<gyre_domain::BreakingChangeBehavior>,
     pub max_version_drift: Option<u32>,
     pub stale_dependency_alert_days: Option<u32>,
+    pub require_cascade_tests: Option<bool>,
     pub auto_create_update_tasks: Option<bool>,
 }
 
@@ -574,6 +577,9 @@ pub async fn set_dependency_policy(
     }
     if let Some(days) = req.stale_dependency_alert_days {
         policy.stale_dependency_alert_days = days;
+    }
+    if let Some(cascade) = req.require_cascade_tests {
+        policy.require_cascade_tests = cascade;
     }
     if let Some(auto) = req.auto_create_update_tasks {
         policy.auto_create_update_tasks = auto;
@@ -748,7 +754,8 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
 
     #[test]
     fn test_detect_breaking_commits_feat_bang() {
-        let log = "abc123 feat!: remove deprecated API endpoints";
+        // Format: SHA\0FULL_MESSAGE\0 (from git log --format="%H%x00%B%x00")
+        let log = "abc123\0feat!: remove deprecated API endpoints\0";
         let result = crate::git_http::detect_breaking_commits(log);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "abc123");
@@ -757,25 +764,24 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
 
     #[test]
     fn test_detect_breaking_commits_breaking_change_footer() {
-        // The parse_conventional function also detects BREAKING CHANGE: footer.
-        // The footer needs to be in the message body but for subject-only parsing
-        // the `!` modifier is the primary detection method.
-        let log = "def456 feat!: redesign authentication flow";
+        // BREAKING CHANGE: footer appears in the commit body (%B includes it).
+        let log = "def456\0feat: redesign authentication flow\n\nBREAKING CHANGE: old tokens no longer work\0";
         let result = crate::git_http::detect_breaking_commits(log);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "def456");
+        assert_eq!(result[0].1, "redesign authentication flow");
     }
 
     #[test]
     fn test_detect_breaking_commits_non_breaking() {
-        let log = "abc123 feat: add new endpoint\ndef456 fix: correct typo";
+        let log = "abc123\0feat: add new endpoint\0def456\0fix: correct typo\0";
         let result = crate::git_http::detect_breaking_commits(log);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_detect_breaking_commits_mixed() {
-        let log = "aaa111 feat: safe change\nbbb222 feat!: breaking change\nccc333 fix: patch";
+        let log = "aaa111\0feat: safe change\0bbb222\0feat!: breaking change\0ccc333\0fix: patch\0";
         let result = crate::git_http::detect_breaking_commits(log);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "bbb222");
@@ -925,6 +931,7 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
             breaking_change_behavior: gyre_domain::BreakingChangeBehavior::Block,
             max_version_drift: 5,
             stale_dependency_alert_days: 60,
+            require_cascade_tests: false,
             auto_create_update_tasks: false,
         };
 
@@ -1211,9 +1218,8 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
 
     #[tokio::test]
     async fn test_breaking_change_auto_creates_task() {
-        // Verify that detect_breaking_changes_on_push creates tasks in dependent repos.
-        // We can't easily test the full git push flow, but we can test the task
-        // creation part directly via the breaking change repository + tasks.
+        // Invoke the production code path (process_breaking_changes) to verify
+        // that breaking change records, edge status updates, and tasks are created.
         let state = setup();
         let repo_a = create_repo(&state, "task-auto-a").await;
         let repo_b = create_repo(&state, "task-auto-b").await;
@@ -1231,40 +1237,53 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
         );
         state.dependencies.save(&edge).await.unwrap();
 
-        // Simulate: the push detection created a breaking change and a task.
-        let bc = gyre_domain::BreakingChange::new(
-            Id::new("bc-task-1"),
-            edge.id.clone(),
-            repo_b.clone(),
-            "sha-break",
-            "removed deprecated API",
-            2000,
-        );
-        state.breaking_changes.create(&bc).await.unwrap();
+        let breaking_commits = vec![("sha-break".to_string(), "removed deprecated API".to_string())];
+        let dependents = vec![edge.clone()];
+        let policy = gyre_domain::DependencyPolicy::default(); // auto_create_update_tasks = true
 
-        // Create task like detect_breaking_changes_on_push would.
-        let task = gyre_domain::Task::new(
-            Id::new("task-auto-1"),
-            format!("Breaking change in task-auto-b: removed deprecated API"),
+        // Call the production function that creates records, updates edges, and creates tasks.
+        crate::git_http::process_breaking_changes(
+            &state,
+            &breaking_commits,
+            &dependents,
+            repo_b.as_str(),
+            "task-auto-b",
+            "ws-1",
+            "tenant-1",
+            &policy,
             2000,
-        );
-        let mut task = task;
-        task.priority = gyre_domain::TaskPriority::High;
-        task.labels = vec![
-            "dependency-update".to_string(),
-            "breaking-change".to_string(),
-            "auto-created".to_string(),
-        ];
-        task.repo_id = repo_a.clone();
-        state.tasks.create(&task).await.unwrap();
+        )
+        .await;
 
-        // Verify the task was created for the DEPENDENT repo (A).
+        // Verify BreakingChange record was created.
+        let bcs = state
+            .breaking_changes
+            .list_by_source_repo(&repo_b)
+            .await
+            .unwrap();
+        assert_eq!(bcs.len(), 1);
+        assert_eq!(bcs[0].commit_sha, "sha-break");
+        assert_eq!(bcs[0].description, "removed deprecated API");
+
+        // Verify the dependency edge status was updated to Breaking.
+        // The edge has source=repo_a (dependent), target=repo_b (depended-on).
+        let updated_edge = state
+            .dependencies
+            .find_by_id(&edge.id)
+            .await
+            .unwrap()
+            .expect("edge should exist");
+        assert_eq!(updated_edge.status, DependencyStatus::Breaking);
+
+        // Verify the task was created for the DEPENDENT repo (A = source_repo_id on the edge).
         let tasks = state.tasks.list_by_repo(&repo_a).await.unwrap();
         assert_eq!(tasks.len(), 1);
         assert!(tasks[0].title.contains("Breaking change"));
+        assert!(tasks[0].title.contains("task-auto-b"));
         assert_eq!(tasks[0].priority, gyre_domain::TaskPriority::High);
         assert!(tasks[0].labels.contains(&"breaking-change".to_string()));
         assert!(tasks[0].labels.contains(&"auto-created".to_string()));
+        assert!(tasks[0].labels.contains(&"dependency-update".to_string()));
     }
 
     // ── Acknowledgment clears edge status test ─────────────────────────

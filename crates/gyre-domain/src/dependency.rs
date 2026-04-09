@@ -168,6 +168,8 @@ pub struct DependencyPolicy {
     pub max_version_drift: u32,
     /// Flag dependencies not updated in this many days. 0 = disabled.
     pub stale_dependency_alert_days: u32,
+    /// Whether to require cascade tests before merging breaking changes.
+    pub require_cascade_tests: bool,
     /// Whether to auto-create tasks for dependency updates.
     pub auto_create_update_tasks: bool,
 }
@@ -178,6 +180,7 @@ impl Default for DependencyPolicy {
             breaking_change_behavior: BreakingChangeBehavior::Warn,
             max_version_drift: 3,
             stale_dependency_alert_days: 30,
+            require_cascade_tests: true,
             auto_create_update_tasks: true,
         }
     }
