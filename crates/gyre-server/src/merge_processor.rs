@@ -377,19 +377,24 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
 
         // Check 2: If the spec has a `conflicts_with` link to an approved spec,
-        // block the merge.
+        // block the merge. conflicts_with is bidirectional (spec-links.md §Cycle Detection),
+        // so check both source_path and target_path matching the referenced spec.
         for link in &relevant_links {
             if link.link_type == crate::spec_registry::SpecLinkType::ConflictsWith
-                && link.source_path == spec_path
+                && (link.source_path == spec_path || link.target_path == spec_path)
             {
-                if let Ok(Some(conflicting)) =
-                    state.spec_ledger.find_by_path(&link.target_path).await
+                let other_spec_path = if link.source_path == spec_path {
+                    &link.target_path
+                } else {
+                    &link.source_path
+                };
+                if let Ok(Some(conflicting)) = state.spec_ledger.find_by_path(other_spec_path).await
                 {
                     if conflicting.approval_status == crate::spec_registry::ApprovalStatus::Approved
                     {
                         let reason = format!(
                             "spec '{}' conflicts with approved spec '{}' — resolve the conflict first",
-                            spec_path, link.target_path
+                            spec_path, other_spec_path
                         );
                         warn!(entry_id = %entry.id, %reason, "spec link merge gate blocked merge");
                         state

@@ -595,7 +595,7 @@ pub async fn sync_spec_ledger(
                         }
                     }
                 }
-                _ => {}
+                _ => {} // wildcard:ok — only extends has sync-time enforcement; supersedes handled in approve_spec
             }
         }
 
@@ -998,7 +998,9 @@ pub async fn check_spec_link_cycles(repo_path: &str, sha: &str) -> Result<(), St
 }
 
 /// Detect cycles in the spec link graph from a parsed manifest.
-/// Only checks `depends_on` and `implements` links.
+/// Checks `depends_on`, `implements`, and `extends` links.
+/// Excludes `conflicts_with` (bidirectional), `references`, and `supersedes`
+/// per spec-links.md §Cycle Detection.
 pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -1007,7 +1009,12 @@ pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
     for entry in &manifest.specs {
         for link in &entry.links {
             match link.link_type {
-                SpecLinkType::DependsOn | SpecLinkType::Implements => {
+                // spec-links.md §Cycle Detection: excluded types
+                SpecLinkType::ConflictsWith
+                | SpecLinkType::References
+                | SpecLinkType::Supersedes => {}
+                // All other directed link types participate in cycle detection
+                _ => {
                     // For cross-workspace targets, use only the path portion.
                     let target_path = match parse_cross_workspace_target(&link.target) {
                         CrossWorkspaceTarget::SameRepo { path } => path,
@@ -1016,7 +1023,6 @@ pub fn detect_link_cycles(manifest: &SpecManifest) -> Result<(), String> {
                     };
                     adj.entry(entry.path.clone()).or_default().push(target_path);
                 }
-                _ => {} // Skip conflicts_with, references, supersedes, extends.
             }
         }
     }
@@ -2435,6 +2441,85 @@ specs:
         assert!(
             result.is_err(),
             "mixed depends_on/implements cycle should be detected"
+        );
+    }
+
+    #[test]
+    fn cycle_detection_extends_cycle() {
+        // A extends B extends A → cycle (extends is a directed link type,
+        // not excluded by spec-links.md §Cycle Detection).
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: extends
+        target: system/b.md
+  - path: system/b.md
+    title: B
+    owner: user:test
+    links:
+      - type: extends
+        target: system/a.md
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(result.is_err(), "extends cycle should be detected");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("spec link cycle detected"), "msg: {msg}");
+    }
+
+    #[test]
+    fn cycle_detection_extends_no_cycle() {
+        // A extends B (no cycle — linear chain).
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: extends
+        target: system/b.md
+  - path: system/b.md
+    title: B
+    owner: user:test
+    links: []
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(
+            result.is_ok(),
+            "linear extends chain should not trigger cycle detection"
+        );
+    }
+
+    #[test]
+    fn cycle_detection_mixed_extends_depends_cycle() {
+        // A extends B depends_on A → cycle (mixed directed types).
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: A
+    owner: user:test
+    links:
+      - type: extends
+        target: system/b.md
+  - path: system/b.md
+    title: B
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/a.md
+"#;
+        let manifest = parse_manifest(yaml).unwrap();
+        let result = detect_link_cycles(&manifest);
+        assert!(
+            result.is_err(),
+            "mixed extends/depends_on cycle should be detected"
         );
     }
 }

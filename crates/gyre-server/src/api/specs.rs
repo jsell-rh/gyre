@@ -478,7 +478,7 @@ pub async fn approve_spec(
                         }
                     }
                 }
-                _ => {}
+                _ => {} // wildcard:ok — extends/references/supersedes have no pre-approval gate; supersedes side-effect handled below
             }
         }
     }
@@ -4227,5 +4227,92 @@ specs:
         // with a message containing "spec link merge gate").
         // list_queue returns non-terminal entries — if it's empty, the entry
         // reached a terminal state (failed at a later step, not at spec link gate).
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merge_gate_blocks_conflicts_with_approved_reverse_direction() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+
+        let state = test_state();
+        let sha = "c".repeat(40);
+        // MR references spec-b, which is the TARGET of a conflicts_with link from spec-a.
+        // Since conflicts_with is bidirectional, this should also be blocked.
+        let spec_ref = format!("system/spec-b.md@{sha}");
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                // Seed spec-a (the source of the conflicts_with link, approved).
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/spec-a.md".to_string(),
+                        title: "Spec A".to_string(),
+                        owner: "user:test".to_string(),
+                        kind: None,
+                        current_sha: "a".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Approved,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "clean".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: None,
+                        workspace_id: None,
+                    })
+                    .await
+                    .unwrap();
+                // Seed spec-b (the referenced spec, also the target of conflicts_with).
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/spec-b.md".to_string(),
+                        title: "Spec B".to_string(),
+                        owner: "user:test".to_string(),
+                        kind: None,
+                        current_sha: sha.clone(),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Approved,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "clean".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: None,
+                        workspace_id: None,
+                    })
+                    .await
+                    .unwrap();
+
+                // spec-a conflicts_with spec-b — link source is spec-a, target is spec-b.
+                // The MR references spec-b (the target), so bidirectional check is needed.
+                let mut store = state.spec_links_store.lock().await;
+                store.push(SpecLinkEntry {
+                    id: "conflict-reverse-1".to_string(),
+                    source_path: "system/spec-a.md".to_string(),
+                    source_repo_id: Some("repo1".to_string()),
+                    link_type: SpecLinkType::ConflictsWith,
+                    target_path: "system/spec-b.md".to_string(),
+                    target_repo_id: None,
+                    target_display: None,
+                    target_sha: None,
+                    reason: None,
+                    status: "active".to_string(),
+                    created_at: 1700000000,
+                    stale_since: None,
+                });
+            })
+        });
+
+        let _entry_id = seed_merge_gate_scenario(&state, &spec_ref);
+
+        crate::merge_processor::run_once(&state).await.unwrap();
+
+        // Entry should be Failed because of bidirectional conflicts_with check.
+        let all = state.merge_queue.list_queue().await.unwrap();
+        assert!(
+            all.is_empty(),
+            "MR referencing target of conflicts_with link should be Failed (bidirectional check)"
+        );
     }
 }
