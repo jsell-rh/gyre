@@ -324,13 +324,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 interval_secs: 86400,
                 enabled: true,
             },
-            |_state| async move {
-                // Stub: real impl iterates spec_links_store entries where target_display
-                // starts with '@', re-resolves workspace slug → repo UUID, and updates
-                // target_repo_id + status ("unresolved" if slug no longer found).
-                tracing::debug!("cross_workspace_link_staleness_check: stub, no-op");
-                Ok(())
-            },
+            |state| async move { crate::spec_link_staleness::run_once(&state).await },
         )
         .await;
 

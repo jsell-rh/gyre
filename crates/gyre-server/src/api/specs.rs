@@ -460,6 +460,20 @@ pub async fn approve_spec(
                         }
                     }
                 }
+                SpecLinkType::DependsOn => {
+                    // TASK-016: Target spec's implementation must be complete (approved)
+                    // before the depending spec can be approved.
+                    // spec-links.md §Approval Gates: "Implementation tasks for source spec
+                    // are blocked until target spec's implementation tasks are complete."
+                    if let Some(target) = state.spec_ledger.find_by_path(&link.target_path).await? {
+                        if target.approval_status != ApprovalStatus::Approved {
+                            return Err(ApiError::InvalidInput(format!(
+                                "cannot approve '{}': depends on '{}' whose implementation is not yet complete (status: {})",
+                                spec_path, link.target_path, target.approval_status
+                            )));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -677,6 +691,61 @@ pub async fn approve_spec(
                     })),
                 )
                 .await;
+        }
+    }
+
+    // TASK-016: Supersedes side-effect — mark target specs as Deprecated when
+    // the superseding spec is approved (spec-links.md §Approval Gates).
+    {
+        let supersedes_links: Vec<_> = {
+            let links = state.spec_links_store.lock().await;
+            links
+                .iter()
+                .filter(|l| l.source_path == spec_path && l.link_type == SpecLinkType::Supersedes)
+                .cloned()
+                .collect()
+        };
+
+        for link in &supersedes_links {
+            if let Ok(Some(mut target_entry)) =
+                state.spec_ledger.find_by_path(&link.target_path).await
+            {
+                if target_entry.approval_status != ApprovalStatus::Deprecated {
+                    target_entry.approval_status = ApprovalStatus::Deprecated;
+                    target_entry.updated_at = now;
+                    let _ = state.spec_ledger.save(&target_entry).await;
+
+                    // Emit deprecation event on the message bus.
+                    let dest = match target_entry.workspace_id.as_deref() {
+                        Some(ws_id) => gyre_common::message::Destination::Workspace(
+                            gyre_common::Id::new(ws_id),
+                        ),
+                        None => gyre_common::message::Destination::Broadcast,
+                    };
+                    state
+                        .emit_event(
+                            target_entry
+                                .workspace_id
+                                .as_ref()
+                                .map(|ws| gyre_common::Id::new(ws.as_str())),
+                            dest,
+                            gyre_common::message::MessageKind::StaleSpecWarning,
+                            Some(serde_json::json!({
+                                "type": "spec_deprecated",
+                                "spec_path": link.target_path,
+                                "superseded_by": spec_path,
+                                "deprecated_at": now,
+                            })),
+                        )
+                        .await;
+
+                    tracing::info!(
+                        source = %spec_path,
+                        target = %link.target_path,
+                        "spec-links: supersedes approval — target marked Deprecated"
+                    );
+                }
+            }
         }
     }
 
@@ -2211,6 +2280,191 @@ mod tests {
             .unwrap();
         // Conflict not approved → allowed
         assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // -----------------------------------------------------------------------
+    // Link enforcement: depends_on gate (TASK-016)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_blocked_by_depends_on_gate() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        // dependency spec: pending (implementation not complete)
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/dependency.md",
+                ApprovalStatus::Pending,
+            ))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/dependent.md",
+                ApprovalStatus::Pending,
+            ))
+            .await
+            .unwrap();
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "dependent-depends-dependency".to_string(),
+            source_path: "system/dependent.md".to_string(),
+            source_repo_id: None,
+            link_type: SpecLinkType::DependsOn,
+            target_path: "system/dependency.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
+        });
+
+        let app = crate::api::api_router().with_state(state);
+        let sha = "a".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdependent.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Dependency not approved → 400
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_allowed_when_dependency_approved() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        // dependency spec: approved (implementation complete)
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/dependency.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/dependent.md",
+                ApprovalStatus::Pending,
+            ))
+            .await
+            .unwrap();
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "dependent-depends-dependency".to_string(),
+            source_path: "system/dependent.md".to_string(),
+            source_repo_id: None,
+            link_type: SpecLinkType::DependsOn,
+            target_path: "system/dependency.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: None,
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
+        });
+
+        let app = crate::api::api_router().with_state(state);
+        let sha = "a".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdependent.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Dependency approved → 201
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // -----------------------------------------------------------------------
+    // Link enforcement: supersedes side-effect (TASK-016)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_supersedes_marks_target_deprecated() {
+        use crate::spec_registry::{SpecLinkEntry, SpecLinkType};
+        let state = test_state();
+
+        // Target spec: approved (will be deprecated on superseding approval)
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/old-spec.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+        // Source spec: pending, has supersedes link
+        let mut source_entry = make_ledger_entry("system/new-spec.md", ApprovalStatus::Pending);
+        source_entry.current_sha = "a".repeat(40);
+        state.spec_ledger.save(&source_entry).await.unwrap();
+        state.spec_links_store.lock().await.push(SpecLinkEntry {
+            id: "new-supersedes-old".to_string(),
+            source_path: "system/new-spec.md".to_string(),
+            source_repo_id: None,
+            link_type: SpecLinkType::Supersedes,
+            target_path: "system/old-spec.md".to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: None,
+            reason: Some("Replaced by new-spec".to_string()),
+            status: "active".to_string(),
+            created_at: 1700000000,
+            stale_since: None,
+        });
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let sha = "a".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fnew-spec.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Approval should succeed
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Verify the target spec is now deprecated
+        let target = state
+            .spec_ledger
+            .find_by_path("system/old-spec.md")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            target.approval_status,
+            ApprovalStatus::Deprecated,
+            "superseded target should be marked Deprecated"
+        );
     }
 
     // -----------------------------------------------------------------------

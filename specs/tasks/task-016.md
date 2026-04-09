@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §Link Types, §Forge-Maintained Spec Graph  
 **Depends on:** None (spec links store and approval flow already exist)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -86,4 +86,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(spec-links): implement staleness job & approval gate enforcement (TASK-016)`

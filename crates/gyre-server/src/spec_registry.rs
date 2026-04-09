@@ -498,8 +498,28 @@ pub async fn sync_spec_ledger(
             }
         }
 
-        // Enforce link semantics.
-        for link in &new_links {
+        // Enforce link semantics and detect staleness.
+        // TASK-016: Check target_sha against current ledger SHA for ALL links.
+        // spec-links.md §Automatic Staleness Detection.
+        for link in &mut new_links {
+            // Staleness detection: if the link has a pinned target_sha but the target
+            // spec's current SHA in the ledger differs, mark the link as stale.
+            if let Some(pinned_sha) = &link.target_sha {
+                if let Ok(Some(target_entry)) = ledger.find_by_path(&link.target_path).await {
+                    let current_sha = &target_entry.current_sha;
+                    if !current_sha.is_empty() && current_sha != pinned_sha {
+                        link.status = "stale".to_string();
+                        link.stale_since = Some(now);
+                        info!(
+                            source = %link.source_path,
+                            target = %link.target_path,
+                            link_type = %link.link_type,
+                            "spec-registry: link target SHA changed — marking stale"
+                        );
+                    }
+                }
+            }
+
             match link.link_type {
                 SpecLinkType::Supersedes => {
                     if let Ok(Some(mut target_entry)) = ledger.find_by_path(&link.target_path).await
@@ -517,24 +537,19 @@ pub async fn sync_spec_ledger(
                     }
                 }
                 SpecLinkType::Extends => {
-                    if let Some(pinned_sha) = &link.target_sha {
-                        if let Ok(Some(target_entry)) = ledger.find_by_path(&link.target_path).await
+                    // For extends links with stale target: mark extending spec as drifted.
+                    if link.status == "stale" {
+                        info!(
+                            source = %link.source_path,
+                            target = %link.target_path,
+                            "spec-registry: extends target SHA changed — marking extending spec drifted"
+                        );
+                        if let Ok(Some(mut source_entry)) =
+                            ledger.find_by_path(&link.source_path).await
                         {
-                            let current_sha = &target_entry.current_sha;
-                            if !current_sha.is_empty() && current_sha != pinned_sha {
-                                info!(
-                                    source = %link.source_path,
-                                    target = %link.target_path,
-                                    "spec-registry: extends target SHA changed — marking extending spec drifted"
-                                );
-                                if let Ok(Some(mut source_entry)) =
-                                    ledger.find_by_path(&link.source_path).await
-                                {
-                                    source_entry.drift_status = "drifted".to_string();
-                                    source_entry.updated_at = now;
-                                    let _ = ledger.save(&source_entry).await;
-                                }
-                            }
+                            source_entry.drift_status = "drifted".to_string();
+                            source_entry.updated_at = now;
+                            let _ = ledger.save(&source_entry).await;
                         }
                     }
                 }
