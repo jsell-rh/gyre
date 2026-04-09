@@ -118,7 +118,7 @@ R2 finding F3 is resolved. The `get_conflicts` endpoint now correctly collects `
 
 ## Findings
 
-- [ ] **F4: `merge_gate_warns_on_unimplemented_depends_on` test has no assertions — tautological**
+- [-] [process-revision-complete] **F4: `merge_gate_warns_on_unimplemented_depends_on` test has no assertions — tautological**
 
   **Location:** `crates/gyre-server/src/api/specs.rs:4262-4342`
 
