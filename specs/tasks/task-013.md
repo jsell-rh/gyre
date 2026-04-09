@@ -2,7 +2,7 @@
 
 **Spec reference:** `human-system-interface.md` §9 (Briefing Detail)
 **Depends on:** None (consumes existing notification, gate result, and spec link data)
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -91,4 +91,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(briefing): implement cross_workspace and exceptions sections (TASK-013)`

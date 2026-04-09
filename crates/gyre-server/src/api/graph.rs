@@ -23,6 +23,7 @@ use axum::{
     Json,
 };
 use futures_util::{stream, StreamExt as _};
+use gyre_common::GateStatus;
 use gyre_common::{
     graph::{ArchitecturalDelta, EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence},
     Id,
@@ -849,11 +850,120 @@ pub async fn assemble_briefing(
         })
         .collect();
 
-    // Section: cross_workspace — stub (empty for now).
-    let cross_workspace: Vec<BriefingItem> = Vec::new();
+    // Section: cross_workspace — inbound spec links from other workspaces.
+    let cross_workspace: Vec<BriefingItem> = {
+        let ws_repos = state
+            .repos
+            .list_by_workspace(&ws_id)
+            .await
+            .unwrap_or_default();
+        let ws_repo_ids: std::collections::HashSet<String> =
+            ws_repos.iter().map(|r| r.id.to_string()).collect();
+        let links = state.spec_links_store.lock().await;
+        links
+            .iter()
+            .filter(|link| {
+                // Inbound links: target repo is in this workspace, source repo is not.
+                link.target_repo_id
+                    .as_ref()
+                    .is_some_and(|tid| ws_repo_ids.contains(tid))
+                    && link
+                        .source_repo_id
+                        .as_ref()
+                        .is_none_or(|sid| !ws_repo_ids.contains(sid))
+                    && link.created_at >= since
+            })
+            .map(|link| BriefingItem {
+                title: format!("Dependency updated: {}", link.target_path),
+                description: link
+                    .target_display
+                    .as_ref()
+                    .map(|d| format!("{d} was updated"))
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{} changed (link type: {:?})",
+                            link.source_path, link.link_type
+                        )
+                    }),
+                entity_type: "spec_link".to_string(),
+                entity_id: Some(link.id.clone()),
+                spec_path: Some(link.target_path.clone()),
+                timestamp: link.created_at,
+            })
+            .collect()
+    };
 
-    // Section: exceptions — stub (empty for now, future: gate failures).
-    let exceptions: Vec<BriefingItem> = Vec::new();
+    // Section: exceptions — gate failures, spec assertion failures, MR reverts.
+    let exceptions: Vec<BriefingItem> = {
+        let mut items = Vec::new();
+
+        // 1. Gate failures: failed gate results for workspace MRs since `since`.
+        for mr in all_mrs.iter().filter(|mr| mr.updated_at >= since) {
+            let results = state
+                .gate_results
+                .list_by_mr_id(&mr.id.to_string())
+                .await
+                .unwrap_or_default();
+            for gr in results.iter().filter(|gr| gr.status == GateStatus::Failed) {
+                items.push(BriefingItem {
+                    title: format!("Gate failure: {} MR", mr.title),
+                    description: gr
+                        .output
+                        .as_deref()
+                        .unwrap_or("Gate check failed")
+                        .to_string(),
+                    entity_type: "gate_failure".to_string(),
+                    entity_id: Some(mr.id.to_string()),
+                    spec_path: mr
+                        .spec_ref
+                        .as_ref()
+                        .map(|s| s.split('@').next().unwrap_or(s).to_string()),
+                    timestamp: gr.finished_at.unwrap_or(mr.updated_at),
+                });
+            }
+        }
+
+        // 2. Spec assertion failures: recent notifications of type SpecAssertionFailure.
+        let recent_notifications = state
+            .notifications
+            .list_recent(200)
+            .await
+            .unwrap_or_default();
+        for n in recent_notifications.iter().filter(|n| {
+            n.notification_type == gyre_common::NotificationType::SpecAssertionFailure
+                && n.workspace_id == ws_id
+                && n.created_at >= since as i64
+        }) {
+            items.push(BriefingItem {
+                title: n.title.clone(),
+                description: n.body.clone().unwrap_or_default(),
+                entity_type: "assertion_failure".to_string(),
+                entity_id: n.entity_ref.clone(),
+                spec_path: n.entity_ref.clone(),
+                timestamp: n.created_at as u64,
+            });
+        }
+
+        // 3. MR reverts: MRs with Reverted status since `since`.
+        for mr in all_mrs
+            .iter()
+            .filter(|mr| mr.status == MrStatus::Reverted && mr.updated_at >= since)
+        {
+            items.push(BriefingItem {
+                title: format!("MR reverted: {}", mr.title),
+                description: format!("{} → {} (reverted)", mr.source_branch, mr.target_branch),
+                entity_type: "mr_revert".to_string(),
+                entity_id: Some(mr.id.to_string()),
+                spec_path: mr
+                    .spec_ref
+                    .as_ref()
+                    .map(|s| s.split('@').next().unwrap_or(s).to_string()),
+                timestamp: mr.reverted_at.unwrap_or(mr.updated_at),
+            });
+        }
+
+        items
+    };
 
     // Metrics: count merged MRs since `since`.
     let mrs_merged = completed.len() as u32;
@@ -1751,5 +1861,284 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp.headers().get("content-type").unwrap();
         assert!(ct.to_str().unwrap().contains("text/event-stream"));
+    }
+
+    // ── Briefing cross_workspace + exceptions tests (TASK-013) ──────────
+
+    /// Helper: create a workspace and repo, returning (workspace_id, repo_id).
+    async fn setup_workspace_and_repo(state: &Arc<AppState>) -> (String, String) {
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-briefing"),
+            Id::new("tenant-1"),
+            "briefing-ws",
+            "briefing-ws",
+            1000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = gyre_domain::Repository {
+            id: Id::new("repo-1"),
+            workspace_id: Id::new("ws-briefing"),
+            name: "billing-service".to_string(),
+            path: "/repos/billing-service".to_string(),
+            default_branch: "main".to_string(), // hardcoded-default:ok — test fixture
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.repos.create(&repo).await.unwrap();
+        ("ws-briefing".to_string(), "repo-1".to_string())
+    }
+
+    #[tokio::test]
+    async fn briefing_cross_workspace_populated_when_linked_spec_changes() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Add a cross-workspace spec link: external repo → our workspace repo.
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-1".to_string(),
+                source_path: "system/idempotent-api.md".to_string(),
+                source_repo_id: Some("external-repo".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/payment-retry.md".to_string(),
+                target_repo_id: Some("repo-1".to_string()),
+                target_display: Some("@platform-core/api-svc/system/idempotent-api.md".to_string()),
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 2000,
+                stale_since: None,
+            });
+        }
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(briefing.cross_workspace.len(), 1);
+        assert!(briefing.cross_workspace[0]
+            .title
+            .contains("payment-retry.md"));
+        assert_eq!(briefing.cross_workspace[0].entity_type, "spec_link");
+        assert_eq!(
+            briefing.cross_workspace[0].spec_path.as_deref(),
+            Some("system/payment-retry.md")
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_cross_workspace_excludes_same_workspace_links() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Add a same-workspace link (source_repo_id is also in the workspace).
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-same".to_string(),
+                source_path: "system/auth.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/users.md".to_string(),
+                target_repo_id: Some("repo-1".to_string()),
+                target_display: None,
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 2000,
+                stale_since: None,
+            });
+        }
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(
+            briefing.cross_workspace.is_empty(),
+            "same-workspace links should not appear in cross_workspace section"
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_exceptions_gate_failures() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Create an MR in the workspace.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-47"),
+            Id::new("repo-1"),
+            "Add billing retry",
+            "feat/billing-retry",
+            "main",
+            2000,
+        );
+        mr.workspace_id = Id::new("ws-briefing");
+        mr.updated_at = 2000;
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Create a failed gate result for that MR.
+        let gr = gyre_domain::GateResult {
+            id: Id::new("gr-1"),
+            gate_id: Id::new("gate-tests"),
+            mr_id: Id::new("mr-47"),
+            status: GateStatus::Failed,
+            output: Some("cargo test failed (3 tests)".to_string()),
+            started_at: Some(1900),
+            finished_at: Some(2000),
+        };
+        state.gate_results.save(&gr).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let gate_failures: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "gate_failure")
+            .collect();
+        assert_eq!(gate_failures.len(), 1);
+        assert!(gate_failures[0].title.contains("Add billing retry"));
+        assert!(gate_failures[0].description.contains("cargo test failed"));
+    }
+
+    #[tokio::test]
+    async fn briefing_exceptions_spec_assertion_failures() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Create a SpecAssertionFailure notification in this workspace.
+        let notif = gyre_common::Notification::new(
+            Id::new("notif-1"),
+            Id::new("ws-briefing"),
+            Id::new("user-1"),
+            gyre_common::NotificationType::SpecAssertionFailure,
+            "Spec assertion failed: auth.md §3",
+            "tenant-1",
+            2000,
+        );
+        state.notifications.create(&notif).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let assertions: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "assertion_failure")
+            .collect();
+        assert_eq!(assertions.len(), 1);
+        assert!(assertions[0].title.contains("Spec assertion failed"));
+    }
+
+    #[tokio::test]
+    async fn briefing_exceptions_mr_reverts() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Create a reverted MR. Transition: Open → Approved → Merged → Reverted.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-99"),
+            Id::new("repo-1"),
+            "Broken migration",
+            "feat/migration",
+            "main",
+            1800,
+        );
+        mr.workspace_id = Id::new("ws-briefing");
+        mr.transition_status(MrStatus::Approved).unwrap();
+        mr.transition_status(MrStatus::Merged).unwrap();
+        mr.revert(Id::new("revert-mr-1"), 2100).unwrap();
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let reverts: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "mr_revert")
+            .collect();
+        assert_eq!(reverts.len(), 1);
+        assert!(reverts[0].title.contains("Broken migration"));
+    }
+
+    #[tokio::test]
+    async fn briefing_empty_sections_return_empty_arrays() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(briefing.cross_workspace.is_empty());
+        assert!(briefing.exceptions.is_empty());
+        assert!(briefing.completed.is_empty());
+        assert!(briefing.in_progress.is_empty());
+    }
+
+    #[tokio::test]
+    async fn briefing_since_filtering_excludes_old_data() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Add a cross-workspace link with old timestamp.
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-old".to_string(),
+                source_path: "old-spec.md".to_string(),
+                source_repo_id: Some("external-repo".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/old-dep.md".to_string(),
+                target_repo_id: Some("repo-1".to_string()),
+                target_display: None,
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 500, // before since=1500
+                stale_since: None,
+            });
+        }
+
+        // Create an old reverted MR. Transition: Open → Approved → Merged → Reverted.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-old"),
+            Id::new("repo-1"),
+            "Old revert",
+            "feat/old",
+            "main",
+            400,
+        );
+        mr.workspace_id = Id::new("ws-briefing");
+        mr.transition_status(MrStatus::Approved).unwrap();
+        mr.transition_status(MrStatus::Merged).unwrap();
+        mr.revert(Id::new("revert-old"), 500).unwrap();
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(
+            briefing.cross_workspace.is_empty(),
+            "old cross-workspace links should be filtered out"
+        );
+        assert!(
+            briefing.exceptions.is_empty(),
+            "old MR reverts should be filtered out"
+        );
     }
 }
