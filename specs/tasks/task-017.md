@@ -78,4 +78,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(spec-registry): enforce manifest coverage on push (TASK-017)`
