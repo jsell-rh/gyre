@@ -1161,6 +1161,98 @@ impl DependencyRepository for MemDependencyRepository {
     }
 }
 
+/// In-memory breaking change repository.
+#[derive(Default)]
+pub struct MemBreakingChangeRepository {
+    store: Arc<Mutex<Vec<gyre_domain::BreakingChange>>>,
+}
+
+#[async_trait]
+impl gyre_ports::BreakingChangeRepository for MemBreakingChangeRepository {
+    async fn create(&self, bc: &gyre_domain::BreakingChange) -> Result<()> {
+        self.store.lock().await.push(bc.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<gyre_domain::BreakingChange>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|b| b.id.as_str() == id.as_str())
+            .cloned())
+    }
+
+    async fn list_unacknowledged(&self) -> Result<Vec<gyre_domain::BreakingChange>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|b| !b.acknowledged)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_by_source_repo(
+        &self,
+        source_repo_id: &Id,
+    ) -> Result<Vec<gyre_domain::BreakingChange>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|b| b.source_repo_id.as_str() == source_repo_id.as_str())
+            .cloned()
+            .collect())
+    }
+
+    async fn acknowledge(&self, id: &Id, acknowledged_by: &str, at: u64) -> Result<bool> {
+        let mut store = self.store.lock().await;
+        if let Some(bc) = store.iter_mut().find(|b| b.id.as_str() == id.as_str()) {
+            bc.acknowledged = true;
+            bc.acknowledged_by = Some(acknowledged_by.to_string());
+            bc.acknowledged_at = Some(at);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+/// In-memory dependency policy repository.
+#[derive(Default)]
+pub struct MemDependencyPolicyRepository {
+    store: Arc<Mutex<HashMap<String, gyre_domain::DependencyPolicy>>>,
+}
+
+#[async_trait]
+impl gyre_ports::DependencyPolicyRepository for MemDependencyPolicyRepository {
+    async fn get_for_workspace(&self, workspace_id: &Id) -> Result<gyre_domain::DependencyPolicy> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .get(workspace_id.as_str())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn set_for_workspace(
+        &self,
+        workspace_id: &Id,
+        policy: &gyre_domain::DependencyPolicy,
+    ) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(workspace_id.as_str().to_string(), policy.clone());
+        Ok(())
+    }
+}
+
 /// In-memory spawn log + revoked tokens store (M13.7).
 #[derive(Default)]
 pub struct MemSpawnLogRepository {
@@ -2835,6 +2927,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         audit_broadcast_tx: broadcast::channel(64).0,
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
         dependencies: Arc::new(MemDependencyRepository::default()),
+        breaking_changes: Arc::new(MemBreakingChangeRepository::default()),
+        dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),

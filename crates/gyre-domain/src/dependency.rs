@@ -101,3 +101,93 @@ pub enum DependencyStatus {
     /// Target repo was deleted or archived.
     Orphaned,
 }
+
+// ── Breaking change detection & enforcement ─────────────────────────────────
+
+/// A record of a detected breaking change in a target repo that affects dependents.
+///
+/// Created when a push to a repo is detected as a breaking change (semver major
+/// bump via conventional commit, or API contract change). One record per
+/// affected dependency edge.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BreakingChange {
+    pub id: Id,
+    /// The dependency edge that is affected.
+    pub dependency_edge_id: Id,
+    /// The repo that introduced the breaking change (target of the dep edge).
+    pub source_repo_id: Id,
+    /// The commit SHA that introduced the breaking change.
+    pub commit_sha: String,
+    /// Human-readable description of the breaking change.
+    pub description: String,
+    /// Unix timestamp when the breaking change was detected.
+    pub detected_at: u64,
+    /// Whether a dependent repo has acknowledged the breaking change.
+    pub acknowledged: bool,
+    /// Who acknowledged the breaking change.
+    pub acknowledged_by: Option<String>,
+    /// Unix timestamp when it was acknowledged.
+    pub acknowledged_at: Option<u64>,
+}
+
+impl BreakingChange {
+    pub fn new(
+        id: Id,
+        dependency_edge_id: Id,
+        source_repo_id: Id,
+        commit_sha: impl Into<String>,
+        description: impl Into<String>,
+        detected_at: u64,
+    ) -> Self {
+        Self {
+            id,
+            dependency_edge_id,
+            source_repo_id,
+            commit_sha: commit_sha.into(),
+            description: description.into(),
+            detected_at,
+            acknowledged: false,
+            acknowledged_by: None,
+            acknowledged_at: None,
+        }
+    }
+}
+
+/// Per-workspace dependency enforcement policy.
+///
+/// Controls how the forge responds to breaking changes, version drift,
+/// and stale dependencies across the workspace's repos.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DependencyPolicy {
+    /// What happens when a breaking change is detected: block, warn, or notify.
+    pub breaking_change_behavior: BreakingChangeBehavior,
+    /// Flag repos more than this many versions behind. 0 = disabled.
+    pub max_version_drift: u32,
+    /// Flag dependencies not updated in this many days. 0 = disabled.
+    pub stale_dependency_alert_days: u32,
+    /// Whether to auto-create tasks for dependency updates.
+    pub auto_create_update_tasks: bool,
+}
+
+impl Default for DependencyPolicy {
+    fn default() -> Self {
+        Self {
+            breaking_change_behavior: BreakingChangeBehavior::Warn,
+            max_version_drift: 3,
+            stale_dependency_alert_days: 30,
+            auto_create_update_tasks: true,
+        }
+    }
+}
+
+/// Enforcement behavior for breaking changes in the dependency graph.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakingChangeBehavior {
+    /// Breaking change cannot merge until all dependents acknowledge.
+    Block,
+    /// Breaking change merges with warnings. Tasks auto-created.
+    Warn,
+    /// Breaking change merges silently. Dependent orchestrators notified.
+    Notify,
+}

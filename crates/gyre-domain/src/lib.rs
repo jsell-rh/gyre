@@ -70,7 +70,10 @@ pub use constraint_evaluator::{
     TargetContext,
 };
 pub use container_audit::ContainerAuditRecord;
-pub use dependency::{DependencyEdge, DependencyStatus, DependencyType, DetectionMethod};
+pub use dependency::{
+    BreakingChange, BreakingChangeBehavior, DependencyEdge, DependencyPolicy, DependencyStatus,
+    DependencyType, DetectionMethod,
+};
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
 pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
 pub use go_extractor::GoExtractor;

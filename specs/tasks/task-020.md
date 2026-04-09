@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §Breaking Change Detection, §Enforcement Policies  
 **Depends on:** None (builds on M22.4 dependency graph infrastructure)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -107,4 +107,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(deps): implement breaking change detection and enforcement (TASK-020)`

@@ -101,6 +101,10 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dep edge; **Admin only** (H-13, M22.4) |
 | `GET` | `/api/v1/repos/{id}/blast-radius` | BFS transitive dependents -- repos affected if this one changes (M22.4) |
 | `GET` | `/api/v1/dependencies/graph` | Full tenant-wide dependency DAG: `{nodes, edges}` (M22.4) |
+| `GET` | `/api/v1/dependencies/breaking` | List unacknowledged breaking changes tenant-wide — `[{id, dependency_edge_id, source_repo_id, commit_sha, description, detected_at, acknowledged, acknowledged_by?, acknowledged_at?}]` (TASK-020) |
+| `POST` | `/api/v1/dependencies/breaking/{id}/acknowledge` | Acknowledge a breaking change, clearing any merge block; returns 204 No Content (TASK-020) |
+| `GET` | `/api/v1/workspaces/{id}/dependency-policy` | Per-workspace dependency enforcement policy — `{breaking_change_behavior: block\|warn\|notify, max_version_drift, stale_dependency_alert_days, auto_create_update_tasks}` (TASK-020) |
+| `PUT` | `/api/v1/workspaces/{id}/dependency-policy` | Update dependency policy (partial update) — same fields, all optional (TASK-020) |
 | `GET` | `/api/v1/repos/{id}/graph` | Full knowledge graph for a repo — `{repo_id, nodes, edges}`; `GraphNode` fields: `id`, `repo_id`, `node_type` (`Package`/`Module`/`Type`/`Interface`/`Function`/`Endpoint`/`Table`), `name`, `qualified_name`, `file_path`, `line_start`/`line_end`, `visibility`, `doc_comment`, `spec_path`, `spec_confidence` (`None`/`Low`/`Medium`/`High`), `last_modified_sha`, `last_modified_by`, `complexity`, `churn_count_30d` (M30) |
 | `GET` | `/api/v1/repos/{id}/graph/types` | Type nodes (structs, enums) with their edges (M30) |
 | `GET` | `/api/v1/repos/{id}/graph/modules` | Module nodes with containment edges (M30) |

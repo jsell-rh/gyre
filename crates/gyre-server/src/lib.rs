@@ -60,17 +60,17 @@ use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, Tel
 use gyre_common::Id;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
-    ComputeTargetRepository, ContainerAuditRepository, ConversationRepository, CostRepository,
-    DependencyRepository, GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository,
-    MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
-    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
-    QualityGateRepository, RepoRepository, ReviewRepository, SpawnLogRepository,
-    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetRepository,
+    BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
+    ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
+    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
+    MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
+    MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
+    PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
+    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
+    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
+    TeamRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -247,6 +247,10 @@ pub struct AppState {
     pub network_peers: Arc<dyn NetworkPeerRepository>,
     /// Cross-repo dependency graph (M22.4).
     pub dependencies: Arc<dyn DependencyRepository>,
+    /// Breaking change records (M22.4 — TASK-020).
+    pub breaking_changes: Arc<dyn BreakingChangeRepository>,
+    /// Per-workspace dependency enforcement policies (M22.4 — TASK-020).
+    pub dependency_policies: Arc<dyn DependencyPolicyRepository>,
     /// Request rate limiter (requests/sec).
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
@@ -833,6 +837,8 @@ pub fn build_state(
             mem::MemNetworkPeerRepository::default()
         ),
         dependencies: Arc::new(mem::MemDependencyRepository::default()),
+        breaking_changes: Arc::new(mem::MemBreakingChangeRepository::default()),
+        dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),

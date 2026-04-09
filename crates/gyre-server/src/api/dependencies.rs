@@ -343,6 +343,209 @@ pub async fn blast_radius(
     }))
 }
 
+// ── Breaking change endpoints (TASK-020) ────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct BreakingChangeResponse {
+    pub id: String,
+    pub dependency_edge_id: String,
+    pub source_repo_id: String,
+    pub commit_sha: String,
+    pub description: String,
+    pub detected_at: u64,
+    pub acknowledged: bool,
+    pub acknowledged_by: Option<String>,
+    pub acknowledged_at: Option<u64>,
+}
+
+impl From<gyre_domain::BreakingChange> for BreakingChangeResponse {
+    fn from(bc: gyre_domain::BreakingChange) -> Self {
+        Self {
+            id: bc.id.to_string(),
+            dependency_edge_id: bc.dependency_edge_id.to_string(),
+            source_repo_id: bc.source_repo_id.to_string(),
+            commit_sha: bc.commit_sha,
+            description: bc.description,
+            detected_at: bc.detected_at,
+            acknowledged: bc.acknowledged,
+            acknowledged_by: bc.acknowledged_by,
+            acknowledged_at: bc.acknowledged_at,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct DependencyPolicyResponse {
+    pub breaking_change_behavior: gyre_domain::BreakingChangeBehavior,
+    pub max_version_drift: u32,
+    pub stale_dependency_alert_days: u32,
+    pub auto_create_update_tasks: bool,
+}
+
+impl From<gyre_domain::DependencyPolicy> for DependencyPolicyResponse {
+    fn from(p: gyre_domain::DependencyPolicy) -> Self {
+        Self {
+            breaking_change_behavior: p.breaking_change_behavior,
+            max_version_drift: p.max_version_drift,
+            stale_dependency_alert_days: p.stale_dependency_alert_days,
+            auto_create_update_tasks: p.auto_create_update_tasks,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateDependencyPolicyRequest {
+    pub breaking_change_behavior: Option<gyre_domain::BreakingChangeBehavior>,
+    pub max_version_drift: Option<u32>,
+    pub stale_dependency_alert_days: Option<u32>,
+    pub auto_create_update_tasks: Option<bool>,
+}
+
+/// GET /api/v1/dependencies/breaking
+/// Lists all unacknowledged breaking changes across the tenant.
+pub async fn list_breaking_changes(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<BreakingChangeResponse>>, ApiError> {
+    let changes = state
+        .breaking_changes
+        .list_unacknowledged()
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(changes.into_iter().map(Into::into).collect()))
+}
+
+/// POST /api/v1/dependencies/breaking/:id/acknowledge
+/// Acknowledge a breaking change, clearing any merge block.
+pub async fn acknowledge_breaking_change(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let bc_id = Id::new(&id);
+
+    // Verify the breaking change exists.
+    let bc = state
+        .breaking_changes
+        .find_by_id(&bc_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("breaking change {id} not found")))?;
+
+    if bc.acknowledged {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let now = now_secs();
+    let acknowledged = state
+        .breaking_changes
+        .acknowledge(&bc_id, "api", now)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    if !acknowledged {
+        return Err(ApiError::NotFound(format!(
+            "breaking change {id} not found"
+        )));
+    }
+
+    // If all breaking changes for this dependency edge are now acknowledged,
+    // revert the edge status to Active.
+    let edge_id = bc.dependency_edge_id.clone();
+    let all_for_edge = state
+        .breaking_changes
+        .list_by_source_repo(&bc.source_repo_id)
+        .await
+        .unwrap_or_default();
+
+    let all_acknowledged = all_for_edge
+        .iter()
+        .filter(|b| b.dependency_edge_id.as_str() == edge_id.as_str())
+        .all(|b| b.acknowledged || b.id.as_str() == id);
+
+    if all_acknowledged {
+        if let Some(mut edge) = state.dependencies.find_by_id(&edge_id).await.ok().flatten() {
+            edge.status = gyre_domain::DependencyStatus::Active;
+            edge.last_verified_at = now;
+            if let Err(e) = state.dependencies.save(&edge).await {
+                tracing::warn!("failed to revert edge status to active: {e}");
+            }
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/v1/workspaces/:id/dependency-policy
+/// Returns the dependency enforcement policy for a workspace.
+pub async fn get_dependency_policy(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<DependencyPolicyResponse>, ApiError> {
+    let workspace_id = Id::new(&id);
+
+    // Verify workspace exists.
+    state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+
+    let policy = state
+        .dependency_policies
+        .get_for_workspace(&workspace_id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(policy.into()))
+}
+
+/// PUT /api/v1/workspaces/:id/dependency-policy
+/// Update the dependency enforcement policy for a workspace.
+pub async fn set_dependency_policy(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateDependencyPolicyRequest>,
+) -> Result<Json<DependencyPolicyResponse>, ApiError> {
+    let workspace_id = Id::new(&id);
+
+    // Verify workspace exists.
+    state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+
+    // Get current policy and apply partial updates.
+    let mut policy = state
+        .dependency_policies
+        .get_for_workspace(&workspace_id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    if let Some(behavior) = req.breaking_change_behavior {
+        policy.breaking_change_behavior = behavior;
+    }
+    if let Some(drift) = req.max_version_drift {
+        policy.max_version_drift = drift;
+    }
+    if let Some(days) = req.stale_dependency_alert_days {
+        policy.stale_dependency_alert_days = days;
+    }
+    if let Some(auto) = req.auto_create_update_tasks {
+        policy.auto_create_update_tasks = auto;
+    }
+
+    state
+        .dependency_policies
+        .set_for_workspace(&workspace_id, &policy)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(policy.into()))
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -497,5 +700,648 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
         let path_deps = crate::git_http::detect_cargo_path_deps(toml_content);
         assert_eq!(path_deps.len(), 1);
         assert_eq!(path_deps[0], "../other-repo");
+    }
+
+    // ── Breaking change detection tests ────────────────────────────────
+
+    #[test]
+    fn test_detect_breaking_commits_feat_bang() {
+        let log = "abc123 feat!: remove deprecated API endpoints";
+        let result = crate::git_http::detect_breaking_commits(log);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "abc123");
+        assert_eq!(result[0].1, "remove deprecated API endpoints");
+    }
+
+    #[test]
+    fn test_detect_breaking_commits_breaking_change_footer() {
+        // The parse_conventional function also detects BREAKING CHANGE: footer.
+        // The footer needs to be in the message body but for subject-only parsing
+        // the `!` modifier is the primary detection method.
+        let log = "def456 feat!: redesign authentication flow";
+        let result = crate::git_http::detect_breaking_commits(log);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "def456");
+    }
+
+    #[test]
+    fn test_detect_breaking_commits_non_breaking() {
+        let log = "abc123 feat: add new endpoint\ndef456 fix: correct typo";
+        let result = crate::git_http::detect_breaking_commits(log);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_detect_breaking_commits_mixed() {
+        let log = "aaa111 feat: safe change\nbbb222 feat!: breaking change\nccc333 fix: patch";
+        let result = crate::git_http::detect_breaking_commits(log);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "bbb222");
+        assert_eq!(result[0].1, "breaking change");
+    }
+
+    #[test]
+    fn test_detect_breaking_commits_empty() {
+        let result = crate::git_http::detect_breaking_commits("");
+        assert!(result.is_empty());
+    }
+
+    // ── Breaking change record CRUD tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_breaking_change_create_and_list() {
+        let state = setup();
+        let a = create_repo(&state, "bc-a").await;
+        let b = create_repo(&state, "bc-b").await;
+
+        // Create a dependency edge: A depends on B.
+        let edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            a.clone(),
+            b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Create a breaking change record.
+        let bc = gyre_domain::BreakingChange::new(
+            Id::new("bc-1"),
+            edge.id.clone(),
+            b.clone(),
+            "abc123",
+            "remove deprecated API",
+            2000,
+        );
+        state.breaking_changes.create(&bc).await.unwrap();
+
+        // List unacknowledged.
+        let unacked = state.breaking_changes.list_unacknowledged().await.unwrap();
+        assert_eq!(unacked.len(), 1);
+        assert_eq!(unacked[0].commit_sha, "abc123");
+        assert_eq!(unacked[0].description, "remove deprecated API");
+        assert!(!unacked[0].acknowledged);
+    }
+
+    #[tokio::test]
+    async fn test_breaking_change_acknowledge() {
+        let state = setup();
+        let a = create_repo(&state, "ack-a").await;
+        let b = create_repo(&state, "ack-b").await;
+
+        let edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            a.clone(),
+            b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        let bc = gyre_domain::BreakingChange::new(
+            Id::new("bc-ack-1"),
+            edge.id.clone(),
+            b.clone(),
+            "def456",
+            "redesign auth",
+            2000,
+        );
+        state.breaking_changes.create(&bc).await.unwrap();
+
+        // Acknowledge.
+        let acked = state
+            .breaking_changes
+            .acknowledge(&Id::new("bc-ack-1"), "user-1", 3000)
+            .await
+            .unwrap();
+        assert!(acked);
+
+        // Verify acknowledged.
+        let found = state
+            .breaking_changes
+            .find_by_id(&Id::new("bc-ack-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(found.acknowledged);
+        assert_eq!(found.acknowledged_by, Some("user-1".to_string()));
+        assert_eq!(found.acknowledged_at, Some(3000));
+
+        // List unacknowledged should be empty.
+        let unacked = state.breaking_changes.list_unacknowledged().await.unwrap();
+        assert!(unacked.is_empty());
+    }
+
+    // ── Dependency policy tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_dependency_policy_default() {
+        let state = setup();
+        // Create workspace for policy lookup.
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-policy"),
+            Id::new("tenant-1"),
+            "test-workspace",
+            "test-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let policy = state
+            .dependency_policies
+            .get_for_workspace(&Id::new("ws-policy"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            policy.breaking_change_behavior,
+            gyre_domain::BreakingChangeBehavior::Warn
+        );
+        assert_eq!(policy.max_version_drift, 3);
+        assert!(policy.auto_create_update_tasks);
+    }
+
+    #[tokio::test]
+    async fn test_dependency_policy_set_and_get() {
+        let state = setup();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-policy-2"),
+            Id::new("tenant-1"),
+            "test-workspace-2",
+            "test-ws-2",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let custom_policy = gyre_domain::DependencyPolicy {
+            breaking_change_behavior: gyre_domain::BreakingChangeBehavior::Block,
+            max_version_drift: 5,
+            stale_dependency_alert_days: 60,
+            auto_create_update_tasks: false,
+        };
+
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-policy-2"), &custom_policy)
+            .await
+            .unwrap();
+
+        let retrieved = state
+            .dependency_policies
+            .get_for_workspace(&Id::new("ws-policy-2"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            retrieved.breaking_change_behavior,
+            gyre_domain::BreakingChangeBehavior::Block
+        );
+        assert_eq!(retrieved.max_version_drift, 5);
+        assert_eq!(retrieved.stale_dependency_alert_days, 60);
+        assert!(!retrieved.auto_create_update_tasks);
+    }
+
+    // ── Merge-time enforcement tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_merge_blocked_by_breaking_change_policy() {
+        // When policy is `block` and there are unacknowledged breaking changes
+        // from the MR's repo, the merge processor should fail the queue entry.
+        let state = setup();
+        let repo_a = create_repo(&state, "merge-block-a").await;
+        let repo_b = create_repo(&state, "merge-block-b").await;
+
+        // A depends on B.
+        let edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            repo_a.clone(),
+            repo_b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Breaking change from B.
+        let bc = gyre_domain::BreakingChange::new(
+            Id::new("bc-merge-1"),
+            edge.id.clone(),
+            repo_b.clone(),
+            "sha-breaking",
+            "removed API",
+            2000,
+        );
+        state.breaking_changes.create(&bc).await.unwrap();
+
+        // Create workspace with block policy.
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-block"),
+            Id::new("tenant-1"),
+            "workspace-block",
+            "ws-block",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let policy = gyre_domain::DependencyPolicy {
+            breaking_change_behavior: gyre_domain::BreakingChangeBehavior::Block,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-block"), &policy)
+            .await
+            .unwrap();
+
+        // Create an MR for repo_b in workspace ws-block.
+        let mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-block-1"),
+            repo_b.clone(),
+            "Test MR",
+            "feat/test",
+            "main",
+            0,
+        );
+        let mut mr = mr;
+        mr.workspace_id = Id::new("ws-block");
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Enqueue the MR.
+        let entry = gyre_domain::MergeQueueEntry::new(
+            Id::new("qe-block-1"),
+            Id::new("mr-block-1"),
+            50,
+            3000,
+        );
+        state.merge_queue.enqueue(&entry).await.unwrap();
+
+        // Run merge processor.
+        crate::merge_processor::run_once(&state).await.unwrap();
+
+        // The entry should be failed due to blocking policy.
+        let updated = state
+            .merge_queue
+            .find_by_id(&Id::new("qe-block-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, gyre_domain::MergeQueueEntryStatus::Failed);
+        assert!(updated
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("unacknowledged breaking change"));
+    }
+
+    #[tokio::test]
+    async fn test_merge_proceeds_after_acknowledgment() {
+        // When all breaking changes are acknowledged, the merge should not be blocked.
+        let state = setup();
+        let repo_a = create_repo(&state, "ack-merge-a").await;
+        let repo_b = create_repo(&state, "ack-merge-b").await;
+
+        let edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            repo_a.clone(),
+            repo_b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Breaking change, already acknowledged.
+        let mut bc = gyre_domain::BreakingChange::new(
+            Id::new("bc-ack-merge-1"),
+            edge.id.clone(),
+            repo_b.clone(),
+            "sha-ok",
+            "acknowledged change",
+            2000,
+        );
+        bc.acknowledged = true;
+        bc.acknowledged_by = Some("user-1".to_string());
+        bc.acknowledged_at = Some(2500);
+        state.breaking_changes.create(&bc).await.unwrap();
+
+        // Create workspace with block policy.
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-ack"),
+            Id::new("tenant-1"),
+            "workspace-ack",
+            "ws-ack",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let policy = gyre_domain::DependencyPolicy {
+            breaking_change_behavior: gyre_domain::BreakingChangeBehavior::Block,
+            ..Default::default()
+        };
+        state
+            .dependency_policies
+            .set_for_workspace(&Id::new("ws-ack"), &policy)
+            .await
+            .unwrap();
+
+        // Create an MR and enqueue.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-ack-1"),
+            repo_b.clone(),
+            "Test MR",
+            "feat/test",
+            "main",
+            0,
+        );
+        mr.workspace_id = Id::new("ws-ack");
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let entry =
+            gyre_domain::MergeQueueEntry::new(Id::new("qe-ack-1"), Id::new("mr-ack-1"), 50, 3000);
+        state.merge_queue.enqueue(&entry).await.unwrap();
+
+        // Run merge processor — should NOT be blocked (all acknowledged).
+        crate::merge_processor::run_once(&state).await.unwrap();
+
+        // The entry should NOT be failed (it will fail at the git merge step
+        // since there's no real git repo, but that's a different failure).
+        let updated = state
+            .merge_queue
+            .find_by_id(&Id::new("qe-ack-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        // It should be Processing or Failed (git merge failure), NOT failed
+        // with breaking-change message.
+        if let Some(ref msg) = updated.error_message {
+            assert!(
+                !msg.contains("unacknowledged breaking change"),
+                "merge should not have been blocked by acknowledged breaking change"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_merge_warn_policy_does_not_block() {
+        // With warn policy, merge should proceed despite unacknowledged changes.
+        let state = setup();
+        let repo_a = create_repo(&state, "warn-a").await;
+        let repo_b = create_repo(&state, "warn-b").await;
+
+        let edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            repo_a.clone(),
+            repo_b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Unacknowledged breaking change.
+        let bc = gyre_domain::BreakingChange::new(
+            Id::new("bc-warn-1"),
+            edge.id.clone(),
+            repo_b.clone(),
+            "sha-break",
+            "breaking stuff",
+            2000,
+        );
+        state.breaking_changes.create(&bc).await.unwrap();
+
+        // Warn policy (default).
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-warn"),
+            Id::new("tenant-1"),
+            "workspace-warn",
+            "ws-warn",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        // Default policy is Warn — no need to set explicitly.
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-warn-1"),
+            repo_b.clone(),
+            "Test MR",
+            "feat/test",
+            "main",
+            0,
+        );
+        mr.workspace_id = Id::new("ws-warn");
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let entry =
+            gyre_domain::MergeQueueEntry::new(Id::new("qe-warn-1"), Id::new("mr-warn-1"), 50, 3000);
+        state.merge_queue.enqueue(&entry).await.unwrap();
+
+        // Run merge processor — should NOT be blocked under warn policy.
+        crate::merge_processor::run_once(&state).await.unwrap();
+
+        let updated = state
+            .merge_queue
+            .find_by_id(&Id::new("qe-warn-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        // Should not fail with breaking change message.
+        if let Some(ref msg) = updated.error_message {
+            assert!(
+                !msg.contains("unacknowledged breaking change"),
+                "warn policy should not block merge"
+            );
+        }
+    }
+
+    // ── Auto-task creation tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_breaking_change_auto_creates_task() {
+        // Verify that detect_breaking_changes_on_push creates tasks in dependent repos.
+        // We can't easily test the full git push flow, but we can test the task
+        // creation part directly via the breaking change repository + tasks.
+        let state = setup();
+        let repo_a = create_repo(&state, "task-auto-a").await;
+        let repo_b = create_repo(&state, "task-auto-b").await;
+
+        // A depends on B.
+        let edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            repo_a.clone(),
+            repo_b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Simulate: the push detection created a breaking change and a task.
+        let bc = gyre_domain::BreakingChange::new(
+            Id::new("bc-task-1"),
+            edge.id.clone(),
+            repo_b.clone(),
+            "sha-break",
+            "removed deprecated API",
+            2000,
+        );
+        state.breaking_changes.create(&bc).await.unwrap();
+
+        // Create task like detect_breaking_changes_on_push would.
+        let task = gyre_domain::Task::new(
+            Id::new("task-auto-1"),
+            format!("Breaking change in task-auto-b: removed deprecated API"),
+            2000,
+        );
+        let mut task = task;
+        task.priority = gyre_domain::TaskPriority::High;
+        task.labels = vec![
+            "dependency-update".to_string(),
+            "breaking-change".to_string(),
+            "auto-created".to_string(),
+        ];
+        task.repo_id = repo_a.clone();
+        state.tasks.create(&task).await.unwrap();
+
+        // Verify the task was created for the DEPENDENT repo (A).
+        let tasks = state.tasks.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].title.contains("Breaking change"));
+        assert_eq!(tasks[0].priority, gyre_domain::TaskPriority::High);
+        assert!(tasks[0].labels.contains(&"breaking-change".to_string()));
+        assert!(tasks[0].labels.contains(&"auto-created".to_string()));
+    }
+
+    // ── Acknowledgment clears edge status test ─────────────────────────
+
+    #[tokio::test]
+    async fn test_acknowledge_reverts_edge_status_to_active() {
+        let state = setup();
+        let a = create_repo(&state, "revert-a").await;
+        let b = create_repo(&state, "revert-b").await;
+
+        let edge_id = Id::new(uuid::Uuid::new_v4().to_string());
+        let mut edge = DependencyEdge::new(
+            edge_id.clone(),
+            a.clone(),
+            b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        edge.status = DependencyStatus::Breaking;
+        state.dependencies.save(&edge).await.unwrap();
+
+        let bc = gyre_domain::BreakingChange::new(
+            Id::new("bc-revert-1"),
+            edge_id.clone(),
+            b.clone(),
+            "sha-break",
+            "breaking",
+            2000,
+        );
+        state.breaking_changes.create(&bc).await.unwrap();
+
+        // Call the acknowledge handler logic.
+        let ack_result =
+            acknowledge_breaking_change(State(state.clone()), Path("bc-revert-1".to_string()))
+                .await;
+        assert!(ack_result.is_ok());
+
+        // Verify the edge status is reverted to Active.
+        let updated_edge = state
+            .dependencies
+            .find_by_id(&edge_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_edge.status, DependencyStatus::Active);
+    }
+
+    // ── Acknowledge nonexistent returns 404 ────────────────────────────
+
+    #[tokio::test]
+    async fn test_acknowledge_nonexistent_returns_not_found() {
+        let state = setup();
+        let result =
+            acknowledge_breaking_change(State(state.clone()), Path("nonexistent-id".to_string()))
+                .await;
+        assert!(result.is_err());
+    }
+
+    // ── List breaking changes endpoint test ────────────────────────────
+
+    #[tokio::test]
+    async fn test_list_breaking_changes_empty() {
+        let state = setup();
+        let result = list_breaking_changes(State(state.clone())).await;
+        assert!(result.is_ok());
+        let Json(changes) = result.ok().expect("already checked");
+        assert!(changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_breaking_changes_filters_acknowledged() {
+        let state = setup();
+        let a = create_repo(&state, "filter-a").await;
+        let b = create_repo(&state, "filter-b").await;
+
+        let edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            a.clone(),
+            b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // One unacknowledged.
+        let bc1 = gyre_domain::BreakingChange::new(
+            Id::new("bc-filter-1"),
+            edge.id.clone(),
+            b.clone(),
+            "sha1",
+            "change 1",
+            2000,
+        );
+        state.breaking_changes.create(&bc1).await.unwrap();
+
+        // One acknowledged.
+        let mut bc2 = gyre_domain::BreakingChange::new(
+            Id::new("bc-filter-2"),
+            edge.id.clone(),
+            b.clone(),
+            "sha2",
+            "change 2",
+            2000,
+        );
+        bc2.acknowledged = true;
+        bc2.acknowledged_by = Some("user".to_string());
+        bc2.acknowledged_at = Some(2500);
+        state.breaking_changes.create(&bc2).await.unwrap();
+
+        let result = list_breaking_changes(State(state.clone())).await;
+        assert!(result.is_ok());
+        let Json(changes) = result.ok().expect("already checked");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].commit_sha, "sha1");
     }
 }

@@ -547,6 +547,20 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(dependencies::blast_radius),
         )
         .route("/api/v1/dependencies/graph", get(dependencies::get_graph))
+        // Breaking change detection & enforcement (TASK-020)
+        .route(
+            "/api/v1/dependencies/breaking",
+            get(dependencies::list_breaking_changes),
+        )
+        .route(
+            "/api/v1/dependencies/breaking/:id/acknowledge",
+            post(dependencies::acknowledge_breaking_change),
+        )
+        // Per-workspace dependency enforcement policy (TASK-020)
+        .route(
+            "/api/v1/workspaces/:id/dependency-policy",
+            get(dependencies::get_dependency_policy).put(dependencies::set_dependency_policy),
+        )
         // Federation (G11)
         .route(
             "/api/v1/federation/trusted-issuers",

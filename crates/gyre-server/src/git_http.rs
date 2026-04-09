@@ -665,6 +665,16 @@ pub async fn git_receive_pack(
                 &update.new_sha,
             )
             .await;
+            // Breaking change detection (TASK-020).
+            detect_breaking_changes_on_push(
+                &state_clone,
+                &repo_id_clone,
+                &repo_path_clone,
+                &update.new_sha,
+                &repo_workspace_id_str,
+                &push_tenant_id,
+            )
+            .await;
             // Knowledge graph: extract Rust symbols and architecture (M30b).
             // When the push is from an agent with a task, enrich the delta with
             // agent context and run a post-extraction divergence check (HSI §8).
@@ -1767,6 +1777,222 @@ pub(crate) async fn detect_dependencies_on_push(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Breaking change detection on push (TASK-020)
+// ---------------------------------------------------------------------------
+
+/// Check pushed commits for conventional commit breaking change markers.
+///
+/// Returns a list of `(commit_sha, description)` tuples for each breaking commit.
+pub(crate) fn detect_breaking_commits(commit_log: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    for line in commit_log.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Each line is expected to be "sha subject" from `git log --format="%H %s"`.
+        let (sha, message) = match line.split_once(' ') {
+            Some((s, m)) => (s.to_string(), m),
+            None => continue,
+        };
+        if let Some(parsed) = crate::version_compute::parse_conventional(&sha, message) {
+            if parsed.is_breaking {
+                results.push((sha, parsed.description));
+            }
+        }
+    }
+    results
+}
+
+/// Detect breaking changes on push and propagate to dependent repos.
+///
+/// When a push to a repo contains conventional commit breaking change markers
+/// (`feat!:`, `BREAKING CHANGE:` footer), this function:
+/// 1. Identifies all repos that depend on the pushed repo
+/// 2. Creates BreakingChange records for each affected dependency edge
+/// 3. Updates dependency edge status to `Breaking`
+/// 4. Creates high-priority tasks in dependent repos (if policy allows)
+/// 5. Sends notifications to workspace members
+pub(crate) async fn detect_breaking_changes_on_push(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    repo_path: &str,
+    new_sha: &str,
+    workspace_id: &str,
+    tenant_id: &str,
+) {
+    use gyre_common::Id;
+    use gyre_domain::{BreakingChange, DependencyStatus, TaskPriority};
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+
+    // Get commit messages from the push. We check the single pushed commit and
+    // its subject line for conventional commit breaking markers.
+    let log_out = match Command::new(&git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("log")
+        .arg("-1")
+        .arg("--format=%H %s")
+        .arg(new_sha)
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+
+    let commit_log = String::from_utf8_lossy(&log_out);
+    let breaking_commits = detect_breaking_commits(&commit_log);
+
+    if breaking_commits.is_empty() {
+        return;
+    }
+
+    // Query the dependency graph: "What repos depend on this repo?"
+    let dependents = match state.dependencies.list_dependents(&Id::new(repo_id)).await {
+        Ok(deps) => deps,
+        Err(e) => {
+            warn!("breaking-change: failed to list dependents for {repo_id}: {e}");
+            return;
+        }
+    };
+
+    if dependents.is_empty() {
+        return;
+    }
+
+    let repo_name = state
+        .repos
+        .find_by_id(&Id::new(repo_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| repo_id.to_string());
+
+    let now = crate::api::now_secs();
+
+    // Get the workspace's dependency policy.
+    let policy = state
+        .dependency_policies
+        .get_for_workspace(&Id::new(workspace_id))
+        .await
+        .unwrap_or_default();
+
+    for (commit_sha, description) in &breaking_commits {
+        for dep_edge in &dependents {
+            // Create a BreakingChange record.
+            let bc_id = Id::new(uuid::Uuid::new_v4().to_string());
+            let bc = BreakingChange::new(
+                bc_id,
+                dep_edge.id.clone(),
+                Id::new(repo_id),
+                commit_sha.as_str(),
+                description.as_str(),
+                now,
+            );
+
+            if let Err(e) = state.breaking_changes.create(&bc).await {
+                warn!("breaking-change: failed to create record: {e}");
+                continue;
+            }
+
+            // Update the dependency edge status to Breaking.
+            let mut updated_edge = dep_edge.clone();
+            updated_edge.status = DependencyStatus::Breaking;
+            updated_edge.last_verified_at = now;
+            if let Err(e) = state.dependencies.save(&updated_edge).await {
+                warn!("breaking-change: failed to update edge status: {e}");
+            }
+
+            // Create a high-priority task in the dependent repo (if policy allows).
+            if policy.auto_create_update_tasks {
+                let task_id = Id::new(uuid::Uuid::new_v4().to_string());
+                let mut task = gyre_domain::Task::new(
+                    task_id,
+                    format!("Breaking change in {repo_name}: {description}"),
+                    now,
+                );
+                task.priority = TaskPriority::High;
+                task.labels = vec![
+                    "dependency-update".to_string(),
+                    "breaking-change".to_string(),
+                    "auto-created".to_string(),
+                ];
+                task.description = Some(format!(
+                    "Repo '{repo_name}' pushed a breaking change (commit {commit_sha}): {description}. \
+                     Update this repo's dependency to accommodate the change."
+                ));
+                task.workspace_id = Id::new(workspace_id);
+                task.repo_id = dep_edge.source_repo_id.clone();
+
+                if let Err(e) = state.tasks.create(&task).await {
+                    warn!("breaking-change: failed to create task: {e}");
+                }
+            }
+
+            // Notify workspace members about the breaking change.
+            let members = state
+                .workspace_memberships
+                .list_by_workspace(&Id::new(workspace_id))
+                .await
+                .unwrap_or_default();
+
+            for member in &members {
+                let body_json = serde_json::json!({
+                    "source_repo": repo_name,
+                    "commit_sha": commit_sha,
+                    "description": description,
+                    "dependency_edge_id": dep_edge.id.as_str(),
+                })
+                .to_string();
+
+                crate::notifications::notify_rich(
+                    state,
+                    Id::new(workspace_id),
+                    member.user_id.clone(),
+                    gyre_common::NotificationType::CrossWorkspaceSpecChange,
+                    format!("Breaking change in {repo_name}: {description}"),
+                    tenant_id,
+                    Some(body_json),
+                    Some(dep_edge.source_repo_id.to_string()),
+                    Some(repo_id.to_string()),
+                )
+                .await;
+            }
+        }
+
+        tracing::info!(
+            repo = repo_id,
+            commit = commit_sha,
+            dependents = dependents.len(),
+            "detected breaking change, notified {} dependents",
+            dependents.len(),
+        );
+    }
+
+    // Send a broadcast event to notify dependent repo orchestrators via the message bus.
+    let descriptions: Vec<&str> = breaking_commits.iter().map(|(_, d)| d.as_str()).collect();
+    let payload = serde_json::json!({
+        "event": "breaking_change_detected",
+        "source_repo_id": repo_id,
+        "source_repo_name": repo_name,
+        "descriptions": descriptions,
+        "dependent_repo_ids": dependents.iter().map(|e| e.source_repo_id.as_str()).collect::<Vec<_>>(),
+    });
+
+    state
+        .emit_event(
+            Some(Id::new(workspace_id)),
+            gyre_common::message::Destination::Workspace(Id::new(workspace_id)),
+            gyre_common::MessageKind::Custom("breaking_change_detected".to_string()),
+            Some(payload),
+        )
+        .await;
 }
 
 // ---------------------------------------------------------------------------

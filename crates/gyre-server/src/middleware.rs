@@ -239,6 +239,8 @@ mod tests {
             audit_broadcast_tx: base.audit_broadcast_tx.clone(),
             network_peers: base.network_peers.clone(),
             dependencies: base.dependencies.clone(),
+            breaking_changes: base.breaking_changes.clone(),
+            dependency_policies: base.dependency_policies.clone(),
             process_registry: base.process_registry.clone(),
             agent_logs: base.agent_logs.clone(),
             agent_log_tx: base.agent_log_tx.clone(),

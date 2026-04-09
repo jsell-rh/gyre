@@ -337,6 +337,58 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
+    // TASK-020: Check breaking change enforcement policy.
+    // If the MR's repo has unacknowledged breaking changes and the workspace policy
+    // is `block`, reject the merge until all dependent repos acknowledge.
+    {
+        let breaking_changes = state
+            .breaking_changes
+            .list_by_source_repo(&mr.repository_id)
+            .await
+            .unwrap_or_default();
+
+        let unacknowledged: Vec<_> = breaking_changes
+            .iter()
+            .filter(|bc| !bc.acknowledged)
+            .collect();
+
+        if !unacknowledged.is_empty() {
+            let dep_policy = state
+                .dependency_policies
+                .get_for_workspace(&mr.workspace_id)
+                .await
+                .unwrap_or_default();
+
+            match dep_policy.breaking_change_behavior {
+                gyre_domain::BreakingChangeBehavior::Block => {
+                    let count = unacknowledged.len();
+                    let reason = format!(
+                        "dependency policy requires acknowledgment: {count} unacknowledged \
+                         breaking change(s) from this repo"
+                    );
+                    warn!(entry_id = %entry.id, %reason, "breaking change policy blocked merge");
+                    state
+                        .merge_queue
+                        .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
+                        .await?;
+                    return Ok(());
+                }
+                gyre_domain::BreakingChangeBehavior::Warn => {
+                    let count = unacknowledged.len();
+                    warn!(
+                        entry_id = %entry.id,
+                        mr_id = %mr.id,
+                        unacknowledged_count = count,
+                        "breaking change detected (warn only, proceeding with merge)"
+                    );
+                }
+                gyre_domain::BreakingChangeBehavior::Notify => {
+                    // Notify only — no merge blocking or warnings.
+                }
+            }
+        }
+    }
+
     // TASK-019: Check spec link merge gates.
     // spec-links.md §Merge Gates: when an MR references a spec, the forge checks
     // that spec's links for supersession, conflicts, and unimplemented dependencies.
