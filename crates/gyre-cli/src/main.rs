@@ -1134,6 +1134,12 @@ fn print_briefing_item(item: &serde_json::Value, prefix: &str) {
             println!("      ({})", format_timestamp(ts));
         }
     }
+    if let Some(actions) = item["actions"].as_array() {
+        if !actions.is_empty() {
+            let labels: Vec<&str> = actions.iter().filter_map(|a| a.as_str()).collect();
+            println!("      Actions: {}", labels.join(" | "));
+        }
+    }
 }
 
 /// Parse a priority range string like "1-5" into (min, max).

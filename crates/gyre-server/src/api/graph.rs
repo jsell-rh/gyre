@@ -265,6 +265,9 @@ pub struct BriefingItem {
     pub entity_id: Option<String>,
     pub spec_path: Option<String>,
     pub timestamp: u64,
+    /// Suggested actions for exception items (HSI §9).
+    /// Empty for non-exception sections (completed, in_progress, cross_workspace).
+    pub actions: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -830,6 +833,7 @@ pub async fn assemble_briefing(
                 .as_ref()
                 .map(|s| s.split('@').next().unwrap_or(s).to_string()),
             timestamp: mr.updated_at,
+            actions: Vec::new(),
         })
         .collect();
 
@@ -847,6 +851,7 @@ pub async fn assemble_briefing(
             entity_id: Some(t.id.to_string()),
             spec_path: t.spec_path.clone(),
             timestamp: t.updated_at,
+            actions: Vec::new(),
         })
         .collect();
 
@@ -863,14 +868,15 @@ pub async fn assemble_briefing(
         links
             .iter()
             .filter(|link| {
-                // Inbound links: target repo is in this workspace, source repo is not.
-                link.target_repo_id
+                // Our spec (source) depends on an external spec (target) that changed.
+                // source_repo_id IN workspace, target_repo_id NOT IN workspace.
+                link.source_repo_id
                     .as_ref()
-                    .is_some_and(|tid| ws_repo_ids.contains(tid))
+                    .is_some_and(|sid| ws_repo_ids.contains(sid))
                     && link
-                        .source_repo_id
+                        .target_repo_id
                         .as_ref()
-                        .is_none_or(|sid| !ws_repo_ids.contains(sid))
+                        .is_some_and(|tid| !ws_repo_ids.contains(tid))
                     && link.created_at >= since
             })
             .map(|link| BriefingItem {
@@ -882,13 +888,15 @@ pub async fn assemble_briefing(
                     .unwrap_or_else(|| {
                         format!(
                             "{} changed (link type: {:?})",
-                            link.source_path, link.link_type
+                            link.target_path, link.link_type
                         )
                     }),
                 entity_type: "spec_link".to_string(),
                 entity_id: Some(link.id.clone()),
-                spec_path: Some(link.target_path.clone()),
+                // spec_path = our local spec that is affected (so user can navigate to it)
+                spec_path: Some(link.source_path.clone()),
                 timestamp: link.created_at,
+                actions: Vec::new(),
             })
             .collect()
     };
@@ -904,7 +912,9 @@ pub async fn assemble_briefing(
                 .list_by_mr_id(&mr.id.to_string())
                 .await
                 .unwrap_or_default();
-            for gr in results.iter().filter(|gr| gr.status == GateStatus::Failed) {
+            for gr in results.iter().filter(|gr| {
+                gr.status == GateStatus::Failed && gr.finished_at.map_or(false, |t| t >= since)
+            }) {
                 items.push(BriefingItem {
                     title: format!("Gate failure: {} MR", mr.title),
                     description: gr
@@ -919,6 +929,12 @@ pub async fn assemble_briefing(
                         .as_ref()
                         .map(|s| s.split('@').next().unwrap_or(s).to_string()),
                     timestamp: gr.finished_at.unwrap_or(mr.updated_at),
+                    actions: vec![
+                        "View Diff".to_string(),
+                        "View Test Output".to_string(),
+                        "Override".to_string(),
+                        "Close MR".to_string(),
+                    ],
                 });
             }
         }
@@ -941,6 +957,11 @@ pub async fn assemble_briefing(
                 entity_id: n.entity_ref.clone(),
                 spec_path: n.entity_ref.clone(),
                 timestamp: n.created_at as u64,
+                actions: vec![
+                    "View Spec".to_string(),
+                    "View Assertion".to_string(),
+                    "Dismiss".to_string(),
+                ],
             });
         }
 
@@ -959,6 +980,11 @@ pub async fn assemble_briefing(
                     .as_ref()
                     .map(|s| s.split('@').next().unwrap_or(s).to_string()),
                 timestamp: mr.reverted_at.unwrap_or(mr.updated_at),
+                actions: vec![
+                    "View Revert MR".to_string(),
+                    "View Original MR".to_string(),
+                    "Re-open".to_string(),
+                ],
             });
         }
 
@@ -1899,16 +1925,17 @@ mod tests {
         let state = test_state();
         let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
 
-        // Add a cross-workspace spec link: external repo → our workspace repo.
+        // Add a cross-workspace spec link: our local spec depends on external spec.
+        // source = local spec (in workspace), target = external dependency.
         {
             let mut links = state.spec_links_store.lock().await;
             links.push(crate::spec_registry::SpecLinkEntry {
                 id: "link-1".to_string(),
-                source_path: "system/idempotent-api.md".to_string(),
-                source_repo_id: Some("external-repo".to_string()),
+                source_path: "system/payment-retry.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
-                target_path: "system/payment-retry.md".to_string(),
-                target_repo_id: Some("repo-1".to_string()),
+                target_path: "system/idempotent-api.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
                 target_display: Some("@platform-core/api-svc/system/idempotent-api.md".to_string()),
                 target_sha: None,
                 reason: None,
@@ -1923,10 +1950,12 @@ mod tests {
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
         assert_eq!(briefing.cross_workspace.len(), 1);
+        // Title references the external dependency (target) that changed.
         assert!(briefing.cross_workspace[0]
             .title
-            .contains("payment-retry.md"));
+            .contains("idempotent-api.md"));
         assert_eq!(briefing.cross_workspace[0].entity_type, "spec_link");
+        // spec_path = our local spec that is affected (source_path).
         assert_eq!(
             briefing.cross_workspace[0].spec_path.as_deref(),
             Some("system/payment-retry.md")
@@ -2009,6 +2038,55 @@ mod tests {
         assert_eq!(gate_failures.len(), 1);
         assert!(gate_failures[0].title.contains("Add billing retry"));
         assert!(gate_failures[0].description.contains("cargo test failed"));
+        assert_eq!(
+            gate_failures[0].actions,
+            vec!["View Diff", "View Test Output", "Override", "Close MR"]
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_exceptions_gate_failures_excludes_old_gate_results() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // MR updated after since (e.g., reviewer added), but gate failure is old.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-old-gate"),
+            Id::new("repo-1"),
+            "Old gate failure MR",
+            "feat/old-gate",
+            "main",
+            400,
+        );
+        mr.workspace_id = Id::new("ws-briefing");
+        mr.updated_at = 2000; // after since=1500
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Gate result finished BEFORE since — should be excluded.
+        let gr = gyre_domain::GateResult {
+            id: Id::new("gr-old"),
+            gate_id: Id::new("gate-tests"),
+            mr_id: Id::new("mr-old-gate"),
+            status: GateStatus::Failed,
+            output: Some("old failure".to_string()),
+            started_at: Some(300),
+            finished_at: Some(500), // before since=1500
+        };
+        state.gate_results.save(&gr).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let gate_failures: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "gate_failure")
+            .collect();
+        assert!(
+            gate_failures.is_empty(),
+            "gate results finished before `since` should be excluded even if the MR was updated after `since`"
+        );
     }
 
     #[tokio::test]
@@ -2039,6 +2117,10 @@ mod tests {
             .collect();
         assert_eq!(assertions.len(), 1);
         assert!(assertions[0].title.contains("Spec assertion failed"));
+        assert_eq!(
+            assertions[0].actions,
+            vec!["View Spec", "View Assertion", "Dismiss"]
+        );
     }
 
     #[tokio::test]
@@ -2072,6 +2154,10 @@ mod tests {
             .collect();
         assert_eq!(reverts.len(), 1);
         assert!(reverts[0].title.contains("Broken migration"));
+        assert_eq!(
+            reverts[0].actions,
+            vec!["View Revert MR", "View Original MR", "Re-open"]
+        );
     }
 
     #[tokio::test]
@@ -2095,15 +2181,16 @@ mod tests {
         let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
 
         // Add a cross-workspace link with old timestamp.
+        // source = our local spec, target = external dependency (correct direction).
         {
             let mut links = state.spec_links_store.lock().await;
             links.push(crate::spec_registry::SpecLinkEntry {
                 id: "link-old".to_string(),
-                source_path: "old-spec.md".to_string(),
-                source_repo_id: Some("external-repo".to_string()),
+                source_path: "system/old-dep.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
                 link_type: crate::spec_registry::SpecLinkType::DependsOn,
-                target_path: "system/old-dep.md".to_string(),
-                target_repo_id: Some("repo-1".to_string()),
+                target_path: "old-spec.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
                 target_display: None,
                 target_sha: None,
                 reason: None,
