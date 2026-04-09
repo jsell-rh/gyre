@@ -414,6 +414,15 @@ Before marking a task `ready-for-review`, verify:
     - **Red flag patterns:** Any test where (a) a comment says "like X would" / "as X would" / "simulate" / "as if", AND (b) the test manually calls `.create()` on the same port type that the assertion queries, AND (c) the production function implied by the test name is never called — is a self-confirming test. The test proves the repository round-trips data, not that the feature creates the right data.
     - **Verification procedure:** For every test you write whose name implies automatic behavior ("auto_creates", "detects", "triggers", "propagates", "generates"), verify that the test calls the production function responsible for that behavior. If the production function is not called anywhere in the test body, the test is self-confirming. Run `scripts/check-self-confirming-tests.sh` to detect this mechanically. **This script is enforced by the pre-commit hook — your commit will fail if it reports violations.** If the production function genuinely cannot be called in a test environment, add `// self-confirming:ok — <reason>` to the test body and document the limitation.
 
+71. **Multi-cycle testing for periodic and background jobs:** When implementing a background job, periodic task, or any process that runs repeatedly and reads/writes shared state (e.g., a staleness checker that runs daily, a drift monitor, a cleanup job), tests MUST include at least one multi-cycle test that runs the job multiple times in sequence and verifies state persistence across cycles. A single `run_once()` test is necessary but insufficient — it catches first-run failures but masks state-reset bugs that only manifest on subsequent runs. Two failure modes:
+    - **Unconditional state reset causing oscillation:** The job unconditionally updates a timestamp field (e.g., `last_verified_at = now`) for all records, regardless of whether the underlying condition changed. On cycle 1, the job detects staleness (`31 days > 30 day threshold`) and marks the record Stale. But the timestamp reset means on cycle 2 (`24 hours < 30 day threshold`), the same record appears fresh and reverts to Active — even though nothing actually changed. The record oscillates between Stale and Active on every run, being Stale for exactly one cycle.
+    - **Accumulated side effects from repeated runs:** The job creates a notification or task when a condition is detected but doesn't check whether one already exists. On each cycle, a new duplicate is created. After 30 runs, there are 30 identical notifications.
+    - **Required test structure:** For every periodic job:
+      - **Cycle 1 test (detection):** Run the job once. Assert the expected state change occurs (e.g., record marked Stale, notification created).
+      - **Cycle 2 test (persistence):** Advance time by one job interval. Run the job again WITHOUT changing the underlying condition. Assert the state change from cycle 1 PERSISTS (e.g., record is still Stale, no duplicate notification created). If cycle 2 reverts the state change from cycle 1, the job has a state-reset bug.
+      - **Recovery test:** Change the underlying condition (e.g., update the dependency version). Run the job. Assert the record returns to Active. This proves the state change is responsive to real-world changes, not just timestamp arithmetic.
+    - **Verification procedure:** For every job or process that runs periodically: (1) identify all state fields the job reads AND writes in the same execution (e.g., `last_verified_at`), (2) for each such field, trace what value the job writes and how that affects the NEXT run's read, (3) if the written value always resets the condition (e.g., setting `last_verified_at = now` means the next run always sees "fresh"), the job has a state-reset bug. (4) Verify the test suite includes a multi-cycle test that catches this pattern.
+
 ## Workflow
 
 1. Read the relevant system specs. These are your source of truth and overarching vision.
@@ -479,6 +488,7 @@ scripts/check-concurrent-shared-write.sh
 scripts/check-wildcard-exclusion.sh
 scripts/check-assertionless-tests.sh
 scripts/check-self-confirming-tests.sh
+scripts/check-pipeline-data-flow.sh
 ```
 If any script reports violations, fix them before proceeding. **Do not commit with check script violations.** These scripts exist because prior review rounds found flaws that the checklist alone did not prevent — they are the mechanical backstop.
 

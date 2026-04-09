@@ -49,15 +49,16 @@ scripts), not code-level fixes. The code bugs remain.
 
 ### Findings
 
-- [ ] **F1 (R1 persists): `DependencyPolicy` omits spec-defined `require_cascade_tests` field.**
+- [-] [process-revision-complete] **F1 (R1 persists): `DependencyPolicy` omits spec-defined `require_cascade_tests` field.**
   `gyre-domain/src/dependency.rs:164-173` — the struct has 4 fields:
   `breaking_change_behavior`, `max_version_drift`, `stale_dependency_alert_days`,
   `auto_create_update_tasks`. The spec defines 5 fields; `require_cascade_tests: bool` (default
   `true`) is absent. The response type `DependencyPolicyResponse`
   (`dependencies.rs:420-425`) and update request `UpdateDependencyPolicyRequest`
   (`dependencies.rs:438-444`) also lack this field. TASK-022 depends on it.
+  Process guard: implementation prompt item 54 (spec-excerpt YAML schema field completeness).
 
-- [ ] **F2 (R1 persists): `BREAKING CHANGE:` footer detection is broken — git log format strips commit body.**
+- [-] [process-revision-complete] **F2 (R1 persists): `BREAKING CHANGE:` footer detection is broken — git log format strips commit body.**
   `git_http.rs:1930` still uses `--format=%H %s`. The `%s` git-log placeholder outputs only
   the subject line. `BREAKING CHANGE:` footers appear in the commit body, which `%s` discards.
   `parse_conventional` at `version_compute.rs:34` checks `message.contains("BREAKING CHANGE:")`
@@ -65,8 +66,10 @@ scripts), not code-level fixes. The code bugs remain.
   `git_http.rs:1901-1904` still claims to detect `BREAKING CHANGE:` footers. The
   `detect_breaking_commits` comment at line 1887 confirms: "Each line is expected to be
   `sha subject` from `git log --format="%H %s"`" — body content is explicitly excluded.
+  Process guard: `scripts/check-pipeline-data-flow.sh` (new), pre-commit hook `pipeline-data-flow`,
+  implementation prompt item 69.
 
-- [ ] **F3 (R1 persists): `test_breaking_change_auto_creates_task` is self-confirming.**
+- [-] [process-revision-complete] **F3 (R1 persists): `test_breaking_change_auto_creates_task` is self-confirming.**
   `dependencies.rs:1213-1268` — the test manually creates a task via
   `state.tasks.create(&task)` (line 1259) and asserts it exists via
   `state.tasks.list_by_repo(&repo_a)` (line 1262). The comment at line 1234 says
@@ -75,3 +78,5 @@ scripts), not code-level fixes. The code bugs remain.
   "Create task like detect_breaking_changes_on_push would." The production function is
   never invoked. The `scripts/check-self-confirming-tests.sh` script added in the R1 revision
   was the correct process guard, but the test itself was not fixed.
+  Process guard: `scripts/check-self-confirming-tests.sh` (R1), pre-commit hook `self-confirming-tests`,
+  implementation prompt item 70.

@@ -4,7 +4,7 @@
 
 ### Findings
 
-- [ ] **F1: Push-time dependency detection does not set status to `Stale` when drift exceeds `max_version_drift`.**
+- [-] [process-revision-complete] **F1: Push-time dependency detection does not set status to `Stale` when drift exceeds `max_version_drift`.**
   The task's implementation plan (step 1) explicitly states: "If drift exceeds workspace policy
   `max_version_drift`, set `DependencyEdge.status = Stale`." The push handler at
   `git_http.rs:1835-1868` computes `version_drift` and saves the edge, but never reads the
@@ -16,8 +16,11 @@
   with drift of 10 versions would appear Active. The fix: after computing `version_drift`
   in the push handler, look up the workspace policy and set `edge.status = Stale` if
   `drift > policy.max_version_drift`.
+  Process guard: implementation prompt items 10 (task traceability — acceptance criteria sweep)
+  and 54 (spec-excerpt schema field completeness). The acceptance criterion explicitly states
+  "Dependencies exceeding `max_version_drift` set to `Stale` status."
 
-- [ ] **F2: Time-based staleness is ephemeral — `last_verified_at` is unconditionally reset, causing stale edges to revert on the next job cycle.**
+- [-] [process-revision-complete] **F2: Time-based staleness is ephemeral — `last_verified_at` is unconditionally reset, causing stale edges to revert on the next job cycle.**
   `dep_staleness.rs:85` unconditionally sets `updated_edge.last_verified_at = now` for every
   edge, regardless of whether version resolution succeeded or the edge is stale. The
   time-based staleness check at line 117 compares `now - edge.last_verified_at > threshold_secs`.
@@ -34,3 +37,5 @@
   version resolution succeeds AND the version has changed, or (b) use a separate field
   (e.g., `last_checked_at`) for the job's housekeeping timestamp, keeping `last_verified_at`
   to track when the dependency version was last confirmed current.
+  Process guard: implementation prompt item 71 (multi-cycle testing for periodic jobs — new),
+  verifier prompt addition (single-cycle test detection for periodic jobs).

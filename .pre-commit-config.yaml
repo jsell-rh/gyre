@@ -236,6 +236,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: pipeline-data-flow
+        name: pipeline data flow lint
+        description: Detect git log format strings that strip data the parser needs
+        entry: scripts/check-pipeline-data-flow.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
