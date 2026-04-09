@@ -7,7 +7,7 @@
 
 ## Findings
 
-- [ ] **F1: Wrong git notes ref namespace — task-vs-spec transcription error**
+- [-] [process-revision-complete] **F1: Wrong git notes ref namespace — task-vs-spec transcription error**
 
   The spec §5.3 (line 519 of `authorization-provenance.md`) states:
 
@@ -27,7 +27,7 @@
   - All callers that reference `CHAIN_ATTESTATION_NOTES_REF`
   - Tests that verify the ref path
 
-- [ ] **F2: Single attestation stored instead of full chain**
+- [-] [process-revision-complete] **F2: Single attestation stored instead of full chain**
 
   The task plan specifies:
 
