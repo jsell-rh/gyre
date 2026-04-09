@@ -74,7 +74,7 @@ F1 and F2 are fully addressed:
 - `CHAIN_ATTESTATION_NOTES_REF` is now `"refs/notes/attestations"` (attestation.rs:50). No stale references to `chain-attestations` anywhere in the codebase.
 - `attach_chain_attestation_note` takes `chain: &[Attestation]` (attestation.rs:65). `read_chain_attestation_note` returns `Option<Vec<Attestation>>` (attestation.rs:129). `write_chain_note_if_committed` loads the full chain via `load_chain` (attestation.rs:185). Callers in `merge_processor.rs` (lines 565, 587) load full chains. Tests use `sample_chain` with 2-node chains and verify round-trip equality.
 
-- [ ] **F3: Race condition between legacy and chain note writes — spec-required chain attestation may be silently overwritten**
+- [-] [process-revision-complete] **F3: Race condition between legacy and chain note writes — spec-required chain attestation may be silently overwritten**
 
   In `merge_processor.rs`, the legacy `AttestationBundle` write (line 517) and the new chain attestation write (line 569, inside `attach_chain_attestation_note`) both target `refs/notes/attestations` with `-f` as fire-and-forget `tokio::spawn` tasks. There is no ordering guarantee between them.
 

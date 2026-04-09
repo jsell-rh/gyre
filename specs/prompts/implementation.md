@@ -336,6 +336,15 @@ Before marking a task `ready-for-review`, verify:
     - **Single-to-collection inflation:** Less common but equally wrong — the task plan specifies a single `T` but the implementation uses `Vec<T>`, changing the semantics (e.g., a function that should return exactly one record now returns a potentially empty list, losing the type-level guarantee of exactly-one).
     - **Verification procedure:** Before marking ready-for-review, re-read the task plan's implementation section. For each function signature the task plan specifies (look for `fn` signatures, parameter type descriptions like "attestation_chain_json," or return type descriptions like `Option<Vec<Attestation>>`), compare against your implementation. If your signature differs in cardinality (`T` vs `Vec<T>`, `&T` vs `&[T]`), verify the change is justified by the spec — not by an assumption that "simpler is sufficient." Also verify the callers: if the write function accepts a single item but the spec says "write the full chain," the caller must load the full chain before calling the write function — not just pass the leaf attestation.
 
+65. **No fire-and-forget concurrent writes to shared resources:** When multiple `tokio::spawn` calls in the same function (or call chain) write to the same shared resource (git ref, file, database row, cache key), they MUST be sequenced — not fire-and-forget. Dropping a `tokio::spawn` JoinHandle means the spawned task runs concurrently with all subsequent code, including later spawned tasks that write to the same resource. Whichever git/file write completes last determines the final content — a non-deterministic race. Two failure modes:
+    - **Overwrite race — later write silently lost:** Function spawns task A (legacy write to `refs/notes/attestations`), drops the JoinHandle, performs database queries, then spawns task B (chain write to `refs/notes/attestations`). Task B is intended to overwrite task A's result, but if task A's git process starts slowly (or task B's finishes early), task A completes last and overwrites task B's output. The spec-required chain attestation is silently replaced by the legacy note. `read_chain_attestation_note` fails to parse the legacy format and returns `None`.
+    - **Corruption from interleaved writes:** Two concurrent writes to the same file or git object can corrupt the resource if they overlap (e.g., git lock contention, partial file writes).
+    - **Fix patterns (any one is sufficient):**
+      - **Sequence:** Await the first spawn's JoinHandle before starting the second: `let handle = tokio::spawn(...); handle.await.ok(); tokio::spawn(second_write);`
+      - **Skip redundant writes:** If the later write will always overwrite the earlier one on the same resource, skip the earlier write entirely when the later one will execute. Example: if a chain attestation note will be written, skip the legacy note write for the same commit — the chain note replaces it.
+      - **Combine into one write:** Merge both payloads into a single write operation to the shared resource.
+    - **Verification procedure:** For every `tokio::spawn` call whose JoinHandle is dropped (not `.await`ed or stored in a variable), check whether any subsequent code in the same function writes to the same resource. "Same resource" for git notes means the same `--ref=` value on the same repo. If a dropped-handle spawn and a later write target the same resource → fire-and-forget race condition. Run `scripts/check-concurrent-shared-write.sh` — it mechanically detects multiple `tokio::spawn` calls in the same function that reference the same git notes ref. **This script is enforced by the pre-commit hook — your commit will fail if it reports violations.** Exempt with `// concurrent-write:ok — <reason>`.
+
 ## Workflow
 
 1. Read the relevant system specs. These are your source of truth and overarching vision.
@@ -397,6 +406,7 @@ scripts/check-template-substitution.sh
 scripts/check-cli-spec-parity.sh
 scripts/check-nested-time-scope.sh
 scripts/check-type-discriminator-values.sh
+scripts/check-concurrent-shared-write.sh
 ```
 If any script reports violations, fix them before proceeding. **Do not commit with check script violations.** These scripts exist because prior review rounds found flaws that the checklist alone did not prevent — they are the mechanical backstop.
 
