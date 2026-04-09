@@ -96,3 +96,4 @@ When working on this task:
 ## Git Commits
 
 - `e36336eb` feat(deps): implement version drift tracking and stale dependency detection (TASK-021)
+- `a17b5201` fix(deps): push-time staleness detection and multi-cycle persistence (TASK-021 R1)
