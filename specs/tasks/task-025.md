@@ -60,4 +60,4 @@ When working on this task:
 
 ## Git Commits
 
-_(listed after commit)_
+- `dde17a05` feat(cli): add spec links CLI commands — links, dependents, graph, stale-links, conflicts (TASK-025)
