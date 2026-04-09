@@ -1,7 +1,7 @@
 # Review: TASK-016 — Spec Links: Staleness Job & Approval Gate Enforcement
 
 **Reviewer:** Verifier  
-**Round:** R3  
+**Round:** R4  
 **Verdict:** `needs-revision`
 
 ---
@@ -54,3 +54,32 @@
   }
   ```
   Alternatively, add the guard inside `create_drift_review_task` itself so the exclusion is centralized. Add a test that creates a `references` link, triggers staleness, and asserts no drift-review task is created.
+
+---
+
+## R4 Findings
+
+- [ ] **F9: Premature `Supersedes` deprecation at sync/push time — spec requires approval-time trigger only**
+
+  spec-links.md §Approval Gates:
+
+  > | `supersedes` | When source is approved, target is automatically set to `deprecated`. Code referencing target gets flagged. |
+
+  The `approve_spec` handler (`specs.rs:697-750`) correctly deprecates the target spec **when the superseding spec is approved**. However, `sync_spec_ledger` (`spec_registry.rs:552-566`) ALSO deprecates the target spec **unconditionally at push/sync time**, regardless of whether the source spec is approved:
+
+  ```rust
+  SpecLinkType::Supersedes => {
+      if let Ok(Some(mut target_entry)) = ledger.find_by_path(&link.target_path).await {
+          if target_entry.approval_status != ApprovalStatus::Deprecated {
+              target_entry.approval_status = ApprovalStatus::Deprecated;
+              // ...
+          }
+      }
+  }
+  ```
+
+  No guard checks `source_entry.approval_status == Approved` before deprecating. This means any user or agent can deprecate another team's spec simply by pushing a manifest declaring `supersedes: their-spec.md` — no approval review required. The `sync_supersedes_marks_target_deprecated` test (`specs.rs:2601`) confirms this: it seeds the source spec as `Pending` (not approved) and asserts deprecation happens.
+
+  The correct deprecation logic already exists in `approve_spec` (lines 697-750). The sync-time deprecation is a duplicate, premature trigger that contradicts the spec's "when source is approved" condition.
+
+  **Fix:** Remove the `SpecLinkType::Supersedes` match arm from `sync_spec_ledger` step 6 (`spec_registry.rs:552-566`). The `approve_spec` handler already handles this correctly. Update or remove the `sync_supersedes_marks_target_deprecated` test (`specs.rs:2601-2688`) since it tests the premature behavior.
