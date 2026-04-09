@@ -82,3 +82,4 @@ When working on this task:
 ## Git Commits
 
 - `bfb1ef58` feat(deps): cascade testing for dependent repos (TASK-022)
+- `7159eece` fix(deps): address TASK-022 R1 findings — event coverage, notification depth, policy scope
