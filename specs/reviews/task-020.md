@@ -80,3 +80,27 @@ scripts), not code-level fixes. The code bugs remain.
   was the correct process guard, but the test itself was not fixed.
   Process guard: `scripts/check-self-confirming-tests.sh` (R1), pre-commit hook `self-confirming-tests`,
   implementation prompt item 70.
+
+## R3 — needs-revision, 1 finding (R1/R2 findings resolved)
+
+R1 findings F1–F3 are now resolved in commit `2e39a167`:
+- F1: `require_cascade_tests` field added to `DependencyPolicy`, `DependencyPolicyResponse`, `UpdateDependencyPolicyRequest`, and the `set_dependency_policy` handler. Default `true`.
+- F2: `detect_breaking_changes_on_push` now uses `--format=%H%x00%B%x00` (full message via `%B`). `detect_breaking_commits` parses null-delimited records. `commits_since` updated to `%H%x00%B%x01` (fix-class exhaustion). `parse_conventional` extracts subject from first line and checks full message for `BREAKING CHANGE:` footers.
+- F3: `test_breaking_change_auto_creates_task` now calls the production `process_breaking_changes` function and asserts on BreakingChange records, edge status updates, and task creation with correct title, priority, and labels.
+
+### Findings
+
+- [ ] **F1: R2 fix added `require_cascade_tests` field but no test asserts on it.**
+  The `test_dependency_policy_set_and_get` test (`dependencies.rs:930-956`) explicitly sets
+  `require_cascade_tests: false` (line 934) but the assertion block (lines 950-956) checks
+  `breaking_change_behavior`, `max_version_drift`, `stale_dependency_alert_days`, and
+  `auto_create_update_tasks` — never `require_cascade_tests`. If the storage layer silently
+  dropped or defaulted this field, the test would still pass. Similarly,
+  `test_dependency_policy_default` (lines 892-916) asserts `breaking_change_behavior`,
+  `max_version_drift`, and `auto_create_update_tasks` but not `require_cascade_tests`
+  (expected default: `true`). This is the "fix-round code changes without test coverage"
+  flaw class — the R2 fix introduced a new field across three types and a handler, but zero
+  test assertions verify it.
+  Fix: Add `assert!(!retrieved.require_cascade_tests)` to `test_dependency_policy_set_and_get`
+  (after line 956) and `assert!(policy.require_cascade_tests)` to `test_dependency_policy_default`
+  (after line 915).
