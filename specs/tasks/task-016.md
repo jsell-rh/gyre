@@ -35,6 +35,15 @@ tracing::debug!("cross_workspace_link_staleness_check: stub, no-op");
 
 **SpecLinkEntry** (`crates/gyre-server/src/spec_registry.rs`): The `health` field exists with values `"active" | "stale" | "broken" | "conflicted" | "unresolved"`, but nothing sets it to `"stale"` automatically.
 
+## Revision Notes (R1)
+
+R1 review found 4 issues. See [`specs/reviews/task-016.md`](../reviews/task-016.md) for details.
+
+- **F1:** Push-time inbound staleness detection is missing. When spec B gets a new SHA, all existing links whose `target_path` matches B must be marked stale *immediately at push time*, not just by the daily background job. Currently only outbound links (from the pushed manifest) are checked.
+- **F2:** Drift-review requires creating a **Task entity**, not just setting `drift_status = "drifted"`. The flag alone is not a tracked work item.
+- **F3:** When an `extends` link's target changes, the extending spec's `approval_status` must be reset to `Pending` (invalidated). Currently approval is retained after parent changes.
+- **F4:** No test covers the `extends` push-time behavior (staleness marking, drift status, approval invalidation).
+
 ## Implementation Plan
 
 1. **Add `DependsOn` approval gate** in `approve_spec` handler:
@@ -46,9 +55,13 @@ tracing::debug!("cross_workspace_link_staleness_check: stub, no-op");
    - When a spec with `supersedes` links is approved, mark the target spec as `Deprecated` in the ledger
    - Emit a Broadcast-tier event for the deprecation
 
-3. **Add `Extends` drift-review trigger** in the push-time spec registry hook:
-   - When a spec changes (new SHA on push), check if any other specs have `extends` links pointing to it
-   - For each extending spec, update the link health to `"stale"` and create a drift-review task
+3. **Push-time inbound staleness detection** in `sync_spec_ledger`:
+   - After detecting which specs have changed SHAs (step 4 of the sync, around line 353), scan the links store for ALL links where `target_path` matches any spec whose SHA changed
+   - For each matching link, mark it as `"stale"` with `stale_since = now` — this applies to ALL link types (`implements`, `depends_on`, `supersedes`, `conflicts_with`, `extends`), not just `extends`
+   - **For `extends` links specifically:**
+     - Set `drift_status = "drifted"` on the extending spec's ledger entry
+     - **Invalidate the extending spec's approval:** set `approval_status = ApprovalStatus::Pending` (same pattern as the auto-invalidation at line 362-364 when a spec's own content changes)
+     - **Create a drift-review Task entity** (not just a drift_status flag) in the extending spec's repo, with actionable context: which parent spec changed, old SHA → new SHA, what the extending spec needs to review
 
 4. **Implement the staleness job** (`cross_workspace_link_staleness_check`):
    - For each `SpecLinkEntry` with a `target_sha`:
@@ -60,30 +73,40 @@ tracing::debug!("cross_workspace_link_staleness_check: stub, no-op");
 5. **Add tests:**
    - `DependsOn` blocks approval when dependency implementation is incomplete
    - `Supersedes` marks target spec as Deprecated on approval
-   - `Extends` triggers drift-review task on parent spec change
    - Staleness job detects SHA mismatch and marks links stale
+   - **`Extends` push-time behavior:** call `sync_spec_ledger` with a manifest containing an `extends` link whose `target_sha` differs from the ledger's current SHA, and assert: (a) the link is marked `"stale"`, (b) the extending spec's `drift_status` is `"drifted"`, (c) the extending spec's `approval_status` is invalidated to `Pending`, (d) a drift-review Task entity is created
+   - **Inbound staleness for non-extends links:** push a spec change and assert that existing `depends_on`/`implements` links pointing to the changed spec are marked `"stale"` at push time (not waiting for the daily job)
 
 ## Acceptance Criteria
 
 - [ ] `DependsOn` approval gate rejects when dependency implementation is incomplete
 - [ ] `Supersedes` approval marks target spec as Deprecated
-- [ ] `Extends` parent spec change triggers drift-review in extending specs
+- [ ] Push-time inbound staleness: when a spec's SHA changes, ALL links targeting that spec are marked `"stale"` immediately (not deferred to the daily job)
+- [ ] `Extends` parent spec change invalidates extending spec's `approval_status` to `Pending`
+- [ ] `Extends` parent spec change creates a drift-review **Task entity** (not just a `drift_status` flag)
 - [ ] Staleness job resolves current SHAs and marks mismatched links as `"stale"`
 - [ ] Stale links produce notifications for workspace members
-- [ ] Tests cover each link type enforcement
+- [ ] Test: `extends` push-time behavior (stale link + drift_status + approval invalidation + task creation)
+- [ ] Test: inbound staleness for non-extends link types at push time
+- [ ] Tests cover each approval gate link type
 - [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
+This task is in `needs-revision` state. Read the R1 review at `specs/reviews/task-016.md` FIRST to understand the 4 findings (F1–F4), then fix them.
+
 When working on this task:
 1. Update the progress field above to `in-progress`
-2. Read `crates/gyre-server/src/api/specs.rs` — the `approve_spec` handler (lines 375-490)
-3. Read `crates/gyre-server/src/spec_registry.rs` — `SpecLinkEntry`, `SpecLinkType`, staleness check
-4. Read `crates/gyre-server/src/jobs.rs` — `cross_workspace_link_staleness_check` stub
-5. Read `specs/system/spec-links.md` for the full enforcement table
-6. Add enforcement cases to the `match &link.link_type` block in `approve_spec`
-7. Implement the staleness job body
-8. On completion, update progress to `ready-for-review` and list git commits below
+2. Read `specs/reviews/task-016.md` — the R1 review with 4 specific findings and fix instructions
+3. Read `crates/gyre-server/src/spec_registry.rs` — `sync_spec_ledger` function (around line 353 where changed SHAs are detected — F1 fix goes here), `SpecLinkEntry`, extends handling (line 539-554 — F3 fix: add `approval_status = Pending`)
+4. Read `crates/gyre-server/src/api/specs.rs` — the `approve_spec` handler (lines 375-490)
+5. Read `crates/gyre-server/src/spec_link_staleness.rs` — the staleness background job
+6. Read `specs/system/spec-links.md` §Automatic Staleness Detection, §Approval Gates for the authoritative behavior
+7. Fix F1: add inbound link scanning after SHA change detection in `sync_spec_ledger`
+8. Fix F2: create a drift-review Task entity (not just drift_status flag) when extends links go stale
+9. Fix F3: set `approval_status = Pending` when an extends link's target changes
+10. Fix F4: add test for extends push-time behavior (stale + drift + approval invalidation + task)
+11. On completion, update progress to `ready-for-review` and list git commits below
 
 ## Git Commits
 
