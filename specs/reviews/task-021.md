@@ -39,3 +39,33 @@
   to track when the dependency version was last confirmed current.
   Process guard: implementation prompt item 71 (multi-cycle testing for periodic jobs — new),
   verifier prompt addition (single-cycle test detection for periodic jobs).
+
+## R2 — needs-revision, 1 finding
+
+### Findings
+
+- [ ] **F1: Test `test_time_based_staleness_recovery_on_version_change` does not test recovery — it tests persistence (duplicate of `test_time_based_staleness_persists_across_cycles`).**
+  `dep_staleness.rs:555` — the test's doc comment says "Multi-cycle recovery test: verifies
+  that a stale edge reverts to Active when the dependency is genuinely updated (version
+  changes)." The test name explicitly claims to test recovery on version change. But the
+  test body never causes a version change. `latest_semver_tag` returns `None` for the test
+  repo (no git tags), so `version_changed` evaluates to `false` on every cycle, and
+  `last_verified_at` is never updated. The test asserts
+  `assert_eq!(after_cycle2.status, DependencyStatus::Stale)` — confirming persistence, not
+  recovery. The inline comment (lines 604-608) explicitly acknowledges this: "This test
+  verifies the persistence path — true recovery requires a git repo with tags, which is an
+  integration test concern."
+  
+  This makes the test functionally identical to `test_time_based_staleness_persists_across_cycles`
+  (line 497), which also runs two cycles and asserts staleness persists. The codebase has two
+  tests that test the same behavior under different names — one honest (`persists_across_cycles`)
+  and one misleading (`recovery_on_version_change`). The misleading name creates the false
+  impression that the recovery path has test coverage when it does not.
+  
+  Fix: Either (a) rename the test to `test_time_based_staleness_persists_when_version_unresolvable`
+  and update the doc comment to match its actual behavior (acknowledging it's a persistence
+  test for the unresolvable-version scenario), or (b) restructure the test to actually verify
+  recovery by making the version resolver injectable (e.g., inject a closure or trait object
+  instead of calling `latest_semver_tag` directly) so the test can simulate a version change
+  between cycles. Option (a) is lower effort; option (b) is more thorough but requires
+  refactoring the job's version resolution.
