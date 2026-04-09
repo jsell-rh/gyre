@@ -103,3 +103,38 @@ R1 findings F1 and F2 are resolved. F1 fix correctly inverts the match to explic
   Since no existing code ever sets the `conflicted` status (grep for `"conflicted"` across `crates/gyre-server/src/` returns only a doc comment), the endpoint must check both specs' approval status at query time. The fix: for each `ConflictsWith` link, look up both the source and target specs via `spec_ledger.find_by_path()` and only include the link if both have `approval_status == Approved`.
 
   The test `get_conflicts_returns_conflicts_with_links` does not detect this because the seeded data (`seed_spec_with_links`) happens to set both specs in the conflicts_with link (`system/core.md` and `system/ui.md`) to `ApprovalStatus::Approved`. A negative test is needed: seed a `conflicts_with` link where one spec is `Pending` and assert the endpoint excludes it.
+
+---
+
+# TASK-019 Review — R3
+
+**Reviewer:** Verifier  
+**Date:** 2026-04-09  
+**Verdict:** `needs-revision` (1 finding)
+
+R2 finding F3 is resolved. The `get_conflicts` endpoint now correctly collects `ConflictsWith` candidate links, releases the lock, then checks both specs' `approval_status` via `spec_ledger.find_by_path()` — only including links where both specs are `Approved`. A negative test (`get_conflicts_excludes_non_approved_conflicts`) seeds a `conflicts_with` link between an Approved and a Pending spec and asserts the endpoint returns empty.
+
+---
+
+## Findings
+
+- [ ] **F4: `merge_gate_warns_on_unimplemented_depends_on` test has no assertions — tautological**
+
+  **Location:** `crates/gyre-server/src/api/specs.rs:4262-4342`
+
+  **Spec reference:** Acceptance criteria:
+  > - Merge processor warns (does not block) on unimplemented `depends_on`
+  > - Tests cover all merge gates, query endpoints, and cycle detection
+
+  The test `merge_gate_warns_on_unimplemented_depends_on` calls `merge_processor::run_once(&state).await.unwrap()` at line 4333 and then ends with only comments — zero `assert!` statements. This is a "no panic = success" tautological test: the function always passes regardless of behavior.
+
+  Compare with the other two merge gate tests in the same file:
+  - `merge_gate_rejects_superseded_spec` (line 4170): `assert!(all.is_empty(), ...)`
+  - `merge_gate_blocks_conflicts_with_approved` (line 4255): `assert!(all.is_empty(), ...)`
+  - `merge_gate_blocks_conflicts_with_approved_reverse_direction` (line 4425): `assert!(all.is_empty(), ...)`
+
+  All three blocking-gate tests assert on observable state. The warning-gate test asserts on nothing.
+
+  If the `depends_on` code path were accidentally changed to block (e.g., someone adds `return Ok(())` after `update_status` on line 374 inside the depends_on check), this test would still pass — because it has no assertion to detect the difference between "blocked at spec link gate" and "passed spec link gate, failed later at git operations."
+
+  The infrastructure to fix this already exists: `state.merge_queue.find_by_id(&entry_id)` returns the entry with its `error_message` field. The test stores `_entry_id` (line 4331) but never uses it. The fix: retrieve the entry after `run_once`, assert its `status == Failed` (it will fail at git operations), and assert its `error_message` does NOT contain `"spec link merge gate"` — proving the failure occurred downstream, not at the spec link gate.
