@@ -1204,13 +1204,38 @@ pub async fn get_stale_links(State(state): State<Arc<AppState>>) -> Json<Vec<Spe
 // ---------------------------------------------------------------------------
 
 pub async fn get_conflicts(State(state): State<Arc<AppState>>) -> Json<Vec<SpecLinkResponse>> {
-    let links = state.spec_links_store.lock().await;
-    let mut result: Vec<SpecLinkResponse> = links
-        .iter()
-        .filter(|l| l.link_type == SpecLinkType::ConflictsWith)
-        .cloned()
-        .map(Into::into)
-        .collect();
+    // Collect conflicts_with links without holding the lock across await points.
+    let candidate_links: Vec<_> = {
+        let links = state.spec_links_store.lock().await;
+        links
+            .iter()
+            .filter(|l| l.link_type == SpecLinkType::ConflictsWith)
+            .cloned()
+            .collect()
+    };
+
+    // An "active conflict" is a conflicts_with link where both specs are approved.
+    // spec-links.md §Link Status: conflicted = both specs approved (violation).
+    let mut result: Vec<SpecLinkResponse> = Vec::new();
+    for link in candidate_links {
+        let source_approved = state
+            .spec_ledger
+            .find_by_path(&link.source_path)
+            .await
+            .ok()
+            .flatten()
+            .map_or(false, |e| e.approval_status == ApprovalStatus::Approved);
+        let target_approved = state
+            .spec_ledger
+            .find_by_path(&link.target_path)
+            .await
+            .ok()
+            .flatten()
+            .map_or(false, |e| e.approval_status == ApprovalStatus::Approved);
+        if source_approved && target_approved {
+            result.push(link.into());
+        }
+    }
     result.sort_by(|a, b| a.id.cmp(&b.id));
     Json(result)
 }
@@ -3944,6 +3969,93 @@ specs:
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["id"], "link-3");
         assert_eq!(arr[0]["link_type"], "conflicts_with");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_conflicts_excludes_non_approved_conflicts() {
+        // Negative test: a conflicts_with link where one spec is Pending
+        // should NOT be returned as an active conflict.
+        let state = test_state();
+
+        // Seed specs: one approved, one pending.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/alpha.md".to_string(),
+                        title: "Alpha".to_string(),
+                        owner: "user:test".to_string(),
+                        kind: None,
+                        current_sha: "a".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Approved,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "clean".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: Some("repo1".to_string()),
+                        workspace_id: Some("ws1".to_string()),
+                    })
+                    .await
+                    .unwrap();
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/beta.md".to_string(),
+                        title: "Beta".to_string(),
+                        owner: "user:test".to_string(),
+                        kind: None,
+                        current_sha: "b".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Pending,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "clean".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: Some("repo1".to_string()),
+                        workspace_id: Some("ws1".to_string()),
+                    })
+                    .await
+                    .unwrap();
+
+                // Seed a conflicts_with link between them.
+                let mut store = state.spec_links_store.lock().await;
+                store.push(crate::spec_registry::SpecLinkEntry {
+                    id: "link-pending-conflict".to_string(),
+                    source_path: "system/alpha.md".to_string(),
+                    source_repo_id: Some("repo1".to_string()),
+                    link_type: crate::spec_registry::SpecLinkType::ConflictsWith,
+                    target_path: "system/beta.md".to_string(),
+                    target_repo_id: None,
+                    target_display: None,
+                    target_sha: None,
+                    reason: Some("potential conflict".to_string()),
+                    status: "active".to_string(),
+                    created_at: 1700000000,
+                    stale_since: None,
+                });
+            })
+        });
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/conflicts")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        // The link should be excluded because beta is Pending, not Approved.
+        assert_eq!(arr.len(), 0);
     }
 
     // -----------------------------------------------------------------------

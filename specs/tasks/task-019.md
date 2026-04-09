@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §Mechanical Gates (Merge Gates), §Querying the Graph, §Cycle Detection  
 **Depends on:** TASK-016 (staleness job and approval gates must be operational)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [specs/reviews/task-019.md](../reviews/task-019.md) — R2, 1 finding
 
 ## Spec Excerpt
@@ -100,3 +100,4 @@ When working on this task:
 - `feat(spec-links): implement merge gates, query endpoints, and cycle detection (TASK-019)`
 - `fix(process): add wildcard-exclusion and bidirectional-filter guards (TASK-019)`
 - `fix(spec-links): add extends to cycle detection, bidirectional conflicts_with merge gate (TASK-019)`
+- `fix(spec-links): filter get_conflicts endpoint to only active conflicts with both specs approved (TASK-019)`
