@@ -43,24 +43,28 @@ pub fn sign_attestation(
 
 // ── Chain attestation git notes (§5.3, location 2) ─────────────────────────
 
-/// The git notes ref used for chain attestations (distinct from the legacy
-/// `refs/notes/attestations` used by `AttestationBundle`).
-pub const CHAIN_ATTESTATION_NOTES_REF: &str = "refs/notes/chain-attestations";
+/// The git notes ref used for chain attestations — same as the legacy
+/// `AttestationBundle` ref per spec §5.3: "same as the existing merge
+/// attestation bundle." The chain attestation overwrites the legacy note
+/// on the same ref (using `-f`).
+pub const CHAIN_ATTESTATION_NOTES_REF: &str = "refs/notes/attestations";
 
-/// Attach a chain attestation as a git note under `refs/notes/chain-attestations`.
+/// Attach the full attestation chain as a git note under `refs/notes/attestations`.
 ///
-/// The full attestation chain is serialized to JSON and written as a note on the
-/// specified commit. Uses `-f` to allow overwriting (e.g., when a gate result
-/// appends to the leaf attestation and re-saves).
+/// The chain (root to leaf) is serialized as a JSON array and written as a note
+/// on the specified commit. Uses `-f` to allow overwriting (e.g., when a gate
+/// result appends to the leaf attestation and re-saves). The full chain is stored
+/// so that an offline verifier can walk and verify the complete authorization
+/// chain from the note alone (§5.3 clone-time portability).
 ///
 /// This is a non-blocking fire-and-forget operation — git note failures are
 /// logged but do not prevent the attestation from being persisted in the database.
 pub async fn attach_chain_attestation_note(
     repo_path: &str,
     commit_sha: &str,
-    attestation: &Attestation,
+    chain: &[Attestation],
 ) {
-    let note_json = match serde_json::to_string(attestation) {
+    let note_json = match serde_json::to_string(chain) {
         Ok(j) => j,
         Err(e) => {
             tracing::warn!(
@@ -114,14 +118,15 @@ pub async fn attach_chain_attestation_note(
     });
 }
 
-/// Read a chain attestation from git notes under `refs/notes/chain-attestations`.
+/// Read the full attestation chain from git notes under `refs/notes/attestations`.
 ///
 /// Returns `None` if no note exists for the given commit, the note is not valid
-/// JSON, or git is not available.
+/// JSON, or git is not available. The chain is stored as a JSON array (root to
+/// leaf) for clone-time portability (§5.3).
 pub async fn read_chain_attestation_note(
     repo_path: &str,
     commit_sha: &str,
-) -> Option<Attestation> {
+) -> Option<Vec<Attestation>> {
     let repo_path = repo_path.to_string();
     let commit_sha = commit_sha.to_string();
     let result = tokio::task::spawn_blocking(move || {
@@ -138,8 +143,8 @@ pub async fn read_chain_attestation_note(
         match output {
             Ok(o) if o.status.success() => {
                 let note_text = String::from_utf8_lossy(&o.stdout);
-                match serde_json::from_str::<Attestation>(note_text.trim()) {
-                    Ok(att) => Some(att),
+                match serde_json::from_str::<Vec<Attestation>>(note_text.trim()) {
+                    Ok(chain) => Some(chain),
                     Err(e) => {
                         tracing::warn!(
                             commit_sha = %commit_sha,
@@ -157,16 +162,16 @@ pub async fn read_chain_attestation_note(
     result.unwrap_or(None)
 }
 
-/// Write a chain attestation as a git note if the attestation has a non-empty
-/// `commit_sha`. Called after persisting the attestation to the database.
+/// Write the full attestation chain as a git note if the attestation has a
+/// non-empty `commit_sha`. Called after persisting the attestation to the
+/// database.
 ///
-/// This resolves the repo path from `state.repos` and delegates to
-/// `attach_chain_attestation_note`. If the repo lookup fails or commit_sha is
-/// empty, the operation is a no-op (attestation is still in the database).
-pub async fn write_chain_note_if_committed(
-    state: &crate::AppState,
-    attestation: &Attestation,
-) {
+/// Loads the full chain from the database via `load_chain` before writing so
+/// that the git note contains the complete authorization chain for offline
+/// verification (§5.3 clone-time portability). Resolves the repo path from
+/// `state.repos`. If the repo lookup fails or commit_sha is empty, the
+/// operation is a no-op (attestation is still in the database).
+pub async fn write_chain_note_if_committed(state: &crate::AppState, attestation: &Attestation) {
     let commit_sha = &attestation.output.commit_sha;
     if commit_sha.is_empty() {
         return;
@@ -175,13 +180,28 @@ pub async fn write_chain_note_if_committed(
     if repo_id.is_empty() {
         return;
     }
-    match state
-        .repos
-        .find_by_id(&gyre_common::Id::new(repo_id))
-        .await
-    {
+
+    // Load the full chain (root to leaf) from the database.
+    let chain = match state.chain_attestations.load_chain(&attestation.id).await {
+        Ok(c) if !c.is_empty() => c,
+        Ok(_) => {
+            // Fallback: if load_chain returns empty (e.g., root node with no
+            // parent), write just this attestation as a single-element chain.
+            vec![attestation.clone()]
+        }
+        Err(e) => {
+            tracing::warn!(
+                attestation_id = %attestation.id,
+                error = %e,
+                "failed to load chain — writing single attestation as git note"
+            );
+            vec![attestation.clone()]
+        }
+    };
+
+    match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
         Ok(Some(repo)) => {
-            attach_chain_attestation_note(&repo.path, commit_sha, attestation).await;
+            attach_chain_attestation_note(&repo.path, commit_sha, &chain).await;
         }
         Ok(None) => {
             tracing::debug!(
@@ -199,7 +219,7 @@ pub async fn write_chain_note_if_committed(
     }
 }
 
-/// Attach a chain attestation as a git note (synchronous inner helper).
+/// Attach the full attestation chain as a git note (synchronous inner helper).
 ///
 /// Unlike `attach_chain_attestation_note`, this blocks until the git command
 /// completes and returns a result. Used internally for testing.
@@ -207,9 +227,9 @@ pub async fn write_chain_note_if_committed(
 async fn attach_chain_attestation_note_sync(
     repo_path: &str,
     commit_sha: &str,
-    attestation: &Attestation,
+    chain: &[Attestation],
 ) -> anyhow::Result<()> {
-    let note_json = serde_json::to_string(attestation)?;
+    let note_json = serde_json::to_string(chain)?;
     let repo_path = repo_path.to_string();
     let commit_sha = commit_sha.to_string();
     tokio::task::spawn_blocking(move || {
@@ -378,25 +398,38 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    /// Build a two-node chain: root (depth 0) → leaf (depth 1).
+    fn sample_chain(commit_sha: &str) -> Vec<Attestation> {
+        let root = sample_attestation(commit_sha);
+        let mut leaf = sample_attestation(commit_sha);
+        leaf.id = "sha256:test-note-leaf".to_string();
+        leaf.metadata.chain_depth = 1;
+        leaf.metadata.task_id = "TASK-TEST-LEAF".to_string();
+        // Root to leaf ordering per spec.
+        vec![root, leaf]
+    }
+
     #[tokio::test]
     async fn chain_note_roundtrip() {
         let (dir, sha) = init_test_repo();
         let repo_path = dir.path().to_str().unwrap();
-        let att = sample_attestation(&sha);
+        let chain = sample_chain(&sha);
 
-        // Write the chain attestation note (sync, so we can await completion).
-        attach_chain_attestation_note_sync(repo_path, &sha, &att)
+        // Write the full chain as a git note.
+        attach_chain_attestation_note_sync(repo_path, &sha, &chain)
             .await
             .unwrap();
 
         // Read it back.
         let result = read_chain_attestation_note(repo_path, &sha).await;
-        assert!(result.is_some(), "expected attestation note to be readable");
-        let read_att = result.unwrap();
-        assert_eq!(read_att.id, att.id);
-        assert_eq!(read_att.metadata.task_id, att.metadata.task_id);
-        assert_eq!(read_att.output.commit_sha, sha);
-        assert_eq!(read_att.metadata.chain_depth, 0);
+        assert!(result.is_some(), "expected chain note to be readable");
+        let read_chain = result.unwrap();
+        assert_eq!(read_chain.len(), 2, "full chain should have 2 nodes");
+        assert_eq!(read_chain[0].id, chain[0].id);
+        assert_eq!(read_chain[0].metadata.chain_depth, 0);
+        assert_eq!(read_chain[1].id, chain[1].id);
+        assert_eq!(read_chain[1].metadata.chain_depth, 1);
+        assert_eq!(read_chain[1].metadata.task_id, "TASK-TEST-LEAF");
     }
 
     #[tokio::test]
@@ -405,27 +438,30 @@ mod tests {
         let sha2 = add_commit(&dir, "file2.txt", "content", "second");
         let repo_path = dir.path().to_str().unwrap();
 
-        let att1 = sample_attestation(&sha1);
+        let chain1 = vec![sample_attestation(&sha1)];
         let mut att2 = sample_attestation(&sha2);
         att2.id = "sha256:test-note-2".to_string();
         att2.metadata.task_id = "TASK-TEST-2".to_string();
         att2.output.commit_sha = sha2.clone();
+        let chain2 = vec![att2];
 
         // Write both notes.
-        attach_chain_attestation_note_sync(repo_path, &sha1, &att1)
+        attach_chain_attestation_note_sync(repo_path, &sha1, &chain1)
             .await
             .unwrap();
-        attach_chain_attestation_note_sync(repo_path, &sha2, &att2)
+        attach_chain_attestation_note_sync(repo_path, &sha2, &chain2)
             .await
             .unwrap();
 
-        // Read back — each commit returns its own attestation.
+        // Read back — each commit returns its own chain.
         let r1 = read_chain_attestation_note(repo_path, &sha1).await.unwrap();
         let r2 = read_chain_attestation_note(repo_path, &sha2).await.unwrap();
-        assert_eq!(r1.id, "sha256:test-note-1");
-        assert_eq!(r1.metadata.task_id, "TASK-TEST");
-        assert_eq!(r2.id, "sha256:test-note-2");
-        assert_eq!(r2.metadata.task_id, "TASK-TEST-2");
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r1[0].id, "sha256:test-note-1");
+        assert_eq!(r1[0].metadata.task_id, "TASK-TEST");
+        assert_eq!(r2.len(), 1);
+        assert_eq!(r2[0].id, "sha256:test-note-2");
+        assert_eq!(r2[0].metadata.task_id, "TASK-TEST-2");
     }
 
     #[tokio::test]
@@ -434,11 +470,9 @@ mod tests {
         let repo_path = dir.path().to_str().unwrap();
 
         // No note written — reading should return None.
-        let result = read_chain_attestation_note(
-            repo_path,
-            "0000000000000000000000000000000000000000",
-        )
-        .await;
+        let result =
+            read_chain_attestation_note(repo_path, "0000000000000000000000000000000000000000")
+                .await;
         assert!(result.is_none());
     }
 
@@ -447,42 +481,47 @@ mod tests {
         let (dir, sha) = init_test_repo();
         let repo_path = dir.path().to_str().unwrap();
 
-        let att = sample_attestation(&sha);
+        let chain = vec![sample_attestation(&sha)];
 
         // Write initial note.
-        attach_chain_attestation_note_sync(repo_path, &sha, &att)
+        attach_chain_attestation_note_sync(repo_path, &sha, &chain)
             .await
             .unwrap();
 
         // Simulate gate result appended — overwrite with -f.
-        let mut updated = att.clone();
-        updated.output.gate_results.push(gyre_common::GateAttestation {
-            gate_id: "gate-1".to_string(),
-            gate_name: "unit-tests".to_string(),
-            gate_type: gyre_common::GateType::TestCommand,
-            status: gyre_common::GateStatus::Passed,
-            output_hash: vec![80, 90],
-            constraint: None,
-            signature: vec![11, 22],
-            key_binding: sample_key_binding(),
-        });
+        let mut updated_leaf = chain[0].clone();
+        updated_leaf
+            .output
+            .gate_results
+            .push(gyre_common::GateAttestation {
+                gate_id: "gate-1".to_string(),
+                gate_name: "unit-tests".to_string(),
+                gate_type: gyre_common::GateType::TestCommand,
+                status: gyre_common::GateStatus::Passed,
+                output_hash: vec![80, 90],
+                constraint: None,
+                signature: vec![11, 22],
+                key_binding: sample_key_binding(),
+            });
+        let updated_chain = vec![updated_leaf];
 
-        attach_chain_attestation_note_sync(repo_path, &sha, &updated)
+        attach_chain_attestation_note_sync(repo_path, &sha, &updated_chain)
             .await
             .unwrap();
 
         // Read back — should have the gate result.
         let result = read_chain_attestation_note(repo_path, &sha).await.unwrap();
-        assert_eq!(result.output.gate_results.len(), 1);
-        assert_eq!(result.output.gate_results[0].gate_id, "gate-1");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].output.gate_results.len(), 1);
+        assert_eq!(result[0].output.gate_results[0].gate_id, "gate-1");
     }
 
     #[tokio::test]
-    async fn dual_write_both_note_refs_exist() {
+    async fn dual_write_chain_overwrites_legacy_on_same_ref() {
         let (dir, sha) = init_test_repo();
         let repo_path = dir.path().to_str().unwrap();
 
-        // Write legacy note (refs/notes/attestations).
+        // Write legacy note first (refs/notes/attestations).
         let legacy_json = r#"{"legacy":"bundle"}"#;
         let output = std::process::Command::new("git")
             .args([
@@ -500,46 +539,35 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "legacy note write failed");
 
-        // Write chain attestation note (refs/notes/chain-attestations).
-        let att = sample_attestation(&sha);
-        attach_chain_attestation_note_sync(repo_path, &sha, &att)
+        // Write chain attestation note (same ref, overwrites legacy with -f).
+        let chain = sample_chain(&sha);
+        attach_chain_attestation_note_sync(repo_path, &sha, &chain)
             .await
             .unwrap();
 
-        // Verify both notes exist.
-        let legacy_out = std::process::Command::new("git")
-            .args([
-                "-C",
-                repo_path,
-                "notes",
-                "--ref=refs/notes/attestations",
-                "show",
-                &sha,
-            ])
-            .output()
-            .unwrap();
-        assert!(legacy_out.status.success(), "legacy note should be readable");
-        let legacy_text = String::from_utf8_lossy(&legacy_out.stdout);
-        assert!(legacy_text.contains("legacy"));
-
-        let chain = read_chain_attestation_note(repo_path, &sha).await;
-        assert!(chain.is_some(), "chain attestation note should be readable");
-        assert_eq!(chain.unwrap().id, att.id);
+        // The note on refs/notes/attestations should now be the chain (JSON array),
+        // having overwritten the legacy format. This is the spec's "same as" behavior.
+        let read_chain = read_chain_attestation_note(repo_path, &sha).await;
+        assert!(read_chain.is_some(), "chain note should be readable");
+        let read_chain = read_chain.unwrap();
+        assert_eq!(read_chain.len(), 2, "should contain full 2-node chain");
+        assert_eq!(read_chain[0].id, chain[0].id);
+        assert_eq!(read_chain[1].id, chain[1].id);
     }
 
     #[tokio::test]
     async fn chain_note_full_attestation_fields_preserved() {
         let (dir, sha) = init_test_repo();
         let repo_path = dir.path().to_str().unwrap();
-        let att = sample_attestation(&sha);
+        let chain = sample_chain(&sha);
 
-        attach_chain_attestation_note_sync(repo_path, &sha, &att)
+        attach_chain_attestation_note_sync(repo_path, &sha, &chain)
             .await
             .unwrap();
 
         let result = read_chain_attestation_note(repo_path, &sha).await.unwrap();
 
-        // Verify all major fields round-trip correctly.
-        assert_eq!(result, att);
+        // Verify all fields round-trip correctly for the full chain.
+        assert_eq!(result, chain);
     }
 }

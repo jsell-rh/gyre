@@ -553,18 +553,23 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 .await;
             info!(mr_id = %updated_mr.id, sha = %merge_commit_sha, "attestation bundle created and stored");
 
-            // §5.3 location 2 — Dual-write: also attach chain attestation as git note
-            // under refs/notes/chain-attestations (alongside the legacy note above).
-            // Look up the chain attestation by commit SHA (set at push time).
+            // §5.3 location 2 — Dual-write: also attach the full chain attestation
+            // as a git note under refs/notes/attestations (overwrites the legacy
+            // note above). Load the full chain for offline verification portability.
             if let Ok(Some(chain_att)) = state
                 .chain_attestations
                 .find_by_commit(&merge_commit_sha)
                 .await
             {
+                // Load the full chain (root to leaf) from the database.
+                let chain = match state.chain_attestations.load_chain(&chain_att.id).await {
+                    Ok(c) if !c.is_empty() => c,
+                    _ => vec![chain_att],
+                };
                 crate::attestation::attach_chain_attestation_note(
                     &repo.path,
                     &merge_commit_sha,
-                    &chain_att,
+                    &chain,
                 )
                 .await;
             } else if let Some(ref agent_id) = updated_mr.author_agent_id {
@@ -576,13 +581,17 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                             .find_by_task(task_id.as_str())
                             .await
                         {
-                            if let Some(leaf) =
-                                atts.iter().max_by_key(|a| a.metadata.chain_depth)
-                            {
+                            if let Some(leaf) = atts.iter().max_by_key(|a| a.metadata.chain_depth) {
+                                // Load the full chain from the leaf.
+                                let chain =
+                                    match state.chain_attestations.load_chain(&leaf.id).await {
+                                        Ok(c) if !c.is_empty() => c,
+                                        _ => vec![leaf.clone()],
+                                    };
                                 crate::attestation::attach_chain_attestation_note(
                                     &repo.path,
                                     &merge_commit_sha,
-                                    leaf,
+                                    &chain,
                                 )
                                 .await;
                             }

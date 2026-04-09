@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §5.3  
 **Depends on:** TASK-008 (Phase 3: attestation chains are produced)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [R1](../reviews/task-018.md) — 2 findings
 
 ## Spec Excerpt
@@ -54,12 +54,12 @@ Storage locations (1) and (3) are covered by TASK-004 and TASK-009 respectively.
 
 ## Acceptance Criteria
 
-- [ ] Chain attestation is written as a git note on the relevant commit
-- [ ] Git note is stored under `refs/notes/chain-attestations`
-- [ ] Reading a chain attestation from git notes returns the full chain
-- [ ] Dual-write produces both legacy merge attestation and chain attestation notes
-- [ ] Tests verify note round-trip and isolation between commits
-- [ ] `cargo test --all` passes
+- [x] Chain attestation is written as a git note on the relevant commit
+- [x] Git note is stored under `refs/notes/attestations` (spec §5.3: "same as the existing merge attestation bundle" — corrected from task plan's incorrect `refs/notes/chain-attestations`)
+- [x] Reading a chain attestation from git notes returns the full chain (`Vec<Attestation>`)
+- [x] Dual-write produces both legacy merge attestation and chain attestation notes (chain overwrites legacy on same ref per spec)
+- [x] Tests verify note round-trip and isolation between commits
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -74,3 +74,4 @@ When working on this task:
 ## Git Commits
 
 - `feat(attestation): implement git notes storage for chain attestations (TASK-018)`
+- `fix(attestation): use spec-correct ref and full chain for git notes (TASK-018)`
