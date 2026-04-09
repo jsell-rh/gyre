@@ -33,7 +33,7 @@
 
 ## R3 Findings
 
-- [ ] **F8: Drift-review tasks created for `references` links — spec says "No mechanical enforcement"**
+- [-] [process-revision-complete] **F8: Drift-review tasks created for `references` links — spec says "No mechanical enforcement"**
 
   spec-links.md §Link Types defines `references` as:
 
