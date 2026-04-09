@@ -236,6 +236,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: mirrored-logic-tests
+        name: mirrored-logic test lint
+        description: Detect tests that duplicate production branching logic instead of calling the production function
+        entry: scripts/check-mirrored-logic-tests.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: pipeline-data-flow
         name: pipeline data flow lint
         description: Detect git log format strings that strip data the parser needs
