@@ -1,43 +1,64 @@
 # Review: TASK-016 — Spec Links: Staleness Job & Approval Gate Enforcement
 
 **Reviewer:** Verifier  
-**Round:** R1  
+**Round:** R2  
 **Verdict:** `needs-revision`
 
 ---
 
-## Findings
+## R1 Findings (all addressed)
 
-- [-] [process-revision-complete] **F1: Missing push-time inbound staleness detection (spec §Automatic Staleness Detection)**
+- [x] [process-revision-complete] **F1: Missing push-time inbound staleness detection (spec §Automatic Staleness Detection)**
+- [x] [process-revision-complete] **F2: Missing drift-review task creation (spec §Automatic Staleness Detection step 3, acceptance criterion 3)**
+- [x] [process-revision-complete] **F3: Missing approval invalidation for `extends` links (spec §Approval Gates)**
+- [x] [process-revision-complete] **F4: No test coverage for `extends` push-time drift behavior (acceptance criterion 6)**
 
-  The spec says: *"When any spec changes (new SHA), the forge: 1. Queries `spec_links` for all links where `target_path` matches the changed spec. 2. Marks those links as `stale`."*
+---
 
-  This describes inbound detection at push time: when spec B gets a new SHA, find all existing links from OTHER specs that point TO B and mark them stale. The `sync_spec_ledger` function (`spec_registry.rs:504-521`) only checks outbound links — links FROM the pushed manifest — verifying each link's target SHA against the ledger. It does NOT scan the links store for existing links whose `target_path` matches any spec that just changed in this push.
+## R2 Findings
 
-  Inbound staleness detection only happens in the daily background job (`spec_link_staleness::run_once`), creating up to a 24-hour delay for detecting stale links when a target spec changes. The spec says this should happen "when any spec changes" (immediate, at push time).
+- [ ] **F5: Inbound extends drift-review tasks assigned to wrong repo/workspace**
 
-  **Fix:** After updating ledger entries in step 4 of `sync_spec_ledger` (where changed SHAs are detected at line 353), scan the links store for all links where `target_path` matches any spec whose SHA changed, and mark those links as `"stale"` with `stale_since = now`.
+  In step 6b (inbound staleness detection, `spec_registry.rs:639-662`), `create_drift_review_task` is called with `source_repo_id` and `source_workspace_id` from `sync_spec_ledger`'s parameters — these are the **pushed repo's** IDs. For inbound links, the extending spec (the link's source) lives in a **different** repo. The link's own `source_repo_id` field (`SpecLinkEntry.source_repo_id`) contains the correct repo ID, but the `stale_extends` collection (line 628-636) only captures `(source_path, target_path)` — the link's `source_repo_id` is discarded.
 
-- [-] [process-revision-complete] **F2: Missing drift-review task creation (spec §Automatic Staleness Detection step 3, acceptance criterion 3)**
+  Result: drift-review tasks for inbound extends links are created in the **pushed** repo (the target spec's repo) instead of the **extending** spec's repo. The extending spec's team doesn't see the task in their repo.
 
-  The spec §Automatic Staleness Detection step 3 says *"Creates drift-review tasks in the source specs' repos."* The task's acceptance criterion says *"Extends parent spec change triggers drift-review in extending specs."*
+  The test `inbound_extends_staleness_full_side_effects` doesn't catch this because `make_test_link` hardcodes `source_repo_id: Some("repo1")` and `create_drift_review_task` is called with `Some("repo1")` — identical IDs for both the pushed repo and the link's source repo. A test that distinguishes them (e.g., link source = "repo_A", pushed repo = "repo_B") and asserts `task.repo_id == "repo_A"` would detect the bug.
 
-  Neither the push-time handler (`sync_spec_ledger`) nor the staleness background job (`run_once`) creates any drift-review task. The code marks `drift_status = "drifted"` on the extending spec (`spec_registry.rs:550`) but does not create a task entity. A drift-review task is a tracked work item that prompts review of the extending spec; simply flagging `drift_status` does not fulfill this requirement.
+  **Fix:** Include `source_repo_id` (and resolve its workspace_id) in the `stale_extends` collection. Pass the link's `source_repo_id` to `create_drift_review_task` instead of `sync_spec_ledger`'s `source_repo_id`. Also update the test to use distinct repo IDs for the pushed repo vs. the inbound link's source repo.
 
-  **Fix:** When an `extends` link becomes stale (either at push time or in the staleness job), create a drift-review task (or notification with actionable context) in the extending spec's repo, in addition to marking `drift_status`.
+- [ ] **F6: Duplicate drift-review task creation for same-repo extends links**
 
-- [-] [process-revision-complete] **F3: Missing approval invalidation for `extends` links (spec §Approval Gates)**
+  When an extends link's source AND target are both in the current manifest and the target's SHA changed, both step 6 (outbound) and step 6b (inbound) process the same link's side effects:
 
-  The spec's Approval Gates table says for `extends`: *"When target changes, source's approval is invalidated (it may need to incorporate the parent's changes)."*
+  1. Step 6 (outbound, line 547-584): Marks the link stale (`stale_since = now`), creates drift-review task, invalidates approval.
+  2. Step 6 (line 590-597): Replaces store links — the stale link (with `stale_since = now`) is added to the store.
+  3. Step 6b (line 606-662): The `stale_extends` filter (line 628-636) collects extends links with `stale_since == Some(now)` AND `target_path` in `changed_set`. The link from step 6 matches **both** criteria — it was processed in step 6 but is still collected here.
+  4. Step 6b applies side effects again → **second** drift-review task created (duplicate). Approval invalidation is idempotent, but task creation is not.
 
-  The push-time handler (`spec_registry.rs:539-554`) marks the extending spec's `drift_status` as `"drifted"` but does NOT reset `approval_status`. If the extending spec was previously `Approved`, it retains its `Approved` status after the parent changes. This violates the spec's explicit statement that "source's approval is invalidated."
+  Concrete scenario: Specs A and B in the same repo. A extends B. Push changes B's SHA. Step 6 processes A→B (stale, task #1). Step 6b sees A→B still matches the filter (stale_since == now, B in changed_set) and creates task #2.
 
-  Compare with the auto-invalidation that already works when a spec's OWN content changes (`spec_registry.rs:362-364`: `existing.approval_status = ApprovalStatus::Pending`). The same invalidation should apply when a parent spec changes via an `extends` link.
+  **Fix:** In step 6b's `stale_extends` filter, exclude links whose `source_path` is in the current manifest's `source_paths` set (which were already processed in step 6). Extract `source_paths` from the step 6 scope so it's accessible in step 6b:
+  ```rust
+  .filter(|l| {
+      l.link_type == SpecLinkType::Extends
+          && l.stale_since == Some(now)
+          && changed_set.contains(l.target_path.as_str())
+          && !manifest_source_paths.contains(&l.source_path)  // exclude outbound (already processed)
+  })
+  ```
 
-  **Fix:** In the `Extends` handling block, after marking `drift_status = "drifted"`, also set `source_entry.approval_status = ApprovalStatus::Pending` to invalidate the extending spec's approval.
+- [ ] **F7: Drift-review task creation limited to `extends` links — spec requires ALL link types**
 
-- [-] [process-revision-complete] **F4: No test coverage for `extends` push-time drift behavior (acceptance criterion 6)**
+  spec-links.md §Automatic Staleness Detection defines a 6-step algorithm where steps 1-3 are generic (all link types) and steps 4-6 are type-specific notes:
 
-  The acceptance criterion says *"Tests cover each link type enforcement."* Tests exist for `DependsOn` (2 tests in `specs.rs`), `Supersedes` (1 test in `specs.rs`), and the staleness job (6 tests in `spec_link_staleness.rs`). However, there is NO test verifying that a pushed spec change triggers `extends`-link staleness marking or drift status update in `sync_spec_ledger`.
+  > 1. Queries spec_links for all links where target_path matches the changed spec
+  > 2. Marks those links as stale
+  > **3. Creates drift-review tasks in the source specs' repos**
+  > 4. For `extends` links: the extending spec may need to be updated
+  > 5. For `depends_on` links: implementation work may need to be re-evaluated
+  > 6. For `supersedes` links: the superseded spec should already be deprecated
 
-  **Fix:** Add a test that calls `sync_spec_ledger` with a manifest containing an `extends` link whose `target_sha` differs from the ledger's current SHA, and asserts that: (a) the link is marked `"stale"`, (b) the extending spec's `drift_status` is set to `"drifted"`, and (c) the extending spec's `approval_status` is invalidated (per F3 fix).
+  Step 3 applies generically to ALL stale links — "in the source specs' repos" with no type qualifier. The implementation creates drift-review tasks only for `extends` links (step 6 line 574, step 6b line 653). When a `depends_on`, `implements`, `supersedes`, or `conflicts_with` link becomes stale, no drift-review task is created — the source spec's team has no tracked work item to re-evaluate the relationship.
+
+  **Fix:** In both step 6 and step 6b, create drift-review tasks for ALL stale links, not just extends. The `match link.link_type` block (line 531) should call `create_drift_review_task` for all link types when the link is stale, not just inside the `Extends` arm. The `extends`-specific side effects (drift_status, approval invalidation) remain extends-only.
