@@ -48,6 +48,8 @@ pub enum NotificationType {
     CascadeTestTriggered,
     /// Priority 3 — cascade test failed in a dependent repo.
     CascadeTestFailed,
+    /// Priority 7 — MR dependency chain exceeds 10 levels (decomposition smell).
+    DependencyChainTooDeep,
 }
 
 impl NotificationType {
@@ -71,6 +73,7 @@ impl NotificationType {
             Self::ConstraintViolation => "ConstraintViolation",
             Self::CascadeTestTriggered => "CascadeTestTriggered",
             Self::CascadeTestFailed => "CascadeTestFailed",
+            Self::DependencyChainTooDeep => "DependencyChainTooDeep",
         }
     }
 
@@ -94,6 +97,7 @@ impl NotificationType {
             "ConstraintViolation" => Some(Self::ConstraintViolation),
             "CascadeTestTriggered" => Some(Self::CascadeTestTriggered),
             "CascadeTestFailed" => Some(Self::CascadeTestFailed),
+            "DependencyChainTooDeep" => Some(Self::DependencyChainTooDeep),
             _ => None,
         }
     }
@@ -118,6 +122,7 @@ impl NotificationType {
             Self::ConstraintViolation => 2,
             Self::CascadeTestTriggered => 4,
             Self::CascadeTestFailed => 3,
+            Self::DependencyChainTooDeep => 7,
         }
     }
 }
@@ -223,6 +228,7 @@ mod tests {
             NotificationType::ConstraintViolation,
             NotificationType::CascadeTestTriggered,
             NotificationType::CascadeTestFailed,
+            NotificationType::DependencyChainTooDeep,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));

@@ -2,7 +2,7 @@
 
 **Spec reference:** `merge-dependencies.md` §Merge Queue Integration (Processing Algorithm, Priority Within Dependency Tiers)  
 **Depends on:** None (refines existing merge processor)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -88,4 +88,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+_(to be filled after commit)_

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -152,17 +153,310 @@ async fn handle_dep_health_issues(
     Ok(false)
 }
 
+/// Build a dependency graph from queued entries and their MRs.
+///
+/// Returns an adjacency list (mr_id → set of mr_ids it depends on) restricted to
+/// entries currently in the queue. Dependencies on MRs outside the queue (already
+/// merged or not yet queued) are not included — they are handled by
+/// `dependencies_satisfied()` at merge time.
+async fn build_queue_dependency_graph(
+    state: &AppState,
+    queued_entries: &[MergeQueueEntry],
+) -> anyhow::Result<HashMap<String, HashSet<String>>> {
+    let queued_mr_ids: HashSet<String> = queued_entries
+        .iter()
+        .map(|e| e.merge_request_id.to_string())
+        .collect();
+
+    let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
+
+    // Initialize every queued MR with an empty dependency set.
+    for mr_id in &queued_mr_ids {
+        graph.entry(mr_id.clone()).or_default();
+    }
+
+    // Populate edges from depends_on.
+    for entry in queued_entries {
+        let mr_id = entry.merge_request_id.to_string();
+        if let Ok(Some(mr)) = state
+            .merge_requests
+            .find_by_id(&entry.merge_request_id)
+            .await
+        {
+            for dep in &mr.depends_on {
+                let dep_str = dep.to_string();
+                if queued_mr_ids.contains(&dep_str) {
+                    graph.entry(mr_id.clone()).or_default().insert(dep_str);
+                }
+            }
+
+            // Atomic group members imply ordering: within the same group, members
+            // form a dependency chain in their enqueue order. This ensures the
+            // topological sort respects atomic group sequencing.
+            if let Some(ref group) = mr.atomic_group {
+                let group_members: Vec<_> = queued_entries
+                    .iter()
+                    .filter(|e| {
+                        e.merge_request_id != entry.merge_request_id
+                            && queued_mr_ids.contains(&e.merge_request_id.to_string())
+                    })
+                    .collect();
+
+                for other in &group_members {
+                    if let Ok(Some(other_mr)) = state
+                        .merge_requests
+                        .find_by_id(&other.merge_request_id)
+                        .await
+                    {
+                        if other_mr.atomic_group.as_deref() == Some(group) {
+                            // Earlier-enqueued member is a dependency of later-enqueued member.
+                            if other.enqueued_at < entry.enqueued_at {
+                                graph
+                                    .entry(mr_id.clone())
+                                    .or_default()
+                                    .insert(other.merge_request_id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(graph)
+}
+
+/// Topological sort using Kahn's algorithm with priority-aware tier ordering.
+///
+/// Within each tier of independent MRs (nodes whose in-queue dependencies are all
+/// resolved), higher-priority entries are processed first. This implements the spec's
+/// "Priority Within Dependency Tiers" requirement: dependencies define ordering
+/// constraints, but within independent MRs, priority still applies.
+///
+/// Returns entries in processing order.
+fn topological_sort_with_priority(
+    entries: &[MergeQueueEntry],
+    graph: &HashMap<String, HashSet<String>>,
+) -> Vec<MergeQueueEntry> {
+    // Build a priority lookup: mr_id → (priority, enqueued_at) for tie-breaking.
+    let entry_map: HashMap<String, &MergeQueueEntry> = entries
+        .iter()
+        .map(|e| (e.merge_request_id.to_string(), e))
+        .collect();
+
+    // Compute in-degree for each node.
+    let mut in_degree: HashMap<String, usize> = HashMap::new();
+    for (node, deps) in graph {
+        in_degree.entry(node.clone()).or_insert(0);
+        for dep in deps {
+            // Only count edges to nodes in the graph.
+            if graph.contains_key(dep) {
+                *in_degree.entry(node.clone()).or_insert(0) += 0; // ensure node exists
+            }
+        }
+    }
+    // Recompute: in-degree = number of in-graph nodes that point to this node.
+    for (node, _) in graph {
+        in_degree.entry(node.clone()).or_insert(0);
+    }
+    let mut in_deg: HashMap<String, usize> = graph.keys().map(|k| (k.clone(), 0)).collect();
+    for (node, deps) in graph {
+        for dep in deps {
+            if graph.contains_key(dep) {
+                // `node` depends on `dep`, so `node` has an incoming edge from `dep`.
+                // But in-degree counts edges INTO a node. `dep → node` means in_deg[node] += 1.
+                // Wait — the graph is mr_id → {its dependencies}. So graph[A] = {B} means
+                // A depends on B, i.e., edge B → A (B must come before A).
+                // in_degree[A] should count how many dependencies A has in the graph.
+                *in_deg.entry(node.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut available: Vec<String> = in_deg
+        .iter()
+        .filter(|(_, &deg)| deg == 0)
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    while !available.is_empty() {
+        // Sort available nodes by priority descending, then enqueued_at ascending for stability.
+        available.sort_by(|a, b| {
+            let ea = entry_map.get(a);
+            let eb = entry_map.get(b);
+            let pa = ea.map(|e| e.priority).unwrap_or(0);
+            let pb = eb.map(|e| e.priority).unwrap_or(0);
+            let ta = ea.map(|e| e.enqueued_at).unwrap_or(u64::MAX);
+            let tb = eb.map(|e| e.enqueued_at).unwrap_or(u64::MAX);
+            pb.cmp(&pa).then(ta.cmp(&tb))
+        });
+
+        // Take the highest-priority available node.
+        let node = available.remove(0);
+
+        if let Some(entry) = entry_map.get(&node) {
+            result.push((*entry).clone());
+        }
+
+        // Remove this node's outgoing edges (other nodes that depend on it).
+        for (other, deps) in graph.iter() {
+            if deps.contains(&node) {
+                if let Some(deg) = in_deg.get_mut(other) {
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0
+                        && !result
+                            .iter()
+                            .any(|e| e.merge_request_id.to_string() == *other)
+                    {
+                        available.push(other.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Compute the maximum dependency chain depth in the graph using topological sort + DP.
+///
+/// Uses topological ordering to compute the longest path (chain depth) from any root
+/// to any leaf. BFS finds shortest paths and would underestimate depth in DAGs with
+/// diamond patterns; this algorithm computes the correct longest path in a DAG.
+///
+/// Returns the maximum chain depth (0 = no dependencies, 1 = one level, etc.).
+fn compute_max_chain_depth(graph: &HashMap<String, HashSet<String>>) -> usize {
+    if graph.is_empty() {
+        return 0;
+    }
+
+    // Compute in-degree for topological ordering.
+    let mut in_deg: HashMap<String, usize> = graph.keys().map(|k| (k.clone(), 0)).collect();
+    for (node, deps) in graph {
+        for dep in deps {
+            if graph.contains_key(dep) {
+                *in_deg.entry(node.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Kahn's algorithm to get topological order.
+    let mut queue: VecDeque<String> = in_deg
+        .iter()
+        .filter(|(_, &deg)| deg == 0)
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    // depth[node] = longest path ending at node.
+    let mut depth: HashMap<String, usize> = graph.keys().map(|k| (k.clone(), 0)).collect();
+
+    let mut topo_order = Vec::new();
+    while let Some(node) = queue.pop_front() {
+        topo_order.push(node.clone());
+        // For every other node that depends on `node`, reduce in-degree.
+        for (other, deps) in graph.iter() {
+            if deps.contains(&node) {
+                let new_depth = depth.get(&node).copied().unwrap_or(0) + 1;
+                let entry = depth.entry(other.clone()).or_insert(0);
+                if new_depth > *entry {
+                    *entry = new_depth;
+                }
+                if let Some(deg) = in_deg.get_mut(other) {
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0 {
+                        queue.push_back(other.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    depth.values().copied().max().unwrap_or(0)
+}
+
+/// Emit a warning notification when the dependency chain depth exceeds 10 levels.
+///
+/// Per merge-dependencies.md §Failure Handling: "Dependency chain too deep (>10 levels):
+/// Warning to repo orchestrator. Not rejected, but flagged as a decomposition smell."
+async fn warn_deep_chain(state: &AppState, depth: usize, workspace_id: &Id) {
+    // caller-scope:ok — single workspace notification, not iterating cross-workspace entities
+    warn!(
+        chain_depth = depth,
+        workspace_id = workspace_id.as_str(),
+        "MR dependency chain is {} levels deep (>10) — decomposition smell",
+        depth
+    );
+
+    let members = state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+
+    let body_json = serde_json::json!({
+        "chain_depth": depth,
+        "threshold": 10,
+        "workspace_id": workspace_id.as_str(),
+    })
+    .to_string();
+
+    for member in &members {
+        crate::notifications::notify_rich(
+            state,
+            workspace_id.clone(),
+            member.user_id.clone(),
+            gyre_common::NotificationType::DependencyChainTooDeep,
+            format!("MR dependency chain is {depth} levels deep — consider decomposing further"),
+            "default",
+            Some(body_json.clone()),
+            None,
+            None,
+        )
+        .await;
+    }
+}
+
 async fn process_next(state: &AppState) -> anyhow::Result<()> {
-    // Get all queued entries and find the first one whose dependencies are all merged.
+    // Step 1: Get all queued entries.
     let all_queued = state.merge_queue.list_queue().await?;
+    let queued_entries: Vec<_> = all_queued
+        .into_iter()
+        .filter(|e| e.status == MergeQueueEntryStatus::Queued)
+        .collect();
+
+    if queued_entries.is_empty() {
+        return Ok(());
+    }
+
+    // Step 2: Build dependency graph from depends_on + atomic_group.
+    let graph = build_queue_dependency_graph(state, &queued_entries).await?;
+
+    // Step 2b: Check chain depth and warn if >10.
+    let max_depth = compute_max_chain_depth(&graph);
+    if max_depth > 10 {
+        // Find a workspace_id from any queued entry for the notification target.
+        if let Some(first) = queued_entries.first() {
+            if let Ok(Some(mr)) = state
+                .merge_requests
+                .find_by_id(&first.merge_request_id)
+                .await
+            {
+                warn_deep_chain(state, max_depth, &mr.workspace_id).await;
+            }
+        }
+    }
+
+    // Step 3: Topological sort (respecting priority within each tier).
+    let sorted = topological_sort_with_priority(&queued_entries, &graph);
+
+    // Step 4: Find the first entry in topological order whose dependencies are
+    // all Merged (not just queued) and whose gates have passed.
     let entry = {
         let mut found = None;
-        for candidate in all_queued {
-            if candidate.status != MergeQueueEntryStatus::Queued {
-                continue;
-            }
+        for candidate in &sorted {
             if dependencies_satisfied(state, &candidate.merge_request_id).await? {
-                found = Some(candidate);
+                found = Some(candidate.clone());
                 break;
             }
         }
@@ -1835,5 +2129,454 @@ mod tests {
             rx.try_recv().is_err(),
             "no events should be emitted when dependent workspace has cascade testing disabled"
         );
+    }
+
+    // ── Topological sort & priority tests (TASK-026) ─────────────────────────
+
+    /// Create an MR with the given id, workspace, and depends_on list.
+    async fn create_mr_with_deps(
+        state: &AppState,
+        mr_id: &str,
+        workspace_id: &str,
+        depends_on: Vec<&str>,
+    ) -> gyre_domain::MergeRequest {
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new(mr_id),
+            Id::new("repo-1"),
+            format!("MR {mr_id}"),
+            format!("feat/{mr_id}"),
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new(workspace_id);
+        mr.depends_on = depends_on.into_iter().map(Id::new).collect();
+        state.merge_requests.create(&mr).await.unwrap();
+        mr
+    }
+
+    /// Enqueue an MR with a given priority and enqueued_at timestamp.
+    async fn enqueue_mr(
+        state: &AppState,
+        mr_id: &str,
+        priority: u32,
+        enqueued_at: u64,
+    ) -> MergeQueueEntry {
+        let entry = MergeQueueEntry::new(
+            Id::new(format!("entry-{mr_id}")),
+            Id::new(mr_id),
+            priority,
+            enqueued_at,
+        );
+        state.merge_queue.enqueue(&entry).await.unwrap();
+        entry
+    }
+
+    #[tokio::test]
+    async fn topological_sort_prioritizes_independent_mrs() {
+        // Two independent MRs (no deps between them): higher priority processes first.
+        let state = test_state();
+
+        create_mr_with_deps(&state, "mr-low", "ws-1", vec![]).await;
+        create_mr_with_deps(&state, "mr-high", "ws-1", vec![]).await;
+
+        let e_low = enqueue_mr(&state, "mr-low", 25, 1000).await; // Low priority
+        let e_high = enqueue_mr(&state, "mr-high", 100, 1001).await; // Critical priority
+
+        let entries = vec![e_low.clone(), e_high.clone()];
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let sorted = topological_sort_with_priority(&entries, &graph);
+
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(
+            sorted[0].merge_request_id.as_str(),
+            "mr-high",
+            "higher priority MR should be first"
+        );
+        assert_eq!(
+            sorted[1].merge_request_id.as_str(),
+            "mr-low",
+            "lower priority MR should be second"
+        );
+    }
+
+    #[tokio::test]
+    async fn topological_sort_respects_dependencies_over_priority() {
+        // mr-high (priority 100) depends on mr-low (priority 25).
+        // mr-low must come first despite lower priority.
+        let state = test_state();
+
+        create_mr_with_deps(&state, "mr-low", "ws-1", vec![]).await;
+        create_mr_with_deps(&state, "mr-high", "ws-1", vec!["mr-low"]).await;
+
+        let e_low = enqueue_mr(&state, "mr-low", 25, 1000).await;
+        let e_high = enqueue_mr(&state, "mr-high", 100, 1001).await;
+
+        let entries = vec![e_high.clone(), e_low.clone()]; // intentional reverse order
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let sorted = topological_sort_with_priority(&entries, &graph);
+
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(
+            sorted[0].merge_request_id.as_str(),
+            "mr-low",
+            "dependency must come first even with lower priority"
+        );
+        assert_eq!(
+            sorted[1].merge_request_id.as_str(),
+            "mr-high",
+            "dependent MR comes after its dependency"
+        );
+    }
+
+    #[tokio::test]
+    async fn topological_sort_priority_within_same_tier() {
+        // Diamond: mr-a depends on mr-root, mr-b depends on mr-root.
+        // mr-a has higher priority than mr-b.
+        // Expected: mr-root first, then mr-a, then mr-b.
+        let state = test_state();
+
+        create_mr_with_deps(&state, "mr-root", "ws-1", vec![]).await;
+        create_mr_with_deps(&state, "mr-a", "ws-1", vec!["mr-root"]).await;
+        create_mr_with_deps(&state, "mr-b", "ws-1", vec!["mr-root"]).await;
+
+        let e_root = enqueue_mr(&state, "mr-root", 50, 1000).await;
+        let e_a = enqueue_mr(&state, "mr-a", 100, 1001).await;
+        let e_b = enqueue_mr(&state, "mr-b", 25, 1002).await;
+
+        let entries = vec![e_b.clone(), e_root.clone(), e_a.clone()];
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let sorted = topological_sort_with_priority(&entries, &graph);
+
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted[0].merge_request_id.as_str(), "mr-root");
+        assert_eq!(
+            sorted[1].merge_request_id.as_str(),
+            "mr-a",
+            "higher priority independent MR in tier 2 should be first"
+        );
+        assert_eq!(
+            sorted[2].merge_request_id.as_str(),
+            "mr-b",
+            "lower priority independent MR in tier 2 should be second"
+        );
+    }
+
+    #[tokio::test]
+    async fn topological_sort_chain_ordering() {
+        // Linear chain: mr-c depends on mr-b, mr-b depends on mr-a.
+        // Even if mr-c has highest priority, order must be: a, b, c.
+        let state = test_state();
+
+        create_mr_with_deps(&state, "mr-a", "ws-1", vec![]).await;
+        create_mr_with_deps(&state, "mr-b", "ws-1", vec!["mr-a"]).await;
+        create_mr_with_deps(&state, "mr-c", "ws-1", vec!["mr-b"]).await;
+
+        let e_a = enqueue_mr(&state, "mr-a", 25, 1000).await;
+        let e_b = enqueue_mr(&state, "mr-b", 50, 1001).await;
+        let e_c = enqueue_mr(&state, "mr-c", 100, 1002).await;
+
+        let entries = vec![e_c.clone(), e_a.clone(), e_b.clone()];
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let sorted = topological_sort_with_priority(&entries, &graph);
+
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted[0].merge_request_id.as_str(), "mr-a");
+        assert_eq!(sorted[1].merge_request_id.as_str(), "mr-b");
+        assert_eq!(sorted[2].merge_request_id.as_str(), "mr-c");
+    }
+
+    #[tokio::test]
+    async fn topological_sort_atomic_group_ordering() {
+        // mr-first and mr-second are in atomic group "bundle".
+        // mr-first enqueued before mr-second.
+        // Atomic group implies: mr-second depends on mr-first.
+        let state = test_state();
+
+        let mut mr_first = gyre_domain::MergeRequest::new(
+            Id::new("mr-first"),
+            Id::new("repo-1"),
+            "First in group",
+            "feat/first",
+            "main",
+            1000,
+        );
+        mr_first.workspace_id = Id::new("ws-1");
+        mr_first.atomic_group = Some("bundle".to_string());
+        state.merge_requests.create(&mr_first).await.unwrap();
+
+        let mut mr_second = gyre_domain::MergeRequest::new(
+            Id::new("mr-second"),
+            Id::new("repo-1"),
+            "Second in group",
+            "feat/second",
+            "main",
+            1000,
+        );
+        mr_second.workspace_id = Id::new("ws-1");
+        mr_second.atomic_group = Some("bundle".to_string());
+        state.merge_requests.create(&mr_second).await.unwrap();
+
+        // mr-second has higher priority but must come after mr-first (enqueue order)
+        let e_first = enqueue_mr(&state, "mr-first", 25, 1000).await;
+        let e_second = enqueue_mr(&state, "mr-second", 100, 1001).await;
+
+        let entries = vec![e_second.clone(), e_first.clone()];
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let sorted = topological_sort_with_priority(&entries, &graph);
+
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(
+            sorted[0].merge_request_id.as_str(),
+            "mr-first",
+            "earlier-enqueued atomic group member must come first"
+        );
+        assert_eq!(
+            sorted[1].merge_request_id.as_str(),
+            "mr-second",
+            "later-enqueued atomic group member must come second"
+        );
+    }
+
+    #[tokio::test]
+    async fn chain_depth_warning_emitted_at_depth_exceeding_10() {
+        // Build a chain of 12 MRs: mr-0 <- mr-1 <- ... <- mr-11.
+        // Chain depth = 11 levels, which exceeds the >10 threshold.
+        let state = test_state();
+
+        // Add a workspace member for notification delivery.
+        let membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("member-1"),
+            Id::new("user-1"),
+            Id::new("ws-1"),
+            gyre_domain::WorkspaceRole::Developer,
+            Id::new("admin"),
+            1000,
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+
+        let mut entries = Vec::new();
+        for i in 0..12 {
+            let mr_id = format!("mr-{i}");
+            let deps = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("mr-{}", i - 1)]
+            };
+            let mut mr = gyre_domain::MergeRequest::new(
+                Id::new(&mr_id),
+                Id::new("repo-1"),
+                format!("MR {mr_id}"),
+                format!("feat/{mr_id}"),
+                "main",
+                1000,
+            );
+            mr.workspace_id = Id::new("ws-1");
+            mr.depends_on = deps.into_iter().map(Id::new).collect();
+            state.merge_requests.create(&mr).await.unwrap();
+
+            let entry = enqueue_mr(&state, &mr_id, 50, 1000 + i as u64).await;
+            entries.push(entry);
+        }
+
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let max_depth = compute_max_chain_depth(&graph);
+        assert_eq!(max_depth, 11, "chain of 12 MRs has depth 11");
+        assert!(max_depth > 10, "should exceed the >10 threshold");
+
+        // Actually trigger the warning via process_next — which will call warn_deep_chain.
+        // Instead of calling process_next (which would try to merge),
+        // call warn_deep_chain directly.
+        warn_deep_chain(&state, max_depth, &Id::new("ws-1")).await;
+
+        // Verify notification was created.
+        let notifications = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-1"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(notifications.len(), 1);
+        let notif = &notifications[0];
+        assert_eq!(
+            notif.notification_type,
+            gyre_common::NotificationType::DependencyChainTooDeep
+        );
+        assert_eq!(
+            notif.priority,
+            gyre_common::NotificationType::DependencyChainTooDeep.default_priority(),
+        );
+        assert_eq!(
+            notif.priority, 7,
+            "DependencyChainTooDeep should be priority 7"
+        );
+        assert!(notif.title.contains("11 levels deep"));
+
+        // Verify body JSON.
+        let body: serde_json::Value =
+            serde_json::from_str(notif.body.as_ref().expect("should have body"))
+                .expect("should be valid JSON");
+        assert_eq!(body["chain_depth"], 11);
+        assert_eq!(body["threshold"], 10);
+        assert_eq!(body["workspace_id"], "ws-1");
+    }
+
+    #[tokio::test]
+    async fn chain_depth_not_warned_at_10_or_below() {
+        // Chain of 11 MRs = depth 10, should NOT trigger warning.
+        let state = test_state();
+
+        let mut entries = Vec::new();
+        for i in 0..11 {
+            let mr_id = format!("mr-{i}");
+            let deps = if i == 0 {
+                vec![]
+            } else {
+                vec![format!("mr-{}", i - 1)]
+            };
+            let mut mr = gyre_domain::MergeRequest::new(
+                Id::new(&mr_id),
+                Id::new("repo-1"),
+                format!("MR {mr_id}"),
+                format!("feat/{mr_id}"),
+                "main",
+                1000,
+            );
+            mr.workspace_id = Id::new("ws-1");
+            mr.depends_on = deps.into_iter().map(Id::new).collect();
+            state.merge_requests.create(&mr).await.unwrap();
+
+            let entry = enqueue_mr(&state, &mr_id, 50, 1000 + i as u64).await;
+            entries.push(entry);
+        }
+
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let max_depth = compute_max_chain_depth(&graph);
+        assert_eq!(max_depth, 10, "chain of 11 MRs has depth 10");
+        assert!(max_depth <= 10, "should NOT exceed the >10 threshold");
+    }
+
+    #[tokio::test]
+    async fn chain_depth_diamond_asymmetric_uses_longest_path() {
+        // Asymmetric diamond: mr-a -> mr-g (direct, depth 1)
+        //                     mr-a -> mr-b -> mr-c -> mr-g (depth 3)
+        // Longest path through g should be 3, not 1.
+        // This tests that the algorithm computes longest paths, not shortest (BFS).
+        let state = test_state();
+
+        create_mr_with_deps(&state, "mr-a", "ws-1", vec![]).await;
+        create_mr_with_deps(&state, "mr-b", "ws-1", vec!["mr-a"]).await;
+        create_mr_with_deps(&state, "mr-c", "ws-1", vec!["mr-b"]).await;
+        create_mr_with_deps(&state, "mr-g", "ws-1", vec!["mr-a", "mr-c"]).await;
+
+        let e_a = enqueue_mr(&state, "mr-a", 50, 1000).await;
+        let e_b = enqueue_mr(&state, "mr-b", 50, 1001).await;
+        let e_c = enqueue_mr(&state, "mr-c", 50, 1002).await;
+        let e_g = enqueue_mr(&state, "mr-g", 50, 1003).await;
+
+        let entries = vec![e_a, e_b, e_c, e_g];
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let max_depth = compute_max_chain_depth(&graph);
+        assert_eq!(
+            max_depth, 3,
+            "longest path a->b->c->g has depth 3, not shortest a->g depth 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn topological_sort_same_priority_uses_enqueue_order() {
+        // Two independent MRs with same priority: FIFO by enqueued_at.
+        let state = test_state();
+
+        create_mr_with_deps(&state, "mr-earlier", "ws-1", vec![]).await;
+        create_mr_with_deps(&state, "mr-later", "ws-1", vec![]).await;
+
+        let e_earlier = enqueue_mr(&state, "mr-earlier", 50, 1000).await;
+        let e_later = enqueue_mr(&state, "mr-later", 50, 1001).await;
+
+        let entries = vec![e_later.clone(), e_earlier.clone()];
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let sorted = topological_sort_with_priority(&entries, &graph);
+
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(
+            sorted[0].merge_request_id.as_str(),
+            "mr-earlier",
+            "earlier-enqueued MR should be first when priorities are equal"
+        );
+        assert_eq!(sorted[1].merge_request_id.as_str(), "mr-later");
+    }
+
+    #[tokio::test]
+    async fn topological_sort_dep_outside_queue_ignored() {
+        // mr-b depends on mr-a, but mr-a is not in the queue (already merged).
+        // mr-b should still be processable.
+        let state = test_state();
+
+        // Create mr-a but DON'T enqueue it.
+        create_mr_with_deps(&state, "mr-a", "ws-1", vec![]).await;
+        create_mr_with_deps(&state, "mr-b", "ws-1", vec!["mr-a"]).await;
+
+        let e_b = enqueue_mr(&state, "mr-b", 50, 1000).await;
+
+        let entries = vec![e_b.clone()];
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let sorted = topological_sort_with_priority(&entries, &graph);
+
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(
+            sorted[0].merge_request_id.as_str(),
+            "mr-b",
+            "MR with out-of-queue dependency should still appear in sorted order"
+        );
+        // The dep on mr-a is not in the graph (only in-queue deps are edges).
+        // dependencies_satisfied() at merge time will check the actual MR status.
+        assert!(
+            graph.get("mr-b").unwrap().is_empty(),
+            "out-of-queue dependency should not appear in graph edges"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_queue_returns_empty_sort() {
+        let state = test_state();
+        let entries: Vec<MergeQueueEntry> = vec![];
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let sorted = topological_sort_with_priority(&entries, &graph);
+        assert!(sorted.is_empty());
+        assert_eq!(compute_max_chain_depth(&graph), 0);
     }
 }
