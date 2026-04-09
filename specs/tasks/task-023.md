@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §Accountability Agent Integration  
 **Depends on:** TASK-016 (staleness job), TASK-019 (query endpoints and cycle detection)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -87,4 +87,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(spec-links): implement accountability agent patrol (TASK-023)`

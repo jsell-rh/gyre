@@ -347,6 +347,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // These fixed-path routes must be registered before `:path` routes.
         .route("/api/v1/specs/stale-links", get(specs::get_stale_links))
         .route("/api/v1/specs/conflicts", get(specs::get_conflicts))
+        // TASK-023: Accountability agent patrol (spec-links.md §Accountability Agent Integration)
+        .route("/api/v1/patrol/spec-links", post(specs::patrol_spec_links))
         .route("/api/v1/specs/:path", get(specs::get_spec))
         .route("/api/v1/specs/:path/approve", post(specs::approve_spec))
         .route(

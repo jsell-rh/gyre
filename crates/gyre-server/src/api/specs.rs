@@ -1241,6 +1241,31 @@ pub async fn get_conflicts(State(state): State<Arc<AppState>>) -> Json<Vec<SpecL
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/v1/patrol/spec-links — accountability agent patrol (TASK-023)
+// spec-links.md §Accountability Agent Integration
+// ---------------------------------------------------------------------------
+
+/// Run all 5 spec-graph patrol checks and return findings.
+///
+/// Runs: stale links, orphaned supersessions, unresolved conflicts,
+/// dangling implementations, deep dependency chains.
+/// Error-severity findings create priority-3 notifications for Admin/Developer members.
+pub async fn patrol_spec_links(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::spec_patrol::PatrolRequest>,
+) -> Json<crate::spec_patrol::PatrolResponse> {
+    let now = now_secs();
+    let threshold = req.stale_threshold_secs.unwrap_or(7 * 24 * 60 * 60);
+
+    let findings = crate::spec_patrol::run_patrol(&state, now, threshold).await;
+
+    // Create notifications for error-severity findings.
+    crate::spec_patrol::create_notifications_for_error_findings(&state, &findings, now).await;
+
+    Json(crate::spec_patrol::PatrolResponse { findings })
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/specs/:path/progress — tasks and MRs linked to a spec
 // ---------------------------------------------------------------------------
 
@@ -4438,5 +4463,107 @@ specs:
             all.is_empty(),
             "MR referencing target of conflicts_with link should be Failed (bidirectional check)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // TASK-023: POST /api/v1/patrol/spec-links — accountability agent patrol
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn patrol_endpoint_returns_findings() {
+        let state = test_state();
+
+        // Seed an implements link pointing to a deleted spec (dangling).
+        let source = SpecLedgerEntry {
+            path: "system/impl.md".to_string(),
+            title: "Impl".to_string(),
+            owner: "user:test".to_string(),
+            kind: None,
+            current_sha: "sha1".to_string(),
+            approval_mode: "human_only".to_string(),
+            approval_status: ApprovalStatus::Pending,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+            repo_id: Some("repo1".to_string()),
+            workspace_id: Some("ws1".to_string()),
+        };
+        state.spec_ledger.save(&source).await.unwrap();
+
+        // Dangling implements link — target does not exist in ledger.
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(crate::spec_registry::SpecLinkEntry {
+                id: "patrol-dangling".to_string(),
+                source_path: "system/impl.md".to_string(),
+                source_repo_id: Some("repo1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::Implements,
+                target_path: "system/deleted.md".to_string(),
+                target_repo_id: None,
+                target_display: None,
+                target_sha: Some("sha123".to_string()),
+                reason: None,
+                status: "active".to_string(),
+                created_at: 1_000_000,
+                stale_since: None,
+            });
+        }
+
+        let app = crate::api::api_router().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/patrol/spec-links")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let findings = json["findings"].as_array().unwrap();
+        assert!(!findings.is_empty(), "should have at least one finding");
+
+        // Verify the dangling implementation finding.
+        let dangling = findings
+            .iter()
+            .find(|f| f["type"] == "dangling_implementation")
+            .expect("should have dangling_implementation finding");
+        assert_eq!(dangling["severity"], "error");
+        assert_eq!(dangling["spec_path"], "system/impl.md");
+        assert!(dangling["detail"]
+            .as_str()
+            .unwrap()
+            .contains("system/deleted.md"));
+        assert!(dangling["suggested_action"].as_str().unwrap().len() > 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn patrol_endpoint_empty_when_no_issues() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/patrol/spec-links")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let findings = json["findings"].as_array().unwrap();
+        assert!(findings.is_empty(), "no links → no findings");
     }
 }
