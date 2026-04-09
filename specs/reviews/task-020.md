@@ -90,7 +90,7 @@ R1 findings F1–F3 are now resolved in commit `2e39a167`:
 
 ### Findings
 
-- [ ] **F1: R2 fix added `require_cascade_tests` field but no test asserts on it.**
+- [-] [process-revision-complete] **F1: R2 fix added `require_cascade_tests` field but no test asserts on it.**
   The `test_dependency_policy_set_and_get` test (`dependencies.rs:930-956`) explicitly sets
   `require_cascade_tests: false` (line 934) but the assertion block (lines 950-956) checks
   `breaking_change_behavior`, `max_version_drift`, `stale_dependency_alert_days`, and
