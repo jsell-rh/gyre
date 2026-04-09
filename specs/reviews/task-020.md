@@ -112,7 +112,7 @@ All prior findings are resolved. Two new findings identified.
 
 ### Findings
 
-- [ ] **F1: `detect_breaking_changes_on_push` only checks the tip commit — interior commits in multi-commit pushes are missed.**
+- [-] [process-revision-complete] **F1: `detect_breaking_changes_on_push` only checks the tip commit — interior commits in multi-commit pushes are missed.**
   `git_http.rs:2065` uses `git log -1 --format=%H%x00%B%x00 NEW_SHA`, which limits detection
   to the single tip commit. In a multi-commit push (e.g., 5 commits pushed at once), breaking
   change markers (`feat!:`, `BREAKING CHANGE:` footer) in interior commits are silently missed.
@@ -126,8 +126,10 @@ All prior findings are resolved. Two new findings identified.
   `git log -1 ... new_sha` with `git log --format=%H%x00%B%x00 old_sha..new_sha` (same
   pattern as line 933–936). (3) Handle the `00000000...` case for new branches (use just
   `new_sha` without range). (4) Update the call site at line 669 to pass `&update.old_sha`.
+  Process guard: `scripts/check-push-commit-range.sh` (new), implementation prompt item 72,
+  verifier prompt addition (push handler tip-only detection).
 
-- [ ] **F2: `test_dependency_policy_default` does not assert `stale_dependency_alert_days` default (spec value: 30).**
+- [-] [process-revision-complete] **F2: `test_dependency_policy_default` does not assert `stale_dependency_alert_days` default (spec value: 30).**
   The spec defines 5 policy fields with defaults. `test_dependency_policy_default`
   (dependencies.rs:910–916) checks 4: `breaking_change_behavior` (Warn), `max_version_drift`
   (3), `require_cascade_tests` (true, added in R3), `auto_create_update_tasks` (true).
@@ -138,3 +140,5 @@ All prior findings are resolved. Two new findings identified.
   but the default value 30 is never verified.
   Fix: Add `assert_eq!(policy.stale_dependency_alert_days, 30);` to
   `test_dependency_policy_default` (after line 914).
+  Process guard: implementation prompt item 73 (default-test assertion field exhaustiveness),
+  verifier prompt addition (default-test assertion field gaps).

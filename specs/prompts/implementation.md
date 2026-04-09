@@ -423,6 +423,19 @@ Before marking a task `ready-for-review`, verify:
       - **Recovery test:** Change the underlying condition (e.g., update the dependency version). Run the job. Assert the record returns to Active. This proves the state change is responsive to real-world changes, not just timestamp arithmetic.
     - **Verification procedure:** For every job or process that runs periodically: (1) identify all state fields the job reads AND writes in the same execution (e.g., `last_verified_at`), (2) for each such field, trace what value the job writes and how that affects the NEXT run's read, (3) if the written value always resets the condition (e.g., setting `last_verified_at = now` means the next run always sees "fresh"), the job has a state-reset bug. (4) Verify the test suite includes a multi-cycle test that catches this pattern.
 
+72. **Push handler commit range completeness — process ALL pushed commits, not just the tip:** When implementing a push-time handler that detects patterns in commit messages or content (e.g., breaking change markers, conventional commit tags, spec references), the handler MUST process ALL commits in the push — not just the tip commit. Using `git log -1 ... NEW_SHA` limits detection to the single newest commit. In a multi-commit push (e.g., 5 commits pushed at once), breaking change markers in interior commits are silently missed. Specifically:
+    - **Use the full push range.** Replace `git log -1 ... NEW_SHA` with `git log ... OLD_SHA..NEW_SHA` to iterate all pushed commits. The `old_sha` is available at the push handler's call site (e.g., `update.old_sha` in the receive-pack handler).
+    - **Handle new branches.** When `old_sha` is all zeros (`0000000000000000000000000000000000000000`), the push is creating a new branch. In this case, use just `NEW_SHA` without a range (or use `--all --not --remotes` patterns to limit scope).
+    - **Follow existing patterns.** Other push-time functions in `git_http.rs` already use `old_sha..new_sha` range patterns (e.g., `commits_since`). Follow the same pattern for consistency.
+    - **Spec language is plural.** When the spec says "When a push is detected as..." or "Breaking changes detected from conventional commits on push," the plural "commits" means all commits in the push — not a single commit. A tip-only implementation silently drops coverage for multi-commit pushes, which are the common case for feature branch merges and batch pushes.
+    - **Verification procedure:** For every push-time detection function that calls `git log`, verify the command does NOT use `-1` or `--max-count=1` to limit output to a single commit. Verify the function accepts `old_sha` as a parameter and uses it in the commit range. Run `scripts/check-push-commit-range.sh` — it mechanically detects `git log -1` in push handler code paths. **This script is enforced by the pre-commit hook — your commit will fail if it reports violations.** Exempt with `// push-range:ok — <reason>`.
+
+73. **Default-test assertion field exhaustiveness — assert EVERY field, not just the ones you remember:** When writing or updating a test that verifies default values of a struct (e.g., `test_*_default`, `test_*_new`, `test_*_initial_state`), the assertion block MUST include an `assert_eq!` or `assert!` for EVERY field of the struct — not just a subset. A default test that checks 4 of 5 fields provides zero coverage for the 5th field's default value. If the storage layer or constructor silently defaults that field to a wrong value, the test passes. Specifically:
+    - **Enumerate struct fields before writing assertions.** Open the struct definition (e.g., `DependencyPolicy`) and list every field. For each field, add an assertion that verifies its expected default value. Do not rely on memory — read the struct and count.
+    - **Spec-derived defaults are authoritative.** When the spec defines a configuration block with default values (e.g., `require_cascade_tests: true`, `stale_dependency_alert_days: 30`), every default in the spec must have a corresponding assertion in the default test.
+    - **Fix-round sweep obligation.** When a fix round adds a new field and its assertion to a default test, the fixer MUST also sweep the entire assertion block for OTHER fields that may already be missing assertions. Adding one assertion without sweeping perpetuates the incomplete coverage. Concrete procedure: after adding the new field's assertion, count the assertions and count the struct's fields — if the counts don't match, find and add the missing assertions.
+    - **Verification procedure:** For every `test_*_default` test you write or modify: (1) open the struct definition the test covers, (2) list every field, (3) for each field, verify the test asserts on it — search for the field name in the assertion block. If a field name appears in the struct but not in the assertions, add an assertion. Run this check before marking the test complete.
+
 ## Workflow
 
 1. Read the relevant system specs. These are your source of truth and overarching vision.
@@ -490,6 +503,7 @@ scripts/check-wildcard-exclusion.sh
 scripts/check-assertionless-tests.sh
 scripts/check-self-confirming-tests.sh
 scripts/check-pipeline-data-flow.sh
+scripts/check-push-commit-range.sh
 ```
 If any script reports violations, fix them before proceeding. **Do not commit with check script violations.** These scripts exist because prior review rounds found flaws that the checklist alone did not prevent — they are the mechanical backstop.
 
