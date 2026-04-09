@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §Link Types, §Forge-Maintained Spec Graph  
 **Depends on:** None (spec links store and approval flow already exist)  
-**Progress:** `needs-revision`
+**Progress:** `ready-for-review`
 **Review:** [`specs/reviews/task-016.md`](../reviews/task-016.md)
 
 ## Spec Excerpt
@@ -111,3 +111,4 @@ When working on this task:
 ## Git Commits
 
 - `feat(spec-links): implement staleness job & approval gate enforcement (TASK-016)`
+- `fix(spec-links): address R1 findings F1-F4 — inbound staleness, drift-review tasks, approval invalidation (TASK-016)`

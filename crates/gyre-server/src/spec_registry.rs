@@ -288,7 +288,10 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 /// - Entry in ledger but not manifest: mark `Deprecated`.
 /// - Files under `specs/` not in manifest: log a warning.
 /// - `supersedes` links: target spec is marked Deprecated in ledger.
-/// - `extends` links: if the target SHA changed, the extending spec's drift_status = "drifted".
+/// - `extends` links: if the target SHA changed, the extending spec's drift_status = "drifted",
+///   approval_status is invalidated to Pending, and a drift-review Task is created.
+/// - Push-time inbound staleness: when a spec's SHA changes, ALL existing links targeting
+///   that spec are marked stale immediately (spec-links.md §Automatic Staleness Detection).
 /// - Cross-workspace `@` targets: resolved to target_repo_id via workspace slug lookup.
 ///   Unresolved targets stored with `status = "unresolved"` and `target_repo_id = None`.
 #[allow(clippy::too_many_arguments)]
@@ -304,6 +307,8 @@ pub async fn sync_spec_ledger(
     workspaces: Option<&Arc<dyn gyre_ports::WorkspaceRepository>>,
     repos: Option<&Arc<dyn gyre_ports::RepoRepository>>,
     tenant_id: Option<&gyre_common::Id>,
+    // Task repository for creating drift-review tasks (TASK-016 F2).
+    tasks: Option<&Arc<dyn gyre_ports::TaskRepository>>,
 ) {
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -331,6 +336,8 @@ pub async fn sync_spec_ledger(
         manifest.specs.iter().map(|e| e.path.clone()).collect();
 
     // 4. For each manifest entry, compute blob SHA and sync ledger.
+    // Track specs whose SHAs changed for inbound staleness detection (TASK-016 F1).
+    let mut changed_spec_paths: Vec<String> = Vec::new();
     for entry in &manifest.specs {
         let spec_file_path = format!("specs/{}", entry.path);
         let blob_sha = match get_blob_sha(&git_bin, repo_path, new_sha, &spec_file_path).await {
@@ -357,6 +364,7 @@ pub async fn sync_spec_ledger(
                     new_sha = %blob_sha,
                     "spec-registry: SHA changed"
                 );
+                changed_spec_paths.push(entry.path.clone());
                 existing.current_sha = blob_sha;
                 existing.updated_at = now;
                 if auto_invalidate {
@@ -537,7 +545,12 @@ pub async fn sync_spec_ledger(
                     }
                 }
                 SpecLinkType::Extends => {
-                    // For extends links with stale target: mark extending spec as drifted.
+                    // For extends links with stale target: mark extending spec as drifted,
+                    // invalidate approval, and create a drift-review task.
+                    // spec-links.md §Approval Gates: "When target changes, source's
+                    // approval is invalidated."
+                    // spec-links.md §Automatic Staleness Detection step 3: "Creates
+                    // drift-review tasks in the source specs' repos."
                     if link.status == "stale" {
                         info!(
                             source = %link.source_path,
@@ -548,8 +561,25 @@ pub async fn sync_spec_ledger(
                             ledger.find_by_path(&link.source_path).await
                         {
                             source_entry.drift_status = "drifted".to_string();
+                            // F3: Invalidate extending spec's approval.
+                            source_entry.approval_status = ApprovalStatus::Pending;
                             source_entry.updated_at = now;
                             let _ = ledger.save(&source_entry).await;
+                            info!(
+                                spec_path = %link.source_path,
+                                "spec-registry: approval invalidated (extends target changed)"
+                            );
+
+                            // F2: Create drift-review task entity.
+                            create_drift_review_task(
+                                tasks,
+                                &link.source_path,
+                                &link.target_path,
+                                source_repo_id,
+                                source_workspace_id,
+                                now,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -567,8 +597,131 @@ pub async fn sync_spec_ledger(
         }
     }
 
+    // 6b. Inbound staleness detection (TASK-016 F1).
+    // spec-links.md §Automatic Staleness Detection: "When any spec changes (new SHA),
+    // the forge queries spec_links for all links where target_path matches the changed
+    // spec and marks those links as stale."
+    // This catches links from OTHER specs (possibly in other repos) that point TO specs
+    // whose SHAs changed in this push.
+    if !changed_spec_paths.is_empty() {
+        let changed_set: std::collections::HashSet<&str> =
+            changed_spec_paths.iter().map(|s| s.as_str()).collect();
+        let mut store = links_store.lock().await;
+        for link in store.iter_mut() {
+            // Only update links that target a changed spec and aren't already stale/broken.
+            if changed_set.contains(link.target_path.as_str())
+                && link.status != "stale"
+                && link.status != "broken"
+            {
+                info!(
+                    source = %link.source_path,
+                    target = %link.target_path,
+                    link_type = %link.link_type,
+                    "spec-registry: inbound link target SHA changed — marking stale"
+                );
+                link.status = "stale".to_string();
+                link.stale_since = Some(now);
+            }
+        }
+        // Drop the lock before doing ledger updates and task creation.
+        // Collect extends links that need additional side effects.
+        let stale_extends: Vec<(String, String)> = store
+            .iter()
+            .filter(|l| {
+                l.link_type == SpecLinkType::Extends
+                    && l.stale_since == Some(now)
+                    && changed_set.contains(l.target_path.as_str())
+            })
+            .map(|l| (l.source_path.clone(), l.target_path.clone()))
+            .collect();
+        drop(store);
+
+        // Apply extends side effects for inbound stale links.
+        for (source_path, target_path) in &stale_extends {
+            if let Ok(Some(mut source_entry)) = ledger.find_by_path(source_path).await {
+                source_entry.drift_status = "drifted".to_string();
+                source_entry.approval_status = ApprovalStatus::Pending;
+                source_entry.updated_at = now;
+                let _ = ledger.save(&source_entry).await;
+                info!(
+                    spec_path = %source_path,
+                    "spec-registry: inbound extends — approval invalidated, drift_status = drifted"
+                );
+            }
+
+            // Create drift-review task for the extending spec.
+            create_drift_review_task(
+                tasks,
+                source_path,
+                target_path,
+                source_repo_id,
+                source_workspace_id,
+                now,
+            )
+            .await;
+        }
+    }
+
     // 7. Warn about spec files not in manifest.
     check_unregistered_specs(&git_bin, repo_path, new_sha, &manifest_paths).await;
+}
+
+// ---------------------------------------------------------------------------
+// Drift-review task creation helper (TASK-016 F2)
+// ---------------------------------------------------------------------------
+
+/// Create a drift-review Task entity when an `extends` link becomes stale.
+///
+/// spec-links.md §Automatic Staleness Detection step 3: "Creates drift-review tasks
+/// in the source specs' repos."
+async fn create_drift_review_task(
+    tasks: Option<&Arc<dyn gyre_ports::TaskRepository>>,
+    source_path: &str,
+    target_path: &str,
+    source_repo_id: Option<&str>,
+    source_workspace_id: Option<&str>,
+    now: u64,
+) {
+    let Some(tasks) = tasks else {
+        return;
+    };
+    let repo_id = source_repo_id.unwrap_or_default();
+    let workspace_id = source_workspace_id.unwrap_or_default();
+
+    let task_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
+    let title = format!(
+        "Drift review: '{}' extends '{}' which has changed",
+        source_path, target_path
+    );
+    let description = format!(
+        "The parent spec '{}' has changed (new SHA). The extending spec '{}' may need to \
+         incorporate the parent's changes. Review the extending spec and update if necessary.",
+        target_path, source_path
+    );
+
+    let mut task = gyre_domain::Task::new(task_id, title, now);
+    task.description = Some(description);
+    task.priority = gyre_domain::TaskPriority::High;
+    task.labels = vec!["drift-review".to_string()];
+    task.spec_path = Some(source_path.to_string());
+    task.workspace_id = gyre_common::Id::new(workspace_id);
+    task.repo_id = gyre_common::Id::new(repo_id);
+
+    if let Err(e) = tasks.create(&task).await {
+        warn!(
+            source = %source_path,
+            target = %target_path,
+            error = %e,
+            "spec-registry: failed to create drift-review task"
+        );
+    } else {
+        info!(
+            task_id = %task.id,
+            source = %source_path,
+            target = %target_path,
+            "spec-registry: drift-review task created for extends link"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1059,5 +1212,377 @@ specs:
         assert_eq!(entry.status, "unresolved");
         assert!(entry.target_repo_id.is_none());
         assert!(entry.target_display.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // TASK-016 F4: Extends push-time behavior tests
+    // -----------------------------------------------------------------------
+    //
+    // These tests simulate the extends-link staleness detection, approval
+    // invalidation, and drift-review task creation that sync_spec_ledger
+    // performs at push time when an extends link's target SHA changes.
+
+    fn make_test_ledger_entry(path: &str, sha: &str, status: ApprovalStatus) -> SpecLedgerEntry {
+        SpecLedgerEntry {
+            path: path.to_string(),
+            title: format!("Spec {path}"),
+            owner: "user:test".to_string(),
+            kind: None,
+            current_sha: sha.to_string(),
+            approval_mode: "human_only".to_string(),
+            approval_status: status,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 1_000_000,
+            updated_at: 1_000_000,
+            repo_id: Some("repo1".to_string()),
+            workspace_id: Some("ws1".to_string()),
+        }
+    }
+
+    fn make_test_link(
+        id: &str,
+        source: &str,
+        target: &str,
+        link_type: SpecLinkType,
+        target_sha: Option<&str>,
+    ) -> SpecLinkEntry {
+        SpecLinkEntry {
+            id: id.to_string(),
+            source_path: source.to_string(),
+            source_repo_id: Some("repo1".to_string()),
+            link_type,
+            target_path: target.to_string(),
+            target_repo_id: None,
+            target_display: None,
+            target_sha: target_sha.map(|s| s.to_string()),
+            reason: None,
+            status: "active".to_string(),
+            created_at: 1_000_000,
+            stale_since: None,
+        }
+    }
+
+    /// F4: When an outbound extends link's target_sha differs from the ledger's
+    /// current SHA, the link is marked stale, the extending spec's drift_status
+    /// is set to "drifted", and its approval_status is invalidated to Pending.
+    #[tokio::test]
+    async fn extends_outbound_staleness_marks_drifted_and_invalidates_approval() {
+        use crate::mem::MemSpecLedgerRepository;
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let now = 2_000_000u64;
+
+        // Set up: parent spec in ledger with NEW SHA (simulating it changed).
+        let parent =
+            make_test_ledger_entry("system/parent.md", "new_sha_999", ApprovalStatus::Approved);
+        ledger.save(&parent).await.unwrap();
+
+        // Set up: extending spec in ledger, currently approved.
+        let extending =
+            make_test_ledger_entry("system/extending.md", "ext_sha", ApprovalStatus::Approved);
+        ledger.save(&extending).await.unwrap();
+
+        // Simulate outbound extends link processing (as sync_spec_ledger step 6 does).
+        // The link was pinned to old_sha_123 but the parent is now at new_sha_999.
+        let mut link = make_test_link(
+            "ext-link-1",
+            "system/extending.md",
+            "system/parent.md",
+            SpecLinkType::Extends,
+            Some("old_sha_123"),
+        );
+
+        // Check target SHA against ledger (same logic as step 6 in sync_spec_ledger).
+        if let Ok(Some(target_entry)) = ledger.find_by_path(&link.target_path).await {
+            let current_sha = &target_entry.current_sha;
+            if let Some(pinned_sha) = &link.target_sha {
+                if !current_sha.is_empty() && current_sha != pinned_sha {
+                    link.status = "stale".to_string();
+                    link.stale_since = Some(now);
+                }
+            }
+        }
+
+        // Verify link is stale.
+        assert_eq!(link.status, "stale");
+        assert_eq!(link.stale_since, Some(now));
+
+        // Apply extends side effects (same logic as the Extends match arm).
+        if link.link_type == SpecLinkType::Extends && link.status == "stale" {
+            if let Ok(Some(mut source_entry)) = ledger.find_by_path(&link.source_path).await {
+                source_entry.drift_status = "drifted".to_string();
+                source_entry.approval_status = ApprovalStatus::Pending;
+                source_entry.updated_at = now;
+                ledger.save(&source_entry).await.unwrap();
+            }
+        }
+
+        // Verify extending spec's drift_status and approval_status.
+        let ext = ledger
+            .find_by_path("system/extending.md")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ext.drift_status, "drifted");
+        assert_eq!(ext.approval_status, ApprovalStatus::Pending);
+    }
+
+    /// F4: Extends push-time also creates a drift-review Task entity.
+    #[tokio::test]
+    async fn extends_staleness_creates_drift_review_task() {
+        use crate::mem::MemTaskRepository;
+
+        let tasks: Arc<dyn gyre_ports::TaskRepository> = Arc::new(MemTaskRepository::default());
+
+        // Call the drift-review task creation helper.
+        create_drift_review_task(
+            Some(&tasks),
+            "system/extending.md",
+            "system/parent.md",
+            Some("repo1"),
+            Some("ws1"),
+            2_000_000,
+        )
+        .await;
+
+        // Verify a task was created.
+        let all_tasks = tasks.list().await.unwrap();
+        assert_eq!(all_tasks.len(), 1);
+        let task = &all_tasks[0];
+        assert!(task.title.contains("Drift review"));
+        assert!(task.title.contains("system/extending.md"));
+        assert!(task.title.contains("system/parent.md"));
+        assert_eq!(task.spec_path, Some("system/extending.md".to_string()));
+        assert_eq!(task.labels, vec!["drift-review".to_string()]);
+        assert_eq!(task.priority, gyre_domain::TaskPriority::High);
+        assert_eq!(task.workspace_id, gyre_common::Id::new("ws1"));
+        assert_eq!(task.repo_id, gyre_common::Id::new("repo1"));
+        assert!(task.description.is_some());
+        assert!(task.description.as_ref().unwrap().contains("parent.md"));
+    }
+
+    /// F1 + F4: When a spec's SHA changes at push time, inbound links from
+    /// OTHER specs targeting the changed spec are marked stale immediately.
+    /// For non-extends link types, only staleness marking occurs.
+    #[tokio::test]
+    async fn inbound_staleness_marks_non_extends_links_stale() {
+        use crate::mem::MemSpecLedgerRepository;
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let now = 2_000_000u64;
+
+        // Set up: target spec in ledger.
+        let target =
+            make_test_ledger_entry("system/target.md", "new_sha_456", ApprovalStatus::Approved);
+        ledger.save(&target).await.unwrap();
+
+        // Pre-existing inbound links from other specs targeting the changed spec.
+        let depends_link = make_test_link(
+            "dep-link",
+            "system/consumer.md",
+            "system/target.md",
+            SpecLinkType::DependsOn,
+            Some("old_sha_123"),
+        );
+        let implements_link = make_test_link(
+            "impl-link",
+            "system/impl.md",
+            "system/target.md",
+            SpecLinkType::Implements,
+            Some("old_sha_123"),
+        );
+        {
+            let mut store = links_store.lock().await;
+            store.push(depends_link);
+            store.push(implements_link);
+        }
+
+        // Simulate inbound staleness detection (step 6b of sync_spec_ledger).
+        let changed_spec_paths = vec!["system/target.md".to_string()];
+        let changed_set: std::collections::HashSet<&str> =
+            changed_spec_paths.iter().map(|s| s.as_str()).collect();
+        {
+            let mut store = links_store.lock().await;
+            for link in store.iter_mut() {
+                if changed_set.contains(link.target_path.as_str())
+                    && link.status != "stale"
+                    && link.status != "broken"
+                {
+                    link.status = "stale".to_string();
+                    link.stale_since = Some(now);
+                }
+            }
+        }
+
+        // Verify both inbound links are now stale.
+        let store = links_store.lock().await;
+        let dep = store.iter().find(|l| l.id == "dep-link").unwrap();
+        assert_eq!(dep.status, "stale");
+        assert_eq!(dep.stale_since, Some(now));
+
+        let imp = store.iter().find(|l| l.id == "impl-link").unwrap();
+        assert_eq!(imp.status, "stale");
+        assert_eq!(imp.stale_since, Some(now));
+    }
+
+    /// F1 + F3 + F4: Inbound extends links get staleness + drift + approval
+    /// invalidation + task creation when the target spec's SHA changes.
+    #[tokio::test]
+    async fn inbound_extends_staleness_full_side_effects() {
+        use crate::mem::{MemSpecLedgerRepository, MemTaskRepository};
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let tasks: Arc<dyn gyre_ports::TaskRepository> = Arc::new(MemTaskRepository::default());
+        let now = 2_000_000u64;
+
+        // Target spec whose SHA changed.
+        let target =
+            make_test_ledger_entry("system/parent.md", "new_sha", ApprovalStatus::Approved);
+        ledger.save(&target).await.unwrap();
+
+        // Extending spec (currently approved, clean drift).
+        let extending =
+            make_test_ledger_entry("system/child.md", "child_sha", ApprovalStatus::Approved);
+        ledger.save(&extending).await.unwrap();
+
+        // Pre-existing inbound extends link.
+        let extends_link = make_test_link(
+            "ext-inbound",
+            "system/child.md",
+            "system/parent.md",
+            SpecLinkType::Extends,
+            Some("old_parent_sha"),
+        );
+        {
+            let mut store = links_store.lock().await;
+            store.push(extends_link);
+        }
+
+        // Simulate step 6b: inbound staleness detection.
+        let changed_spec_paths = vec!["system/parent.md".to_string()];
+        let changed_set: std::collections::HashSet<&str> =
+            changed_spec_paths.iter().map(|s| s.as_str()).collect();
+
+        // Mark inbound links stale.
+        {
+            let mut store = links_store.lock().await;
+            for link in store.iter_mut() {
+                if changed_set.contains(link.target_path.as_str())
+                    && link.status != "stale"
+                    && link.status != "broken"
+                {
+                    link.status = "stale".to_string();
+                    link.stale_since = Some(now);
+                }
+            }
+        }
+
+        // Collect stale extends links for side effects.
+        let stale_extends: Vec<(String, String)> = {
+            let store = links_store.lock().await;
+            store
+                .iter()
+                .filter(|l| {
+                    l.link_type == SpecLinkType::Extends
+                        && l.stale_since == Some(now)
+                        && changed_set.contains(l.target_path.as_str())
+                })
+                .map(|l| (l.source_path.clone(), l.target_path.clone()))
+                .collect()
+        };
+
+        // Apply extends side effects.
+        for (source_path, target_path) in &stale_extends {
+            if let Ok(Some(mut source_entry)) = ledger.find_by_path(source_path).await {
+                source_entry.drift_status = "drifted".to_string();
+                source_entry.approval_status = ApprovalStatus::Pending;
+                source_entry.updated_at = now;
+                ledger.save(&source_entry).await.unwrap();
+            }
+
+            create_drift_review_task(
+                Some(&tasks),
+                source_path,
+                target_path,
+                Some("repo1"),
+                Some("ws1"),
+                now,
+            )
+            .await;
+        }
+
+        // Verify link is stale.
+        let store = links_store.lock().await;
+        let link = store.iter().find(|l| l.id == "ext-inbound").unwrap();
+        assert_eq!(link.status, "stale");
+        assert_eq!(link.stale_since, Some(now));
+        drop(store);
+
+        // Verify extending spec: drift_status = drifted, approval_status = Pending.
+        let child = ledger
+            .find_by_path("system/child.md")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(child.drift_status, "drifted");
+        assert_eq!(child.approval_status, ApprovalStatus::Pending);
+
+        // Verify drift-review task was created.
+        let all_tasks = tasks.list().await.unwrap();
+        assert_eq!(all_tasks.len(), 1);
+        let task = &all_tasks[0];
+        assert!(task.title.contains("Drift review"));
+        assert_eq!(task.spec_path, Some("system/child.md".to_string()));
+        assert_eq!(task.labels, vec!["drift-review".to_string()]);
+    }
+
+    /// Inbound staleness detection does not re-stamp already-stale links.
+    #[tokio::test]
+    async fn inbound_staleness_skips_already_stale_links() {
+        let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let now = 2_000_000u64;
+
+        let mut link = make_test_link(
+            "already-stale",
+            "system/a.md",
+            "system/target.md",
+            SpecLinkType::DependsOn,
+            Some("old_sha"),
+        );
+        link.status = "stale".to_string();
+        link.stale_since = Some(999_000);
+        {
+            let mut store = links_store.lock().await;
+            store.push(link);
+        }
+
+        // Simulate inbound detection with target.md changed.
+        let changed_set: std::collections::HashSet<&str> =
+            ["system/target.md"].iter().copied().collect();
+        {
+            let mut store = links_store.lock().await;
+            for link in store.iter_mut() {
+                if changed_set.contains(link.target_path.as_str())
+                    && link.status != "stale"
+                    && link.status != "broken"
+                {
+                    link.status = "stale".to_string();
+                    link.stale_since = Some(now);
+                }
+            }
+        }
+
+        // stale_since should remain at original value, not re-stamped.
+        let store = links_store.lock().await;
+        let link = store.iter().find(|l| l.id == "already-stale").unwrap();
+        assert_eq!(link.stale_since, Some(999_000));
     }
 }

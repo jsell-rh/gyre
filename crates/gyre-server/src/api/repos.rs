@@ -556,6 +556,7 @@ pub async fn sync_mirror(
                 Some(&state.workspaces),
                 Some(&state.repos),
                 workspace_tenant_id.as_ref(),
+                Some(&state.tasks),
             )
             .await;
 

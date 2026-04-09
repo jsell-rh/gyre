@@ -65,6 +65,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                             Some(&state.workspaces),
                             Some(&state.repos),
                             workspace_tenant_id.as_ref(),
+                            Some(&state.tasks),
                         )
                         .await;
 

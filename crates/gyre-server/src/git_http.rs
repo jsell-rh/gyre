@@ -583,6 +583,7 @@ pub async fn git_receive_pack(
                 Some(&state_clone.workspaces),
                 Some(&state_clone.repos),
                 workspace_tenant_id.as_ref(),
+                Some(&state_clone.tasks),
             )
             .await;
             // Dependency graph: auto-detect Cargo.toml path deps (M22.4).
