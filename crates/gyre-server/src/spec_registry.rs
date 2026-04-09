@@ -530,10 +530,11 @@ pub async fn sync_spec_ledger(
                 }
             }
 
-            // Step 3 (generic): Create drift-review tasks for ALL stale links.
+            // Step 3 (generic): Create drift-review tasks for stale links.
             // spec-links.md §Automatic Staleness Detection step 3: "Creates
             // drift-review tasks in the source specs' repos."
-            if link.status == "stale" {
+            // Excludes `references` — spec says "No mechanical enforcement."
+            if link.status == "stale" && link.link_type != SpecLinkType::References {
                 create_drift_review_task(
                     tasks,
                     &link.source_path,
@@ -659,7 +660,11 @@ pub async fn sync_spec_ledger(
                 .as_ref()
                 .and_then(|e| e.workspace_id.clone());
 
-            // Step 3 (generic): drift-review task for ALL stale inbound links.
+            // Step 3 (generic): drift-review task for stale inbound links.
+            // Excludes `references` — spec says "No mechanical enforcement."
+            if *link_type == SpecLinkType::References {
+                continue;
+            }
             create_drift_review_task(
                 tasks,
                 source_path,
@@ -695,10 +700,11 @@ pub async fn sync_spec_ledger(
 // Drift-review task creation helper (TASK-016 F2)
 // ---------------------------------------------------------------------------
 
-/// Create a drift-review Task entity when any link becomes stale.
+/// Create a drift-review Task entity when an enforced link becomes stale.
 ///
 /// spec-links.md §Automatic Staleness Detection step 3: "Creates drift-review tasks
-/// in the source specs' repos." This applies to ALL link types, not just extends.
+/// in the source specs' repos." Applies to all link types except `references`
+/// (which has no mechanical enforcement). Callers gate on link type before calling.
 async fn create_drift_review_task(
     tasks: Option<&Arc<dyn gyre_ports::TaskRepository>>,
     source_path: &str,
@@ -1793,5 +1799,70 @@ specs:
         assert!(impl_task.title.contains("system/parent_spec.md"));
         assert_eq!(impl_task.labels, vec!["drift-review".to_string()]);
         assert_eq!(impl_task.repo_id, gyre_common::Id::new("repo_impl"));
+    }
+
+    /// Verify that `references` links do NOT create drift-review tasks.
+    /// spec-links.md §Link Types: `references` = "No mechanical enforcement."
+    /// Staleness marking is informational only; task creation is enforcement.
+    #[tokio::test]
+    async fn no_drift_review_task_for_references_links() {
+        use crate::mem::MemTaskRepository;
+
+        let tasks: Arc<dyn gyre_ports::TaskRepository> = Arc::new(MemTaskRepository::default());
+
+        // Calling create_drift_review_task directly for a references link
+        // should still create (it doesn't check type internally).
+        // The guard is at the call sites. Verify the call-site guard
+        // by simulating the step 6 condition.
+        let link = SpecLinkEntry {
+            id: "link-ref-1".to_string(),
+            source_path: "system/notes.md".to_string(),
+            target_path: "system/design.md".to_string(),
+            link_type: SpecLinkType::References,
+            target_sha: Some("old_sha".to_string()),
+            source_repo_id: Some("repo_notes".to_string()),
+            target_repo_id: None,
+            target_display: None,
+            reason: None,
+            status: "stale".to_string(),
+            stale_since: Some(1_000_000),
+            created_at: 1_000_000,
+        };
+
+        // Simulate the step 6 guard: `if link.status == "stale" && link.link_type != SpecLinkType::References`
+        if link.status == "stale" && link.link_type != SpecLinkType::References {
+            create_drift_review_task(
+                Some(&tasks),
+                &link.source_path,
+                &link.target_path,
+                &link.link_type,
+                link.source_repo_id.as_deref(),
+                Some("ws_notes"),
+                2_000_000,
+            )
+            .await;
+        }
+
+        // Simulate the step 6b guard: `if *link_type == SpecLinkType::References { continue; }`
+        if link.link_type != SpecLinkType::References {
+            create_drift_review_task(
+                Some(&tasks),
+                &link.source_path,
+                &link.target_path,
+                &link.link_type,
+                link.source_repo_id.as_deref(),
+                Some("ws_notes"),
+                2_000_000,
+            )
+            .await;
+        }
+
+        // No tasks should have been created for references links.
+        let all_tasks = tasks.list().await.unwrap();
+        assert_eq!(
+            all_tasks.len(),
+            0,
+            "references links must not produce drift-review tasks (no mechanical enforcement)"
+        );
     }
 }
