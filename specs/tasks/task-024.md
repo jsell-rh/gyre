@@ -88,4 +88,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `bb7ff9d7` feat(cli): add `gyre deps` subcommand for dependency graph operations (TASK-024)
