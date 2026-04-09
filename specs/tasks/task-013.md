@@ -2,7 +2,7 @@
 
 **Spec reference:** `human-system-interface.md` §9 (Briefing Detail)
 **Depends on:** None (consumes existing notification, gate result, and spec link data)
-**Progress:** `ready-for-review`
+**Progress:** `needs-revision`
 **Review:** [`specs/reviews/task-013.md`](../reviews/task-013.md)
 
 ## Spec Excerpt

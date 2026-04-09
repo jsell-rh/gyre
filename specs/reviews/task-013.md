@@ -1,7 +1,7 @@
 # Review: TASK-013 — Briefing Data Assembly (Cross-Workspace & Exceptions)
 
 **Reviewer:** Verifier
-**Round:** R2
+**Round:** R3
 **Verdict:** `needs-revision` (2 findings)
 
 ---
@@ -14,27 +14,30 @@
 
 - [x] **F3: Gate results not filtered by gate result timestamp — old failures leak into briefing.** — Fixed in `ec71a1f1`. Inner filter now checks `gr.finished_at.map_or(false, |t| t >= since)`. Test case added for MR updated after `since` with gate result finished before `since`.
 
-## R2 Findings
+## R2 Findings (all resolved)
 
-- [ ] [process-revision-complete] **F4: Exception `entity_type` values don't match the spec-defined type enum — consumers matching spec values will miss these items.**
-  - **Spec (HSI §9, line 1316):** The response field definition states:
-    - `"spec_assertion_failure"` — spec assertion validation failure
-    - `"reverted"` — MR with Reverted status
-  - **Implementation (`graph.rs:956`):** Uses `"assertion_failure"` instead of `"spec_assertion_failure"`.
-  - **Implementation (`graph.rs:976`):** Uses `"mr_revert"` instead of `"reverted"`.
-  - **Impact:** Any downstream consumer (UI, CLI, MCP client) checking for the spec-defined values (`"spec_assertion_failure"`, `"reverted"`) will fail to match these exception items. Note that other parts of the codebase already use `"reverted"` for `MrStatus::Reverted` (see `merge_deps.rs:265`, `specs.rs:1156`, `merge_requests.rs:202`), so the briefing is inconsistent with both the spec and existing serialization conventions.
-  - **Tests also use wrong values:** Lines 2116 (`"assertion_failure"`) and 2153 (`"mr_revert"`) — tests must be updated alongside the fix.
-  - **Fix:** Change line 956 to `entity_type: "spec_assertion_failure".to_string()` and line 976 to `entity_type: "reverted".to_string()`. Update the test filter predicates at lines 2116 and 2153 to match.
+- [x] **F4: Exception `entity_type` values don't match the spec-defined type enum.** — Fixed in `bdd23253`. Changed `"assertion_failure"` → `"spec_assertion_failure"` and `"mr_revert"` → `"reverted"`. Tests updated.
 
-- [ ] [process-revision-complete] **F5: Cross-workspace filter comment claims "target that changed" but `created_at` filter cannot detect target changes — only detects link recreation on source push.**
-  - **Spec (HSI §9, line 1271):** "platform-core updated idempotent-api.md. Your payment-retry.md depends on it." — The trigger for cross_workspace entries is the external dependency (target) being updated.
-  - **Comment (`graph.rs:871`):** "Our spec (source) depends on an external spec (target) that changed." — Correct description of spec intent.
-  - **Filter (`graph.rs:880`):** `link.created_at >= since` — But `created_at` is set to `now` each time the source spec's repo is pushed (`spec_registry.rs:495`), because the link store does a full refresh per source-spec push (`spec_registry.rs:545-551`). This timestamp reflects when the local repo was last pushed, NOT when the external dependency changed.
-  - **Consequence:** (a) Every push to any workspace repo causes ALL its cross-workspace links to appear as "Dependency updated" in the next briefing — false positives. (b) If the external spec is updated but the local repo isn't re-pushed, the link's `created_at` isn't refreshed and the briefing misses the update — false negative.
-  - **`SpecLinkEntry.stale_since`** (`spec_registry.rs:227`) was designed for exactly this purpose ("Timestamp when link became stale — target SHA advanced") but is never populated in the current codebase.
-  - **Fix:** Add `stale_since` to the filter disjunction so the feature works correctly when staleness detection is implemented upstream:
+- [x] **F5: Cross-workspace filter used `created_at` which cannot detect target changes.** — Fixed in `bdd23253`. Filter now includes `stale_since` disjunction; title changed to avoid "updated" claim; timestamp prefers `stale_since` when available.
+
+## R3 Findings
+
+- [ ] **F6: Missing `source_workspace_slug` field in cross_workspace items — spec-excerpt field omission.**
+  - **Spec (HSI §9, line 1315):** `"cross_workspace": [{"source_workspace_slug": "...", "spec_path": "...", "summary": "..."}]` — `source_workspace_slug` is a required field.
+  - **Task plan (line 50):** Explicitly says "Populate each entry: `source_workspace_slug` (from `target_display`), `spec_path`, `summary`."
+  - **Spec narrative (line 1271):** "↔ platform-core updated idempotent-api.md" — the external workspace identity ("platform-core") is the primary information conveyed to the user.
+  - **Implementation (`graph.rs:884-902`):** `BriefingItem` has no `source_workspace_slug` field. The workspace slug is embedded in the `description` string (via `target_display`, e.g., "Depends on @platform-core/api-svc/system/idempotent-api.md") but not as a structured field. Consumers cannot programmatically identify which external workspace the dependency comes from.
+  - **Data source:** `SpecLinkEntry.target_display` (`spec_registry.rs:218-220`) contains the composite path (e.g., "@platform-core/api-svc/system/auth.md"). The workspace slug can be extracted by parsing the `@{workspace_slug}/` prefix.
+  - **Fix:** Add `source_workspace_slug: Option<String>` to `BriefingItem` (or use a dedicated `CrossWorkspaceItem` struct). Populate it from `target_display` by extracting the workspace slug:
     ```rust
-    && (link.created_at >= since
-        || link.stale_since.is_some_and(|t| t >= since))
+    source_workspace_slug: link.target_display.as_ref().and_then(|d| {
+        d.strip_prefix('@').and_then(|s| s.split('/').next()).map(String::from)
+    }),
     ```
-    This preserves current behavior (new links appear) AND adds support for detecting target changes when `stale_since` is eventually populated. Also update the title from `"Dependency updated: {target_path}"` to `"Cross-workspace dependency: {target_path}"` to avoid claiming the dependency was "updated" when the filter cannot verify this. Update the `timestamp` field (line 898) to prefer `stale_since` when available: `timestamp: link.stale_since.unwrap_or(link.created_at)`.
+    Update the test `briefing_cross_workspace_populated_when_linked_spec_changes` to assert on `source_workspace_slug` (expected: `"platform-core"` given `target_display: "@platform-core/api-svc/system/idempotent-api.md"`).
+
+- [ ] **F7: `stale_since` disjunction added in R2 has zero test coverage — untested code path.**
+  - **R2 fix (`graph.rs:881-882`):** Added `|| link.stale_since.is_some_and(|t| t >= since)` to the cross_workspace filter and `timestamp: link.stale_since.unwrap_or(link.created_at)` to the timestamp field.
+  - **All tests:** Every test sets `stale_since: None` (lines 1946, 1987, 2201). No test exercises the `stale_since: Some(...)` path.
+  - **Impact:** The `stale_since` path is the semantically correct mechanism for detecting dependency changes (as R2's own analysis confirmed — `created_at` produces false positives on every source push). Yet this path has zero test coverage. If someone accidentally removes the `stale_since` check, no test would fail.
+  - **Fix:** Add a test case with a link where `created_at < since` (link is old) but `stale_since: Some(value)` where `value >= since` (dependency changed recently). Assert the link appears in `cross_workspace`. Also verify `timestamp` equals `stale_since` (not `created_at`). Add a negative case where `stale_since: Some(value)` with `value < since` and `created_at < since` — assert the link is excluded.
