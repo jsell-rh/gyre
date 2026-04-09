@@ -2,8 +2,8 @@
 
 **Spec reference:** `spec-links.md` §Mechanical Gates (Merge Gates), §Querying the Graph, §Cycle Detection  
 **Depends on:** TASK-016 (staleness job and approval gates must be operational)  
-**Progress:** `ready-for-review`  
-**Review:** [specs/reviews/task-019.md](../reviews/task-019.md) — R4 pending
+**Progress:** `complete`  
+**Review:** [specs/reviews/task-019.md](../reviews/task-019.md) — R4 complete (0 findings)
 
 ## Spec Excerpt
 

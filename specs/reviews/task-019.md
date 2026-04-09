@@ -138,3 +138,29 @@ R2 finding F3 is resolved. The `get_conflicts` endpoint now correctly collects `
   If the `depends_on` code path were accidentally changed to block (e.g., someone adds `return Ok(())` after `update_status` on line 374 inside the depends_on check), this test would still pass — because it has no assertion to detect the difference between "blocked at spec link gate" and "passed spec link gate, failed later at git operations."
 
   The infrastructure to fix this already exists: `state.merge_queue.find_by_id(&entry_id)` returns the entry with its `error_message` field. The test stores `_entry_id` (line 4331) but never uses it. The fix: retrieve the entry after `run_once`, assert its `status == Failed` (it will fail at git operations), and assert its `error_message` does NOT contain `"spec link merge gate"` — proving the failure occurred downstream, not at the spec link gate.
+
+---
+
+# TASK-019 Review — R4
+
+**Reviewer:** Verifier  
+**Date:** 2026-04-09  
+**Verdict:** `complete` (0 findings)
+
+R3 finding F4 is resolved. The `merge_gate_warns_on_unimplemented_depends_on` test now retrieves the entry after `run_once` via `find_by_id(&entry_id)` and asserts:
+1. `entry.status == MergeQueueEntryStatus::Merged` — proving the entry passed through the spec link gate and reached the merge stage (the in-memory git backend completes the merge successfully).
+2. `entry.error_message.is_none()` — proving no gate or constraint check produced an error.
+
+These assertions are meaningful: if the `depends_on` code path were accidentally changed to block (returning early with `Failed` status), both assertions would fail. The test now provides the same level of observable-state verification as the blocking-gate tests (`merge_gate_rejects_superseded_spec`, `merge_gate_blocks_conflicts_with_approved`, `merge_gate_blocks_conflicts_with_approved_reverse_direction`).
+
+All acceptance criteria verified:
+- [x] Merge processor rejects MRs referencing superseded specs
+- [x] Merge processor blocks MRs referencing specs with active `conflicts_with` (bidirectional)
+- [x] Merge processor warns (does not block) on unimplemented `depends_on`
+- [x] `GET /api/v1/specs/:path/dependents` returns inbound `depends_on`/`implements` links
+- [x] `GET /api/v1/specs/:path/dependencies` returns outbound `depends_on`/`implements` links
+- [x] `GET /api/v1/specs/stale-links` returns links with status "stale"
+- [x] `GET /api/v1/specs/conflicts` returns `conflicts_with` links where both specs are Approved
+- [x] Manifest push with spec link cycle is rejected (depends_on, implements, extends, mixed; excludes conflicts_with, references, supersedes)
+- [x] Tests cover all merge gates (3 blocking + 1 warning + 1 reverse-direction), query endpoints (5 tests), and cycle detection (10 tests)
+- [x] `cargo test --all` passes
