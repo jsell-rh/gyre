@@ -344,6 +344,21 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register dep_staleness_check job (runs daily, dependency-graph.md §Version Drift)
+    registry
+        .register(
+            JobDefinition {
+                name: "dep_staleness_check".to_string(),
+                description:
+                    "Scans dependency edges for version drift and time-based staleness (TASK-021)"
+                        .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+            },
+            |state| async move { crate::dep_staleness::run_once(&state).await },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.

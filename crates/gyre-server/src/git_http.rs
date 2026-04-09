@@ -1671,10 +1671,87 @@ fn extract_path_value(line: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// Extract the `version = "X.Y.Z"` value from a Cargo.toml [package] section.
+#[cfg(test)]
+pub(crate) fn extract_cargo_version(toml_content: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in toml_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("version") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let val = rest.trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the pinned version for a specific dependency from Cargo.toml.
+///
+/// Handles both `crate = "1.2.3"` and `crate = { version = "1.2.3", ... }` formats.
+pub(crate) fn extract_dep_version(toml_content: &str, dep_name: &str) -> Option<String> {
+    let mut in_dependencies = false;
+
+    for line in toml_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_dependencies = trimmed == "[dependencies]"
+                || trimmed == "[dev-dependencies]"
+                || trimmed == "[build-dependencies]";
+            continue;
+        }
+        if !in_dependencies {
+            continue;
+        }
+        // Match the dependency name at the start of the line.
+        if let Some(rest) = trimmed.strip_prefix(dep_name) {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim();
+                // Simple form: dep = "1.2.3"
+                if rest.starts_with('"') || rest.starts_with('\'') {
+                    let val = rest.trim_matches('"').trim_matches('\'');
+                    if !val.is_empty() {
+                        return Some(val.to_string());
+                    }
+                }
+                // Inline table form: dep = { version = "1.2.3", ... }
+                if rest.starts_with('{') {
+                    if let Some(ver_idx) = rest.find("version") {
+                        let after = &rest[ver_idx + 7..];
+                        let after = after.trim_start();
+                        if let Some(after) = after.strip_prefix('=') {
+                            let after = after.trim();
+                            if after.starts_with('"') {
+                                if let Some(end) = after[1..].find('"') {
+                                    return Some(after[1..1 + end].to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Post-push auto-detection: scan Cargo.toml changes for path deps pointing to sibling repos.
 ///
 /// On pushes to the default branch, reads the Cargo.toml at the new SHA and creates
 /// DependencyEdge records for any path deps whose basename matches a known Gyre repo name.
+/// Also resolves target repo versions and computes version drift (TASK-021).
 pub(crate) async fn detect_dependencies_on_push(
     state: &Arc<AppState>,
     repo_id: &str,
@@ -1755,7 +1832,7 @@ pub(crate) async fn detect_dependencies_on_push(
                 continue;
             }
 
-            let edge = DependencyEdge::new(
+            let mut edge = DependencyEdge::new(
                 Id::new(uuid::Uuid::new_v4().to_string()),
                 source_id.clone(),
                 target_repo.id.clone(),
@@ -1766,12 +1843,26 @@ pub(crate) async fn detect_dependencies_on_push(
                 now,
             );
 
+            // Extract pinned version from source Cargo.toml (TASK-021).
+            edge.version_pinned = extract_dep_version(&toml_content, &basename);
+
+            // Resolve target repo's current version from its latest semver tag.
+            let target_version = crate::version_compute::latest_semver_tag(&target_repo.path).await;
+            edge.target_version_current = target_version.clone();
+
+            // Compute version drift if both versions are known.
+            if let (Some(pinned), Some(current)) = (&edge.version_pinned, &target_version) {
+                edge.version_drift = crate::version_compute::compute_version_drift(pinned, current);
+            }
+
             if let Err(e) = state.dependencies.save(&edge).await {
                 warn!("dep-detection: failed to save edge: {e}");
             } else {
                 tracing::info!(
                     source_repo = repo_id,
                     target_repo = %target_repo.id,
+                    version_pinned = ?edge.version_pinned,
+                    version_drift = ?edge.version_drift,
                     "auto-detected Cargo.toml path dependency"
                 );
             }

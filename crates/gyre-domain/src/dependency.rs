@@ -21,6 +21,8 @@ pub struct DependencyEdge {
     pub target_artifact: String,
     /// Version the source pins (e.g. "1.2.3", "^2.0"). None for path deps or spec links.
     pub version_pinned: Option<String>,
+    /// Current version of the target repo. None if unknown.
+    pub target_version_current: Option<String>,
     /// How many versions the source is behind the target. None if unknown.
     pub version_drift: Option<u32>,
     pub detection_method: DetectionMethod,
@@ -49,6 +51,7 @@ impl DependencyEdge {
             source_artifact: source_artifact.into(),
             target_artifact: target_artifact.into(),
             version_pinned: None,
+            target_version_current: None,
             version_drift: None,
             detection_method,
             status: DependencyStatus::Active,

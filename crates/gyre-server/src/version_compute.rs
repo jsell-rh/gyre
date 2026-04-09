@@ -128,6 +128,28 @@ pub fn compute_next_version(current_tag: Option<&str>, bump: &BumpLevel) -> Stri
     }
 }
 
+/// Compute version drift between a pinned version and the current version.
+///
+/// Returns the number of minor versions the pinned version is behind the current.
+/// If there is a major version difference, each major version counts as 10 minor versions
+/// to ensure it always exceeds reasonable `max_version_drift` thresholds.
+/// Returns `None` if either version string cannot be parsed.
+pub fn compute_version_drift(pinned: &str, current: &str) -> Option<u32> {
+    let (p_major, p_minor, _p_patch) = parse_semver(pinned)?;
+    let (c_major, c_minor, _c_patch) = parse_semver(current)?;
+
+    if c_major > p_major {
+        // Major version drift: each major counts as 10 minor versions.
+        let major_diff = (c_major - p_major) as u32;
+        let minor_in_current = c_minor as u32;
+        Some(major_diff * 10 + minor_in_current)
+    } else if c_major == p_major && c_minor > p_minor {
+        Some((c_minor - p_minor) as u32)
+    } else {
+        Some(0)
+    }
+}
+
 // ── Git helpers ───────────────────────────────────────────────────────────────
 
 /// Find the latest semver git tag in a bare repo (e.g. `v1.2.3`).
@@ -447,5 +469,49 @@ mod tests {
         assert!(md.contains("**auth:** add OIDC login"));
         assert!(md.contains("worker-1"));
         assert!(md.contains("TASK-001"));
+    }
+
+    // ── Version drift computation tests (TASK-021) ────────────────────
+
+    #[test]
+    fn drift_same_version() {
+        assert_eq!(compute_version_drift("1.2.3", "1.2.3"), Some(0));
+        assert_eq!(compute_version_drift("v1.2.3", "v1.2.3"), Some(0));
+    }
+
+    #[test]
+    fn drift_minor_versions() {
+        assert_eq!(compute_version_drift("1.2.3", "1.5.0"), Some(3));
+        assert_eq!(compute_version_drift("v1.0.0", "v1.3.0"), Some(3));
+    }
+
+    #[test]
+    fn drift_major_version() {
+        // Major diff: 1 major * 10 + current minor
+        assert_eq!(compute_version_drift("1.2.3", "2.0.0"), Some(10));
+        assert_eq!(compute_version_drift("1.2.3", "2.3.0"), Some(13));
+        assert_eq!(compute_version_drift("1.2.3", "3.0.0"), Some(20));
+    }
+
+    #[test]
+    fn drift_current_behind_pinned() {
+        // Current is not behind pinned — drift should be 0.
+        assert_eq!(compute_version_drift("1.5.0", "1.2.3"), Some(0));
+    }
+
+    #[test]
+    fn drift_unparseable_returns_none() {
+        assert_eq!(compute_version_drift("not-a-version", "1.2.3"), None);
+        assert_eq!(compute_version_drift("1.2.3", "bad"), None);
+    }
+
+    #[test]
+    fn drift_with_v_prefix() {
+        assert_eq!(compute_version_drift("v1.2.0", "v1.5.0"), Some(3));
+    }
+
+    #[test]
+    fn drift_prerelease_stripped() {
+        assert_eq!(compute_version_drift("1.2.3-beta.1", "1.5.0"), Some(3));
     }
 }

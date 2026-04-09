@@ -424,6 +424,7 @@ diesel::table! {
         source_artifact -> Text,
         target_artifact -> Text,
         version_pinned -> Nullable<Text>,
+        target_version_current -> Nullable<Text>,
         version_drift -> Nullable<Integer>,
         detection_method -> Text,
         status -> Text,

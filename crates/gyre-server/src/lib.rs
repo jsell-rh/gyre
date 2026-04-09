@@ -9,6 +9,7 @@ pub(crate) mod auth;
 pub mod commit_signatures;
 pub(crate) mod constraint_check;
 pub mod container_audit;
+pub mod dep_staleness;
 pub mod domain_events;
 pub mod gate_executor;
 pub(crate) mod git_http;

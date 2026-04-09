@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §Version Drift Tracking, API (`GET /api/v1/deps/stale`)  
 **Depends on:** None (builds on M22.4 dependency graph infrastructure)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 

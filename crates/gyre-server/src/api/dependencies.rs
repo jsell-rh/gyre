@@ -49,6 +49,7 @@ pub struct DependencyEdgeResponse {
     pub source_artifact: String,
     pub target_artifact: String,
     pub version_pinned: Option<String>,
+    pub target_version_current: Option<String>,
     pub version_drift: Option<u32>,
     pub detection_method: DetectionMethod,
     pub status: DependencyStatus,
@@ -66,6 +67,7 @@ impl From<DependencyEdge> for DependencyEdgeResponse {
             source_artifact: e.source_artifact,
             target_artifact: e.target_artifact,
             version_pinned: e.version_pinned,
+            target_version_current: e.target_version_current,
             version_drift: e.version_drift,
             detection_method: e.detection_method,
             status: e.status,
@@ -341,6 +343,46 @@ pub async fn blast_radius(
         transitive_dependents: transitive,
         total,
     }))
+}
+
+// ── Stale dependencies endpoint (TASK-021) ─────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct StaleQuery {
+    pub workspace_id: Option<String>,
+}
+
+/// GET /api/v1/dependencies/stale
+/// Returns all dependency edges with status `Stale` across the tenant.
+/// Optionally filtered by `?workspace_id=`.
+pub async fn list_stale_dependencies(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<StaleQuery>,
+) -> Result<Json<Vec<DependencyEdgeResponse>>, ApiError> {
+    let all_edges = state
+        .dependencies
+        .list_all()
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let mut stale: Vec<DependencyEdge> = all_edges
+        .into_iter()
+        .filter(|e| e.status == DependencyStatus::Stale)
+        .collect();
+
+    // If workspace_id filter is provided, restrict to edges whose source repo
+    // belongs to that workspace.
+    if let Some(ref ws_id) = query.workspace_id {
+        let ws_repos = state
+            .repos
+            .list_by_workspace(&Id::new(ws_id))
+            .await
+            .map_err(ApiError::Internal)?;
+        let ws_repo_ids: HashSet<String> = ws_repos.iter().map(|r| r.id.to_string()).collect();
+        stale.retain(|e| ws_repo_ids.contains(&e.source_repo_id.to_string()));
+    }
+
+    Ok(Json(stale.into_iter().map(Into::into).collect()))
 }
 
 // ── Breaking change endpoints (TASK-020) ────────────────────────────────────
@@ -1343,5 +1385,146 @@ gyre-client = { git = "https://github.com/example/gyre-client" }
         let Json(changes) = result.ok().expect("already checked");
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].commit_sha, "sha1");
+    }
+
+    // ── Stale dependencies endpoint tests (TASK-021) ──────────────────
+
+    #[tokio::test]
+    async fn test_list_stale_dependencies_returns_only_stale() {
+        let state = setup();
+        let a = create_repo(&state, "stale-src").await;
+        let b = create_repo(&state, "stale-tgt").await;
+
+        // One active edge.
+        let active_edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            a.clone(),
+            b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&active_edge).await.unwrap();
+
+        // One stale edge.
+        let mut stale_edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            a.clone(),
+            b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b-old",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        stale_edge.status = DependencyStatus::Stale;
+        stale_edge.version_drift = Some(5);
+        stale_edge.version_pinned = Some("1.0.0".to_string());
+        stale_edge.target_version_current = Some("v1.5.0".to_string());
+        state.dependencies.save(&stale_edge).await.unwrap();
+
+        let query = axum::extract::Query(StaleQuery { workspace_id: None });
+        let result = list_stale_dependencies(State(state.clone()), query).await;
+        assert!(result.is_ok());
+        let Json(stale_list) = result.ok().unwrap();
+        assert_eq!(stale_list.len(), 1);
+        assert_eq!(stale_list[0].target_artifact, "crate-b-old");
+        assert_eq!(stale_list[0].version_drift, Some(5));
+        assert_eq!(
+            stale_list[0].target_version_current,
+            Some("v1.5.0".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_stale_dependencies_empty_when_none() {
+        let state = setup();
+        let a = create_repo(&state, "no-stale-src").await;
+        let b = create_repo(&state, "no-stale-tgt").await;
+
+        let edge = DependencyEdge::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            a,
+            b,
+            DependencyType::Code,
+            "Cargo.toml",
+            "crate-b",
+            DetectionMethod::CargoToml,
+            1000,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        let query = axum::extract::Query(StaleQuery { workspace_id: None });
+        let result = list_stale_dependencies(State(state.clone()), query).await;
+        assert!(result.is_ok());
+        let Json(stale_list) = result.ok().unwrap();
+        assert!(stale_list.is_empty());
+    }
+
+    // ── Cargo.toml version extraction tests (TASK-021) ────────────────
+
+    #[test]
+    fn test_extract_cargo_version() {
+        let toml = r#"
+[package]
+name = "my-crate"
+version = "1.2.3"
+
+[dependencies]
+serde = "1.0"
+"#;
+        assert_eq!(
+            crate::git_http::extract_cargo_version(toml),
+            Some("1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_cargo_version_no_package() {
+        let toml = r#"
+[dependencies]
+serde = "1.0"
+"#;
+        assert_eq!(crate::git_http::extract_cargo_version(toml), None);
+    }
+
+    #[test]
+    fn test_extract_dep_version_simple() {
+        let toml = r#"
+[dependencies]
+serde = "1.0.200"
+other-crate = "2.3.4"
+"#;
+        assert_eq!(
+            crate::git_http::extract_dep_version(toml, "serde"),
+            Some("1.0.200".to_string())
+        );
+        assert_eq!(
+            crate::git_http::extract_dep_version(toml, "other-crate"),
+            Some("2.3.4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_dep_version_inline_table() {
+        let toml = r#"
+[dependencies]
+serde = { version = "1.0.200", features = ["derive"] }
+"#;
+        assert_eq!(
+            crate::git_http::extract_dep_version(toml, "serde"),
+            Some("1.0.200".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_dep_version_not_found() {
+        let toml = r#"
+[dependencies]
+serde = "1.0"
+"#;
+        assert_eq!(crate::git_http::extract_dep_version(toml, "tokio"), None);
     }
 }
