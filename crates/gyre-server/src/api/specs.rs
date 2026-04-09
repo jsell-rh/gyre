@@ -4328,17 +4328,29 @@ specs:
             })
         });
 
-        let _entry_id = seed_merge_gate_scenario(&state, &spec_ref);
+        let entry_id = seed_merge_gate_scenario(&state, &spec_ref);
 
         crate::merge_processor::run_once(&state).await.unwrap();
 
-        // The merge should NOT be blocked — depends_on only warns.
-        // Since we don't have a real repo, it will fail later in the pipeline,
-        // but NOT at the spec link gate. The entry being in any non-queued state
-        // proves it got past the spec link gate (which would have failed it
-        // with a message containing "spec link merge gate").
-        // list_queue returns non-terminal entries — if it's empty, the entry
-        // reached a terminal state (failed at a later step, not at spec link gate).
+        // The merge should NOT be blocked by the spec link gate — depends_on only warns.
+        // With the in-memory git backend, the merge succeeds (Merged status).
+        // This proves the entry passed through the spec link gate without being blocked.
+        let entry = state
+            .merge_queue
+            .find_by_id(&entry_id)
+            .await
+            .unwrap()
+            .expect("entry should still exist after run_once");
+        assert_eq!(
+            entry.status,
+            gyre_domain::MergeQueueEntryStatus::Merged,
+            "depends_on should warn, not block — entry should reach Merged status"
+        );
+        assert!(
+            entry.error_message.is_none(),
+            "depends_on should not produce an error — but got: {:?}",
+            entry.error_message
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
