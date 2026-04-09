@@ -35,14 +35,30 @@ tracing::debug!("cross_workspace_link_staleness_check: stub, no-op");
 
 **SpecLinkEntry** (`crates/gyre-server/src/spec_registry.rs`): The `health` field exists with values `"active" | "stale" | "broken" | "conflicted" | "unresolved"`, but nothing sets it to `"stale"` automatically.
 
-## Revision Notes (R1)
+## Revision History
 
-R1 review found 4 issues. See [`specs/reviews/task-016.md`](../reviews/task-016.md) for details.
+Full review history at [`specs/reviews/task-016.md`](../reviews/task-016.md). Currently at **R4**.
 
-- **F1:** Push-time inbound staleness detection is missing. When spec B gets a new SHA, all existing links whose `target_path` matches B must be marked stale *immediately at push time*, not just by the daily background job. Currently only outbound links (from the pushed manifest) are checked.
-- **F2:** Drift-review requires creating a **Task entity**, not just setting `drift_status = "drifted"`. The flag alone is not a tracked work item.
-- **F3:** When an `extends` link's target changes, the extending spec's `approval_status` must be reset to `Pending` (invalidated). Currently approval is retained after parent changes.
-- **F4:** No test covers the `extends` push-time behavior (staleness marking, drift status, approval invalidation).
+### R1 (4 findings — all addressed)
+
+- **F1:** Push-time inbound staleness detection missing — fixed
+- **F2:** Drift-review requires Task entity, not just drift_status flag — fixed
+- **F3:** `extends` link target change must invalidate `approval_status` to `Pending` — fixed
+- **F4:** No test for `extends` push-time behavior — fixed
+
+### R2 (3 findings — all addressed)
+
+- **F5:** Inbound extends drift-review tasks assigned to wrong repo/workspace — fixed
+- **F6:** Duplicate drift-review task creation for same-repo extends links — fixed
+- **F7:** Drift-review task creation limited to `extends` links, spec requires all types — fixed
+
+### R3 (1 finding — addressed)
+
+- **F8:** Drift-review tasks created for `references` links, but spec says "No mechanical enforcement" for references — fixed
+
+### R4 (1 finding — OPEN)
+
+- **F9:** Premature `Supersedes` deprecation at sync/push time. The `sync_spec_ledger` function deprecates the target spec unconditionally when processing a `supersedes` link, but the spec says deprecation should only happen **when the superseding spec is approved** (§Approval Gates). The correct logic already exists in `approve_spec`. The sync-time deprecation is a duplicate, premature trigger.
 
 ## Implementation Plan
 
@@ -88,27 +104,28 @@ R1 review found 4 issues. See [`specs/reviews/task-016.md`](../reviews/task-016.
 - [ ] Stale links produce notifications for workspace members
 - [ ] Test: `extends` push-time behavior (stale link + drift_status + approval invalidation + task creation)
 - [ ] Test: inbound staleness for non-extends link types at push time
+- [ ] `Supersedes` deprecation only triggers at approval time (not at push/sync time) — F9
 - [ ] Tests cover each approval gate link type
 - [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
-This task is in `needs-revision` state. Read the R1 review at `specs/reviews/task-016.md` FIRST to understand the 4 findings (F1–F4), then fix them.
+This task is in `needs-revision` state at **R4** with **1 open finding (F9)**. Read the review at `specs/reviews/task-016.md` FIRST, focusing on F9.
 
 When working on this task:
 1. Update the progress field above to `in-progress`
-2. Read `specs/reviews/task-016.md` — the R1 review with 4 specific findings and fix instructions
-3. Read `crates/gyre-server/src/spec_registry.rs` — `sync_spec_ledger` function (around line 353 where changed SHAs are detected — F1 fix goes here), `SpecLinkEntry`, extends handling (line 539-554 — F3 fix: add `approval_status = Pending`)
-4. Read `crates/gyre-server/src/api/specs.rs` — the `approve_spec` handler (lines 375-490)
-5. Read `crates/gyre-server/src/spec_link_staleness.rs` — the staleness background job
-6. Read `specs/system/spec-links.md` §Automatic Staleness Detection, §Approval Gates for the authoritative behavior
-7. Fix F1: add inbound link scanning after SHA change detection in `sync_spec_ledger`
-8. Fix F2: create a drift-review Task entity (not just drift_status flag) when extends links go stale
-9. Fix F3: set `approval_status = Pending` when an extends link's target changes
-10. Fix F4: add test for extends push-time behavior (stale + drift + approval invalidation + task)
-11. On completion, update progress to `ready-for-review` and list git commits below
+2. Read `specs/reviews/task-016.md` — the R4 review. Findings F1–F8 are resolved; F9 is open.
+3. Read `crates/gyre-server/src/spec_registry.rs` — the `sync_spec_ledger` function, specifically the `SpecLinkType::Supersedes` match arm (around line 552-566). This is the premature deprecation that F9 identifies.
+4. Read `crates/gyre-server/src/api/specs.rs` — the `approve_spec` handler (lines 697-750) where the **correct** Supersedes deprecation logic already lives.
+5. Read `specs/system/spec-links.md` §Approval Gates — confirms deprecation is an approval-time side-effect, not a push-time side-effect.
+6. Fix F9: Remove the `SpecLinkType::Supersedes` match arm from `sync_spec_ledger` step 6. The `approve_spec` handler already handles deprecation correctly at approval time.
+7. Update or remove the `sync_supersedes_marks_target_deprecated` test (specs.rs:2601-2688) since it tests the premature behavior.
+8. Add a test confirming that `sync_spec_ledger` does NOT deprecate the target when a `supersedes` link is processed — only `approve_spec` should trigger deprecation.
+9. On completion, update progress to `ready-for-review` and list git commits below
 
 ## Git Commits
 
 - `feat(spec-links): implement staleness job & approval gate enforcement (TASK-016)`
 - `fix(spec-links): address R1 findings F1-F4 — inbound staleness, drift-review tasks, approval invalidation (TASK-016)`
+- `fix(spec-links): address R2 findings F5-F7 — repo assignment, dedup, all-type tasks (TASK-016)`
+- `fix(spec-links): exclude references links from drift-review task creation (TASK-016)`
