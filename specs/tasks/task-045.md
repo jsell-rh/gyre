@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §UI (lines 186–189)
 
-**Status:** `not-started`
+**Progress:** `not-started`
 
 **Depends on:** TASK-016 (staleness data), TASK-019 (query endpoints, conflict data)
 
@@ -89,10 +89,10 @@ _(none yet)_
 ## Agent Instructions
 
 When working on this task:
-1. Update the **Status** field above to `in-progress` when you begin.
+1. Update the **Progress** field above to `in-progress` when you begin.
 2. Read `web/src/components/SpecDashboard.svelte` (lines 405–455) for the current graph rendering.
 3. Read `web/src/components/ExplorerCanvas.svelte` for SVG rendering patterns to reuse.
 4. Implement the DAG visualization, replacing the card grid in the graph view section.
 5. Add a component test in `web/src/__tests__/`.
 6. List each commit SHA under **Git Commits** above.
-7. When done, update **Status** to `ready-for-review`.
+7. When done, update **Progress** to `ready-for-review`.

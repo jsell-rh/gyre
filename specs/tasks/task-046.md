@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §UI (lines 228–232)
 
-**Status:** `not-started`
+**Progress:** `not-started`
 
 **Depends on:** TASK-020 (breaking change detection), TASK-021 (version drift tracking)
 
@@ -104,7 +104,7 @@ _(none yet)_
 ## Agent Instructions
 
 When working on this task:
-1. Update the **Status** field above to `in-progress` when you begin.
+1. Update the **Progress** field above to `in-progress` when you begin.
 2. Read the existing dependency API at `crates/gyre-server/src/api/dependencies.rs` to understand available data.
 3. Read `web/src/components/ExplorerCanvas.svelte` for SVG rendering patterns.
 4. Read `web/src/components/WorkspaceHome.svelte` for the dashboard layout to add the health card.
@@ -112,4 +112,4 @@ When working on this task:
 6. Add component tests in `web/src/__tests__/`.
 7. If a new aggregation endpoint is needed, implement it in `crates/gyre-server/src/api/dependencies.rs` and register in `mod.rs`.
 8. List each commit SHA under **Git Commits** above.
-9. When done, update **Status** to `ready-for-review`.
+9. When done, update **Progress** to `ready-for-review`.
