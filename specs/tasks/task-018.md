@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §5.3  
 **Depends on:** TASK-008 (Phase 3: attestation chains are produced)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -72,4 +72,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(attestation): implement git notes storage for chain attestations (TASK-018)`

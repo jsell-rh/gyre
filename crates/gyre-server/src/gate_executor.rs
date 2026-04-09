@@ -303,6 +303,9 @@ async fn produce_gate_attestation(
             "failed to persist gate attestation"
         );
     } else {
+        // §5.3 location 2: write chain attestation as git note.
+        crate::attestation::write_chain_note_if_committed(state, &updated_leaf).await;
+
         // §7.7: attestation.created audit event for gate attestation.
         info!(
             gate_id = %gate.id,

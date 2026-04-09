@@ -553,6 +553,44 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 .await;
             info!(mr_id = %updated_mr.id, sha = %merge_commit_sha, "attestation bundle created and stored");
 
+            // §5.3 location 2 — Dual-write: also attach chain attestation as git note
+            // under refs/notes/chain-attestations (alongside the legacy note above).
+            // Look up the chain attestation by commit SHA (set at push time).
+            if let Ok(Some(chain_att)) = state
+                .chain_attestations
+                .find_by_commit(&merge_commit_sha)
+                .await
+            {
+                crate::attestation::attach_chain_attestation_note(
+                    &repo.path,
+                    &merge_commit_sha,
+                    &chain_att,
+                )
+                .await;
+            } else if let Some(ref agent_id) = updated_mr.author_agent_id {
+                // Fallback: look up by agent's task if no commit-indexed attestation.
+                if let Ok(Some(agent)) = state.agents.find_by_id(agent_id).await {
+                    if let Some(ref task_id) = agent.current_task_id {
+                        if let Ok(atts) = state
+                            .chain_attestations
+                            .find_by_task(task_id.as_str())
+                            .await
+                        {
+                            if let Some(leaf) =
+                                atts.iter().max_by_key(|a| a.metadata.chain_depth)
+                            {
+                                crate::attestation::attach_chain_attestation_note(
+                                    &repo.path,
+                                    &merge_commit_sha,
+                                    leaf,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+            }
+
             // TASK-007 (Phase 2): Merge-time constraint evaluation (audit-only).
             // Collect all constraints (explicit + strategy-implied + gate),
             // evaluate against the merged diff, log results, emit violations.
