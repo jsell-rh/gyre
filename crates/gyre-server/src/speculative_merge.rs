@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn branch_with_unsatisfied_deps_is_skipped() {
+    async fn deps_resolved_across_waves() {
         use gyre_common::Id;
         use gyre_domain::{DependencySource, MergeRequestDependency};
 
@@ -635,7 +635,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Both should be speculated: branch-a is clean (no deps), branch-b's dep
-        // (mr-a) was speculated clean, so branch-b should also be processed.
+        // (mr-a) was speculated clean in wave 1, so branch-b is processed in wave 2.
         let results = state.speculative_results.lock().await;
         let result_a = results.get(&("repo1".to_string(), "feat/a".to_string()));
         let result_b = results.get(&("repo1".to_string(), "feat/b".to_string()));
@@ -645,7 +645,7 @@ mod tests {
 
         assert!(
             result_b.is_some(),
-            "branch-b should have been speculated (deps satisfied)"
+            "branch-b should have been speculated (deps satisfied across waves)"
         );
         assert_eq!(result_b.unwrap().status, SpeculativeStatus::Clean);
     }
@@ -908,6 +908,172 @@ mod tests {
                 .unwrap()
                 .status,
             SpeculativeStatus::Clean,
+        );
+    }
+
+    // ── Conflict type classification behavioral tests (TASK-028 F8) ──
+
+    /// Helper: set up a branch using a custom state (for ConfigurableGitOps tests).
+    async fn setup_branch_with_commits(
+        state: &std::sync::Arc<crate::AppState>,
+        agent_id: &str,
+        repo_id: &str,
+        branch: &str,
+        mr_id: &str,
+    ) {
+        use gyre_common::Id;
+        use gyre_domain::{Agent, AgentCommit, AgentStatus, AgentWorktree, MergeRequest, Repository};
+
+        // Create repo if it doesn't exist.
+        if state
+            .repos
+            .find_by_id(&Id::new(repo_id))
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let repo = Repository::new(
+                Id::new(repo_id),
+                Id::new("ws-test"),
+                repo_id,
+                &format!("/tmp/{repo_id}"),
+                1000,
+            );
+            state.repos.create(&repo).await.unwrap();
+        }
+
+        // Create agent if it doesn't exist.
+        if state
+            .agents
+            .find_by_id(&Id::new(agent_id))
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let mut agent = Agent::new(Id::new(agent_id), agent_id, 1000);
+            agent.status = AgentStatus::Active;
+            state.agents.create(&agent).await.unwrap();
+        }
+
+        // Create worktree.
+        let wt = AgentWorktree::new(
+            Id::new(&format!("wt-{agent_id}-{branch}")),
+            Id::new(agent_id),
+            Id::new(repo_id),
+            None,
+            branch,
+            &format!("/tmp/worktrees/{agent_id}/{branch}"),
+            1000,
+        );
+        state.worktrees.create(&wt).await.unwrap();
+
+        // Create MR.
+        let mr = MergeRequest::new(
+            Id::new(mr_id),
+            Id::new(repo_id),
+            &format!("MR for {branch}"),
+            branch,
+            "main",
+            1000,
+        );
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Create agent commit in the same repo so find_conflicting_agent can match.
+        let commit = AgentCommit::new(
+            Id::new(&format!("commit-{agent_id}-{branch}")),
+            Id::new(agent_id),
+            Id::new(repo_id),
+            &format!("sha-{agent_id}-{branch}"),
+            branch,
+            1000,
+        );
+        state.agent_commits.record(&commit).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn conflict_classified_as_order_independent() {
+        use crate::mem::{test_state_with_git_ops, ConfigurableGitOps};
+
+        // Branch feat/solo conflicts with main — no prior speculated branches.
+        let git_ops = ConfigurableGitOps::with_conflicts(vec!["feat/solo"]);
+        let state = test_state_with_git_ops(Arc::new(git_ops));
+
+        setup_branch_with_commits(&state, "agent-solo", "repo-oi", "feat/solo", "mr-solo").await;
+
+        let result = run_once(&state).await;
+        assert!(result.is_ok());
+
+        let results = state.speculative_results.lock().await;
+        let result_solo = results
+            .get(&("repo-oi".to_string(), "feat/solo".to_string()))
+            .expect("branch should have a result");
+
+        assert_eq!(result_solo.status, SpeculativeStatus::Conflict);
+        assert_eq!(
+            result_solo.conflict_type,
+            Some(ConflictType::OrderIndependent),
+            "conflict with no prior speculated branches should be order-independent"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflict_classified_as_order_dependent() {
+        use crate::mem::{test_state_with_git_ops, ConfigurableGitOps};
+        use gyre_common::Id;
+        use gyre_domain::{DependencySource, MergeRequestDependency};
+
+        // feat/conflict depends on mr-cl, ensuring feat/clean is speculated
+        // first (wave 1). feat/conflict is speculated in wave 2, where it
+        // conflicts. find_conflicting_agent finds feat/clean (both agents have
+        // commits in the same repo), and since feat/clean is in
+        // speculated_clean_branches, the conflict is classified as order-dependent.
+        let git_ops = ConfigurableGitOps::with_conflicts(vec!["feat/conflict"]);
+        let state = test_state_with_git_ops(Arc::new(git_ops));
+
+        setup_branch_with_commits(&state, "agent-cl", "repo-od", "feat/clean", "mr-cl").await;
+        setup_branch_with_commits(&state, "agent-cf", "repo-od", "feat/conflict", "mr-cf").await;
+
+        // Set feat/conflict to depend on mr-cl so it's processed in wave 2.
+        let mut mr_cf = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-cf"))
+            .await
+            .unwrap()
+            .unwrap();
+        mr_cf.depends_on = vec![MergeRequestDependency::new(
+            Id::new("mr-cl"),
+            DependencySource::Explicit,
+        )];
+        state.merge_requests.update(&mr_cf).await.unwrap();
+
+        let result = run_once(&state).await;
+        assert!(result.is_ok());
+
+        let results = state.speculative_results.lock().await;
+
+        // feat/clean should be clean (wave 1).
+        let result_clean = results
+            .get(&("repo-od".to_string(), "feat/clean".to_string()))
+            .expect("clean branch should have a result");
+        assert_eq!(result_clean.status, SpeculativeStatus::Clean);
+
+        // feat/conflict should be a conflict (wave 2), classified as order-dependent
+        // because feat/clean was speculated clean in wave 1.
+        let result_conflict = results
+            .get(&("repo-od".to_string(), "feat/conflict".to_string()))
+            .expect("conflict branch should have a result");
+        assert_eq!(result_conflict.status, SpeculativeStatus::Conflict);
+        assert_eq!(
+            result_conflict.conflicting_branch,
+            Some("feat/clean".to_string()),
+            "conflicting branch should be feat/clean"
+        );
+        assert_eq!(
+            result_conflict.conflict_type,
+            Some(ConflictType::OrderDependent),
+            "conflict after a speculated-clean branch should be order-dependent"
         );
     }
 }

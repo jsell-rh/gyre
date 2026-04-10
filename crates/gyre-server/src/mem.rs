@@ -152,6 +152,147 @@ impl GitOpsPort for NoopGitOps {
     }
 }
 
+/// Configurable git operations adapter for tests that need to control
+/// `can_merge` results per branch. Branches in the `conflict_branches` set
+/// return `Ok(false)` from `can_merge`; all others return `Ok(true)`.
+/// All other operations delegate to `NoopGitOps` behavior.
+#[cfg(test)]
+pub struct ConfigurableGitOps {
+    pub conflict_branches: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+#[cfg(test)]
+impl ConfigurableGitOps {
+    pub fn with_conflicts(branches: Vec<&str>) -> Self {
+        let set: std::collections::HashSet<String> =
+            branches.into_iter().map(|s| s.to_string()).collect();
+        Self {
+            conflict_branches: Arc::new(std::sync::Mutex::new(set)),
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl GitOpsPort for ConfigurableGitOps {
+    async fn init_bare(&self, _path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_branches(&self, _repo_path: &str) -> Result<Vec<BranchInfo>> {
+        Ok(vec![])
+    }
+
+    async fn commit_log(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _limit: usize,
+    ) -> Result<Vec<CommitInfo>> {
+        Ok(vec![])
+    }
+
+    async fn diff(&self, _repo_path: &str, _from: &str, _to: &str) -> Result<DiffResult> {
+        Ok(DiffResult {
+            files_changed: 0,
+            insertions: 0,
+            deletions: 0,
+            patches: vec![],
+        })
+    }
+
+    async fn is_repo(&self, _path: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn can_merge(&self, _repo_path: &str, source: &str, _target: &str) -> Result<bool> {
+        let conflicts = self.conflict_branches.lock().unwrap();
+        Ok(!conflicts.contains(source))
+    }
+
+    async fn merge_branches(
+        &self,
+        _repo_path: &str,
+        _source: &str,
+        _target: &str,
+    ) -> Result<MergeResult> {
+        Ok(MergeResult::Success {
+            merge_commit_sha: "0000000000000000000000000000000000000000".to_string(),
+        })
+    }
+
+    async fn create_worktree(
+        &self,
+        _repo_path: &str,
+        _worktree_path: &str,
+        _branch: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    async fn create_initial_commit(&self, _repo_path: &str, _branch: &str) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
+    }
+
+    async fn clone_mirror(&self, _url: &str, _path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn fetch_mirror(&self, _path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn branch_exists(&self, _repo_path: &str, _branch_name: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn create_branch(
+        &self,
+        _repo_path: &str,
+        _branch_name: &str,
+        _from_ref: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write_file(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _file_path: &str,
+        _content: &[u8],
+        _message: &str,
+    ) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
+    }
+
+    async fn reset_branch(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _target_sha: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 #[async_trait]
 impl JjOpsPort for NoopJjOps {
@@ -3004,6 +3145,131 @@ pub fn test_state() -> Arc<crate::AppState> {
         conversations: Arc::new(MemConversationRepository::default()),
         // Use a non-existent path that unit tests will never actually access via real git.
         // NoopGitOps does not create files; commits_since() on a missing path returns 0.
+        repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
+        prompt_templates: Arc::new(MemPromptRepository::default()),
+        compute_targets: Arc::new(MemComputeTargetRepository::default()),
+        llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
+        user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
+        user_tokens: Arc::new(MemUserTokenRepository::default()),
+        judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
+        ws_tickets: crate::auth::WsTicketStore::new(),
+    })
+}
+
+/// Build an AppState with a custom GitOpsPort for tests that need to control
+/// git operation behavior (e.g., configurable `can_merge` results).
+#[cfg(test)]
+pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
+    use std::collections::HashMap;
+    use tokio::sync::{broadcast, Mutex};
+    Arc::new(crate::AppState {
+        auth_token: "test-token".to_string(),
+        base_url: "http://localhost:3000".to_string(),
+        repos: Arc::new(MemRepoRepository::default()),
+        agents: Arc::new(MemAgentRepository::default()),
+        tasks: Arc::new(MemTaskRepository::default()),
+        merge_requests: Arc::new(MemMrRepository::default()),
+        reviews: Arc::new(MemReviewRepository::default()),
+        merge_queue: Arc::new(MemMergeQueueRepository::default()),
+        git_ops,
+        jj_ops: Arc::new(NoopJjOps),
+        agent_commits: Arc::new(MemAgentCommitRepository::default()),
+        worktrees: Arc::new(MemWorktreeRepository::default()),
+        telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
+        message_broadcast_tx: broadcast::channel(16).0,
+        kv_store: Arc::new(MemKvStore::default()),
+        agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
+        agent_jwt_ttl_secs: 3600,
+        users: Arc::new(MemUserRepository::default()),
+        api_keys: Arc::new(MemApiKeyRepository::default()),
+        jwt_config: None,
+        http_client: reqwest::Client::new(),
+        metrics: Arc::new(crate::metrics::Metrics::new().expect("test metrics")),
+        started_at_secs: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        compose_sessions: Arc::new(Mutex::new(HashMap::new())),
+        retention_store: crate::retention::RetentionStore::new(),
+        job_registry: Arc::new(crate::jobs::JobRegistry::new()),
+        analytics: Arc::new(MemAnalyticsRepository::default()),
+        costs: Arc::new(MemCostRepository::default()),
+        audit: Arc::new(MemAuditRepository::default()),
+        siem_store: crate::siem::SiemStore::new(),
+        audit_broadcast_tx: broadcast::channel(64).0,
+        network_peers: Arc::new(MemNetworkPeerRepository::default()),
+        dependencies: Arc::new(MemDependencyRepository::default()),
+        breaking_changes: Arc::new(MemBreakingChangeRepository::default()),
+        dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
+        rate_limiter: crate::rate_limit::RateLimiter::new(1000),
+        process_registry: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
+        quality_gates: Arc::new(MemQualityGateRepository::default()),
+        gate_results: Arc::new(MemGateResultRepository::default()),
+        push_gate_registry: Arc::new(crate::pre_accept::builtin_gates()),
+        repo_push_gates: Arc::new(MemPushGateRepository::default()),
+        speculative_results: Arc::new(Mutex::new(HashMap::new())),
+        spawn_log: Arc::new(MemSpawnLogRepository::default()),
+        db_storage: None,
+        spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
+        spec_policies: Arc::new(MemSpecPolicyRepository::default()),
+        attestation_store: Arc::new(MemAttestationRepository::default()),
+        chain_attestations: Arc::new(MemChainAttestationRepository::default()),
+        key_bindings: Arc::new(MemKeyBindingRepository::default()),
+        trust_anchors: Arc::new(MemTrustAnchorRepository::default()),
+        trusted_issuers: vec![],
+        remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
+        sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
+        tunnel_store: Arc::new(Mutex::new(HashMap::new())),
+        container_audits: Arc::new(MemContainerAuditRepository::default()),
+        spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
+        spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
+        spec_links_store: Arc::new(Mutex::new(Vec::new())),
+        budget_configs: Arc::new(MemBudgetConfigRepository::default()),
+        budget_usages: Arc::new(MemBudgetUsageRepository::default()),
+        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        tenants: Arc::new(MemTenantRepository::default()),
+        workspaces: Arc::new(MemWorkspaceRepository::default()),
+        personas: Arc::new(MemPersonaRepository::default()),
+        policies: Arc::new(MemPolicyRepository::default()),
+        workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
+        teams: Arc::new(MemTeamRepository::default()),
+        notifications: Arc::new(MemNotificationRepository::default()),
+        graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
+        saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
+        wg_config: crate::WireGuardConfig::from_env(),
+        meta_specs: Arc::new(MemMetaSpecRepository::default()),
+        meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
+        meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        messages: Arc::new(MemMessageRepository::default()),
+        message_dispatch_tx: {
+            let (tx, rx) = tokio::sync::mpsc::channel(256);
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while rx.recv().await.is_some() {}
+            });
+            tx
+        },
+        agent_inbox_max: 1000,
+        user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
+        last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        llm_configs: Arc::new(MemLlmConfigRepository::default()),
+        presence: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        ws_connections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        ws_connection_workspaces: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
+        traces: Arc::new(MemTraceRepository::default()),
+        otlp_config: crate::otlp_receiver::OtlpServerConfig {
+            enabled: false,
+            grpc_port: 4317,
+            max_spans_per_trace: 10_000,
+        },
+        conversations: Arc::new(MemConversationRepository::default()),
         repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
         prompt_templates: Arc::new(MemPromptRepository::default()),
         compute_targets: Arc::new(MemComputeTargetRepository::default()),

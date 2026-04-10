@@ -2,7 +2,7 @@
 
 **Spec reference:** `merge-dependencies.md` §Three Ways Dependencies Are Established, §Speculative Merge Integration  
 **Depends on:** None (extends data model and API, independent of queue algorithm)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [`specs/reviews/task-028.md`](../reviews/task-028.md)
 
 ## Spec Excerpt
