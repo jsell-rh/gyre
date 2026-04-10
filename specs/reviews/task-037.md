@@ -43,3 +43,26 @@ The implementation is well-executed overall. TypeScript interfaces accurately mi
     streamingText = '';
   }
   ```
+
+---
+
+## R2 — `complete`
+
+**Round:** R2
+**Commit reviewed:** `35d45dac`
+
+### R1 finding verification
+
+- [x] **F1 — Pre-check guard bypasses validator**: Fixed in `35d45dac`. The redundant guard `if (!query || typeof query !== 'object' || !query.scope) break;` was removed. The validator now runs for all incoming view queries, including null, non-objects, and scope-less queries — all of which produce user-facing error messages as acceptance criterion 5 requires.
+
+- [x] **F2 — Validation error path does not finalize in-flight streaming text**: Fixed in `35d45dac`. The streaming text finalization block (`if (streamingText.trim()) { ... streamingText = ''; }`) was added before the error message on the validation failure path, matching the success path's behavior. Status is set to `'ready'` and `scrollToBottom()` is called on both paths — state symmetry is correct.
+
+### R2 verification
+
+- TypeScript interfaces match Rust types field-by-field (all 11 structs, discriminated union for Scope, correct optionality for `#[serde(default)]` and `Option<T>` fields, `#[serde(untagged)]` Zoom union).
+- Validator covers all critical rendering-error checks from Rust's `ViewQuery::validate()`.
+- 53 unit tests pass covering valid queries, structural errors, scope-specific errors, edge types, emphasis, zoom, colors, narrative, and multi-error reporting.
+- ExplorerCanvas `activeQuery` prop typed via JSDoc `import('./types/view-query.ts').ViewQuery | null`.
+- No fix-introduced regressions: guard removal is covered by existing validator tests; streaming text finalization on error path is correct by code inspection (state symmetry with success path confirmed).
+
+**Verdict:** `complete` — all acceptance criteria met, both R1 findings resolved.
