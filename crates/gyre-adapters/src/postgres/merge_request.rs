@@ -2,9 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{
-    DependencySource, DiffStats, MergeRequest, MergeRequestDependency, MrStatus,
-};
+use gyre_domain::{DependencySource, DiffStats, MergeRequest, MergeRequestDependency, MrStatus};
 use gyre_ports::MergeRequestRepository;
 use std::sync::Arc;
 
@@ -64,18 +62,18 @@ impl MergeRequestRow {
     fn into_mr(self) -> Result<MergeRequest> {
         let reviewer_strs: Vec<String> = serde_json::from_str(&self.reviewers).unwrap_or_default();
         // Backward compat: try new format first, fall back to plain Vec<String>.
-        let depends_on: Vec<MergeRequestDependency> =
-            if let Ok(deps) = serde_json::from_str::<Vec<MergeRequestDependency>>(&self.depends_on)
-            {
-                deps
-            } else if let Ok(id_strs) = serde_json::from_str::<Vec<String>>(&self.depends_on) {
-                id_strs
-                    .into_iter()
-                    .map(|id| MergeRequestDependency::new(Id::new(id), DependencySource::Explicit))
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        let depends_on: Vec<MergeRequestDependency> = if let Ok(deps) =
+            serde_json::from_str::<Vec<MergeRequestDependency>>(&self.depends_on)
+        {
+            deps
+        } else if let Ok(id_strs) = serde_json::from_str::<Vec<String>>(&self.depends_on) {
+            id_strs
+                .into_iter()
+                .map(|id| MergeRequestDependency::new(Id::new(id), DependencySource::Explicit))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let diff_stats = match (
             self.diff_files_changed,
             self.diff_insertions,

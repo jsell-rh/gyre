@@ -135,6 +135,7 @@ pub(crate) fn would_create_cycle(
 
 pub async fn set_dependencies(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<SetDependenciesRequest>,
 ) -> Result<(StatusCode, Json<DependenciesResponse>), ApiError> {
@@ -182,15 +183,18 @@ pub async fn set_dependencies(
         ));
     }
 
-    // Apply — agent-declared or explicit based on caller context.
-    // When called via PUT /dependencies, the source is AgentDeclared.
-    let source = gyre_domain::DependencySource::AgentDeclared;
+    // Apply — agent-declared if caller is an agent JWT, explicit if human API key.
+    // Agent JWTs have jwt_claims populated; API key callers have jwt_claims = None.
+    let source = if auth.jwt_claims.is_some() {
+        gyre_domain::DependencySource::AgentDeclared
+    } else {
+        gyre_domain::DependencySource::Explicit
+    };
     mr.depends_on = req
         .depends_on
         .iter()
         .map(|dep_id| {
-            let mut dep =
-                gyre_domain::MergeRequestDependency::new(Id::new(dep_id), source.clone());
+            let mut dep = gyre_domain::MergeRequestDependency::new(Id::new(dep_id), source.clone());
             dep.reason = req.reason.clone();
             dep
         })
@@ -415,7 +419,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["depends_on"][0]["mr_id"], mr1_id);
-        assert_eq!(json["depends_on"][0]["source"], "agent-declared");
+        // Global token has no jwt_claims → Explicit source.
+        assert_eq!(json["depends_on"][0]["source"], "explicit");
 
         // GET dependencies for mr1 should show mr2 as dependent
         let resp = app
@@ -680,12 +685,12 @@ mod tests {
     // ── Source tracking & reason persistence tests (TASK-028) ────────────
 
     #[tokio::test]
-    async fn dependency_source_is_agent_declared() {
+    async fn dependency_source_is_explicit_for_non_jwt_caller() {
         let app = app();
         let (app, mr1_id) = create_mr(app, "Source MR").await;
         let (app, mr2_id) = create_mr(app, "Dep MR").await;
 
-        // Set via PUT /dependencies → source should be "agent-declared".
+        // Set via PUT /dependencies with global token (no JWT claims) → Explicit source.
         let body = serde_json::json!({
             "depends_on": [mr1_id],
             "reason": "MR-A adds the UserPort trait that this code implements"
@@ -705,7 +710,8 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["depends_on"][0]["source"], "agent-declared");
+        // Global token has no jwt_claims → Explicit source.
+        assert_eq!(json["depends_on"][0]["source"], "explicit");
         assert_eq!(
             json["depends_on"][0]["reason"],
             "MR-A adds the UserPort trait that this code implements"
@@ -749,7 +755,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["depends_on"][0]["mr_id"], mr1_id);
-        assert_eq!(json["depends_on"][0]["source"], "agent-declared");
+        // Global token has no jwt_claims → Explicit source.
+        assert_eq!(json["depends_on"][0]["source"], "explicit");
         assert_eq!(
             json["depends_on"][0]["reason"],
             "needs migration schema from MR-A"
@@ -776,8 +783,57 @@ mod tests {
             .await
             .unwrap();
         let json = body_json(resp).await;
-        assert_eq!(json["depends_on"][0]["source"], "agent-declared");
+        // Global token has no jwt_claims → Explicit source.
+        assert_eq!(json["depends_on"][0]["source"], "explicit");
         // reason should be null (absent from JSON due to skip_serializing_if).
         assert!(json["depends_on"][0]["reason"].is_null());
+    }
+
+    #[tokio::test]
+    async fn dependency_source_is_agent_declared_for_jwt_caller() {
+        let state = test_state();
+
+        // Mint an agent JWT and register it in the agent_tokens store.
+        let agent_jwt = state
+            .agent_signing_key
+            .mint("agent-42", "task-1", "system", &state.base_url, 3600)
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-42", agent_jwt.clone())
+            .await
+            .unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+
+        // Create two MRs using the global token (for setup).
+        let (app, mr1_id) = create_mr(app, "JWT Source MR").await;
+        let (app, mr2_id) = create_mr(app, "JWT Dep MR").await;
+
+        // Set dependency using agent JWT → should get "agent-declared" source.
+        let body = serde_json::json!({
+            "depends_on": [mr1_id],
+            "reason": "Agent discovered runtime dependency"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr2_id}/dependencies"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {agent_jwt}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // Agent JWT has jwt_claims → AgentDeclared source.
+        assert_eq!(json["depends_on"][0]["source"], "agent-declared");
+        assert_eq!(
+            json["depends_on"][0]["reason"],
+            "Agent discovered runtime dependency"
+        );
     }
 }

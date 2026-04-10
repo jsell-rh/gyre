@@ -16,7 +16,10 @@ use axum::{
 };
 use futures_util::stream;
 use gyre_common::Id;
-use gyre_domain::{CostEntry, MergeRequest, Task, TaskPriority, TaskStatus};
+use gyre_domain::{
+    CostEntry, DependencySource, MergeRequest, MergeRequestDependency, Task, TaskPriority,
+    TaskStatus,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -191,7 +194,8 @@ fn tool_definitions() -> Value {
                         "repository_id": { "type": "string", "description": "Repository ID" },
                         "source_branch": { "type": "string", "description": "Source branch name" },
                         "target_branch": { "type": "string", "description": "Target branch name" },
-                        "author_agent_id": { "type": "string", "description": "Agent ID creating the MR" }
+                        "author_agent_id": { "type": "string", "description": "Agent ID creating the MR" },
+                        "depends_on": { "type": "array", "items": { "type": "string" }, "description": "MR IDs that must merge before this one" }
                     },
                     "required": ["title", "repository_id", "source_branch", "target_branch"]
                 }
@@ -728,6 +732,62 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
         Some(t) => t.to_string(),
         None => return tool_error("missing required field: target_branch"),
     };
+
+    // Parse optional depends_on array.
+    let depends_on: Option<Vec<String>> = args.get("depends_on").and_then(|v| {
+        v.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+    });
+
+    // Validate and build explicit dependencies (mirrors REST create_mr logic).
+    let explicit_deps = if let Some(ref dep_ids) = depends_on {
+        let mut validated = Vec::new();
+        for dep_id_str in dep_ids {
+            let dep_id = Id::new(dep_id_str);
+            match state.merge_requests.find_by_id(&dep_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return tool_error(format!("dependency merge request {dep_id_str} not found"))
+                }
+                Err(e) => return tool_error(format!("Failed to validate dependency: {e}")),
+            }
+            validated.push(MergeRequestDependency::new(
+                dep_id,
+                DependencySource::Explicit,
+            ));
+        }
+
+        // Cycle check.
+        let all_mrs = match state.merge_requests.list().await {
+            Ok(m) => m,
+            Err(e) => return tool_error(format!("Failed to list MRs: {e}")),
+        };
+        let mut adj: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for m in &all_mrs {
+            adj.insert(
+                m.id.to_string(),
+                m.depends_on
+                    .iter()
+                    .map(|d| d.target_mr_id.to_string())
+                    .collect(),
+            );
+        }
+        // Use a temporary ID for the new MR for cycle check purposes.
+        let tmp_id = new_id();
+        if crate::api::merge_deps::would_create_cycle(&tmp_id.to_string(), dep_ids, &adj) {
+            return tool_error(
+                "cycle detected: adding these dependencies would create a circular dependency chain",
+            );
+        }
+        validated
+    } else {
+        Vec::new()
+    };
+
     let now = now_secs();
     let mut mr = MergeRequest::new(
         new_id(),
@@ -738,6 +798,11 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
         now,
     );
     mr.author_agent_id = get_str(args, "author_agent_id").map(Id::new);
+
+    if !explicit_deps.is_empty() {
+        mr.depends_on = explicit_deps;
+    }
+
     match state.merge_requests.create(&mr).await {
         Ok(()) => tool_result(format!("Created MR '{}' (id: {})", title, mr.id)),
         Err(e) => tool_error(format!("Failed to create MR: {e}")),
@@ -2157,12 +2222,10 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
                 tool_error("LLM produced invalid diff operations. Each operation must have op (add/remove/replace), path, and content fields.")
             }
         }
-        Ok(_) => {
-            tool_error("LLM response is valid JSON but missing required 'diff' and/or 'explanation' fields.")
-        }
-        Err(_) => {
-            tool_error("LLM returned invalid JSON. Please try rephrasing your instruction.")
-        }
+        Ok(_) => tool_error(
+            "LLM response is valid JSON but missing required 'diff' and/or 'explanation' fields.",
+        ),
+        Err(_) => tool_error("LLM returned invalid JSON. Please try rephrasing your instruction."),
     }
 }
 

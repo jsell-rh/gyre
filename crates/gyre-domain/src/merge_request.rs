@@ -239,9 +239,8 @@ mod tests {
         assert!(json.contains("\"branch-lineage\""));
         assert!(json.contains("\"target_mr_id\""));
 
-        let dep2 =
-            MergeRequestDependency::new(Id::new("mr2"), DependencySource::AgentDeclared)
-                .with_reason("needs trait from mr2");
+        let dep2 = MergeRequestDependency::new(Id::new("mr2"), DependencySource::AgentDeclared)
+            .with_reason("needs trait from mr2");
         let json2 = serde_json::to_string(&dep2).unwrap();
         assert!(json2.contains("\"agent-declared\""));
         assert!(json2.contains("needs trait from mr2"));
@@ -257,8 +256,7 @@ mod tests {
         assert!(dep.reason.is_none());
 
         // With reason.
-        let json2 =
-            r#"{"target_mr_id":"mr2","source":"agent-declared","reason":"needs schema"}"#;
+        let json2 = r#"{"target_mr_id":"mr2","source":"agent-declared","reason":"needs schema"}"#;
         let dep2: MergeRequestDependency = serde_json::from_str(json2).unwrap();
         assert_eq!(dep2.source, DependencySource::AgentDeclared);
         assert_eq!(dep2.reason.as_deref(), Some("needs schema"));

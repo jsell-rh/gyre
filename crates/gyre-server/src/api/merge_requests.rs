@@ -288,9 +288,7 @@ pub async fn create_mr(
                 .find_by_id(&dep_id)
                 .await?
                 .ok_or_else(|| {
-                    ApiError::NotFound(format!(
-                        "dependency merge request {dep_id_str} not found"
-                    ))
+                    ApiError::NotFound(format!("dependency merge request {dep_id_str} not found"))
                 })?;
             validated.push(MergeRequestDependency::new(
                 dep_id,
