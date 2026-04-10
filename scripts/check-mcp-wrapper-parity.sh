@@ -45,6 +45,11 @@
 #             validation returns raw, unparsed LLM text — the consumer
 #             gets no error indication and no structured data when the LLM
 #             produces invalid output.
+#   Check 7 — REST→MCP parameter drift: REST request structs have fields
+#             that the corresponding MCP tool's inputSchema does not include.
+#             When a REST endpoint gains a parameter, the MCP tool must be
+#             updated to maintain HSI §11 parity. MCP callers silently
+#             cannot access the new functionality.
 #
 # Origin: specs/reviews/task-010.md F1 (dead depth param), F2/F3 (missing
 #         briefing fields), F4 (edge filter divergence), F5 (hand-built JSON
@@ -55,6 +60,9 @@
 #         specs/reviews/task-012.md R2 F5 (raw LLM response passthrough) —
 #         MCP handler returned raw LLM text without JSON parsing/validation
 #         that the REST handler performs.
+#         specs/reviews/task-028.md R1 F4 (REST→MCP parameter drift) —
+#         CreateMrRequest gained depends_on but gyre_create_mr tool schema
+#         was not updated.
 #
 # Exempt with: // mcp-parity:ok — <reason>
 #
@@ -454,6 +462,94 @@ for entry in "${LLM_FN_LINES[@]}"; do
             VIOLATIONS=$((VIOLATIONS + 1))
         fi
     fi
+done
+
+# ── Check 7: REST→MCP parameter drift ───────────────────────────────────
+# When a REST endpoint's request struct gains a new field, the corresponding
+# MCP tool's inputSchema must also include that parameter. This check
+# detects REST fields missing from MCP tool schemas.
+#
+# Strategy: for known REST-to-MCP mappings, extract the REST struct's pub
+# fields and the MCP tool's inputSchema properties, then compare.
+#
+# Origin: specs/reviews/task-028.md F4 — CreateMrRequest gained depends_on
+#         but gyre_create_mr tool schema was not updated.
+#
+# Exempt with: // mcp-parity:ok — <reason> on the MCP tool schema line.
+
+API_MERGE_FILE="crates/gyre-server/src/api/merge_requests.rs"
+
+# Known REST struct → MCP tool mappings
+# Format: "StructName:tool_name:file_path"
+MAPPINGS=(
+    "CreateMrRequest:gyre_create_mr:$API_MERGE_FILE"
+)
+
+for mapping in "${MAPPINGS[@]}"; do
+    struct_name=$(echo "$mapping" | cut -d: -f1)
+    tool_name=$(echo "$mapping" | cut -d: -f2)
+    struct_file=$(echo "$mapping" | cut -d: -f3)
+
+    if [ ! -f "$struct_file" ]; then
+        continue
+    fi
+
+    # Extract pub fields from the REST request struct.
+    # Look for lines between "pub struct $struct_name {" and the next "}"
+    # that contain "pub field_name:"
+    REST_FIELDS=$(sed -n "/pub struct ${struct_name}/,/^}/p" "$struct_file" \
+        | grep -oP 'pub\s+\K[a-z_]+(?=\s*:)' \
+        | sort || true)
+
+    if [ -z "$REST_FIELDS" ]; then
+        continue
+    fi
+
+    # Extract properties from MCP tool's inputSchema.
+    # Find the tool definition by name and extract property keys from the
+    # subsequent ~30 lines.
+    TOOL_LINE=$(grep -n "\"name\": \"${tool_name}\"" "$MCP_FILE" | head -1 | cut -d: -f1 || true)
+    if [ -z "$TOOL_LINE" ]; then
+        continue
+    fi
+
+    TOOL_SCHEMA_END=$((TOOL_LINE + 40))
+    MCP_FIELDS=$(sed -n "${TOOL_LINE},${TOOL_SCHEMA_END}p" "$MCP_FILE" \
+        | grep -oP '"([a-z_]+)":\s*\{' \
+        | grep -oP '"([a-z_]+)"' \
+        | tr -d '"' \
+        | sort || true)
+
+    if [ -z "$MCP_FIELDS" ]; then
+        continue
+    fi
+
+    # Compare: find REST fields not in MCP schema
+    for rest_field in $REST_FIELDS; do
+        if ! echo "$MCP_FIELDS" | grep -qw "$rest_field"; then
+            # Check for exemption on the tool schema line
+            EXEMPT=$(sed -n "${TOOL_LINE},${TOOL_SCHEMA_END}p" "$MCP_FILE" \
+                | grep -c 'mcp-parity:ok' || true)
+            if [ "${EXEMPT:-0}" -gt 0 ]; then
+                continue
+            fi
+
+            echo ""
+            echo "REST→MCP PARAMETER DRIFT: $MCP_FILE (tool: $tool_name)"
+            echo "  REST struct $struct_name in $struct_file has field '$rest_field'"
+            echo "  but MCP tool '$tool_name' inputSchema does not include it."
+            echo ""
+            echo "  When a REST endpoint gains a parameter, the corresponding MCP tool"
+            echo "  must be updated to include the same parameter to maintain HSI §11"
+            echo "  REST-MCP parity. MCP callers cannot access the new functionality."
+            echo ""
+            echo "  Fix: add '$rest_field' to the tool's inputSchema.properties and"
+            echo "  wire it through the MCP handler."
+            echo ""
+            echo "  Exempt with '// mcp-parity:ok — <reason>' in the tool schema block."
+            VIOLATIONS=$((VIOLATIONS + 1))
+        fi
+    done
 done
 
 echo ""
