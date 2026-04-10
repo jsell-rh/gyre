@@ -407,8 +407,8 @@ pub async fn create_mr(
 /// whether `source_branch` is a descendant of that MR's source branch by
 /// comparing the merge-base to the candidate branch tip. If merge-base == tip,
 /// the new branch was created from the candidate branch and should depend on it.
-async fn detect_lineage_deps(
-    state: &Arc<AppState>,
+pub(crate) async fn detect_lineage_deps(
+    state: &AppState,
     repo_id: &Id,
     repo_path: &str,
     source_branch: &str,

@@ -789,18 +789,47 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
     };
 
     let now = now_secs();
+    let rid = Id::new(&repo_id);
     let mut mr = MergeRequest::new(
         new_id(),
-        Id::new(&repo_id),
+        rid.clone(),
         title.clone(),
-        source,
-        target,
+        source.clone(),
+        target.clone(),
         now,
     );
     mr.author_agent_id = get_str(args, "author_agent_id").map(Id::new);
 
+    // Auto-detect branch lineage dependencies and set workspace_id (mirrors REST create_mr).
+    if let Ok(Some(repo)) = state.repos.find_by_id(&rid).await {
+        mr.workspace_id = repo.workspace_id.clone();
+        let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
+            state,
+            &rid,
+            &repo.path,
+            &source,
+            &target,
+        )
+        .await;
+        if !lineage_deps.is_empty() {
+            mr.depends_on = lineage_deps;
+        }
+    }
+
+    // Merge explicit deps with lineage deps: explicit takes precedence,
+    // lineage adds to the set for deps not already declared.
     if !explicit_deps.is_empty() {
+        let explicit_ids: std::collections::HashSet<String> = explicit_deps
+            .iter()
+            .map(|d| d.target_mr_id.to_string())
+            .collect();
+        let additional_lineage: Vec<_> = mr
+            .depends_on
+            .drain(..)
+            .filter(|d| !explicit_ids.contains(&d.target_mr_id.to_string()))
+            .collect();
         mr.depends_on = explicit_deps;
+        mr.depends_on.extend(additional_lineage);
     }
 
     match state.merge_requests.create(&mr).await {

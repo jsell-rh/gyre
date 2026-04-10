@@ -1076,4 +1076,71 @@ mod tests {
             "conflict after a speculated-clean branch should be order-dependent"
         );
     }
+
+    /// Atomic group deferral: if one member has unsatisfied deps, ALL members
+    /// are deferred — the group cannot proceed as a unit (merge-dependencies.md
+    /// §Speculative Merge Integration: "Speculate on atomic groups as a unit").
+    #[tokio::test]
+    async fn atomic_group_deferred_when_member_has_unsatisfied_dep() {
+        use gyre_common::Id;
+        use gyre_domain::{DependencySource, MergeRequestDependency};
+
+        let state = test_state();
+
+        // Two branches in group "deploy-bundle": g1 has no deps, g2 depends on
+        // a nonexistent MR (unsatisfiable).
+        setup_branch(&state, "agent-ag1", "repo-ag", "feat/ag1", "mr-ag1").await;
+        setup_branch(&state, "agent-ag2", "repo-ag", "feat/ag2", "mr-ag2").await;
+
+        // Put both in the same atomic group.
+        let mut mr_ag1 = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-ag1"))
+            .await
+            .unwrap()
+            .unwrap();
+        mr_ag1.atomic_group = Some("deploy-bundle".to_string());
+        state.merge_requests.update(&mr_ag1).await.unwrap();
+
+        let mut mr_ag2 = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-ag2"))
+            .await
+            .unwrap()
+            .unwrap();
+        mr_ag2.atomic_group = Some("deploy-bundle".to_string());
+        // g2 depends on a nonexistent MR — can never be satisfied.
+        mr_ag2.depends_on = vec![MergeRequestDependency::new(
+            Id::new("mr-does-not-exist"),
+            DependencySource::Explicit,
+        )];
+        state.merge_requests.update(&mr_ag2).await.unwrap();
+
+        let result = run_once(&state).await;
+        assert!(result.is_ok());
+
+        let results = state.speculative_results.lock().await;
+
+        // g2 should be Skipped — its dep is unsatisfiable.
+        let result_ag2 = results
+            .get(&("repo-ag".to_string(), "feat/ag2".to_string()))
+            .expect("g2 should have a result");
+        assert_eq!(
+            result_ag2.status,
+            SpeculativeStatus::Skipped,
+            "g2 should be skipped: its dependency is unsatisfiable"
+        );
+
+        // g1 should ALSO be Skipped — even though g1 has no deps of its own,
+        // the group cannot proceed as a unit because g2's dep is unsatisfied.
+        let result_ag1 = results
+            .get(&("repo-ag".to_string(), "feat/ag1".to_string()))
+            .expect("g1 should have a result");
+        assert_eq!(
+            result_ag1.status,
+            SpeculativeStatus::Skipped,
+            "g1 should be skipped: atomic group cannot proceed as a unit \
+             because g2's dependency is unsatisfied"
+        );
+    }
 }
