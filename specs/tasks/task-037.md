@@ -82,3 +82,4 @@ When working on this task:
 ## Git Commits
 
 - `e9b13077` feat(web): add ViewQuery TypeScript types and client-side validation (TASK-037)
+- `35d45dac` fix(web): remove redundant guard and finalize streaming text on error path (TASK-037)
