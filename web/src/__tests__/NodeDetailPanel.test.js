@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render } from '@testing-library/svelte';
+import { render, fireEvent } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
 
 const TYPE_NODE = {
@@ -656,17 +657,40 @@ describe('NodeDetailPanel -- evaluative tab', () => {
     expect(onSpanSelect).toHaveBeenCalledWith(expect.objectContaining({ span_id: 's3' }));
   });
 
-  it('shows no evaluative tab when no spans match the node', () => {
+  it('shows expanded span detail with attributes and input/output summary on click', async () => {
     const { container } = render(NodeDetailPanel, {
-      props: { node: INTERFACE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: [TRACE_SPANS[3]] },
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS },
     });
-    // INTERFACE_NODE is n2, only s4 matches n2, but we pass only s4 which is for n2
-    // Actually n2 does have s4, let's test with no matching spans
+    // Spans sorted by duration: save_user (12000), find_user (5000), validate_user (500)
+    // Click the second row (find_user / s1) which has attributes, input_summary, output_summary
+    const spanRows = container.querySelectorAll('.eval-span-row');
+    expect(spanRows.length).toBe(3);
+    await fireEvent.click(spanRows[1]); // find_user (s1)
+    await tick();
+
+    // Verify expanded detail section is rendered
+    const detail = container.querySelector('.eval-span-detail');
+    expect(detail).toBeTruthy();
+
+    // Verify attributes are shown
+    const attrSection = detail.querySelector('.eval-attributes');
+    expect(attrSection).toBeTruthy();
+    expect(attrSection.textContent).toContain('db.system');
+    expect(attrSection.textContent).toContain('sqlite');
+
+    // Verify input summary
+    const detailValues = detail.querySelectorAll('.eval-detail-mono');
+    const detailTexts = Array.from(detailValues).map(el => el.textContent);
+    expect(detailTexts).toContain('id=42');
+    expect(detailTexts).toContain('{"name":"Alice"}');
+  });
+
+  it('shows no evaluative tab when no spans match the node', () => {
     const noMatchNode = { ...TYPE_NODE, id: 'n999' };
-    const { container: c2 } = render(NodeDetailPanel, {
+    const { container } = render(NodeDetailPanel, {
       props: { node: noMatchNode, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS },
     });
-    const sectionTitles = Array.from(c2.querySelectorAll('.detail-section-title')).map(t => t.textContent);
+    const sectionTitles = Array.from(container.querySelectorAll('.detail-section-title')).map(t => t.textContent);
     expect(sectionTitles.some(t => t.includes('Evaluative'))).toBe(false);
   });
 });

@@ -25,6 +25,7 @@
     queryResult = null, // { node_metrics: Record<string, number>, ... } from dry-run resolve
     assertionResults = [], // [{ line, assertion_text, passed, explanation }] from spec assertion check
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
+    highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
   } = $props();
 
   // ── Interactive $clicked / $selected modes ─────────────────────────────
@@ -862,6 +863,13 @@
     }
     evalParticles = newParticles;
   }
+
+  // Redraw when highlighted span changes (evaluative tab click)
+  $effect(() => {
+    // Access highlightedSpanId to create a dependency
+    const _spanId = highlightedSpanId;
+    if (lens === 'evaluative') scheduleRedraw();
+  });
 
   // Computed elapsed time string for trace playback display
   let traceElapsedDisplay = $derived.by(() => {
@@ -3469,18 +3477,31 @@
       // Frustum cull
       if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
 
-      const radius = 4 + cam.zoom * 0.5;
+      const isHighlighted = highlightedSpanId && p.span?.span_id === highlightedSpanId;
+      const radius = isHighlighted ? 8 + cam.zoom * 0.8 : 4 + cam.zoom * 0.5;
 
       // Glow
       ctx.save();
-      ctx.shadowColor = p.glow;
-      ctx.shadowBlur = 10;
-      ctx.globalAlpha = 0.8;
-      ctx.fillStyle = p.color;
+      ctx.shadowColor = isHighlighted ? '#f59e0b' : p.glow;
+      ctx.shadowBlur = isHighlighted ? 20 : 10;
+      ctx.globalAlpha = isHighlighted ? 1.0 : 0.8;
+      ctx.fillStyle = isHighlighted ? '#f59e0b' : p.color;
       ctx.beginPath();
       ctx.arc(px, py, radius, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
+
+      // Highlight ring for selected span
+      if (isHighlighted) {
+        ctx.save();
+        ctx.globalAlpha = 0.6;
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(px, py, radius + 4, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
 
       // Core
       ctx.save();

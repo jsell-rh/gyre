@@ -48,6 +48,7 @@
   let explorerLens = $state('structural');
   let explorerSavedViews = $state([]);
   let detailNode = $state(null);
+  let highlightedSpanId = $state(null);
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
@@ -1262,6 +1263,7 @@
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => {
                   detailNode = n;
+                  highlightedSpanId = null;
                   if (n?._action === 'view_spec' && n.spec_path) {
                     openSpecEditor(n.spec_path);
                   } else if (n?._action === 'create_spec') {
@@ -1286,6 +1288,7 @@
                 queryResult={viewQueryResult}
                 assertionResults={specAssertionResults}
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
+                {highlightedSpanId}
               />
               <!-- Architecture Insights — collapsible panel inside canvas area -->
               {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
@@ -1478,12 +1481,12 @@
                   node={detailNode}
                   nodes={graph.nodes ?? []}
                   edges={graph.edges ?? []}
-                  onClose={() => { detailNode = null; }}
+                  onClose={() => { detailNode = null; highlightedSpanId = null; }}
                   onNavigate={(n) => { detailNode = n; }}
                   onInteractiveQuery={(q) => { activeViewQuery = q; }}
                   lens={explorerLens}
                   traceSpans={traceData?.spans ?? []}
-                  onSpanSelect={(span) => { /* highlight span on canvas via detailNode metadata */ }}
+                  onSpanSelect={(span) => { highlightedSpanId = span?.span_id ?? null; }}
                 />
                 {#if detailNode.spec_path}
                   <div class="edit-spec-action">

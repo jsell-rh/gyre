@@ -196,7 +196,7 @@ describe('ExplorerCanvas — hierarchy', () => {
   it('at root level shows only top-level packages (no Contains parent)', () => {
     // Root nodes are pkg1, pkg2, and test1 (test1 has no parent)
     // The treemap should show these as top-level cells
-    const { container } = render(ExplorerCanvas, {
+    render(ExplorerCanvas, { // dead-test-code:ok — render triggers canvas draw, container not needed
       props: { nodes: NODES, edges: EDGES },
     });
     // Canvas rendering happened
