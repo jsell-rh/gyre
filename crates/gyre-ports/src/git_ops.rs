@@ -82,6 +82,13 @@ pub trait GitOpsPort: Send + Sync {
         message: &str,
     ) -> Result<String>;
 
+    /// Force-reset a branch to point at a specific commit SHA.
+    ///
+    /// Used for atomic group rollback: when a group member fails to merge,
+    /// the target branch is reset to the pre-group HEAD to undo already-merged
+    /// members.
+    async fn reset_branch(&self, repo_path: &str, branch: &str, target_sha: &str) -> Result<()>;
+
     /// Read a file's content from the tip of a branch.
     ///
     /// Returns `Ok(None)` if the file does not exist at the given path on the

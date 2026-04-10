@@ -404,6 +404,405 @@ async fn warn_deep_chain(state: &AppState, depth: usize, workspace_id: &Id) {
     }
 }
 
+/// Merge all members of an atomic group as a single transactional unit.
+///
+/// Per merge-dependencies.md §Atomic Group Rules:
+/// 1. All members must have all gates passed before any member merges.
+/// 2. The merge processor locks the queue and merges all members in dependency
+///    order with no interleaving.
+/// 3. If any member fails to merge (conflict), the entire group is rolled back
+///    and requeued.
+/// 4. Atomic groups imply dependency ordering among members.
+///
+/// Returns `Ok(())` on success or failure — errors are handled internally
+/// (rollback, requeue, notify). Only propagates infrastructure errors.
+async fn merge_atomic_group(
+    state: &AppState,
+    group_name: &str,
+    first_mr: &MergeRequest,
+    sorted: &[MergeQueueEntry],
+    queued_entries: &[MergeQueueEntry],
+) -> anyhow::Result<()> {
+    // Collect all group members from the queued entries, sorted by topological order.
+    let group_member_ids: HashSet<String> = {
+        let all_mrs = state.merge_requests.list().await?;
+        all_mrs
+            .iter()
+            .filter(|m| m.atomic_group.as_deref() == Some(group_name))
+            .map(|m| m.id.to_string())
+            .collect()
+    };
+
+    // Filter sorted entries to only those in this group, preserving topological order.
+    let group_entries: Vec<MergeQueueEntry> = sorted
+        .iter()
+        .filter(|e| group_member_ids.contains(&e.merge_request_id.to_string()))
+        .filter(|e| {
+            queued_entries
+                .iter()
+                .any(|q| q.id == e.id && q.status == MergeQueueEntryStatus::Queued)
+        })
+        .cloned()
+        .collect();
+
+    if group_entries.is_empty() {
+        return Ok(());
+    }
+
+    info!(
+        group = %group_name,
+        member_count = group_entries.len(),
+        "starting atomic group transactional merge"
+    );
+
+    // Look up the repository (all group members share the same repo).
+    let repo = match state.repos.find_by_id(&first_mr.repository_id).await? {
+        Some(r) => r,
+        None => {
+            warn!(repo_id = %first_mr.repository_id, "repository not found for atomic group");
+            for ge in &group_entries {
+                state
+                    .merge_queue
+                    .update_status(
+                        &ge.id,
+                        MergeQueueEntryStatus::Failed,
+                        Some("repository not found".to_string()),
+                    )
+                    .await?;
+            }
+            return Ok(());
+        }
+    };
+
+    // Record the target branch HEAD before starting, for rollback.
+    let target_branch = &first_mr.target_branch;
+    let pre_group_sha =
+        crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{target_branch}")).await;
+
+    // Mark all group members as Processing.
+    for ge in &group_entries {
+        state
+            .merge_queue
+            .update_status(&ge.id, MergeQueueEntryStatus::Processing, None)
+            .await?;
+    }
+
+    // Track successfully merged entries for potential rollback.
+    let mut merged_entries: Vec<(MergeQueueEntry, MergeRequest)> = Vec::new();
+
+    // Sequentially merge each member in dependency order.
+    for ge in &group_entries {
+        let mr = match state
+            .merge_requests
+            .find_by_id(&ge.merge_request_id)
+            .await?
+        {
+            Some(m) => m,
+            None => {
+                warn!(mr_id = %ge.merge_request_id, "MR not found during atomic group merge");
+                // Rollback and requeue.
+                rollback_atomic_group(
+                    state,
+                    group_name,
+                    &repo,
+                    target_branch,
+                    pre_group_sha.as_deref(),
+                    &merged_entries,
+                    &group_entries,
+                    &format!("MR {} not found", ge.merge_request_id),
+                    &ge.merge_request_id,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
+        // P5: Check dependency health for this member.
+        if handle_dep_health_issues(state, ge, &mr).await? {
+            // Dep health issue found — rollback the group.
+            rollback_atomic_group(
+                state,
+                group_name,
+                &repo,
+                target_branch,
+                pre_group_sha.as_deref(),
+                &merged_entries,
+                &group_entries,
+                &format!("dependency health issue for MR {}", mr.id),
+                &mr.id,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        // Attempt the merge for this member.
+        let result = state
+            .git_ops
+            .merge_branches(&repo.path, &mr.source_branch, &mr.target_branch)
+            .await;
+
+        match result {
+            Ok(MergeResult::Success { merge_commit_sha }) => {
+                info!(
+                    group = %group_name,
+                    mr_id = %mr.id,
+                    sha = %merge_commit_sha,
+                    "atomic group member merged successfully"
+                );
+
+                // Update MR status to Merged.
+                let mut updated_mr = mr.clone();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                updated_mr.updated_at = now;
+                if updated_mr.status == MrStatus::Open {
+                    let _ = updated_mr.transition_status(MrStatus::Approved);
+                }
+                if let Err(e) = updated_mr.transition_status(MrStatus::Merged) {
+                    warn!("could not transition MR to Merged: {e}");
+                }
+                let _ = state.merge_requests.update(&updated_mr).await;
+
+                state
+                    .merge_queue
+                    .update_status(&ge.id, MergeQueueEntryStatus::Merged, None)
+                    .await?;
+
+                // Track analytics.
+                let ev = AnalyticsEvent::new(
+                    Id::new(Uuid::new_v4().to_string()),
+                    "merge_queue.processed",
+                    updated_mr.author_agent_id.as_ref().map(|id| id.to_string()),
+                    serde_json::json!({
+                        "entry_id": ge.id.to_string(),
+                        "mr_id": updated_mr.id.to_string(),
+                        "result": "merged",
+                        "atomic_group": group_name,
+                    }),
+                    now,
+                );
+                let _ = state.analytics.record(&ev).await;
+
+                // Notify the MR author.
+                if let Some(ref author_id) = updated_mr.author_agent_id {
+                    crate::notifications::notify_mr_merged(
+                        state,
+                        author_id,
+                        &updated_mr.workspace_id,
+                        &updated_mr.id.to_string(),
+                        "default",
+                    )
+                    .await;
+                }
+
+                merged_entries.push((ge.clone(), updated_mr));
+            }
+            Ok(MergeResult::Conflict { message }) => {
+                warn!(
+                    group = %group_name,
+                    mr_id = %mr.id,
+                    reason = %message,
+                    "atomic group member merge conflict — rolling back entire group"
+                );
+                rollback_atomic_group(
+                    state,
+                    group_name,
+                    &repo,
+                    target_branch,
+                    pre_group_sha.as_deref(),
+                    &merged_entries,
+                    &group_entries,
+                    &format!("conflict in MR {}: {}", mr.id, message),
+                    &mr.id,
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(e) => {
+                error!(
+                    group = %group_name,
+                    mr_id = %mr.id,
+                    error = %e,
+                    "atomic group member git error — rolling back entire group"
+                );
+                rollback_atomic_group(
+                    state,
+                    group_name,
+                    &repo,
+                    target_branch,
+                    pre_group_sha.as_deref(),
+                    &merged_entries,
+                    &group_entries,
+                    &format!("git error in MR {}: {}", mr.id, e),
+                    &mr.id,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
+
+    info!(
+        group = %group_name,
+        merged_count = merged_entries.len(),
+        "atomic group merged successfully"
+    );
+
+    Ok(())
+}
+
+/// Roll back an atomic group merge: reset the target branch, requeue all members,
+/// and notify all distinct authors.
+async fn rollback_atomic_group(
+    state: &AppState,
+    group_name: &str,
+    repo: &gyre_domain::Repository,
+    target_branch: &str,
+    pre_group_sha: Option<&str>,
+    merged_entries: &[(MergeQueueEntry, MergeRequest)],
+    all_group_entries: &[MergeQueueEntry],
+    failure_reason: &str,
+    failing_mr_id: &Id,
+) -> anyhow::Result<()> {
+    // Step 1: Reset the target branch to the pre-group SHA (undo already-merged members).
+    if !merged_entries.is_empty() {
+        if let Some(sha) = pre_group_sha {
+            info!(
+                group = %group_name,
+                target_branch = %target_branch,
+                reset_to = %sha,
+                merged_count = merged_entries.len(),
+                "rolling back atomic group: resetting target branch"
+            );
+            if let Err(e) = state
+                .git_ops
+                .reset_branch(&repo.path, target_branch, sha)
+                .await
+            {
+                error!(
+                    group = %group_name,
+                    error = %e,
+                    "failed to reset branch during atomic group rollback"
+                );
+            }
+        } else {
+            warn!(
+                group = %group_name,
+                "no pre-group SHA recorded; cannot reset branch"
+            );
+        }
+
+        // Revert MR statuses for already-merged members.
+        for (_, mr) in merged_entries {
+            let mut reverted_mr = mr.clone();
+            reverted_mr.status = MrStatus::Open;
+            reverted_mr.updated_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let _ = state.merge_requests.update(&reverted_mr).await;
+        }
+    }
+
+    // Step 2: Requeue all group members (set status back to Queued with failure reason).
+    for ge in all_group_entries {
+        state
+            .merge_queue
+            .update_status(
+                &ge.id,
+                MergeQueueEntryStatus::Queued,
+                Some(format!("atomic group rollback: {failure_reason}")),
+            )
+            .await?;
+    }
+
+    // Step 3: Collect distinct author agent IDs from all group members.
+    let mut author_ids: HashSet<String> = HashSet::new();
+    let mut workspace_id: Option<Id> = None;
+    for ge in all_group_entries {
+        if let Ok(Some(mr)) = state.merge_requests.find_by_id(&ge.merge_request_id).await {
+            if let Some(ref author) = mr.author_agent_id {
+                author_ids.insert(author.to_string());
+            }
+            if workspace_id.is_none() {
+                workspace_id = Some(mr.workspace_id.clone());
+            }
+        }
+    }
+
+    let ws_id = workspace_id.unwrap_or_else(|| Id::new("default"));
+
+    // Step 4: Notify all distinct authors.
+    let members = state
+        .workspace_memberships
+        .list_by_workspace(&ws_id)
+        .await
+        .unwrap_or_default();
+
+    // Collect user IDs for notification: all distinct MR author agent IDs
+    // plus workspace members.
+    let mut notify_user_ids: HashSet<String> = author_ids.clone();
+    for member in &members {
+        notify_user_ids.insert(member.user_id.to_string());
+    }
+
+    let body_json = serde_json::json!({
+        "group": group_name,
+        "failing_mr_id": failing_mr_id.to_string(),
+        "failure_reason": failure_reason,
+        "member_count": all_group_entries.len(),
+        "rolled_back_count": merged_entries.len(),
+    })
+    .to_string();
+
+    for user_id in &notify_user_ids {
+        crate::notifications::notify_rich(
+            state,
+            ws_id.clone(),
+            Id::new(user_id),
+            gyre_common::NotificationType::AtomicGroupFailure,
+            format!(
+                "Atomic group '{}' failed: {} — all members rolled back and requeued",
+                group_name, failure_reason
+            ),
+            "default",
+            Some(body_json.clone()),
+            Some(failing_mr_id.to_string()),
+            Some(repo.id.to_string()),
+        )
+        .await;
+    }
+
+    // Step 5: Emit AtomicGroupFailed event.
+    state
+        .emit_event(
+            Some(ws_id.clone()),
+            gyre_common::message::Destination::Workspace(ws_id),
+            gyre_common::MessageKind::AtomicGroupFailed,
+            Some(serde_json::json!({
+                "group": group_name,
+                "failing_mr_id": failing_mr_id.to_string(),
+                "failure_reason": failure_reason,
+                "member_count": all_group_entries.len(),
+                "rolled_back_count": merged_entries.len(),
+                "member_mr_ids": all_group_entries.iter().map(|e| e.merge_request_id.to_string()).collect::<Vec<_>>(),
+            })),
+        )
+        .await;
+
+    warn!(
+        group = %group_name,
+        failing_mr = %failing_mr_id,
+        "atomic group rollback complete: {} members requeued, {} authors notified",
+        all_group_entries.len(),
+        notify_user_ids.len(),
+    );
+
+    Ok(())
+}
+
 async fn process_next(state: &AppState) -> anyhow::Result<()> {
     // Step 1: Get all queued entries.
     let all_queued = state.merge_queue.list_queue().await?;
@@ -522,6 +921,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     };
 
     info!(entry_id = %entry.id, mr_id = %entry.merge_request_id, "processing merge queue entry");
+
+    // If this entry is part of an atomic group, merge all group members
+    // as a transactional unit — no interleaving allowed.
+    if let Some(ref group_name) = mr.atomic_group {
+        return merge_atomic_group(state, group_name, &mr, &sorted, &queued_entries).await;
+    }
+
+    // ── Single-entry merge path (non-atomic-group) ─────────────────────
 
     // Mark as Processing
     state
@@ -2931,5 +3338,595 @@ mod tests {
             MergeQueueEntryStatus::Merged,
             "mr-b queue entry should be Merged"
         );
+    }
+
+    // ── Atomic group transactional merge tests (TASK-027) ─────────────────
+
+    /// Helper to create an MR in an atomic group.
+    async fn create_mr_in_group(
+        state: &AppState,
+        mr_id: &str,
+        repo_id: &Id,
+        workspace_id: &str,
+        group: &str,
+        source_branch: &str,
+        author_agent_id: Option<&str>,
+    ) -> gyre_domain::MergeRequest {
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new(mr_id),
+            repo_id.clone(),
+            format!("MR {mr_id}"),
+            source_branch,
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new(workspace_id);
+        mr.atomic_group = Some(group.to_string());
+        mr.author_agent_id = author_agent_id.map(Id::new);
+        state.merge_requests.create(&mr).await.unwrap();
+        mr
+    }
+
+    /// Test: All members of an atomic group merge in a single processor cycle
+    /// in dependency order with no interleaving.
+    #[tokio::test]
+    async fn atomic_group_all_members_merge_in_one_cycle() {
+        let state = test_state();
+
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // Create two MRs in atomic group "bundle".
+        create_mr_in_group(
+            &state,
+            "mr-first",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/first",
+            Some("agent-1"),
+        )
+        .await;
+        create_mr_in_group(
+            &state,
+            "mr-second",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/second",
+            Some("agent-2"),
+        )
+        .await;
+
+        // Enqueue in order: mr-first first, mr-second second.
+        enqueue_mr(&state, "mr-first", 50, 1000).await;
+        enqueue_mr(&state, "mr-second", 50, 1001).await;
+
+        // Subscribe to broadcast channel before running.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        // Run a single merge-processor cycle.
+        process_next(&state).await.unwrap();
+
+        // Both members should be merged.
+        let updated_first = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-first"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_first.status,
+            MrStatus::Merged,
+            "mr-first should be merged"
+        );
+
+        let updated_second = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-second"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_second.status,
+            MrStatus::Merged,
+            "mr-second should be merged"
+        );
+
+        // Both queue entries should be Merged.
+        let entry_first = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-first"))
+            .await
+            .unwrap()
+            .expect("mr-first entry should exist");
+        assert_eq!(entry_first.status, MergeQueueEntryStatus::Merged);
+
+        let entry_second = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-second"))
+            .await
+            .unwrap()
+            .expect("mr-second entry should exist");
+        assert_eq!(entry_second.status, MergeQueueEntryStatus::Merged);
+
+        // No AtomicGroupFailed event should be emitted (success case).
+        let mut found_failed = false;
+        while let Ok(msg) = rx.try_recv() {
+            if msg.kind == gyre_common::MessageKind::AtomicGroupFailed {
+                found_failed = true;
+            }
+        }
+        assert!(
+            !found_failed,
+            "no AtomicGroupFailed event should be emitted on success"
+        );
+    }
+
+    /// Test: No interleaving — a non-group MR does not merge between group members.
+    #[tokio::test]
+    async fn atomic_group_no_interleaving_with_non_group_mr() {
+        let state = test_state();
+
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // Create two MRs in atomic group "bundle".
+        create_mr_in_group(&state, "mr-g1", &repo.id, "ws-1", "bundle", "feat/g1", None).await;
+        create_mr_in_group(&state, "mr-g2", &repo.id, "ws-1", "bundle", "feat/g2", None).await;
+
+        // Create a non-group MR with HIGHER priority than the group members.
+        let mut mr_solo = gyre_domain::MergeRequest::new(
+            Id::new("mr-solo"),
+            repo.id.clone(),
+            "Solo MR",
+            "feat/solo",
+            "main",
+            1000,
+        );
+        mr_solo.workspace_id = Id::new("ws-1");
+        state.merge_requests.create(&mr_solo).await.unwrap();
+
+        // Enqueue: group members first, solo with higher priority.
+        enqueue_mr(&state, "mr-g1", 50, 1000).await;
+        enqueue_mr(&state, "mr-g2", 50, 1001).await;
+        enqueue_mr(&state, "mr-solo", 100, 1002).await;
+
+        // Run one cycle — the solo MR has higher priority but the topological sort
+        // picks mr-solo first (it's independent). But since mr-g1 is also independent,
+        // if mr-solo is selected first (higher priority), it should merge solo.
+        // Then on the next cycle, the group should merge together.
+
+        // First cycle: mr-solo merges (highest priority independent).
+        // event-emission:ok — this test verifies atomic group no-interleaving behavior,
+        // not merge-time event emission which is covered by other tests.
+        process_next(&state).await.unwrap();
+
+        let solo_status = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-solo"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status;
+        assert_eq!(
+            solo_status,
+            MrStatus::Merged,
+            "solo MR should merge in the first cycle"
+        );
+
+        // Second cycle: both group members should merge together.
+        process_next(&state).await.unwrap();
+
+        let g1_status = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-g1"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status;
+        let g2_status = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-g2"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status;
+
+        assert_eq!(g1_status, MrStatus::Merged, "mr-g1 should be merged");
+        assert_eq!(g2_status, MrStatus::Merged, "mr-g2 should be merged");
+    }
+
+    /// Test: Rollback on failure — all already-merged members are rolled back
+    /// and the entire group is requeued.
+    #[tokio::test]
+    async fn atomic_group_rollback_requeues_all_members() {
+        let state = test_state();
+
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // Create two MRs in atomic group "bundle".
+        let mr_first = create_mr_in_group(
+            &state,
+            "mr-first",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/first",
+            Some("agent-1"),
+        )
+        .await;
+        let mr_second = create_mr_in_group(
+            &state,
+            "mr-second",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/second",
+            Some("agent-2"),
+        )
+        .await;
+
+        // Enqueue both.
+        let e_first = enqueue_mr(&state, "mr-first", 50, 1000).await;
+        let e_second = enqueue_mr(&state, "mr-second", 50, 1001).await;
+
+        // Subscribe to broadcast channel.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        // Simulate: mr-first was already merged, mr-second failed.
+        let merged_entries = vec![(e_first.clone(), mr_first.clone())];
+        let all_group_entries = vec![e_first.clone(), e_second.clone()];
+
+        rollback_atomic_group(
+            &state,
+            "bundle",
+            &repo,
+            "main",
+            Some("pre_group_sha_abc123"),
+            &merged_entries,
+            &all_group_entries,
+            "conflict in MR mr-second: file.rs",
+            &mr_second.id,
+        )
+        .await
+        .unwrap();
+
+        // Both entries should be requeued (status back to Queued).
+        let entry_first = state
+            .merge_queue
+            .find_by_id(&e_first.id)
+            .await
+            .unwrap()
+            .expect("mr-first entry should exist");
+        assert_eq!(
+            entry_first.status,
+            MergeQueueEntryStatus::Queued,
+            "mr-first should be requeued after rollback"
+        );
+
+        let entry_second = state
+            .merge_queue
+            .find_by_id(&e_second.id)
+            .await
+            .unwrap()
+            .expect("mr-second entry should exist");
+        assert_eq!(
+            entry_second.status,
+            MergeQueueEntryStatus::Queued,
+            "mr-second should be requeued after rollback"
+        );
+
+        // AtomicGroupFailed event should be emitted.
+        let msg = rx
+            .try_recv()
+            .expect("AtomicGroupFailed event should be emitted");
+        assert_eq!(msg.kind, gyre_common::MessageKind::AtomicGroupFailed);
+        let payload = msg.payload.as_ref().expect("event should have payload");
+        assert_eq!(payload["group"], "bundle");
+        assert_eq!(payload["failing_mr_id"], mr_second.id.to_string());
+        assert_eq!(payload["member_count"], 2);
+        assert_eq!(payload["rolled_back_count"], 1);
+    }
+
+    /// Test: All distinct authors receive AtomicGroupFailure notifications
+    /// when a group merge fails.
+    #[tokio::test]
+    async fn atomic_group_failure_notifies_all_distinct_authors() {
+        let state = test_state();
+
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // Create two MRs with DIFFERENT author_agent_ids.
+        let mr_first = create_mr_in_group(
+            &state,
+            "mr-first",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/first",
+            Some("author-A"),
+        )
+        .await;
+        let mr_second = create_mr_in_group(
+            &state,
+            "mr-second",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/second",
+            Some("author-B"),
+        )
+        .await;
+
+        // Add a workspace member (human user who should also be notified).
+        let membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("member-1"),
+            Id::new("user-1"),
+            Id::new("ws-1"),
+            gyre_domain::WorkspaceRole::Developer,
+            Id::new("admin"),
+            1000,
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
+
+        let e_first = enqueue_mr(&state, "mr-first", 50, 1000).await;
+        let e_second = enqueue_mr(&state, "mr-second", 50, 1001).await;
+
+        // Subscribe to broadcast.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        // Rollback with failure.
+        let merged_entries = vec![(e_first.clone(), mr_first.clone())];
+        let all_group_entries = vec![e_first.clone(), e_second.clone()];
+
+        rollback_atomic_group(
+            &state,
+            "bundle",
+            &repo,
+            "main",
+            Some("pre_group_sha_abc123"),
+            &merged_entries,
+            &all_group_entries,
+            "conflict in MR mr-second",
+            &mr_second.id,
+        )
+        .await
+        .unwrap();
+
+        // Check notifications for author-A.
+        let notifs_a = state
+            .notifications
+            .list_for_user(
+                &Id::new("author-A"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !notifs_a.is_empty(),
+            "author-A should receive a notification"
+        );
+        assert_eq!(
+            notifs_a[0].notification_type,
+            gyre_common::NotificationType::AtomicGroupFailure
+        );
+        assert_eq!(
+            notifs_a[0].priority,
+            gyre_common::NotificationType::AtomicGroupFailure.default_priority(),
+            "priority should match AtomicGroupFailure default"
+        );
+        assert!(notifs_a[0].title.contains("bundle"));
+        assert!(notifs_a[0].title.contains("rolled back"));
+
+        // Verify notification body.
+        let body: serde_json::Value = serde_json::from_str(
+            notifs_a[0]
+                .body
+                .as_ref()
+                .expect("notification should have body"),
+        )
+        .expect("body should be valid JSON");
+        assert_eq!(body["group"], "bundle");
+        assert_eq!(body["failing_mr_id"], mr_second.id.to_string());
+        assert_eq!(body["member_count"], 2);
+        assert_eq!(body["rolled_back_count"], 1);
+
+        // Verify entity_ref.
+        assert_eq!(
+            notifs_a[0].entity_ref.as_deref(),
+            Some(mr_second.id.as_str()),
+            "entity_ref should be the failing MR id"
+        );
+
+        // Check notifications for author-B.
+        let notifs_b = state
+            .notifications
+            .list_for_user(
+                &Id::new("author-B"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !notifs_b.is_empty(),
+            "author-B should receive a notification"
+        );
+        assert_eq!(
+            notifs_b[0].notification_type,
+            gyre_common::NotificationType::AtomicGroupFailure
+        );
+
+        // Check notifications for workspace member user-1.
+        let notifs_user = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-1"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !notifs_user.is_empty(),
+            "workspace member should receive a notification"
+        );
+
+        // Verify event.
+        let msg = rx
+            .try_recv()
+            .expect("AtomicGroupFailed event should be emitted");
+        assert_eq!(msg.kind, gyre_common::MessageKind::AtomicGroupFailed);
+    }
+
+    /// Test: Atomic group implies dependency ordering among members.
+    /// Members enqueued in order automatically have dependency edges.
+    #[tokio::test]
+    async fn atomic_group_implies_dependency_ordering() {
+        let state = test_state();
+
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // Create three MRs in the same atomic group.
+        create_mr_in_group(&state, "mr-a", &repo.id, "ws-1", "deploy", "feat/a", None).await;
+        create_mr_in_group(&state, "mr-b", &repo.id, "ws-1", "deploy", "feat/b", None).await;
+        create_mr_in_group(&state, "mr-c", &repo.id, "ws-1", "deploy", "feat/c", None).await;
+
+        // Enqueue in order: a, b, c. Atomic group implies a <- b <- c.
+        let e_a = enqueue_mr(&state, "mr-a", 50, 1000).await;
+        let e_b = enqueue_mr(&state, "mr-b", 50, 1001).await;
+        let e_c = enqueue_mr(&state, "mr-c", 50, 1002).await;
+
+        let entries = vec![e_c.clone(), e_b.clone(), e_a.clone()]; // shuffled
+        let graph = build_queue_dependency_graph(&state, &entries)
+            .await
+            .unwrap();
+        let sorted = topological_sort_with_priority(&entries, &graph);
+
+        // Dependency ordering should force a, b, c order.
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(
+            sorted[0].merge_request_id.as_str(),
+            "mr-a",
+            "first-enqueued group member should be first"
+        );
+        assert_eq!(
+            sorted[1].merge_request_id.as_str(),
+            "mr-b",
+            "second-enqueued group member should be second"
+        );
+        assert_eq!(
+            sorted[2].merge_request_id.as_str(),
+            "mr-c",
+            "third-enqueued group member should be third"
+        );
+
+        // Run a single merge cycle — all three should merge together.
+        // event-emission:ok — this test verifies atomic group ordering behavior,
+        // not merge-time event emission which is covered by other tests.
+        process_next(&state).await.unwrap();
+
+        let status_a = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-a"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status;
+        let status_b = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-b"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status;
+        let status_c = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-c"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status;
+
+        assert_eq!(status_a, MrStatus::Merged, "mr-a should be merged");
+        assert_eq!(status_b, MrStatus::Merged, "mr-b should be merged");
+        assert_eq!(status_c, MrStatus::Merged, "mr-c should be merged");
+    }
+
+    /// Test: Rollback with no pre-group SHA (edge case — e.g., target branch
+    /// doesn't exist yet). Should still requeue and notify.
+    #[tokio::test]
+    async fn atomic_group_rollback_without_pre_group_sha() {
+        let state = test_state();
+
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        let mr_first = create_mr_in_group(
+            &state,
+            "mr-first",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/first",
+            Some("agent-1"),
+        )
+        .await;
+
+        let e_first = enqueue_mr(&state, "mr-first", 50, 1000).await;
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        // Rollback with no pre-group SHA.
+        let merged_entries: Vec<(MergeQueueEntry, MergeRequest)> = vec![];
+        let all_group_entries = vec![e_first.clone()];
+
+        rollback_atomic_group(
+            &state,
+            "bundle",
+            &repo,
+            "main",
+            None, // no pre-group SHA
+            &merged_entries,
+            &all_group_entries,
+            "MR not found",
+            &mr_first.id,
+        )
+        .await
+        .unwrap();
+
+        // Entry should still be requeued.
+        let entry = state
+            .merge_queue
+            .find_by_id(&e_first.id)
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Queued,
+            "entry should be requeued even without pre-group SHA"
+        );
+
+        // Event should still be emitted.
+        let msg = rx
+            .try_recv()
+            .expect("AtomicGroupFailed event should be emitted");
+        assert_eq!(msg.kind, gyre_common::MessageKind::AtomicGroupFailed);
     }
 }

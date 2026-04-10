@@ -50,6 +50,8 @@ pub enum NotificationType {
     CascadeTestFailed,
     /// Priority 7 — MR dependency chain exceeds 10 levels (decomposition smell).
     DependencyChainTooDeep,
+    /// Priority 3 — an atomic group member failed to merge; entire group rolled back.
+    AtomicGroupFailure,
 }
 
 impl NotificationType {
@@ -74,6 +76,7 @@ impl NotificationType {
             Self::CascadeTestTriggered => "CascadeTestTriggered",
             Self::CascadeTestFailed => "CascadeTestFailed",
             Self::DependencyChainTooDeep => "DependencyChainTooDeep",
+            Self::AtomicGroupFailure => "AtomicGroupFailure",
         }
     }
 
@@ -98,6 +101,7 @@ impl NotificationType {
             "CascadeTestTriggered" => Some(Self::CascadeTestTriggered),
             "CascadeTestFailed" => Some(Self::CascadeTestFailed),
             "DependencyChainTooDeep" => Some(Self::DependencyChainTooDeep),
+            "AtomicGroupFailure" => Some(Self::AtomicGroupFailure),
             _ => None,
         }
     }
@@ -123,6 +127,7 @@ impl NotificationType {
             Self::CascadeTestTriggered => 4,
             Self::CascadeTestFailed => 3,
             Self::DependencyChainTooDeep => 7,
+            Self::AtomicGroupFailure => 3,
         }
     }
 }
@@ -229,6 +234,7 @@ mod tests {
             NotificationType::CascadeTestTriggered,
             NotificationType::CascadeTestFailed,
             NotificationType::DependencyChainTooDeep,
+            NotificationType::AtomicGroupFailure,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));

@@ -138,6 +138,10 @@ impl GitOpsPort for NoopGitOps {
         Ok("0000000000000000000000000000000000000000".to_string())
     }
 
+    async fn reset_branch(&self, _repo_path: &str, _branch: &str, _target_sha: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn read_file(
         &self,
         _repo_path: &str,

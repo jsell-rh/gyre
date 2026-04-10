@@ -552,6 +552,34 @@ impl GitOpsPort for Git2OpsAdapter {
         .await?
     }
 
+    async fn reset_branch(&self, repo_path: &str, branch: &str, target_sha: &str) -> Result<()> {
+        let repo_path = repo_path.to_string();
+        let branch = branch.to_string();
+        let target_sha = target_sha.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+            let target_oid = git2::Oid::from_str(&target_sha).context("invalid target SHA")?;
+            let target_commit = repo
+                .find_commit(target_oid)
+                .context("target SHA is not a valid commit")?;
+            let refname = format!("refs/heads/{branch}");
+            repo.reference(
+                &refname,
+                target_oid,
+                true,
+                &format!("reset to {target_sha}"),
+            )
+            .context("failed to update branch reference")?;
+            // If a working directory exists, reset the index and workdir too.
+            if !repo.is_bare() {
+                repo.reset(target_commit.as_object(), git2::ResetType::Hard, None)
+                    .context("failed to reset working directory")?;
+            }
+            Ok(())
+        })
+        .await?
+    }
+
     async fn read_file(
         &self,
         repo_path: &str,

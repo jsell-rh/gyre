@@ -2,7 +2,7 @@
 
 **Spec reference:** `merge-dependencies.md` §Atomic Groups, §Atomic Group Rules, §Failure Handling  
 **Depends on:** TASK-026 (topological sort processes groups in correct order)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -83,4 +83,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(merge): implement atomic group transactional merge (TASK-027)`
