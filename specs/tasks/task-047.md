@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §2.3, §7.7  
 **Depends on:** TASK-006 (key binding creation — complete)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 

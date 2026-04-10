@@ -412,10 +412,18 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // Auth / API keys / token introspection (M18)
         .route("/api/v1/auth/api-keys", post(auth::create_api_key))
         .route("/api/v1/auth/token-info", get(auth::token_info))
-        // Key binding (TASK-006, authorization-provenance.md §2.3)
+        // Key binding (TASK-006, TASK-047, authorization-provenance.md §2.3)
         .route(
             "/api/v1/auth/key-binding",
             post(key_binding::create_key_binding),
+        )
+        .route(
+            "/api/v1/auth/key-binding/:id",
+            delete(key_binding::revoke_key_binding),
+        )
+        .route(
+            "/api/v1/auth/key-bindings",
+            delete(key_binding::revoke_all_key_bindings),
         )
         // Analytics
         .route(
