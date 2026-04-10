@@ -2,7 +2,7 @@
 
 **Spec reference:** `merge-dependencies.md` §Merge Queue Integration (Processing Algorithm, Priority Within Dependency Tiers)  
 **Depends on:** None (refines existing merge processor)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [`specs/reviews/task-026.md`](../reviews/task-026.md)
 
 ## Spec Excerpt

@@ -2794,4 +2794,142 @@ mod tests {
             "mr-b should be merged after mr-a was failed due to gate failure"
         );
     }
+
+    /// Verify that a candidate whose atomic group is not ready is skipped,
+    /// and the next topologically-ordered candidate is tried (spec step 4c).
+    #[tokio::test]
+    async fn selection_skips_atomic_group_not_ready_tries_next_candidate() {
+        use gyre_domain::{GateResult, GateType, QualityGate};
+
+        let state = test_state();
+
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // MR A: in atomic group "bundle", high priority.
+        let mut mr_a = gyre_domain::MergeRequest::new(
+            Id::new("mr-a"),
+            repo.id.clone(),
+            "MR A (in atomic group)",
+            "feat/a",
+            "main",
+            1000,
+        );
+        mr_a.workspace_id = Id::new("ws-1");
+        mr_a.atomic_group = Some("bundle".to_string());
+        state.merge_requests.create(&mr_a).await.unwrap();
+
+        // MR C: also in atomic group "bundle" — has a pending gate,
+        // making the group not ready for MR A.
+        let mut mr_c = gyre_domain::MergeRequest::new(
+            Id::new("mr-c"),
+            repo.id.clone(),
+            "MR C (group member, gates pending)",
+            "feat/c",
+            "main",
+            1000,
+        );
+        mr_c.workspace_id = Id::new("ws-1");
+        mr_c.atomic_group = Some("bundle".to_string());
+        state.merge_requests.create(&mr_c).await.unwrap();
+
+        // MR B: no atomic group, low priority, all gates passed.
+        let mut mr_b = gyre_domain::MergeRequest::new(
+            Id::new("mr-b"),
+            repo.id.clone(),
+            "MR B (no group)",
+            "feat/b",
+            "main",
+            1000,
+        );
+        mr_b.workspace_id = Id::new("ws-1");
+        state.merge_requests.create(&mr_b).await.unwrap();
+
+        // Enqueue: mr-a (high priority), mr-b (low priority).
+        // mr-c is NOT enqueued — it's only a group member affecting readiness.
+        enqueue_mr(&state, "mr-a", 100, 1000).await;
+        enqueue_mr(&state, "mr-b", 50, 1001).await;
+
+        // Create a required gate and a pending result for mr-c.
+        // This makes atomic_group_ready("bundle", "mr-a") return Ok(false)
+        // because group member mr-c has a pending required gate.
+        let gate = QualityGate {
+            id: Id::new("gate-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            created_at: 1000,
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        let gate_result_c = GateResult {
+            id: Id::new("gr-c"),
+            gate_id: Id::new("gate-1"),
+            mr_id: Id::new("mr-c"),
+            status: GateStatus::Pending,
+            output: None,
+            started_at: None,
+            finished_at: None,
+        };
+        state.gate_results.save(&gate_result_c).await.unwrap();
+
+        // Run a merge-processor cycle.
+        // event-emission:ok — this test verifies candidate selection behavior (atomic group
+        // not ready → skip), not merge-time event emission which is covered by other tests.
+        process_next(&state).await.unwrap();
+
+        // Verify: mr-b was selected and merged (not mr-a).
+        let updated_b = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-b"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_b.status,
+            MrStatus::Merged,
+            "mr-b should be merged because it was the next candidate after mr-a was skipped"
+        );
+
+        // Verify: mr-a was NOT processed — still Open status.
+        let updated_a = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-a"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_a.status,
+            MrStatus::Open,
+            "mr-a should remain Open because its atomic group is not ready"
+        );
+
+        // Verify queue states: mr-b's entry should be Merged, mr-a's should still be Queued.
+        let entry_a = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-a"))
+            .await
+            .unwrap()
+            .expect("mr-a entry should exist");
+        assert_eq!(
+            entry_a.status,
+            MergeQueueEntryStatus::Queued,
+            "mr-a queue entry should remain Queued"
+        );
+
+        let entry_b = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-b"))
+            .await
+            .unwrap()
+            .expect("mr-b entry should exist");
+        assert_eq!(
+            entry_b.status,
+            MergeQueueEntryStatus::Merged,
+            "mr-b queue entry should be Merged"
+        );
+    }
 }
