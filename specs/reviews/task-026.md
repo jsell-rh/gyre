@@ -48,3 +48,19 @@
 - Selection loop correctly checks all three spec conditions (deps, gates, atomic group) with skip semantics
 - `DependencyChainTooDeep` notification: priority 7, body JSON verified
 - All acceptance criteria met (topological ordering, priority within tiers, depth warning, existing behavior preserved)
+
+---
+
+**Round:** R3
+**Commit:** `3dc99862`
+**Verdict:** complete
+
+## R2 Fix Verification
+
+- F3: **Fixed.** Test `selection_skips_atomic_group_not_ready_tries_next_candidate` added. The test correctly exercises the step 4c skip path: mr-a (high priority, atomic group "bundle") is skipped because group member mr-c has a pending gate, and mr-b (lower priority, no group) is selected and merged instead. Verified that mr-a reaches step 4c (not short-circuited at step 4b) because `check_gates_for_mr("mr-a")` returns `Ok(true)` — the gate result exists only for mr-c, not mr-a. Assertions cover MR status (Merged/Open) and queue entry status (Merged/Queued). Test passes.
+
+## R3 Verification Summary
+
+- 25 merge processor tests pass (including the new atomic group skip test)
+- All 1018 gyre-server tests pass
+- No new findings — all acceptance criteria satisfied, all R1+R2 findings resolved
