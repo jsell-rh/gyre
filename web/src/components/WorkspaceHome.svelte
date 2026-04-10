@@ -404,10 +404,14 @@
       const staleRepos = new Set((staleEdges ?? []).map(e => e.source_repo_id));
       depGraphNodes = graphData.nodes ?? [];
       depGraphEdges = graphData.edges ?? [];
+      // Filter breaking changes to workspace scope — the tenant-wide endpoint
+      // returns all breaking changes, but the dashboard should only show those
+      // affecting repos in the current workspace (checklist item 97).
+      const wsRepoIds = new Set((graphData.nodes ?? []).map(n => n.repo_id));
       depHealthData = {
         totalWithDeps: nodesWithEdges.size,
         staleCount: staleRepos.size,
-        breakingCount: (breakingList ?? []).filter(b => !b.acknowledged).length,
+        breakingCount: (breakingList ?? []).filter(b => !b.acknowledged && wsRepoIds.has(b.source_repo_id)).length,
       };
     } catch {
       depHealthData = { totalWithDeps: 0, staleCount: 0, breakingCount: 0 };
@@ -1277,7 +1281,11 @@
                   onScopeChange={handleDepScopeChange}
                   onNodeClick={(node) => {
                     const repo = repos.find(r => r.id === node.repo_id);
-                    if (repo) onSelectRepo?.(repo);
+                    if (repo) {
+                      onSelectRepo?.(repo);
+                    } else {
+                      toastError(`"${node.name}" is in another workspace and cannot be opened from here.`);
+                    }
                   }}
                 />
               </div>

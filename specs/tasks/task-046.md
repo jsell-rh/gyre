@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §UI (lines 228–232)
 
-**Progress:** `needs-revision`
+**Progress:** `ready-for-review`
 
 **Review:** [`specs/reviews/task-046.md`](../reviews/task-046.md)
 

@@ -47,11 +47,25 @@ vi.mock('../lib/api.js', () => ({
     mergeQueue: vi.fn().mockResolvedValue([]),
     mergeQueueGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     adminAudit: vi.fn().mockResolvedValue([]),
+    workspaceDependencyGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    dependencyGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    staleDependencies: vi.fn().mockResolvedValue([]),
+    breakingChanges: vi.fn().mockResolvedValue([]),
   },
 }));
 
 vi.mock('../lib/ExplorerCanvas.svelte', () => ({
   default: function ExplorerCanvasStub() {},
+}));
+
+vi.mock('../lib/layout-engines.js', () => ({
+  elkLayout: vi.fn().mockImplementation(async (nodes) => {
+    const positions = {};
+    nodes.forEach((n, i) => {
+      positions[n.id] = { x: 100 + i * 200, y: 80 + i * 100 };
+    });
+    return positions;
+  }),
 }));
 
 vi.mock('../lib/toast.svelte.js', () => ({
@@ -61,6 +75,7 @@ vi.mock('../lib/toast.svelte.js', () => ({
 }));
 
 import { api } from '../lib/api.js';
+import { toastError } from '../lib/toast.svelte.js';
 import WorkspaceHome from '../components/WorkspaceHome.svelte';
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
@@ -860,6 +875,152 @@ describe.skip('Agent Rules section (old layout — needs update)', () => {
     await waitFor(() => {
       expect(container.querySelector('[data-testid="rules-list"]')).toBeFalsy();
     });
+  });
+});
+
+// ── Dependency Health — workspace-scoped breaking count (F1 fix) ─────────────
+
+describe('WorkspaceHome — dependency health workspace scoping', () => {
+  it('filters breaking changes to workspace repos only', async () => {
+    // Set up workspace repos — graph nodes define the workspace scope
+    api.workspaceDependencyGraph.mockResolvedValue({
+      nodes: [
+        { repo_id: 'repo-1', name: 'payment-api' },
+        { repo_id: 'repo-2', name: 'user-service' },
+      ],
+      edges: [
+        { id: 'e1', source: 'repo-1', target: 'repo-2', type: 'code', status: 'active' },
+      ],
+    });
+    api.staleDependencies.mockResolvedValue([]);
+    // Breaking changes include repo-1 (in workspace) and repo-99 (NOT in workspace)
+    api.breakingChanges.mockResolvedValue([
+      { id: 'bc-1', source_repo_id: 'repo-1', acknowledged: false },
+      { id: 'bc-2', source_repo_id: 'repo-99', acknowledged: false },
+      { id: 'bc-3', source_repo_id: 'repo-1', acknowledged: true },
+    ]);
+
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+
+    await waitFor(() => {
+      const breaking = container.querySelector('[data-testid="dep-health-breaking"]');
+      // Only bc-1 should count: repo-1 is in workspace AND not acknowledged.
+      // bc-2 is excluded (repo-99 not in workspace).
+      // bc-3 is excluded (acknowledged).
+      expect(breaking).toBeTruthy();
+      expect(breaking.textContent).toContain('1');
+    });
+  });
+
+  it('shows zero breaking when all breaking changes are outside workspace', async () => {
+    api.workspaceDependencyGraph.mockResolvedValue({
+      nodes: [
+        { repo_id: 'repo-1', name: 'payment-api' },
+        { repo_id: 'repo-2', name: 'user-service' },
+      ],
+      edges: [
+        { id: 'e1', source: 'repo-1', target: 'repo-2', type: 'code', status: 'active' },
+      ],
+    });
+    api.staleDependencies.mockResolvedValue([]);
+    api.breakingChanges.mockResolvedValue([
+      { id: 'bc-1', source_repo_id: 'repo-99', acknowledged: false },
+      { id: 'bc-2', source_repo_id: 'repo-100', acknowledged: false },
+    ]);
+
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+
+    await waitFor(() => {
+      // No breaking changes in workspace repos — the healthy message should show
+      const healthy = container.querySelector('[data-testid="dep-health-healthy"]');
+      expect(healthy).toBeTruthy();
+    });
+
+    // Breaking badge should NOT be present
+    expect(container.querySelector('[data-testid="dep-health-breaking"]')).toBeNull();
+  });
+});
+
+// ── Dependency Graph — external node click feedback (F2 fix) ─────────────────
+
+describe('WorkspaceHome — external node click feedback', () => {
+  it('shows toast error when clicking a node for an external repo', async () => {
+    // repos array only contains repo-1
+    api.workspaceRepos.mockResolvedValue([
+      { id: 'repo-1', name: 'payment-api', active_spec_count: 0, active_agents: 0 },
+    ]);
+    // Graph includes an external node (repo-ext) that is NOT in workspace repos
+    api.workspaceDependencyGraph.mockResolvedValue({
+      nodes: [
+        { repo_id: 'repo-1', name: 'payment-api' },
+        { repo_id: 'repo-ext', name: 'external-lib' },
+      ],
+      edges: [
+        { id: 'e1', source: 'repo-1', target: 'repo-ext', type: 'code', status: 'active' },
+      ],
+    });
+    api.staleDependencies.mockResolvedValue([]);
+    api.breakingChanges.mockResolvedValue([]);
+
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+
+    // Wait for health card to render, then open the graph
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-health-view-graph"]')).toBeTruthy();
+    });
+    await fireEvent.click(container.querySelector('[data-testid="dep-health-view-graph"]'));
+
+    // Wait for graph SVG to appear (layout is mocked to resolve instantly)
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-svg"]')).toBeTruthy();
+    });
+
+    // Click the external node
+    const extNode = container.querySelector('[data-testid="dep-node-repo-ext"]');
+    expect(extNode).toBeTruthy();
+    await fireEvent.click(extNode);
+
+    // Should show toast error about external workspace
+    expect(toastError).toHaveBeenCalledWith(
+      '"external-lib" is in another workspace and cannot be opened from here.'
+    );
+  });
+
+  it('navigates normally when clicking a workspace-local node', async () => {
+    const onSelectRepo = vi.fn();
+    api.workspaceRepos.mockResolvedValue([
+      { id: 'repo-1', name: 'payment-api', active_spec_count: 0, active_agents: 0 },
+    ]);
+    api.workspaceDependencyGraph.mockResolvedValue({
+      nodes: [{ repo_id: 'repo-1', name: 'payment-api' }],
+      edges: [],
+    });
+    api.staleDependencies.mockResolvedValue([]);
+    api.breakingChanges.mockResolvedValue([]);
+
+    const { container } = render(WorkspaceHome, {
+      props: { workspace: WORKSPACE, onSelectRepo },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-health-view-graph"]')).toBeTruthy();
+    });
+    await fireEvent.click(container.querySelector('[data-testid="dep-health-view-graph"]'));
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dep-svg"]')).toBeTruthy();
+    });
+
+    const localNode = container.querySelector('[data-testid="dep-node-repo-1"]');
+    expect(localNode).toBeTruthy();
+    await fireEvent.click(localNode);
+
+    // Should call onSelectRepo with the full repo object, NOT show toast error
+    expect(onSelectRepo).toHaveBeenCalledTimes(1);
+    expect(onSelectRepo).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'repo-1', name: 'payment-api' })
+    );
+    expect(toastError).not.toHaveBeenCalled();
   });
 });
 
