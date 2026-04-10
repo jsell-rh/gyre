@@ -2,7 +2,8 @@
 
 **Spec reference:** `view-query-grammar.md`  
 **Depends on:** None (Rust types in `gyre-common/src/view_query.rs` are the source of truth)  
-**Progress:** `ready-for-review`
+**Progress:** `needs-revision`  
+**Review:** [`specs/reviews/task-037.md`](../reviews/task-037.md)
 
 ## Spec Excerpt
 
