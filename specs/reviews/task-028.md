@@ -69,3 +69,25 @@ R2 findings F7–F8 are both correctly resolved:
 - [-] [process-revision-complete] **F10: MCP `handle_create_mr` does not detect or merge branch lineage dependencies — REST-MCP parity gap.**  
   The REST `create_mr` handler (merge_requests.rs:346-374) calls `detect_lineage_deps()` to auto-detect branch lineage dependencies, then merges them with explicit deps (explicit takes precedence, lineage adds to the set). The MCP `handle_create_mr` (mcp.rs:746-803) validates and cycle-checks explicit deps but never calls `detect_lineage_deps()` or performs the merge. The acceptance criterion (line 115) says "Creation-time dependencies are validated (exist, no cycle) and merged with lineage deps." The MCP handler was explicitly modified as part of TASK-028 (R1 F4 fix added `depends_on` to the MCP tool), putting it in scope. An MR created via MCP in a branch lineage scenario (e.g., `feat/use-storage-port` based on `feat/add-storage-port`) will NOT get the auto-detected `branch-lineage` dependency that the same MR created via REST would get, creating inconsistent merge ordering depending on the creation method. This violates HSI §11 REST-MCP parity for the feature TASK-028 introduced.  
   **Fix:** In `handle_create_mr`, look up the repo via `state.repos.find_by_id()` to get `repo_path`, call `detect_lineage_deps()`, and merge with explicit deps using the same logic as the REST handler (merge_requests.rs:359-374).
+
+---
+
+# TASK-028 Review — R4
+
+**Reviewer:** Verifier  
+**Verdict:** `complete`
+
+R3 findings F9–F10 are both correctly resolved:
+- F9: Test `atomic_group_deferred_when_member_has_unsatisfied_dep` added (speculative_merge.rs:1084). Two branches in group "deploy-bundle": g1 has no deps, g2 depends on a nonexistent MR. Asserts both are `Skipped` — the group cannot proceed as a unit. The deferral code path (lines 211-214) is now exercised. ✓
+- F10: MCP `handle_create_mr` now calls `detect_lineage_deps()` (mcp.rs:806-813) and merges with explicit deps using the same logic as the REST handler (mcp.rs:819-833). Workspace ID is also correctly set from the repo lookup (mcp.rs:805). ✓
+
+All 10 findings from R1–R3 are resolved. No new findings. All acceptance criteria are satisfied:
+- [x] `POST /api/v1/merge-requests` accepts optional `depends_on` field (merge_requests.rs:34)
+- [x] Creation-time deps validated and merged with lineage deps (merge_requests.rs:282-374)
+- [x] Each dependency records its source via `DependencySource` enum (merge_request.rs:29-38)
+- [x] Dependency `reason` is persisted and returned in responses (merge_deps.rs:41,199)
+- [x] `GET /dependencies` returns source and reason per dependency (merge_deps.rs:62-64)
+- [x] Speculative merge respects dependency ordering (speculative_merge.rs:179-266)
+- [x] Backward compat: SQLite/Postgres adapters handle plain `Vec<String>` deserialization (sqlite/merge_request.rs:64-76)
+- [x] Tests: 13 new speculative merge tests, 7 new dependency API tests, 3 new creation-time dep tests, adapter round-trip and backward compat tests
+- [x] `cargo test --all` passes (1,997 tests, 0 failures)
