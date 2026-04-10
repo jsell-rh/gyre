@@ -100,6 +100,7 @@ Create a new dependency graph visualization component and integrate it into the 
 ## Git Commits
 
 - `c3853572` feat(web): add cross-repo dependency graph visualization (TASK-046)
+- `7ebb0131` fix(web): scope breaking count to workspace and handle external node clicks (TASK-046)
 
 ---
 
