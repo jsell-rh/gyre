@@ -5,3 +5,8 @@
 # in the test body explains why.
 #
 # Format: test_function_name
+
+# TASK-028 R2 F7: Test name claims "skipped" but asserts Clean.
+# Temporary exemption — implementation agent must rename this test
+# (e.g., to `deps_resolved_across_waves`) and remove this exemption.
+branch_with_unsatisfied_deps_is_skipped

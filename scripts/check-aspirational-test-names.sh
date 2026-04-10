@@ -244,6 +244,98 @@ for file in $(find "$CRATE_SRC" -name '*.rs' -print 2>/dev/null | sort); do
     ' "$file" >> "$HITS_FILE" 2>/dev/null || true
 done
 
+# --- Check 3: Negative-outcome test names with positive-outcome assertions ---
+# A test named *_is_skipped, *_rejected, *_blocked, *_denied, *_excluded,
+# *_filtered, *_drops_*, *_ignored, *_prevents_*, *_not_processed that ends
+# with an assertion of a positive outcome (Clean, Success, Ok, Active,
+# Approved, Merged, Processed, true, Passed) contradicts its own name.
+# The test claims the item is NOT processed but proves it IS.
+#
+# See: specs/reviews/task-028.md R2 F7
+for file in $(find "$CRATE_SRC" -name '*.rs' -print 2>/dev/null | sort); do
+    [ -f "$file" ] || continue
+
+    awk -v file="$file" -v exempted="$EXEMPTED_TESTS" '
+    /^[[:space:]]*(#\[test\]|#\[tokio::test)/ {
+        in_test_attr = 1
+        next
+    }
+
+    in_test_attr && /^[[:space:]]*(pub[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)/ {
+        in_test_attr = 0
+        match($0, /fn[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)/, m)
+        test_name = m[1]
+
+        # Only check tests with negative-outcome-implying names
+        if (test_name ~ /(is_skipped|_skipped$|gets_skipped|is_rejected|_rejected$|gets_rejected|is_blocked|_blocked$|gets_blocked|is_denied|_denied$|is_excluded|_excluded$|is_filtered|_filtered$|_drops_|is_dropped|_ignored$|is_ignored|prevents_|not_processed|not_allowed|is_disallowed|does_not_process)/) {
+            in_test = 1
+            brace_depth = 0
+            has_exemption = 0
+            last_assert_line = 0
+            last_assert_text = ""
+            asserts_positive = 0
+            body_count = 0
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "{") brace_depth++
+                if (c == "}") brace_depth--
+            }
+        }
+        next
+    }
+
+    in_test_attr && !/^[[:space:]]*$/ && !/^[[:space:]]*\/\// {
+        in_test_attr = 0
+    }
+
+    in_test {
+        for (i = 1; i <= length($0); i++) {
+            c = substr($0, i, 1)
+            if (c == "{") brace_depth++
+            if (c == "}") brace_depth--
+        }
+        body_count++
+
+        if ($0 ~ /aspirational-name:ok/) {
+            has_exemption = 1
+        }
+
+        # Track last assert_eq! that references a status-like value
+        if ($0 ~ /assert(_eq|_ne)?!/) {
+            last_assert_line = NR
+            last_assert_text = $0
+            # Check if the assertion asserts a positive/success state
+            # — contradicting the negative-outcome test name
+            if ($0 ~ /(Clean|Success|Active|Approved|Merged|Processed|Passed|Completed|Ready|Valid|Resolved|Some\()/) {
+                asserts_positive = 1
+            } else if ($0 ~ /assert_eq!\(.*,\s*true\)/ || $0 ~ /assert_eq!\(\s*true\s*,/) {
+                asserts_positive = 1
+            } else {
+                asserts_positive = 0
+            }
+        }
+
+        if (brace_depth == 0 && body_count > 1) {
+            if (exempted != "" && test_name ~ ("^(" exempted ")$")) {
+                in_test = 0
+                next
+            }
+
+            if (has_exemption) {
+                in_test = 0
+                next
+            }
+
+            if (asserts_positive && last_assert_line > 0) {
+                printf "VIOLATION [Check 3]: %s:%d — test `%s` has a negative-outcome name (skipped/rejected/blocked/etc.) but its final assertion asserts a positive outcome:\n  %s\n  A test named \"is_skipped\" should assert the item was actually skipped (e.g., status == Skipped, result is None).\n  If the test verifies that dependencies ARE satisfied and processing succeeds, rename it to match (e.g., `deps_resolved_across_waves`).\n  Exempt with: // aspirational-name:ok — <reason>\n\n", file, last_assert_line, test_name, last_assert_text
+            }
+
+            in_test = 0
+        }
+    }
+    ' "$file" >> "$HITS_FILE" 2>/dev/null || true
+done
+
 if [ -s "$HITS_FILE" ]; then
     cat "$HITS_FILE"
     VIOLATIONS=$(grep -c "^VIOLATION" "$HITS_FILE" || true)
