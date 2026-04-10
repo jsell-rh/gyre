@@ -8,7 +8,7 @@
 
 ## Findings
 
-- [x] [resolved] **F1: Missing strikethrough visual on supersedes edge target node**
+- [-] [process-revision-complete] **F1 (resolved R2): Missing strikethrough visual on supersedes edge target node**
 
   **Spec source:** Task Requirements §3 (task-045.md line 43):
   > `supersedes` → dotted arrow with strikethrough target
