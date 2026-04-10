@@ -2,7 +2,7 @@
 
 **Spec reference:** `merge-dependencies.md` §Three Ways Dependencies Are Established, §Speculative Merge Integration  
 **Depends on:** None (extends data model and API, independent of queue algorithm)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -134,4 +134,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(merge-deps): add dependency metadata model and creation-time binding (TASK-028)`

@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -43,8 +44,10 @@ fn now_secs() -> u64 {
 
 /// Run one iteration of the speculative merge job.
 ///
-/// For each active agent that has a worktree, attempt `can_merge` against "main".
-/// Record the result in `state.speculative_results` and emit domain events.
+/// Collects all active agent branches, builds a dependency graph from their
+/// associated MRs, and speculates in dependency order — skipping branches
+/// whose dependency MRs haven't been speculated clean yet.
+/// Atomic group members are speculated as a single unit.
 pub async fn run_once(state: &Arc<AppState>) -> Result<()> {
     // Get all active agents.
     let active_agents = state
@@ -58,8 +61,22 @@ pub async fn run_once(state: &Arc<AppState>) -> Result<()> {
         active_agents.len()
     );
 
+    // Collect all (repo_id, branch, agent_id) tuples to process.
+    struct BranchInfo {
+        repo_id: String,
+        repo_path: String,
+        branch: String,
+        agent_id: String,
+        // MR dependency target IDs (branches whose MRs must be speculated clean first).
+        dep_mr_ids: HashSet<String>,
+        atomic_group: Option<String>,
+    }
+
+    let mut branches: Vec<BranchInfo> = Vec::new();
+    // Map from MR ID → branch name for dependency resolution.
+    let mut mr_id_to_branch: HashMap<String, String> = HashMap::new();
+
     for agent in &active_agents {
-        // Find worktrees for this agent.
         let worktrees = state
             .worktrees
             .find_by_agent(&agent.id)
@@ -73,124 +90,265 @@ pub async fn run_once(state: &Arc<AppState>) -> Result<()> {
             };
 
             let branch = wt.branch.clone();
-            let repo_id = wt.repository_id.to_string();
-
-            // Skip main/master — no speculative merge needed.
             if branch == "main" || branch == "master" {
                 continue;
             }
 
-            // Attempt speculative merge via can_merge.
-            let can_merge = state.git_ops.can_merge(&repo.path, &branch, "main").await;
+            // Find the MR for this branch to get dependency info.
+            let mrs = state
+                .merge_requests
+                .list_by_repo(&wt.repository_id)
+                .await
+                .unwrap_or_default();
+            let mr = mrs.iter().find(|m| {
+                m.source_branch == branch
+                    && matches!(
+                        m.status,
+                        gyre_domain::MrStatus::Open | gyre_domain::MrStatus::Approved
+                    )
+            });
 
-            let result = match can_merge {
-                Ok(true) => {
-                    info!(
-                        repo_id = %repo_id,
-                        branch = %branch,
-                        "speculative merge: clean"
-                    );
-                    SpeculativeResult {
-                        repo_id: repo_id.clone(),
-                        branch: branch.clone(),
-                        status: SpeculativeStatus::Clean,
-                        conflicting_files: vec![],
-                        conflicting_branch: None,
-                        conflicting_agent_id: None,
-                        detected_at: now_secs(),
-                    }
-                }
-                Ok(false) => {
-                    warn!(
-                        repo_id = %repo_id,
-                        branch = %branch,
-                        "speculative merge: conflict detected"
-                    );
-
-                    // Try to find which other branch conflicts by checking other active
-                    // agents' branches that touch overlapping paths.
-                    let (conflicting_branch, conflicting_agent_id) =
-                        find_conflicting_agent(state, &repo_id, &branch, agent.id.to_string())
-                            .await;
-
-                    SpeculativeResult {
-                        repo_id: repo_id.clone(),
-                        branch: branch.clone(),
-                        status: SpeculativeStatus::Conflict,
-                        // We don't have per-file conflict detail from can_merge; provide empty list.
-                        // A full implementation would use git merge-tree output.
-                        conflicting_files: vec![],
-                        conflicting_branch,
-                        conflicting_agent_id,
-                        detected_at: now_secs(),
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        repo_id = %repo_id,
-                        branch = %branch,
-                        error = %e,
-                        "speculative merge: skipped (error)"
-                    );
-                    SpeculativeResult {
-                        repo_id: repo_id.clone(),
-                        branch: branch.clone(),
-                        status: SpeculativeStatus::Skipped,
-                        conflicting_files: vec![],
-                        conflicting_branch: None,
-                        conflicting_agent_id: None,
-                        detected_at: now_secs(),
-                    }
-                }
+            let (dep_mr_ids, atomic_group) = if let Some(mr) = mr {
+                mr_id_to_branch
+                    .insert(mr.id.to_string(), branch.clone());
+                let deps: HashSet<String> = mr
+                    .depends_on
+                    .iter()
+                    .map(|d| d.target_mr_id.to_string())
+                    .collect();
+                (deps, mr.atomic_group.clone())
+            } else {
+                (HashSet::new(), None)
             };
 
-            // Store the result.
-            {
-                let mut results = state.speculative_results.lock().await;
-                results.insert((repo_id.clone(), branch.clone()), result.clone());
-            }
-
-            // Emit event via unified message bus.
-            // Workspace lookup: get repo's workspace_id for proper scoping.
-            let ws_id = state
-                .repos
-                .find_by_id(&gyre_common::Id::new(&repo_id))
-                .await
-                .ok()
-                .flatten()
-                .map(|r| r.workspace_id)
-                .unwrap_or_else(|| gyre_common::Id::new("default"));
-            match result.status {
-                SpeculativeStatus::Clean => {
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id),
-                            gyre_common::message::MessageKind::SpeculativeMergeClean,
-                            Some(serde_json::json!({"repo_id": repo_id, "branch": branch})),
-                        )
-                        .await;
-                }
-                SpeculativeStatus::Conflict => {
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id),
-                            gyre_common::message::MessageKind::SpeculativeConflict,
-                            Some(serde_json::json!({
-                                "repo_id": repo_id,
-                                "branch": branch,
-                                "conflicting_files": result.conflicting_files,
-                            })),
-                        )
-                        .await;
-                }
-                SpeculativeStatus::Skipped => {}
-            }
+            branches.push(BranchInfo {
+                repo_id: wt.repository_id.to_string(),
+                repo_path: repo.path.clone(),
+                branch,
+                agent_id: agent.id.to_string(),
+                dep_mr_ids,
+                atomic_group,
+            });
         }
     }
 
+    // Build dependency order: resolve MR ID deps to branch names.
+    // Track which branches have been speculated clean.
+    let mut speculated_clean: HashSet<String> = HashSet::new(); // branch names
+    let mut speculated_mr_ids: HashSet<String> = HashSet::new(); // MR IDs speculated clean
+
+    // Process in waves: each wave, speculate branches whose deps are all satisfied.
+    let mut remaining: VecDeque<usize> = (0..branches.len()).collect();
+    let mut progress = true;
+
+    while progress && !remaining.is_empty() {
+        progress = false;
+        let mut still_remaining = VecDeque::new();
+
+        while let Some(idx) = remaining.pop_front() {
+            let bi = &branches[idx];
+
+            // Check if all dependency MRs have been speculated clean.
+            let deps_satisfied = bi
+                .dep_mr_ids
+                .iter()
+                .all(|dep_id| speculated_mr_ids.contains(dep_id));
+
+            if !deps_satisfied {
+                still_remaining.push_back(idx);
+                continue;
+            }
+
+            // For atomic group members, check if all other group members
+            // are also ready (deps satisfied). If not, defer.
+            if let Some(ref group) = bi.atomic_group {
+                let group_ready = branches.iter().enumerate().all(|(j, bj)| {
+                    if j == idx {
+                        return true;
+                    }
+                    if bj.atomic_group.as_deref() != Some(group) {
+                        return true;
+                    }
+                    bj.dep_mr_ids
+                        .iter()
+                        .all(|dep_id| speculated_mr_ids.contains(dep_id))
+                });
+                if !group_ready {
+                    still_remaining.push_back(idx);
+                    continue;
+                }
+            }
+
+            progress = true;
+
+            // Attempt speculative merge.
+            let result = speculate_branch(
+                state,
+                &bi.repo_id,
+                &bi.repo_path,
+                &bi.branch,
+                &bi.agent_id,
+            )
+            .await;
+
+            if result.status == SpeculativeStatus::Clean {
+                speculated_clean.insert(bi.branch.clone());
+                // Mark associated MR IDs as speculated clean.
+                for (mr_id, branch) in &mr_id_to_branch {
+                    if branch == &bi.branch {
+                        speculated_mr_ids.insert(mr_id.clone());
+                    }
+                }
+            }
+
+            // Store and emit events.
+            store_and_emit(state, &bi.repo_id, &bi.branch, result).await;
+        }
+
+        remaining = still_remaining;
+    }
+
+    // Any remaining branches have unsatisfied dependency order — skip them.
+    for idx in remaining {
+        let bi = &branches[idx];
+        info!(
+            repo_id = %bi.repo_id,
+            branch = %bi.branch,
+            "speculative merge: skipped (unsatisfied dependency order)"
+        );
+        let result = SpeculativeResult {
+            repo_id: bi.repo_id.clone(),
+            branch: bi.branch.clone(),
+            status: SpeculativeStatus::Skipped,
+            conflicting_files: vec![],
+            conflicting_branch: None,
+            conflicting_agent_id: None,
+            detected_at: now_secs(),
+        };
+        store_and_emit(state, &bi.repo_id, &bi.branch, result).await;
+    }
+
     Ok(())
+}
+
+/// Attempt a speculative merge for a single branch against main.
+async fn speculate_branch(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    repo_path: &str,
+    branch: &str,
+    agent_id: &str,
+) -> SpeculativeResult {
+    let can_merge = state.git_ops.can_merge(repo_path, branch, "main").await;
+
+    match can_merge {
+        Ok(true) => {
+            info!(
+                repo_id = %repo_id,
+                branch = %branch,
+                "speculative merge: clean"
+            );
+            SpeculativeResult {
+                repo_id: repo_id.to_string(),
+                branch: branch.to_string(),
+                status: SpeculativeStatus::Clean,
+                conflicting_files: vec![],
+                conflicting_branch: None,
+                conflicting_agent_id: None,
+                detected_at: now_secs(),
+            }
+        }
+        Ok(false) => {
+            warn!(
+                repo_id = %repo_id,
+                branch = %branch,
+                "speculative merge: conflict detected"
+            );
+
+            let (conflicting_branch, conflicting_agent_id) =
+                find_conflicting_agent(state, repo_id, branch, agent_id.to_string()).await;
+
+            SpeculativeResult {
+                repo_id: repo_id.to_string(),
+                branch: branch.to_string(),
+                status: SpeculativeStatus::Conflict,
+                conflicting_files: vec![],
+                conflicting_branch,
+                conflicting_agent_id,
+                detected_at: now_secs(),
+            }
+        }
+        Err(e) => {
+            warn!(
+                repo_id = %repo_id,
+                branch = %branch,
+                error = %e,
+                "speculative merge: skipped (error)"
+            );
+            SpeculativeResult {
+                repo_id: repo_id.to_string(),
+                branch: branch.to_string(),
+                status: SpeculativeStatus::Skipped,
+                conflicting_files: vec![],
+                conflicting_branch: None,
+                conflicting_agent_id: None,
+                detected_at: now_secs(),
+            }
+        }
+    }
+}
+
+/// Store a speculative merge result and emit the corresponding domain event.
+async fn store_and_emit(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    branch: &str,
+    result: SpeculativeResult,
+) {
+    {
+        let mut results = state.speculative_results.lock().await;
+        results.insert(
+            (repo_id.to_string(), branch.to_string()),
+            result.clone(),
+        );
+    }
+
+    let ws_id = state
+        .repos
+        .find_by_id(&gyre_common::Id::new(repo_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.workspace_id)
+        .unwrap_or_else(|| gyre_common::Id::new("default"));
+
+    match result.status {
+        SpeculativeStatus::Clean => {
+            state
+                .emit_event(
+                    Some(ws_id.clone()),
+                    gyre_common::message::Destination::Workspace(ws_id),
+                    gyre_common::message::MessageKind::SpeculativeMergeClean,
+                    Some(serde_json::json!({"repo_id": repo_id, "branch": branch})),
+                )
+                .await;
+        }
+        SpeculativeStatus::Conflict => {
+            state
+                .emit_event(
+                    Some(ws_id.clone()),
+                    gyre_common::message::Destination::Workspace(ws_id),
+                    gyre_common::message::MessageKind::SpeculativeConflict,
+                    Some(serde_json::json!({
+                        "repo_id": repo_id,
+                        "branch": branch,
+                        "conflicting_files": result.conflicting_files,
+                    })),
+                )
+                .await;
+        }
+        SpeculativeStatus::Skipped => {}
+    }
 }
 
 /// Find another active agent whose branch conflicts with `branch` in the same repo.

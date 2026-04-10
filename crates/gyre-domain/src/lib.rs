@@ -79,7 +79,9 @@ pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
 pub use go_extractor::GoExtractor;
 pub use llm_config::{is_valid_function_key, LlmFunctionConfig, VALID_FUNCTION_KEYS};
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
-pub use merge_request::{DiffStats, MergeRequest, MrError, MrStatus};
+pub use merge_request::{
+    DependencySource, DiffStats, MergeRequest, MergeRequestDependency, MrError, MrStatus,
+};
 pub use message_type::MessageType;
 pub use meta_spec::{
     MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope, MetaSpecVersion,

@@ -35,9 +35,9 @@ async fn dependencies_satisfied(state: &AppState, mr_id: &Id) -> anyhow::Result<
         Some(m) => m,
         None => return Ok(true), // MR not found — let the processor handle the error
     };
-    for dep_id in &mr.depends_on {
-        match state.merge_requests.find_by_id(dep_id).await? {
-            Some(dep) if dep.status == MrStatus::Merged => continue,
+    for dep in &mr.depends_on {
+        match state.merge_requests.find_by_id(&dep.target_mr_id).await? {
+            Some(dep_mr) if dep_mr.status == MrStatus::Merged => continue,
             Some(_) => return Ok(false), // dependency not yet merged
             None => return Ok(false),    // missing dep — block until resolved
         }
@@ -82,14 +82,15 @@ async fn handle_dep_health_issues(
     entry: &MergeQueueEntry,
     mr: &MergeRequest,
 ) -> anyhow::Result<bool> {
-    for dep_id in &mr.depends_on {
-        let dep = match state.merge_requests.find_by_id(dep_id).await? {
+    for dep in &mr.depends_on {
+        let dep_id = &dep.target_mr_id;
+        let dep_mr = match state.merge_requests.find_by_id(dep_id).await? {
             Some(d) => d,
             None => continue,
         };
 
         // Case 1: Dependency MR was closed before merging.
-        if dep.status == MrStatus::Closed {
+        if dep_mr.status == MrStatus::Closed {
             warn!(
                 mr_id = %mr.id,
                 dep_id = %dep_id,
@@ -184,7 +185,7 @@ async fn build_queue_dependency_graph(
             .await
         {
             for dep in &mr.depends_on {
-                let dep_str = dep.to_string();
+                let dep_str = dep.target_mr_id.to_string();
                 if queued_mr_ids.contains(&dep_str) {
                     graph.entry(mr_id.clone()).or_default().insert(dep_str);
                 }
@@ -2543,7 +2544,15 @@ mod tests {
             1000,
         );
         mr.workspace_id = Id::new(workspace_id);
-        mr.depends_on = depends_on.into_iter().map(Id::new).collect();
+        mr.depends_on = depends_on
+            .into_iter()
+            .map(|id| {
+                gyre_domain::MergeRequestDependency::new(
+                    Id::new(id),
+                    gyre_domain::DependencySource::Explicit,
+                )
+            })
+            .collect();
         state.merge_requests.create(&mr).await.unwrap();
         mr
     }
@@ -2765,7 +2774,7 @@ mod tests {
         let mut entries = Vec::new();
         for i in 0..12 {
             let mr_id = format!("mr-{i}");
-            let deps = if i == 0 {
+            let deps: Vec<String> = if i == 0 {
                 vec![]
             } else {
                 vec![format!("mr-{}", i - 1)]
@@ -2779,7 +2788,15 @@ mod tests {
                 1000,
             );
             mr.workspace_id = Id::new("ws-1");
-            mr.depends_on = deps.into_iter().map(Id::new).collect();
+            mr.depends_on = deps
+                .into_iter()
+                .map(|id| {
+                    gyre_domain::MergeRequestDependency::new(
+                        Id::new(id),
+                        gyre_domain::DependencySource::Explicit,
+                    )
+                })
+                .collect();
             state.merge_requests.create(&mr).await.unwrap();
 
             let entry = enqueue_mr(&state, &mr_id, 50, 1000 + i as u64).await;
@@ -2846,7 +2863,7 @@ mod tests {
         let mut entries = Vec::new();
         for i in 0..11 {
             let mr_id = format!("mr-{i}");
-            let deps = if i == 0 {
+            let deps: Vec<String> = if i == 0 {
                 vec![]
             } else {
                 vec![format!("mr-{}", i - 1)]
@@ -2860,7 +2877,15 @@ mod tests {
                 1000,
             );
             mr.workspace_id = Id::new("ws-1");
-            mr.depends_on = deps.into_iter().map(Id::new).collect();
+            mr.depends_on = deps
+                .into_iter()
+                .map(|id| {
+                    gyre_domain::MergeRequestDependency::new(
+                        Id::new(id),
+                        gyre_domain::DependencySource::Explicit,
+                    )
+                })
+                .collect();
             state.merge_requests.create(&mr).await.unwrap();
 
             let entry = enqueue_mr(&state, &mr_id, 50, 1000 + i as u64).await;

@@ -136,7 +136,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=&workspace_id=`); canonical `status` values (snake_case): `backlog`, `in_progress`, `review`, `done`, `blocked` |
 | `GET/PUT` | `/api/v1/tasks/{id}` | Read / update task |
 | `PUT` | `/api/v1/tasks/{id}/status` | Transition task status |
-| `POST/GET` | `/api/v1/merge-requests` | Create / list (`?status=&repository_id=&workspace_id=`) |
+| `POST/GET` | `/api/v1/merge-requests` | Create / list (`?status=&repository_id=&workspace_id=`). Create accepts optional `depends_on: [<mr-id>,...]` to set creation-time explicit dependencies (validated, cycle-checked, merged with auto-detected lineage deps). (TASK-028) |
 | `GET` | `/api/v1/merge-requests/{id}` | Get merge request |
 | `PUT` | `/api/v1/merge-requests/{id}/status` | Transition MR status |
 | `POST/GET` | `/api/v1/merge-requests/{id}/comments` | Add / list review comments |
@@ -148,7 +148,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/merge-requests/{id}/trace` | Gate-time execution trace for an MR — structured spans capturing gate execution, LLM calls, tool use; `{mr_id, spans: [{span_id, parent_span_id, name, start_ms, end_ms, attributes}]}` (S2.4, HSI §3a) |
 | `GET` | `/api/v1/trace-spans/{span_id}/payload` | Full payload for a single trace span — raw input/output data for a gate or LLM call (S2.4) |
 | `PUT` | `/api/v1/merge-requests/{id}/dependencies` | Set MR dependency list: `{depends_on: [<mr-uuid>,...], reason?}` — validates all dep IDs exist, rejects self-dependency and cycles (400); queue skips MRs with unmerged deps; **Developer+ required** — ReadOnly callers receive 403 (CISO P147-A, TASK-100). **Branch lineage auto-detection:** on MR creation, the server uses `git merge-base` to check if the source branch descends from another open MR's source branch and auto-populates `depends_on` (branch refs validated to prevent arg injection). |
-| `GET` | `/api/v1/merge-requests/{id}/dependencies` | Get MR dependencies and dependents: `{mr_id, depends_on: [...], dependents: [...]}` (TASK-100) |
+| `GET` | `/api/v1/merge-requests/{id}/dependencies` | Get MR dependencies and dependents: `{mr_id, depends_on: [{mr_id, source, reason?},...], dependents: [...]}`. Each dependency includes `source` (`explicit`, `branch-lineage`, `agent-declared`) and optional `reason` (TASK-028, TASK-100) |
 | `DELETE` | `/api/v1/merge-requests/{id}/dependencies/{dep_id}` | Remove a single dependency from an MR; 404 if dep_id not in depends_on; **Developer+ required** (CISO P147-A, TASK-100) |
 | `PUT` | `/api/v1/merge-requests/{id}/atomic-group` | Set atomic group membership: `{group: "<name>"}` (or `null` to clear) — all group members must be ready before any is dequeued; **Developer+ required** (CISO P147-A, TASK-100) |
 | `POST` | `/api/v1/merge-queue/enqueue` | Add approved MR to merge queue; triggers gate execution per repo gates (M12.1) |

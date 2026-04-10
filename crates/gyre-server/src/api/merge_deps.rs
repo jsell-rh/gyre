@@ -32,10 +32,34 @@ pub struct SetDependenciesRequest {
     pub reason: Option<String>,
 }
 
+/// Per-dependency detail including source and reason.
+#[derive(Serialize)]
+pub struct DependencyDetailResponse {
+    pub mr_id: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl From<gyre_domain::MergeRequestDependency> for DependencyDetailResponse {
+    fn from(dep: gyre_domain::MergeRequestDependency) -> Self {
+        let source = match dep.source {
+            gyre_domain::DependencySource::Explicit => "explicit",
+            gyre_domain::DependencySource::BranchLineage => "branch-lineage",
+            gyre_domain::DependencySource::AgentDeclared => "agent-declared",
+        };
+        Self {
+            mr_id: dep.target_mr_id.to_string(),
+            source: source.to_string(),
+            reason: dep.reason,
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct DependenciesResponse {
     pub mr_id: String,
-    pub depends_on: Vec<String>,
+    pub depends_on: Vec<DependencyDetailResponse>,
     pub dependents: Vec<String>,
 }
 
@@ -51,12 +75,18 @@ pub struct AtomicGroupResponse {
 }
 
 #[derive(Serialize)]
+pub struct GraphDependencyEdge {
+    pub mr_id: String,
+    pub source: String,
+}
+
+#[derive(Serialize)]
 pub struct GraphNode {
     pub mr_id: String,
     pub title: String,
     pub status: String,
     pub priority: u32,
-    pub depends_on: Vec<String>,
+    pub depends_on: Vec<GraphDependencyEdge>,
     pub atomic_group: Option<String>,
 }
 
@@ -69,7 +99,7 @@ pub struct QueueGraphResponse {
 
 /// Returns `true` if adding edge `from → to` would create a cycle in the
 /// current dependency graph (represented as adjacency list `deps`).
-fn would_create_cycle(
+pub(crate) fn would_create_cycle(
     from: &str,
     new_deps: &[String],
     all_mrs: &HashMap<String, Vec<String>>,
@@ -138,7 +168,10 @@ pub async fn set_dependencies(
     for m in &all_mrs {
         adj.insert(
             m.id.to_string(),
-            m.depends_on.iter().map(|d| d.to_string()).collect(),
+            m.depends_on
+                .iter()
+                .map(|d| d.target_mr_id.to_string())
+                .collect(),
         );
     }
 
@@ -149,8 +182,19 @@ pub async fn set_dependencies(
         ));
     }
 
-    // Apply
-    mr.depends_on = req.depends_on.iter().map(Id::new).collect();
+    // Apply — agent-declared or explicit based on caller context.
+    // When called via PUT /dependencies, the source is AgentDeclared.
+    let source = gyre_domain::DependencySource::AgentDeclared;
+    mr.depends_on = req
+        .depends_on
+        .iter()
+        .map(|dep_id| {
+            let mut dep =
+                gyre_domain::MergeRequestDependency::new(Id::new(dep_id), source.clone());
+            dep.reason = req.reason.clone();
+            dep
+        })
+        .collect();
     mr.updated_at = now_secs();
     state.merge_requests.update(&mr).await?;
 
@@ -166,7 +210,11 @@ pub async fn set_dependencies(
         StatusCode::OK,
         Json(DependenciesResponse {
             mr_id: id,
-            depends_on: req.depends_on,
+            depends_on: mr
+                .depends_on
+                .into_iter()
+                .map(DependencyDetailResponse::from)
+                .collect(),
             dependents,
         }),
     ))
@@ -193,7 +241,11 @@ pub async fn get_dependencies(
 
     Ok(Json(DependenciesResponse {
         mr_id: id,
-        depends_on: mr.depends_on.iter().map(|id| id.to_string()).collect(),
+        depends_on: mr
+            .depends_on
+            .into_iter()
+            .map(DependencyDetailResponse::from)
+            .collect(),
         dependents,
     }))
 }
@@ -210,7 +262,8 @@ pub async fn remove_dependency(
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
     let before_len = mr.depends_on.len();
-    mr.depends_on.retain(|d| d.as_str() != dep_id.as_str());
+    mr.depends_on
+        .retain(|d| d.target_mr_id.as_str() != dep_id.as_str());
 
     if mr.depends_on.len() == before_len {
         return Err(ApiError::NotFound(format!(
@@ -269,7 +322,21 @@ pub async fn get_queue_graph(
                 title: mr.title,
                 status: status.to_string(),
                 priority: entry.priority,
-                depends_on: mr.depends_on.iter().map(|id| id.to_string()).collect(),
+                depends_on: mr
+                    .depends_on
+                    .iter()
+                    .map(|d| {
+                        let source = match d.source {
+                            gyre_domain::DependencySource::Explicit => "explicit",
+                            gyre_domain::DependencySource::BranchLineage => "branch-lineage",
+                            gyre_domain::DependencySource::AgentDeclared => "agent-declared",
+                        };
+                        GraphDependencyEdge {
+                            mr_id: d.target_mr_id.to_string(),
+                            source: source.to_string(),
+                        }
+                    })
+                    .collect(),
                 atomic_group: mr.atomic_group,
             });
         }
@@ -347,7 +414,8 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["depends_on"][0], mr1_id);
+        assert_eq!(json["depends_on"][0]["mr_id"], mr1_id);
+        assert_eq!(json["depends_on"][0]["source"], "agent-declared");
 
         // GET dependencies for mr1 should show mr2 as dependent
         let resp = app
@@ -607,5 +675,109 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Source tracking & reason persistence tests (TASK-028) ────────────
+
+    #[tokio::test]
+    async fn dependency_source_is_agent_declared() {
+        let app = app();
+        let (app, mr1_id) = create_mr(app, "Source MR").await;
+        let (app, mr2_id) = create_mr(app, "Dep MR").await;
+
+        // Set via PUT /dependencies → source should be "agent-declared".
+        let body = serde_json::json!({
+            "depends_on": [mr1_id],
+            "reason": "MR-A adds the UserPort trait that this code implements"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr2_id}/dependencies"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["depends_on"][0]["source"], "agent-declared");
+        assert_eq!(
+            json["depends_on"][0]["reason"],
+            "MR-A adds the UserPort trait that this code implements"
+        );
+    }
+
+    #[tokio::test]
+    async fn reason_persisted_and_retrievable() {
+        let app = app();
+        let (app, mr1_id) = create_mr(app, "Reason A").await;
+        let (app, mr2_id) = create_mr(app, "Reason B").await;
+
+        // Set dep with reason.
+        let body = serde_json::json!({
+            "depends_on": [mr1_id],
+            "reason": "needs migration schema from MR-A"
+        });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr2_id}/dependencies"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // GET dependencies and verify reason is returned.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/merge-requests/{mr2_id}/dependencies"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["depends_on"][0]["mr_id"], mr1_id);
+        assert_eq!(json["depends_on"][0]["source"], "agent-declared");
+        assert_eq!(
+            json["depends_on"][0]["reason"],
+            "needs migration schema from MR-A"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_without_reason_has_null_reason() {
+        let app = app();
+        let (app, mr1_id) = create_mr(app, "NoReason A").await;
+        let (app, mr2_id) = create_mr(app, "NoReason B").await;
+
+        let body = serde_json::json!({ "depends_on": [mr1_id] });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr2_id}/dependencies"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["depends_on"][0]["source"], "agent-declared");
+        // reason should be null (absent from JSON due to skip_serializing_if).
+        assert!(json["depends_on"][0]["reason"].is_null());
     }
 }

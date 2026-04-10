@@ -607,7 +607,7 @@ impl MergeRequestRepository for MemMrRepository {
             .filter(|mr| {
                 mr.depends_on
                     .iter()
-                    .any(|dep| dep.as_str() == mr_id.as_str())
+                    .any(|dep| dep.target_mr_id.as_str() == mr_id.as_str())
             })
             .map(|mr| mr.id.clone())
             .collect();
