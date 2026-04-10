@@ -97,7 +97,7 @@ Create a new dependency graph visualization component and integrate it into the 
 
 ## Git Commits
 
-_(none yet)_
+- `c3853572` feat(web): add cross-repo dependency graph visualization (TASK-046)
 
 ---
 
