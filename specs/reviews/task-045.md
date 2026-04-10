@@ -1,14 +1,14 @@
 # Review: TASK-045 — Spec Links — Interactive DAG Visualization
 
 **Reviewer:** Verifier
-**Round:** R1
-**Verdict:** `needs-revision`
+**Round:** R2
+**Verdict:** `complete`
 
 ---
 
 ## Findings
 
-- [-] [process-revision-complete] **F1: Missing strikethrough visual on supersedes edge target node**
+- [x] [resolved] **F1: Missing strikethrough visual on supersedes edge target node**
 
   **Spec source:** Task Requirements §3 (task-045.md line 43):
   > `supersedes` → dotted arrow with strikethrough target

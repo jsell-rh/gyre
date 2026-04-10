@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §UI (lines 186–189)
 
-**Progress:** `ready-for-review`
+**Progress:** `complete`
 
 **Review:** [`specs/reviews/task-045.md`](../reviews/task-045.md)
 
