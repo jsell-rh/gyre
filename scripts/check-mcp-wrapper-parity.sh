@@ -50,6 +50,12 @@
 #             When a REST endpoint gains a parameter, the MCP tool must be
 #             updated to maintain HSI §11 parity. MCP callers silently
 #             cannot access the new functionality.
+#   Check 8 — REST→MCP intermediate function call parity: REST handlers
+#             call domain-specific helper functions (detect_*, would_*,
+#             validate_*, etc.) between parameter extraction and the domain
+#             call. The MCP handler must also call these functions. Missing
+#             intermediate calls cause behavioral divergence even when
+#             parameter and response parity are correct.
 #
 # Origin: specs/reviews/task-010.md F1 (dead depth param), F2/F3 (missing
 #         briefing fields), F4 (edge filter divergence), F5 (hand-built JSON
@@ -63,6 +69,9 @@
 #         specs/reviews/task-028.md R1 F4 (REST→MCP parameter drift) —
 #         CreateMrRequest gained depends_on but gyre_create_mr tool schema
 #         was not updated.
+#         specs/reviews/task-028.md R3 F10 (REST→MCP intermediate logic gap) —
+#         MCP handle_create_mr was fixed to accept depends_on but never calls
+#         detect_lineage_deps() that the REST handler calls.
 #
 # Exempt with: // mcp-parity:ok — <reason>
 #
@@ -547,6 +556,118 @@ for mapping in "${MAPPINGS[@]}"; do
             echo "  wire it through the MCP handler."
             echo ""
             echo "  Exempt with '// mcp-parity:ok — <reason>' in the tool schema block."
+            VIOLATIONS=$((VIOLATIONS + 1))
+        fi
+    done
+done
+
+# ── Check 8: REST→MCP intermediate function call parity ──────────────
+# When a REST handler calls domain-specific helper functions between
+# parameter extraction and the domain call (e.g., detect_lineage_deps,
+# detect_*, merge/combine logic), the corresponding MCP handler must
+# also call those functions. Missing intermediate calls cause behavioral
+# divergence: the MCP and REST handlers accept the same parameters and
+# return the same type, but produce different results because the MCP
+# handler skips processing steps.
+#
+# Strategy: for known REST handler → MCP handler mappings, extract
+# domain-specific function calls from the REST handler body and verify
+# each appears in the MCP handler body.
+#
+# Origin: specs/reviews/task-028.md R3 F10 — REST create_mr calls
+#         detect_lineage_deps() and merges lineage deps with explicit
+#         deps. MCP handle_create_mr was fixed to accept depends_on
+#         (R1 F4) but never calls detect_lineage_deps().
+#
+# Exempt with: // mcp-parity:ok — <reason> on the MCP handler function.
+
+# Known REST handler → MCP handler mappings
+# Format: "rest_fn:mcp_fn:rest_file"
+# rest_fn = the REST handler function name
+# mcp_fn  = the MCP handler function name
+# rest_file = the file containing the REST handler
+HANDLER_MAPPINGS=(
+    "create_mr:handle_create_mr:$API_MERGE_FILE"
+)
+
+# Domain-specific function call pattern: function names that indicate
+# domain/business logic (not framework boilerplate). We look for these
+# patterns in the REST handler body and verify they also appear in the
+# MCP handler body.
+DOMAIN_FN_PATTERN='detect_[a-z_]+\(|would_create_cycle\(|merge_lineage_deps\(|validate_[a-z_]+\(|compute_[a-z_]+\(|resolve_[a-z_]+\(|assemble_[a-z_]+\(|build_[a-z_]+\(|check_[a-z_]+\('
+
+for mapping in "${HANDLER_MAPPINGS[@]}"; do
+    rest_fn=$(echo "$mapping" | cut -d: -f1)
+    mcp_fn=$(echo "$mapping" | cut -d: -f2)
+    rest_file=$(echo "$mapping" | cut -d: -f3)
+
+    if [ ! -f "$rest_file" ] || [ ! -f "$MCP_FILE" ]; then
+        continue
+    fi
+
+    # Extract the REST handler function body.
+    # Find "fn $rest_fn(" and collect lines until we find a function at
+    # the same indent level (next pub fn / pub async fn).
+    REST_FN_LINE=$(grep -n "pub async fn ${rest_fn}\b\|pub fn ${rest_fn}\b" "$rest_file" \
+        | head -1 | cut -d: -f1 || true)
+    if [ -z "$REST_FN_LINE" ]; then
+        continue
+    fi
+    REST_FN_END=$(tail -n +"$((REST_FN_LINE + 1))" "$rest_file" \
+        | grep -n '^pub async fn \|^pub fn \|^    pub async fn \|^    pub fn ' \
+        | head -1 | cut -d: -f1 || echo "500")
+    REST_FN_END=$((REST_FN_LINE + REST_FN_END))
+    REST_BODY=$(sed -n "${REST_FN_LINE},${REST_FN_END}p" "$rest_file")
+
+    # Extract the MCP handler function body.
+    MCP_FN_LINE=$(grep -n "async fn ${mcp_fn}\b\|fn ${mcp_fn}\b" "$MCP_FILE" \
+        | head -1 | cut -d: -f1 || true)
+    if [ -z "$MCP_FN_LINE" ]; then
+        continue
+    fi
+
+    # Check if the MCP handler has an exemption
+    MCP_FN_FIRST_LINE=$(sed -n "${MCP_FN_LINE}p" "$MCP_FILE")
+    if echo "$MCP_FN_FIRST_LINE" | grep -q 'mcp-parity:ok'; then
+        continue
+    fi
+
+    MCP_FN_END=$(tail -n +"$((MCP_FN_LINE + 1))" "$MCP_FILE" \
+        | grep -n '^async fn \|^pub async fn \|^pub fn \|^fn ' \
+        | head -1 | cut -d: -f1 || echo "500")
+    MCP_FN_END=$((MCP_FN_LINE + MCP_FN_END))
+    MCP_BODY=$(sed -n "${MCP_FN_LINE},${MCP_FN_END}p" "$MCP_FILE")
+
+    # Find domain-specific function calls in the REST handler body.
+    REST_DOMAIN_CALLS=$(echo "$REST_BODY" \
+        | grep -oP "$DOMAIN_FN_PATTERN" \
+        | sed 's/($//' \
+        | sort -u || true)
+
+    if [ -z "$REST_DOMAIN_CALLS" ]; then
+        continue
+    fi
+
+    # For each domain call in the REST handler, check if it appears
+    # in the MCP handler body.
+    for fn_call in $REST_DOMAIN_CALLS; do
+        if ! echo "$MCP_BODY" | grep -q "$fn_call"; then
+            echo ""
+            echo "REST→MCP INTERMEDIATE LOGIC GAP: $MCP_FILE (fn $mcp_fn)"
+            echo "  REST handler '$rest_fn' in $rest_file calls '$fn_call()'"
+            echo "  but MCP handler '$mcp_fn' does not."
+            echo ""
+            echo "  When a REST handler calls a domain-specific helper function"
+            echo "  (auto-detection, validation, enrichment, pre-processing),"
+            echo "  the MCP handler wrapping the same endpoint must also call it."
+            echo "  Missing intermediate calls cause behavioral divergence —"
+            echo "  the same input produces different results via MCP vs REST."
+            echo ""
+            echo "  Fix: add the '$fn_call()' call to '$mcp_fn' with the same"
+            echo "  logic flow as the REST handler."
+            echo ""
+            echo "  Exempt with '// mcp-parity:ok — <reason>' on the MCP handler"
+            echo "  function definition line."
             VIOLATIONS=$((VIOLATIONS + 1))
         fi
     done
