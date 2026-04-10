@@ -90,3 +90,4 @@ When working on this task:
 ## Git Commits
 
 - `fc7db38e` feat(merge-queue): topological sort with priority ordering and chain depth warning (TASK-026)
+- `66d68539` fix(merge-queue): move gate and atomic group checks into selection loop (TASK-026)
