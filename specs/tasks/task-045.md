@@ -2,7 +2,9 @@
 
 **Spec reference:** `spec-links.md` §UI (lines 186–189)
 
-**Progress:** `ready-for-review`
+**Progress:** `needs-revision`
+
+**Review:** [`specs/reviews/task-045.md`](../reviews/task-045.md)
 
 **Depends on:** TASK-016 (staleness data), TASK-019 (query endpoints, conflict data)
 
