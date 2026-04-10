@@ -25,3 +25,24 @@
 
 - [-] [process-revision-complete] **F6: Dead variable `speculated_clean` in speculative_merge.rs.**  
   Line 137 creates `let mut speculated_clean: HashSet<String>` and line 195 inserts into it, but the variable is never read anywhere in the function. Only `speculated_mr_ids` is used for dependency satisfaction checks. This is dead code.
+
+---
+
+# TASK-028 Review — R2
+
+**Reviewer:** Verifier  
+**Verdict:** `needs-revision` (2 findings)
+
+R1 findings F1–F6 are all correctly resolved. Two new findings in R2:
+
+---
+
+## Findings
+
+- [ ] **F7: Aspirational test name — `branch_with_unsatisfied_deps_is_skipped` asserts `Clean`, not `Skipped`.**  
+  `speculative_merge.rs:610` — the test name claims to verify that branches with unsatisfied dependencies are skipped, but both branches achieve `SpeculativeStatus::Clean`. The test body's comment confirms the opposite behavior: *"Both should be speculated: branch-a is clean (no deps), branch-b's dep (mr-a) was speculated clean, so branch-b should also be processed."* The test actually verifies that wave-based dependency resolution works (deps ARE satisfied across waves). The skip behavior IS covered by `branch_with_circular_dep_is_skipped` and `dep_on_nonexistent_mr_blocks_branch`, but this test's name falsely inflates perceived coverage of the skip path. The final assertions (`assert_eq!(result_b.unwrap().status, SpeculativeStatus::Clean)`) directly contradict the name's claim of "skipped."  
+  **Fix:** Rename to `deps_resolved_across_waves` or `satisfied_deps_allows_speculation`.
+
+- [ ] **F8: Conflict type classification logic (R1 F3 fix) has zero behavioral test coverage.**  
+  The R1 F3 fix added a 3-branch conditional in `speculate_branch()` (`speculative_merge.rs:318-326`) that classifies conflicts as `OrderDependent` or `OrderIndependent` based on whether the conflicting branch was speculated clean. The only related test (`order_dependent_conflict_serializes` at line 524) manually constructs a `SpeculativeResult` with a hardcoded `conflict_type` — it never calls `speculate_branch` and never exercises the classification logic. The `NoopGitOps` mock always returns `Ok(true)` for `can_merge` (`mem.rs:73-74`), so no conflict scenario is ever triggered in any behavioral test. The 3-branch conditional (`speculated_clean_branches.contains(cb)` → OrderDependent, else → OrderIndependent, no conflicting branch → OrderIndependent) could be entirely broken — e.g., always returning `OrderIndependent` — and all tests would pass.  
+  **Fix:** Make `NoopGitOps` configurable to return `Ok(false)` for specific branches (e.g., via `Arc<Mutex<HashSet<String>>>` of "conflicting branches" injected into `test_state`). Then add tests that: (a) speculate branch A clean, then speculate branch B with a conflict against A → verify `conflict_type == Some(OrderDependent)`, (b) speculate branch B with a conflict and no prior speculated branches → verify `conflict_type == Some(OrderIndependent)`.
