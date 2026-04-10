@@ -13,7 +13,7 @@ The implementation is well-executed overall. TypeScript interfaces accurately mi
 
 ## Findings
 
-- [ ] **F1 — Pre-check guard bypasses validator for scope-less queries (acceptance criterion 5 violation)**
+- [-] [process-revision-complete] **F1 — Pre-check guard bypasses validator for scope-less queries (acceptance criterion 5 violation)**
 
   `ExplorerChat.svelte:350` has a pre-existing guard:
 
@@ -29,7 +29,7 @@ The implementation is well-executed overall. TypeScript interfaces accurately mi
 
   **Fix:** Remove the entire guard on line 350, or at minimum remove the `!query.scope` condition. The validator covers all three cases.
 
-- [ ] **F2 — Validation error path does not finalize in-flight streaming text**
+- [-] [process-revision-complete] **F2 — Validation error path does not finalize in-flight streaming text**
 
   When validation fails (lines 353–366), the handler `break`s without finalizing any accumulated `streamingText`. On the non-error path (lines 369–371), streaming text is finalized into a visible message before the view query is applied. On the error path, any LLM explanation text accumulated during the `thinking` phase is orphaned — it stays in `streamingText` and will be incorrectly prepended to the next assistant response.
 
