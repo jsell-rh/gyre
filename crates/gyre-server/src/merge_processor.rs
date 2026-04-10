@@ -570,33 +570,6 @@ async fn merge_atomic_group(
                     .update_status(&ge.id, MergeQueueEntryStatus::Merged, None)
                     .await?;
 
-                // Track analytics.
-                let ev = AnalyticsEvent::new(
-                    Id::new(Uuid::new_v4().to_string()),
-                    "merge_queue.processed",
-                    updated_mr.author_agent_id.as_ref().map(|id| id.to_string()),
-                    serde_json::json!({
-                        "entry_id": ge.id.to_string(),
-                        "mr_id": updated_mr.id.to_string(),
-                        "result": "merged",
-                        "atomic_group": group_name,
-                    }),
-                    now,
-                );
-                let _ = state.analytics.record(&ev).await;
-
-                // Notify the MR author.
-                if let Some(ref author_id) = updated_mr.author_agent_id {
-                    crate::notifications::notify_mr_merged(
-                        state,
-                        author_id,
-                        &updated_mr.workspace_id,
-                        &updated_mr.id.to_string(),
-                        "default",
-                    )
-                    .await;
-                }
-
                 merged_entries.push((ge.clone(), updated_mr));
             }
             Ok(MergeResult::Conflict { message }) => {
@@ -641,6 +614,37 @@ async fn merge_atomic_group(
                 .await?;
                 return Ok(());
             }
+        }
+    }
+
+    // All group members merged successfully — now emit deferred side effects
+    // (notifications and analytics). These are deferred to avoid irretractable
+    // emissions inside the rollback-capable merge loop.
+    for (ge, updated_mr) in &merged_entries {
+        let now = updated_mr.updated_at;
+        let ev = AnalyticsEvent::new(
+            Id::new(Uuid::new_v4().to_string()),
+            "merge_queue.processed",
+            updated_mr.author_agent_id.as_ref().map(|id| id.to_string()),
+            serde_json::json!({
+                "entry_id": ge.id.to_string(),
+                "mr_id": updated_mr.id.to_string(),
+                "result": "merged",
+                "atomic_group": group_name,
+            }),
+            now,
+        );
+        let _ = state.analytics.record(&ev).await;
+
+        if let Some(ref author_id) = updated_mr.author_agent_id {
+            crate::notifications::notify_mr_merged(
+                state,
+                author_id,
+                &updated_mr.workspace_id,
+                &updated_mr.id.to_string(),
+                "default",
+            )
+            .await;
         }
     }
 
@@ -734,20 +738,7 @@ async fn rollback_atomic_group(
 
     let ws_id = workspace_id.unwrap_or_else(|| Id::new("default"));
 
-    // Step 4: Notify all distinct authors.
-    let members = state
-        .workspace_memberships
-        .list_by_workspace(&ws_id)
-        .await
-        .unwrap_or_default();
-
-    // Collect user IDs for notification: all distinct MR author agent IDs
-    // plus workspace members.
-    let mut notify_user_ids: HashSet<String> = author_ids.clone();
-    for member in &members {
-        notify_user_ids.insert(member.user_id.to_string());
-    }
-
+    // Step 4: Notify all distinct authors (spec says "notify all authors" — no broader audience).
     let body_json = serde_json::json!({
         "group": group_name,
         "failing_mr_id": failing_mr_id.to_string(),
@@ -757,7 +748,7 @@ async fn rollback_atomic_group(
     })
     .to_string();
 
-    for user_id in &notify_user_ids {
+    for user_id in &author_ids {
         crate::notifications::notify_rich(
             state,
             ws_id.clone(),
@@ -797,7 +788,7 @@ async fn rollback_atomic_group(
         failing_mr = %failing_mr_id,
         "atomic group rollback complete: {} members requeued, {} authors notified",
         all_group_entries.len(),
-        notify_user_ids.len(),
+        author_ids.len(),
     );
 
     Ok(())
@@ -3769,7 +3760,8 @@ mod tests {
             gyre_common::NotificationType::AtomicGroupFailure
         );
 
-        // Check notifications for workspace member user-1.
+        // Check that workspace member user-1 does NOT receive a notification
+        // (spec says "notify all authors" — no broader audience).
         let notifs_user = state
             .notifications
             .list_for_user(
@@ -3784,8 +3776,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !notifs_user.is_empty(),
-            "workspace member should receive a notification"
+            notifs_user.is_empty(),
+            "workspace member (non-author) should NOT receive a notification"
         );
 
         // Verify event.

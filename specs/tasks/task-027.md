@@ -2,7 +2,7 @@
 
 **Spec reference:** `merge-dependencies.md` §Atomic Groups, §Atomic Group Rules, §Failure Handling  
 **Depends on:** TASK-026 (topological sort processes groups in correct order)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [`specs/reviews/task-027.md`](../reviews/task-027.md)
 
 ## Spec Excerpt
