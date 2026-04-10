@@ -3359,12 +3359,26 @@ mod tests {
     }
 
     /// Test: All members of an atomic group merge in a single processor cycle
-    /// in dependency order with no interleaving.
+    /// in dependency order with no interleaving. Also verifies that deferred
+    /// side effects (per-member analytics events and author notifications) are
+    /// emitted after the successful group merge.
     #[tokio::test]
     async fn atomic_group_all_members_merge_in_one_cycle() {
         let state = test_state();
 
         let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // Create agent records for author agents so notify_mr_merged can resolve
+        // the human user via spawned_by.
+        let mut agent_1 = gyre_domain::Agent::new(Id::new("agent-1"), "agent-1", 1000);
+        agent_1.spawned_by = Some("user-human-1".to_string());
+        agent_1.workspace_id = Id::new("ws-1");
+        state.agents.create(&agent_1).await.unwrap();
+
+        let mut agent_2 = gyre_domain::Agent::new(Id::new("agent-2"), "agent-2", 1000);
+        agent_2.spawned_by = Some("user-human-2".to_string());
+        agent_2.workspace_id = Id::new("ws-1");
+        state.agents.create(&agent_2).await.unwrap();
 
         // Create two MRs in atomic group "bundle".
         create_mr_in_group(
@@ -3450,6 +3464,79 @@ mod tests {
         assert!(
             !found_failed,
             "no AtomicGroupFailed event should be emitted on success"
+        );
+
+        // --- Deferred side-effect assertions (F3 coverage) ---
+
+        // Verify analytics events: each merged member should have a
+        // "merge_queue.processed" event with "atomic_group" in the payload.
+        let analytics_events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            analytics_events.len(),
+            2,
+            "two analytics events should be recorded (one per merged member)"
+        );
+        for ev in &analytics_events {
+            assert_eq!(ev.event_name, "merge_queue.processed");
+            let payload = &ev.properties;
+            assert_eq!(
+                payload["result"], "merged",
+                "analytics event result should be 'merged'"
+            );
+            assert_eq!(
+                payload["atomic_group"], "bundle",
+                "analytics event should reference the atomic group name"
+            );
+        }
+
+        // Verify author notifications: each author's human user should receive
+        // a merge notification via notify_mr_merged (which resolves spawned_by).
+        let notifs_user1 = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-human-1"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !notifs_user1.is_empty(),
+            "user-human-1 (agent-1's spawner) should receive a merge notification"
+        );
+        assert!(
+            notifs_user1[0].title.contains("merged"),
+            "notification title should mention 'merged'"
+        );
+
+        let notifs_user2 = state
+            .notifications
+            .list_for_user(
+                &Id::new("user-human-2"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !notifs_user2.is_empty(),
+            "user-human-2 (agent-2's spawner) should receive a merge notification"
+        );
+        assert!(
+            notifs_user2[0].title.contains("merged"),
+            "notification title should mention 'merged'"
         );
     }
 
