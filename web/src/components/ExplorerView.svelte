@@ -1481,6 +1481,9 @@
                   onClose={() => { detailNode = null; }}
                   onNavigate={(n) => { detailNode = n; }}
                   onInteractiveQuery={(q) => { activeViewQuery = q; }}
+                  lens={explorerLens}
+                  traceSpans={traceData?.spans ?? []}
+                  onSpanSelect={(span) => { /* highlight span on canvas via detailNode metadata */ }}
                 />
                 {#if detailNode.spec_path}
                   <div class="edit-spec-action">

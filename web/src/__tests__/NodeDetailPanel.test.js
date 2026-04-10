@@ -546,3 +546,127 @@ describe('NodeDetailPanel -- method call count computation', () => {
     expect(uncalled).not.toContain('m1');
   });
 });
+
+// ── Evaluative tab tests ──
+
+const TRACE_SPANS = [
+  { span_id: 's1', graph_node_id: 'n1', operation_name: 'find_user', duration_us: 5000, status: 'ok', start_time: 1710000000000000, parent_span_id: null, attributes: { 'db.system': 'sqlite' }, input_summary: 'id=42', output_summary: '{"name":"Alice"}' },
+  { span_id: 's2', graph_node_id: 'n1', operation_name: 'validate_user', duration_us: 500, status: 'ok', start_time: 1710000001000000, parent_span_id: 's1', attributes: {}, input_summary: null, output_summary: null },
+  { span_id: 's3', graph_node_id: 'n1', operation_name: 'save_user', duration_us: 12000, status: 'ERROR', start_time: 1710000002000000, parent_span_id: 's1', attributes: { 'error.message': 'constraint violation' }, input_summary: null, output_summary: null },
+  { span_id: 's4', graph_node_id: 'n2', operation_name: 'list_tasks', duration_us: 3000, status: 'ok', start_time: 1710000003000000, parent_span_id: null, attributes: {}, input_summary: null, output_summary: null },
+];
+
+describe('NodeDetailPanel -- evaluative tab', () => {
+  it('shows evaluative tab when lens is evaluative and trace data exists', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS },
+    });
+    const sectionTitles = Array.from(container.querySelectorAll('.detail-section-title')).map(t => t.textContent);
+    expect(sectionTitles.some(t => t.includes('Evaluative'))).toBe(true);
+  });
+
+  it('hides evaluative tab when lens is structural', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'structural', traceSpans: TRACE_SPANS },
+    });
+    const sectionTitles = Array.from(container.querySelectorAll('.detail-section-title')).map(t => t.textContent);
+    expect(sectionTitles.some(t => t.includes('Evaluative'))).toBe(false);
+  });
+
+  it('hides evaluative tab when lens is observable', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'observable', traceSpans: TRACE_SPANS },
+    });
+    const sectionTitles = Array.from(container.querySelectorAll('.detail-section-title')).map(t => t.textContent);
+    expect(sectionTitles.some(t => t.includes('Evaluative'))).toBe(false);
+  });
+
+  it('filters spans to only those touching the selected node', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS },
+    });
+    // Node n1 has 3 spans (s1, s2, s3), node n2 has 1 (s4)
+    const spanRows = container.querySelectorAll('.eval-span-row');
+    expect(spanRows.length).toBe(3);
+  });
+
+  it('sorts spans by duration descending (slowest first)', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS },
+    });
+    const spanNames = Array.from(container.querySelectorAll('.eval-span-name')).map(el => el.textContent);
+    // save_user: 12000, find_user: 5000, validate_user: 500
+    expect(spanNames[0]).toBe('save_user');
+    expect(spanNames[1]).toBe('find_user');
+    expect(spanNames[2]).toBe('validate_user');
+  });
+
+  it('shows operation name, duration, and status for each span', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS },
+    });
+    const firstRow = container.querySelector('.eval-span-row');
+    expect(firstRow).toBeTruthy();
+    expect(firstRow.querySelector('.eval-span-name')?.textContent).toBe('save_user');
+    expect(firstRow.querySelector('.eval-span-duration')?.textContent).toBe('12.0ms');
+    expect(firstRow.querySelector('.eval-status-error')).toBeTruthy();
+  });
+
+  it('shows aggregate stats (p50, p95, error rate)', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS },
+    });
+    const statLabels = Array.from(container.querySelectorAll('.eval-stat-label')).map(el => el.textContent);
+    expect(statLabels).toContain('p50');
+    expect(statLabels).toContain('p95');
+    expect(statLabels).toContain('Errors');
+    expect(statLabels).toContain('Mean');
+
+    // Error rate: 1 out of 3 = 33%
+    const errorStatValue = container.querySelectorAll('.eval-stat-value');
+    const errorText = Array.from(errorStatValue).map(el => el.textContent);
+    expect(errorText.some(t => t.includes('33%'))).toBe(true);
+  });
+
+  it('shows span count badge', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS },
+    });
+    const badge = container.querySelector('.detail-badge');
+    const evalBadge = Array.from(container.querySelectorAll('.detail-badge')).find(b => b.textContent.includes('spans'));
+    expect(evalBadge?.textContent).toContain('3 spans');
+  });
+
+  it('marks error spans with error styling', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS },
+    });
+    const errorRows = container.querySelectorAll('.eval-span-error');
+    expect(errorRows.length).toBe(1);
+  });
+
+  it('calls onSpanSelect when a span row is clicked', async () => {
+    const onSpanSelect = vi.fn();
+    const { container } = render(NodeDetailPanel, {
+      props: { node: TYPE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS, onSpanSelect },
+    });
+    const firstRow = container.querySelector('.eval-span-row');
+    firstRow.click();
+    expect(onSpanSelect).toHaveBeenCalledTimes(1);
+    expect(onSpanSelect).toHaveBeenCalledWith(expect.objectContaining({ span_id: 's3' }));
+  });
+
+  it('shows no evaluative tab when no spans match the node', () => {
+    const { container } = render(NodeDetailPanel, {
+      props: { node: INTERFACE_NODE, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: [TRACE_SPANS[3]] },
+    });
+    // INTERFACE_NODE is n2, only s4 matches n2, but we pass only s4 which is for n2
+    // Actually n2 does have s4, let's test with no matching spans
+    const noMatchNode = { ...TYPE_NODE, id: 'n999' };
+    const { container: c2 } = render(NodeDetailPanel, {
+      props: { node: noMatchNode, nodes: NODES, edges: EDGES, lens: 'evaluative', traceSpans: TRACE_SPANS },
+    });
+    const sectionTitles = Array.from(c2.querySelectorAll('.detail-section-title')).map(t => t.textContent);
+    expect(sectionTitles.some(t => t.includes('Evaluative'))).toBe(false);
+  });
+});

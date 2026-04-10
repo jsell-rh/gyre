@@ -6,7 +6,63 @@
     onClose = () => {},
     onNavigate = () => {},
     onInteractiveQuery = () => {},
+    lens = 'structural',
+    traceSpans = [],
+    onSpanSelect = () => {},
   } = $props();
+
+  // ── Evaluative tab: per-node span list and stats ──
+  let expandedSpanId = $state(null);
+
+  // Filter trace spans to those touching the selected node
+  let nodeSpans = $derived.by(() => {
+    if (!node || !traceSpans?.length) return [];
+    const nodeId = node.id;
+    return traceSpans
+      .filter(s => s.graph_node_id === nodeId)
+      .sort((a, b) => (b.duration_us ?? 0) - (a.duration_us ?? 0));
+  });
+
+  // Compute aggregate stats for the evaluative tab
+  let evalStats = $derived.by(() => {
+    if (nodeSpans.length === 0) return null;
+    const durations = nodeSpans.map(s => s.duration_us ?? 0).sort((a, b) => a - b);
+    const total = durations.length;
+    const errors = nodeSpans.filter(s => s.status === 'error' || s.status === 'ERROR').length;
+
+    const percentile = (arr, p) => {
+      if (arr.length === 0) return 0;
+      if (arr.length === 1) return arr[0];
+      const idx = p * (arr.length - 1);
+      const lo = Math.floor(idx);
+      const hi = Math.ceil(idx);
+      const frac = idx - lo;
+      return arr[lo] * (1 - frac) + arr[hi] * frac;
+    };
+
+    const p50 = percentile(durations, 0.5);
+    const p95 = percentile(durations, 0.95);
+    const mean = durations.reduce((a, b) => a + b, 0) / total;
+    const errorRate = total > 0 ? errors / total : 0;
+
+    return { spanCount: total, p50, p95, meanDuration: mean, errorRate };
+  });
+
+  let showEvalTab = $derived(lens === 'evaluative' && nodeSpans.length > 0);
+
+  // Format duration in microseconds to human-readable
+  function formatDuration(us) {
+    if (us < 1000) return `${Math.round(us)}\u00B5s`;
+    if (us < 1_000_000) return `${(us / 1000).toFixed(1)}ms`;
+    return `${(us / 1_000_000).toFixed(2)}s`;
+  }
+
+  // Format span timestamp
+  function formatSpanTime(ts) {
+    if (!ts) return '';
+    const d = new Date(ts / 1000); // ts is in microseconds
+    return d.toLocaleTimeString();
+  }
 
   // Compute relationships for the selected node
   let relationships = $derived.by(() => {
@@ -1699,6 +1755,113 @@
       {/if}
 
       <!-- ============================================ -->
+      <!-- EVALUATIVE TAB: per-node span list (all node types) -->
+      <!-- ============================================ -->
+      {#if showEvalTab}
+        <details class="detail-collapsible" open>
+          <summary class="detail-section-title">
+            Evaluative
+            <span class="detail-badge">{evalStats?.spanCount ?? 0} spans</span>
+          </summary>
+
+          <!-- Aggregate stats -->
+          {#if evalStats}
+            <div class="eval-stats-summary">
+              <span class="eval-stat" title="Median duration">
+                <span class="eval-stat-label">p50</span>
+                <span class="eval-stat-value">{formatDuration(evalStats.p50)}</span>
+              </span>
+              <span class="eval-stat" title="95th percentile duration">
+                <span class="eval-stat-label">p95</span>
+                <span class="eval-stat-value">{formatDuration(evalStats.p95)}</span>
+              </span>
+              <span class="eval-stat" title="Error rate">
+                <span class="eval-stat-label">Errors</span>
+                <span class="eval-stat-value" class:eval-error-rate={evalStats.errorRate > 0}>{Math.round(evalStats.errorRate * 100)}%</span>
+              </span>
+              <span class="eval-stat" title="Mean duration">
+                <span class="eval-stat-label">Mean</span>
+                <span class="eval-stat-value">{formatDuration(evalStats.meanDuration)}</span>
+              </span>
+            </div>
+          {/if}
+
+          <!-- Span list sorted by duration descending -->
+          <div class="eval-span-list">
+            {#each nodeSpans as span (span.span_id)}
+              <button
+                class="eval-span-row"
+                class:eval-span-error={span.status === 'error' || span.status === 'ERROR'}
+                class:eval-span-expanded={expandedSpanId === span.span_id}
+                onclick={() => {
+                  onSpanSelect(span);
+                  expandedSpanId = expandedSpanId === span.span_id ? null : span.span_id;
+                }}
+                type="button"
+              >
+                <div class="eval-span-header">
+                  <span class="eval-span-name" title={span.operation_name}>{span.operation_name ?? 'unknown'}</span>
+                  <span class="eval-span-duration">{formatDuration(span.duration_us ?? 0)}</span>
+                  <span class="eval-span-status" class:eval-status-ok={span.status !== 'error' && span.status !== 'ERROR'} class:eval-status-error={span.status === 'error' || span.status === 'ERROR'}>
+                    {(span.status === 'error' || span.status === 'ERROR') ? 'ERR' : 'OK'}
+                  </span>
+                </div>
+
+                <!-- Expanded detail -->
+                {#if expandedSpanId === span.span_id}
+                  <div class="eval-span-detail">
+                    {#if span.start_time}
+                      <div class="eval-detail-row">
+                        <span class="eval-detail-label">Time</span>
+                        <span class="eval-detail-value">{formatSpanTime(span.start_time)}</span>
+                      </div>
+                    {/if}
+                    {#if span.span_id}
+                      <div class="eval-detail-row">
+                        <span class="eval-detail-label">Span ID</span>
+                        <span class="eval-detail-value"><code>{span.span_id}</code></span>
+                      </div>
+                    {/if}
+                    {#if span.parent_span_id}
+                      <div class="eval-detail-row">
+                        <span class="eval-detail-label">Parent</span>
+                        <span class="eval-detail-value"><code>{span.parent_span_id}</code></span>
+                      </div>
+                    {/if}
+                    {#if span.attributes && Object.keys(span.attributes).length > 0}
+                      <div class="eval-detail-row">
+                        <span class="eval-detail-label">Attributes</span>
+                        <div class="eval-attributes">
+                          {#each Object.entries(span.attributes) as [key, val]}
+                            <div class="eval-attr">
+                              <span class="eval-attr-key">{key}</span>
+                              <span class="eval-attr-val">{typeof val === 'object' ? JSON.stringify(val) : String(val)}</span>
+                            </div>
+                          {/each}
+                        </div>
+                      </div>
+                    {/if}
+                    {#if span.input_summary}
+                      <div class="eval-detail-row">
+                        <span class="eval-detail-label">Input</span>
+                        <span class="eval-detail-value eval-detail-mono">{span.input_summary}</span>
+                      </div>
+                    {/if}
+                    {#if span.output_summary}
+                      <div class="eval-detail-row">
+                        <span class="eval-detail-label">Output</span>
+                        <span class="eval-detail-value eval-detail-mono">{span.output_summary}</span>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </button>
+            {/each}
+          </div>
+        </details>
+      {/if}
+
+      <!-- ============================================ -->
       <!-- SHARED SECTIONS (all node types) -->
       <!-- ============================================ -->
 
@@ -2853,5 +3016,169 @@
     font-size: 10px;
     color: #94a3b8;
     line-height: 1.3;
+  }
+
+  /* ── Evaluative tab styles ── */
+  .eval-stats-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-2) 0;
+    margin-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .eval-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 50px;
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius-sm);
+  }
+
+  .eval-stat-label {
+    font-size: 10px;
+    color: var(--color-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .eval-stat-value {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    font-family: var(--font-mono);
+  }
+
+  .eval-error-rate {
+    color: var(--color-error, #ef4444);
+  }
+
+  .eval-span-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .eval-span-row {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    padding: var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.1s;
+    font: inherit;
+    color: inherit;
+  }
+
+  .eval-span-row:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .eval-span-row.eval-span-error {
+    border-left: 3px solid var(--color-error, #ef4444);
+  }
+
+  .eval-span-row.eval-span-expanded {
+    background: var(--color-surface-elevated);
+  }
+
+  .eval-span-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .eval-span-name {
+    flex: 1;
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-text);
+  }
+
+  .eval-span-duration {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-muted);
+    white-space: nowrap;
+  }
+
+  .eval-span-status {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+  }
+
+  .eval-status-ok {
+    color: var(--color-success, #22c55e);
+    background: rgba(34, 197, 94, 0.1);
+  }
+
+  .eval-status-error {
+    color: var(--color-error, #ef4444);
+    background: rgba(239, 68, 68, 0.1);
+  }
+
+  .eval-span-detail {
+    padding-top: var(--space-2);
+    margin-top: var(--space-2);
+    border-top: 1px solid var(--color-border);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .eval-detail-row {
+    display: flex;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+  }
+
+  .eval-detail-label {
+    color: var(--color-muted);
+    min-width: 60px;
+    flex-shrink: 0;
+  }
+
+  .eval-detail-value {
+    color: var(--color-text);
+    word-break: break-all;
+  }
+
+  .eval-detail-mono {
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .eval-attributes {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .eval-attr {
+    display: flex;
+    gap: var(--space-1);
+    font-size: 10px;
+    font-family: var(--font-mono);
+  }
+
+  .eval-attr-key {
+    color: var(--color-primary);
+  }
+
+  .eval-attr-val {
+    color: var(--color-text);
+    word-break: break-all;
   }
 </style>

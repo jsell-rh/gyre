@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-canvas.md` §Evaluative (Interaction)  
 **Depends on:** TASK-029 (lens toggle, complete), TASK-033 (evaluative heat map, complete)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -71,4 +71,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- feat(web): add evaluative tab to NodeDetailPanel (TASK-042)
