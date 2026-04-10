@@ -1,7 +1,7 @@
-# TASK-054: Register Conversations Endpoint Route
+# TASK-054: Conversations Endpoint Integration Test
 
 **Spec reference:** `human-system-interface.md` §5 (Conversation-to-Code Provenance)  
-**Depends on:** None (handler already implemented)  
+**Depends on:** None (handler and route already implemented)  
 **Progress:** `not-started`
 
 ## Spec Excerpt
@@ -10,40 +10,36 @@ From `human-system-interface.md` §5:
 
 > Each agent's conversation with LLM hashed, stored as provenance artifact.
 
-The spec defines `GET /api/v1/conversations/:sha` for retrieving conversation blobs. The handler is fully implemented in `crates/gyre-server/src/api/conversations.rs`, including per-handler ABAC (resolves `workspace_id` from conversation metadata before evaluating access). The module is declared in `api/mod.rs` (`pub mod conversations;`), but the route is **not registered** in the `api_router()` function.
+The spec defines `GET /api/v1/conversations/:sha` for retrieving conversation blobs.
 
 ## Current State
 
 - Handler: `crates/gyre-server/src/api/conversations.rs` — complete (67 lines)
 - Module declaration: `pub mod conversations;` in `api/mod.rs` — present
-- Route registration in `api_router()` — **MISSING**
+- Route registration: registered in `crates/gyre-server/src/lib.rs` (line 661) — **DONE**
 - `ConversationRepository` port: wired into `AppState`
 - Upload path (`conversation.upload` MCP tool): working
 - Database tables (`conversations`, `turn_commit_links`): migrated
+- Integration test: **MISSING**
 
-The upload side works (agents can store conversations via MCP), but the retrieval side (humans/UI reading conversations via REST) is unreachable because the route is not registered.
+The endpoint is fully functional (handler + route registration). The only gap is an integration test verifying the round-trip behavior.
 
 ## Implementation Plan
 
-1. **Add route registration** in `crates/gyre-server/src/api/mod.rs`:
-   ```rust
-   .route("/api/v1/conversations/:sha", get(conversations::get_conversation))
-   ```
-   Add the import at the top of `api_router()` or use the fully qualified path.
-
-2. **Add integration test** verifying round-trip:
+1. **Add integration test** verifying round-trip:
    - Store a conversation blob via the `ConversationRepository` port
-   - `GET /api/v1/conversations/:sha` returns 200 with the blob
+   - `GET /api/v1/conversations/:sha` returns 200 with the decompressed blob
    - `GET /api/v1/conversations/nonexistent` returns 404
+   - ABAC: unauthenticated request returns 401/403
 
-3. **Verify** `cargo test --all` passes.
+2. **Verify** `cargo test --all` passes.
 
 ## Acceptance Criteria
 
-- [ ] `GET /api/v1/conversations/:sha` returns the decompressed conversation blob
-- [ ] 404 returned for unknown SHA
-- [ ] ABAC enforced (workspace read access required)
-- [ ] Integration test covers success and not-found paths
+- [x] `GET /api/v1/conversations/:sha` returns the decompressed conversation blob (route registered in lib.rs:661)
+- [ ] Integration test covers success path (200 with blob)
+- [ ] Integration test covers not-found path (404)
+- [ ] Integration test covers ABAC enforcement
 - [ ] `cargo test --all` passes
 
 ## Agent Instructions
@@ -51,10 +47,9 @@ The upload side works (agents can store conversations via MCP), but the retrieva
 When working on this task:
 1. Update the progress field above to `in-progress`
 2. Read `crates/gyre-server/src/api/conversations.rs` — the handler is complete
-3. Read `crates/gyre-server/src/api/mod.rs` — add the route registration
-4. Add the `conversations::get_conversation` import
-5. Write an integration test in `crates/gyre-server/tests/` or extend an existing test file
-6. On completion, update progress to `ready-for-review` and list git commits below
+3. Confirm the route is registered in `crates/gyre-server/src/lib.rs` (line ~661)
+4. Write an integration test in `crates/gyre-server/tests/` or extend an existing test file
+5. On completion, update progress to `ready-for-review` and list git commits below
 
 ## Git Commits
 

@@ -114,18 +114,7 @@ All acceptance criteria verified. No findings.
 
 ## Agent Instructions
 
-This task is in `needs-revision` state at **R4** with **1 open finding (F9)**. Read the review at `specs/reviews/task-016.md` FIRST, focusing on F9.
-
-When working on this task:
-1. Update the progress field above to `in-progress`
-2. Read `specs/reviews/task-016.md` — the R4 review. Findings F1–F8 are resolved; F9 is open.
-3. Read `crates/gyre-server/src/spec_registry.rs` — the `sync_spec_ledger` function, specifically the `SpecLinkType::Supersedes` match arm (around line 552-566). This is the premature deprecation that F9 identifies.
-4. Read `crates/gyre-server/src/api/specs.rs` — the `approve_spec` handler (lines 697-750) where the **correct** Supersedes deprecation logic already lives.
-5. Read `specs/system/spec-links.md` §Approval Gates — confirms deprecation is an approval-time side-effect, not a push-time side-effect.
-6. Fix F9: Remove the `SpecLinkType::Supersedes` match arm from `sync_spec_ledger` step 6. The `approve_spec` handler already handles deprecation correctly at approval time.
-7. Update or remove the `sync_supersedes_marks_target_deprecated` test (specs.rs:2601-2688) since it tests the premature behavior.
-8. Add a test confirming that `sync_spec_ledger` does NOT deprecate the target when a `supersedes` link is processed — only `approve_spec` should trigger deprecation.
-9. On completion, update progress to `ready-for-review` and list git commits below
+This task is **complete** at R5 (0 findings). All acceptance criteria verified. No further work needed.
 
 ## Git Commits
 
