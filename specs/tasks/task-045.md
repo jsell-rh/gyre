@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §UI (lines 186–189)
 
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 **Depends on:** TASK-016 (staleness data), TASK-019 (query endpoints, conflict data)
 
@@ -82,7 +82,7 @@ Replace the card-grid rendering in SpecDashboard's graph view with an interactiv
 
 ## Git Commits
 
-_(none yet)_
+_(listed after commit)_
 
 ---
 

@@ -22,6 +22,7 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import Button from '../lib/Button.svelte';
   import Modal from '../lib/Modal.svelte';
+  import SpecGraphDAG from './SpecGraphDAG.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
   import { specStatusTooltip } from '../lib/statusTooltips.js';
 
@@ -56,6 +57,7 @@
   let viewMode = $state('list');
   let specGraph = $state(null);
   let specGraphLoading = $state(false);
+  let graphScope = $state('workspace');
 
   async function loadSpecGraph() {
     specGraphLoading = true;
@@ -65,6 +67,34 @@
       specGraph = { nodes: [], edges: [] };
     } finally {
       specGraphLoading = false;
+    }
+  }
+
+  // Filter graph data to workspace scope (only specs in current workspace repos)
+  const graphNodes = $derived.by(() => {
+    if (!specGraph?.nodes) return [];
+    if (graphScope === 'tenant') return specGraph.nodes;
+    // Workspace scope: only include nodes whose path matches a loaded spec in this workspace
+    const specPaths = new Set(specs.map(s => s.path));
+    return specGraph.nodes.filter(n => specPaths.has(n.path));
+  });
+
+  const graphEdges = $derived.by(() => {
+    if (!specGraph?.edges) return [];
+    if (graphScope === 'tenant') return specGraph.edges;
+    // Only include edges where both endpoints are in the workspace-filtered nodes
+    const nodePaths = new Set(graphNodes.map(n => n.path));
+    return specGraph.edges.filter(e => nodePaths.has(e.source) && nodePaths.has(e.target));
+  });
+
+  function handleGraphNodeClick(node) {
+    const path = node.path;
+    const specData = specs.find(s => s.path === path);
+    const data = { path, repo_id: specData?.repo_id ?? repoId };
+    if (goToEntityDetail) {
+      goToEntityDetail('spec', path, data);
+    } else if (openDetailPanel) {
+      openDetailPanel({ type: 'spec', id: path, data });
     }
   }
 
@@ -403,7 +433,7 @@
     />
   </div>
 
-  <!-- ── Spec Relationship Graph ──────────────────────────────────────────── -->
+  <!-- ── Spec Relationship Graph (DAG) ─────────────────────────────────────── -->
   {#if viewMode === 'graph'}
     <div class="spec-graph-view" data-testid="spec-graph-view">
       {#if specGraphLoading}
@@ -411,42 +441,36 @@
           {#each Array(4) as _}<Skeleton width="100%" height="2.5rem" />{/each}
         </div>
       {:else if specGraph}
-        {@const nodes = specGraph.nodes ?? []}
-        {@const edges = specGraph.edges ?? []}
-        {#if nodes.length === 0}
+        <div class="graph-toolbar">
+          <div class="spec-graph-info">
+            <span class="graph-stat">{graphNodes.length} spec{graphNodes.length !== 1 ? 's' : ''}</span>
+            <span class="graph-stat">{graphEdges.length} relationship{graphEdges.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div class="graph-scope-toggle" role="group" aria-label="Graph scope">
+            <button
+              class="pill"
+              class:active={graphScope === 'workspace'}
+              onclick={() => { graphScope = 'workspace'; }}
+              aria-pressed={graphScope === 'workspace'}
+              data-testid="scope-workspace"
+            >Workspace</button>
+            <button
+              class="pill"
+              class:active={graphScope === 'tenant'}
+              onclick={() => { graphScope = 'tenant'; }}
+              aria-pressed={graphScope === 'tenant'}
+              data-testid="scope-tenant"
+            >Tenant</button>
+          </div>
+        </div>
+        {#if graphNodes.length === 0}
           <EmptyState title="No spec relationships" description="Spec relationships appear when specs reference each other via manifest links (implements, conflicts, extends)." />
         {:else}
-          <div class="spec-graph-info">
-            <span class="graph-stat">{nodes.length} spec{nodes.length !== 1 ? 's' : ''}</span>
-            <span class="graph-stat">{edges.length} relationship{edges.length !== 1 ? 's' : ''}</span>
-          </div>
-          <div class="spec-graph-grid">
-            {#each nodes as node}
-              {@const nodeEdges = edges.filter(e => e.source === node.id || e.from === node.id || e.target === node.id || e.to === node.id)}
-              {@const specData = specs.find(s => s.path === node.id || s.path === node.path)}
-              <button class="spec-graph-card" onclick={() => { const path = node.id ?? node.path; const d = { path, repo_id: specData?.repo_id ?? repoId }; goToEntityDetail ? goToEntityDetail('spec', path, d) : openDetailPanel?.({ type: 'spec', id: path, data: d }); }}>
-                <div class="sgc-header">
-                  <span class="sgc-name">{(node.label ?? node.id ?? '').split('/').pop()}</span>
-                  {#if specData?.approval_status}
-                    <Badge value={specData.approval_status} variant={specData.approval_status === 'approved' ? 'success' : specData.approval_status === 'pending' ? 'warning' : specData.approval_status === 'rejected' ? 'danger' : 'muted'} />
-                  {/if}
-                </div>
-                {#if nodeEdges.length > 0}
-                  <div class="sgc-links">
-                    {#each nodeEdges as edge}
-                      {@const isSource = edge.source === node.id || edge.from === node.id}
-                      {@const otherNode = isSource ? (edge.target ?? edge.to) : (edge.source ?? edge.from)}
-                      {@const linkType = edge.label ?? edge.link_type ?? edge.type ?? 'related'}
-                      <span class="sgc-link-tag sgc-link-{linkType}">
-                        {isSource ? '' : '← '}{linkType}{isSource ? ' →' : ''} {(otherNode ?? '').split('/').pop()}
-                      </span>
-                    {/each}
-                  </div>
-                {/if}
-                <span class="sgc-path mono">{node.id ?? node.path}</span>
-              </button>
-            {/each}
-          </div>
+          <SpecGraphDAG
+            nodes={graphNodes}
+            edges={graphEdges}
+            onNodeClick={handleGraphNodeClick}
+          />
         {/if}
       {:else}
         <EmptyState title="Load spec graph" description="Click the Graph button to visualize spec relationships." />
@@ -1266,43 +1290,16 @@
   .hidden-view { display: none !important; }
 
   /* ── Spec graph ───────────────────────────────────────────────────── */
-  .spec-graph-view { flex: 1; overflow-y: auto; padding: var(--space-4); }
-  .spec-graph-info { display: flex; gap: var(--space-4); margin-bottom: var(--space-4); }
-  .graph-stat { font-size: var(--text-sm); color: var(--color-text-secondary); font-weight: 600; }
-  .spec-graph-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: var(--space-3);
-  }
-  .spec-graph-card {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    padding: var(--space-3);
-    cursor: pointer;
-    text-align: left;
-    font: inherit;
-    color: var(--color-text);
-    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  .spec-graph-view { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .graph-toolbar {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-2) 0;
+    flex-shrink: 0;
   }
-  .spec-graph-card:hover { border-color: var(--color-primary); box-shadow: 0 0 0 1px var(--color-primary); }
-  .spec-graph-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-  .sgc-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
-  .sgc-name { font-weight: 600; font-size: var(--text-sm); }
-  .sgc-links { display: flex; flex-wrap: wrap; gap: 4px; }
-  .sgc-link-tag {
-    font-size: 10px;
-    padding: 1px var(--space-2);
-    border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--color-info) 10%, transparent);
-    color: var(--color-info);
-    white-space: nowrap;
-  }
-  .sgc-link-implements { background: color-mix(in srgb, var(--color-success) 10%, transparent); color: var(--color-success); }
-  .sgc-link-conflicts { background: color-mix(in srgb, var(--color-danger) 10%, transparent); color: var(--color-danger); }
-  .sgc-link-extends { background: color-mix(in srgb, var(--color-warning) 10%, transparent); color: var(--color-warning); }
-  .sgc-path { font-size: var(--text-xs); color: var(--color-text-muted); }
+  .spec-graph-info { display: flex; gap: var(--space-4); }
+  .graph-stat { font-size: var(--text-sm); color: var(--color-text-secondary); font-weight: 600; }
+  .graph-scope-toggle { display: flex; gap: var(--space-1); }
 </style>
