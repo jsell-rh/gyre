@@ -86,4 +86,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `cf33a793` feat(auth): add key binding revocation endpoints (TASK-047)
