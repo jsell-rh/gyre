@@ -8,11 +8,12 @@
   import EvaluativeOverlay from '../components/EvaluativeOverlay.svelte';
   import ObservableBanner from '../components/ObservableBanner.svelte';
 
+  /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null }} */
   let {
     repoId = '',
     nodes = [],
     edges = [],
-    activeQuery = null,
+    activeQuery = /** @type {import('./types/view-query.ts').ViewQuery | null} */ (null),
     filter = 'all',
     lens = 'structural',
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),

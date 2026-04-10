@@ -1223,7 +1223,9 @@
     "disconnected": "Disconnected",
     "error": "Connection error",
     "save_view": "Save this view",
-    "send": "Send"
+    "send": "Send",
+    "view_applied": "View applied.",
+    "invalid_view_query": "The generated view query is invalid:"
   },
   "explorer_treemap": {
     "filter_presets": "Filter presets",

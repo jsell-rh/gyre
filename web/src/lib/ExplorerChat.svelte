@@ -2,6 +2,7 @@
   import { onDestroy } from 'svelte';
   import { t } from 'svelte-i18n';
   import { renderMarkdown } from './markdown.js';
+  import { validateViewQuery } from './view-query-validator.js';
 
   let {
     repoId = '',
@@ -347,6 +348,23 @@
       case 'view_query': {
         const query = msg.query ?? msg.view_query;
         if (!query || typeof query !== 'object' || !query.scope) break;
+
+        // Validate the view query before applying
+        const validation = validateViewQuery(query);
+        if (!validation.valid) {
+          console.warn('[ExplorerChat] Invalid view query:', validation.errors);
+          messages = capMessages([...messages, {
+            id: nextMsgId++,
+            role: 'assistant',
+            content: $t('explorer_chat.invalid_view_query') + '\n\n' + validation.errors.map(e => `- ${e}`).join('\n'),
+            isError: true,
+            timestamp: Date.now(),
+          }]);
+          status = 'ready';
+          scrollToBottom();
+          break;
+        }
+
         // Finalize any in-flight streaming text before clearing
         if (streamingText.trim()) {
           messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: streamingText, timestamp: Date.now() }]);
