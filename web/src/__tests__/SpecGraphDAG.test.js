@@ -350,4 +350,73 @@ describe('SpecGraphDAG', () => {
     expect(path.getAttribute('stroke')).toBe('#a78bfa');
     expect(path.getAttribute('stroke-dasharray')).toBe('3 3');
   });
+
+  // ── Supersedes target strikethrough ──────────────────────────────────────
+
+  it('applies strikethrough to supersedes target node', async () => {
+    const { container } = render(SpecGraphDAG, {
+      props: {
+        nodes: MOCK_NODES,
+        edges: [{ source: 'system/deprecated.md', target: 'system/vision.md', link_type: 'supersedes', status: 'active' }],
+      },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+    });
+
+    // Target node (vision.md) should have strikethrough decoration
+    const targetNode = container.querySelector('[data-testid="dag-node-system/vision.md"]');
+    expect(targetNode).toBeTruthy();
+    expect(targetNode.getAttribute('data-superseded')).toBe('true');
+    const strikethrough = targetNode.querySelector('.dag-strikethrough');
+    expect(strikethrough).toBeTruthy();
+    expect(strikethrough.tagName.toLowerCase()).toBe('line');
+
+    // Source node (deprecated.md) should NOT have strikethrough
+    const sourceNode = container.querySelector('[data-testid="dag-node-system/deprecated.md"]');
+    expect(sourceNode).toBeTruthy();
+    expect(sourceNode.getAttribute('data-superseded')).toBeNull();
+    expect(sourceNode.querySelector('.dag-strikethrough')).toBeNull();
+  });
+
+  it('does not apply strikethrough to nodes that are not supersedes targets', async () => {
+    const { container } = render(SpecGraphDAG, {
+      props: {
+        nodes: MOCK_NODES,
+        edges: [{ source: 'system/auth.md', target: 'system/deprecated.md', link_type: 'depends_on', status: 'active' }],
+      },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+    });
+
+    // No supersedes edges, so no node should have strikethrough
+    const allNodes = container.querySelectorAll('.dag-node');
+    allNodes.forEach(node => {
+      expect(node.getAttribute('data-superseded')).toBeNull();
+      expect(node.querySelector('.dag-strikethrough')).toBeNull();
+    });
+  });
+
+  it('includes superseded status in aria-label for target node', async () => {
+    const { container } = render(SpecGraphDAG, {
+      props: {
+        nodes: MOCK_NODES,
+        edges: [{ source: 'system/deprecated.md', target: 'system/vision.md', link_type: 'supersedes', status: 'active' }],
+      },
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+    });
+
+    const targetNode = container.querySelector('[data-testid="dag-node-system/vision.md"]');
+    expect(targetNode.getAttribute('aria-label')).toContain('(superseded)');
+
+    // Non-target node should not mention superseded
+    const sourceNode = container.querySelector('[data-testid="dag-node-system/deprecated.md"]');
+    expect(sourceNode.getAttribute('aria-label')).not.toContain('(superseded)');
+  });
 });

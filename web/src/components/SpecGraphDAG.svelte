@@ -222,6 +222,14 @@
     const lt = (edge.link_type ?? '').toLowerCase();
     return lt === 'conflictswith' || lt === 'conflicts_with';
   }
+
+  // ── Is this node a target of a supersedes edge? ─────────────────────────
+  function isSupersededTarget(nodePath) {
+    return edges.some(e => {
+      const lt = (e.link_type ?? '').toLowerCase();
+      return (lt === 'supersedes') && e.target === nodePath;
+    });
+  }
 </script>
 
 {#if !layoutReady}
@@ -328,15 +336,18 @@
     {#each nodes as node}
       {@const pos = positions[node.path]}
       {@const colors = nodeColor(node.approval_status)}
+      {@const superseded = isSupersededTarget(node.path)}
       {#if pos}
         <g
           class="dag-node"
+          class:dag-node-superseded={superseded}
           data-testid="dag-node-{node.path}"
           data-status={node.approval_status}
+          data-superseded={superseded ? 'true' : undefined}
           transform="translate({pos.x - NODE_W / 2}, {pos.y - NODE_H / 2})"
           tabindex="0"
           role="button"
-          aria-label="{nodeLabel(node.path)} — {node.approval_status}"
+          aria-label="{nodeLabel(node.path)} — {node.approval_status}{superseded ? ' (superseded)' : ''}"
           onclick={() => onNodeClick(node)}
           onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNodeClick(node); } }}
         >
@@ -360,6 +371,19 @@
           >
             {nodeLabel(node.path)}
           </text>
+          {#if superseded}
+            <!-- Strikethrough line across label text for superseded targets -->
+            <line
+              class="dag-strikethrough"
+              x1={NODE_W * 0.15}
+              y1={NODE_H / 2 - 4}
+              x2={NODE_W * 0.85}
+              y2={NODE_H / 2 - 4}
+              stroke={colors.text}
+              stroke-width="1.5"
+              opacity="0.8"
+            />
+          {/if}
           <text
             class="dag-node-status"
             x={NODE_W / 2}
@@ -417,6 +441,14 @@
     pointer-events: none;
     font-family: var(--font-body, system-ui);
     text-transform: capitalize;
+  }
+
+  .dag-node-superseded {
+    opacity: 0.7;
+  }
+
+  .dag-strikethrough {
+    pointer-events: none;
   }
 
   .dag-edge-label {
