@@ -1,9 +1,9 @@
 # Review: TASK-027 — Merge Dependencies: Atomic Group Transactional Merge
 
 **Reviewer:** Verifier  
-**Round:** R2  
-**Commit:** `0674ff98`  
-**Verdict:** needs-revision
+**Round:** R3  
+**Commit:** `20200afa`  
+**Verdict:** complete
 
 ---
 
@@ -15,13 +15,12 @@
 
 ## R2 Findings
 
-- [-] [process-revision-complete] **F3: Deferred side-effects (F1 fix) have zero test coverage on the success path — no test asserts that per-member analytics events or author notifications are emitted after a successful atomic group merge.** The F1 fix moved analytics and notification emissions from inside the merge loop to a post-loop success block (lines 620-648). This is a new code path. The only test that exercises the success path, `atomic_group_all_members_merge_in_one_cycle` (line 3364), asserts on MR statuses (Merged), queue entry statuses (Merged), and the absence of `AtomicGroupFailed` events — but has zero assertions on the deferred side effects. It does not: (a) query `state.notifications.list_for_user(...)` for either `agent-1` or `agent-2` to verify `notify_mr_merged` was called, or (b) query the analytics repository for `merge_queue.processed` events. If someone accidentally deleted lines 620-648, all tests would still pass. **Fix:** Add assertions to `atomic_group_all_members_merge_in_one_cycle` (or a dedicated test) that verify: (1) each author receives a merge notification after successful group merge, and (2) analytics events are recorded for each merged member with `"atomic_group"` in the payload.
+- [x] [process-revision-complete] **F3: Deferred side-effects (F1 fix) have zero test coverage on the success path — no test asserts that per-member analytics events or author notifications are emitted after a successful atomic group merge.** The F1 fix moved analytics and notification emissions from inside the merge loop to a post-loop success block (lines 620-648). This is a new code path. The only test that exercises the success path, `atomic_group_all_members_merge_in_one_cycle` (line 3364), asserts on MR statuses (Merged), queue entry statuses (Merged), and the absence of `AtomicGroupFailed` events — but has zero assertions on the deferred side effects. It does not: (a) query `state.notifications.list_for_user(...)` for either `agent-1` or `agent-2` to verify `notify_mr_merged` was called, or (b) query the analytics repository for `merge_queue.processed` events. If someone accidentally deleted lines 620-648, all tests would still pass. **Fix:** Add assertions to `atomic_group_all_members_merge_in_one_cycle` (or a dedicated test) that verify: (1) each author receives a merge notification after successful group merge, and (2) analytics events are recorded for each merged member with `"atomic_group"` in the payload. **R3:** Fixed correctly — test now creates agent records with `spawned_by` for notification resolution, asserts 2 analytics events with correct payload fields (`result: "merged"`, `atomic_group: "bundle"`), and asserts both human users receive merge notifications.
 
-## Verification Summary
+## R3 Verification Summary
 
-- F1 structural fix: correct — side effects deferred to post-loop success block
-- F2 structural fix: correct — audience restricted to authors only
-- F2 test: correct — negative assertion verifies workspace member exclusion
-- All 31 merge_processor tests pass
-- Mechanical checks pass: `check-transactional-side-effects.sh`, `check-notification-audience.sh`, `check-event-emission-coverage.sh`, `check-assertionless-tests.sh`
-- R2 gap: the new deferred code path (lines 620-648) is untested — a regression that removes the block would be undetected
+- F3 fix: correct — `atomic_group_all_members_merge_in_one_cycle` now asserts on deferred analytics events (count, payload fields) and author notifications (existence, title content) for both group members
+- Agent records properly created with `spawned_by` to match `notify_mr_merged` resolution logic
+- All mechanical checks pass: `check-transactional-side-effects.sh`, `check-notification-audience.sh`, `check-notification-test-coverage.sh`, `check-event-emission-coverage.sh`, `check-assertionless-tests.sh`
+- All 2024 tests pass (`cargo test --all`: 0 failures)
+- No new findings — task complete
