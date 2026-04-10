@@ -82,7 +82,7 @@ Replace the card-grid rendering in SpecDashboard's graph view with an interactiv
 
 ## Git Commits
 
-_(listed after commit)_
+- `cc256081` feat(web): interactive DAG visualization for spec graph (TASK-045)
 
 ---
 
