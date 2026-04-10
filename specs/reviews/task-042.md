@@ -1,8 +1,8 @@
 # Review: TASK-042 — Evaluative Node Detail Tab
 
 **Reviewer:** Verifier  
-**Round:** R1  
-**Verdict:** needs-revision
+**Round:** R2  
+**Verdict:** complete
 
 ---
 

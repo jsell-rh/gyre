@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-canvas.md` §Evaluative (Interaction)  
 **Depends on:** TASK-029 (lens toggle, complete), TASK-033 (evaluative heat map, complete)  
-**Progress:** `ready-for-review`  
+**Progress:** `complete`  
 **Review:** [specs/reviews/task-042.md](../reviews/task-042.md)
 
 ## Spec Excerpt
