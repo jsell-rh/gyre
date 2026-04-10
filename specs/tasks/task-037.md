@@ -80,4 +80,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `e9b13077` feat(web): add ViewQuery TypeScript types and client-side validation (TASK-037)
