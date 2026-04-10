@@ -245,20 +245,7 @@ fn topological_sort_with_priority(
         .collect();
 
     // Compute in-degree for each node.
-    let mut in_degree: HashMap<String, usize> = HashMap::new();
-    for (node, deps) in graph {
-        in_degree.entry(node.clone()).or_insert(0);
-        for dep in deps {
-            // Only count edges to nodes in the graph.
-            if graph.contains_key(dep) {
-                *in_degree.entry(node.clone()).or_insert(0) += 0; // ensure node exists
-            }
-        }
-    }
-    // Recompute: in-degree = number of in-graph nodes that point to this node.
-    for (node, _) in graph {
-        in_degree.entry(node.clone()).or_insert(0);
-    }
+    // in_deg[node] = number of in-graph dependencies node has (edges INTO node).
     let mut in_deg: HashMap<String, usize> = graph.keys().map(|k| (k.clone(), 0)).collect();
     for (node, deps) in graph {
         for dep in deps {
@@ -450,18 +437,86 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     // Step 3: Topological sort (respecting priority within each tier).
     let sorted = topological_sort_with_priority(&queued_entries, &graph);
 
-    // Step 4: Find the first entry in topological order whose dependencies are
-    // all Merged (not just queued) and whose gates have passed.
-    let entry = {
+    // Step 4: For each entry in topological order, check deps (4a), gates (4b),
+    // and atomic group readiness (4c). Skip entries that aren't ready; select
+    // the first entry that passes all checks.
+    let (entry, mr) = {
         let mut found = None;
         for candidate in &sorted {
-            if dependencies_satisfied(state, &candidate.merge_request_id).await? {
-                found = Some(candidate.clone());
-                break;
+            // Step 4a: Are all dependencies Merged?
+            if !dependencies_satisfied(state, &candidate.merge_request_id).await? {
+                continue;
             }
+
+            // Step 4b: Are all gates passed?
+            match crate::gate_executor::check_gates_for_mr(state, &candidate.merge_request_id).await
+            {
+                Ok(true) => {}         // all gates passed (or no gates)
+                Ok(false) => continue, // gates still running — skip, try next candidate
+                Err(reason) => {
+                    // Gate failed — fail this entry and try next candidate.
+                    warn!(
+                        entry_id = %candidate.id,
+                        reason = %reason,
+                        "quality gate failed during candidate selection, failing entry"
+                    );
+                    state
+                        .merge_queue
+                        .update_status(
+                            &candidate.id,
+                            MergeQueueEntryStatus::Failed,
+                            Some(format!("quality gate failed: {reason}")),
+                        )
+                        .await?;
+                    continue;
+                }
+            }
+
+            // Look up the MR (needed for atomic group check and later processing).
+            let candidate_mr = match state
+                .merge_requests
+                .find_by_id(&candidate.merge_request_id)
+                .await?
+            {
+                Some(mr) => mr,
+                None => {
+                    warn!(mr_id = %candidate.merge_request_id, "MR not found for queue entry, skipping");
+                    state
+                        .merge_queue
+                        .update_status(
+                            &candidate.id,
+                            MergeQueueEntryStatus::Failed,
+                            Some("merge request not found".to_string()),
+                        )
+                        .await?;
+                    continue;
+                }
+            };
+
+            // Step 4c: Is this part of an atomic group? If so, are all members ready?
+            if let Some(ref group) = candidate_mr.atomic_group {
+                match atomic_group_ready(state, group, &candidate_mr.id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        info!(
+                            entry_id = %candidate.id,
+                            group = %group,
+                            "atomic group not ready, skipping to next candidate"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(entry_id = %candidate.id, error = %e, "error checking atomic group, skipping");
+                        continue;
+                    }
+                }
+            }
+
+            found = Some((candidate.clone(), candidate_mr));
+            break;
         }
         match found {
-            Some(e) => e,
+            Some(pair) => pair,
             None => return Ok(()),
         }
     };
@@ -473,27 +528,6 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         .merge_queue
         .update_status(&entry.id, MergeQueueEntryStatus::Processing, None)
         .await?;
-
-    // Look up the merge request
-    let mr = match state
-        .merge_requests
-        .find_by_id(&entry.merge_request_id)
-        .await?
-    {
-        Some(mr) => mr,
-        None => {
-            warn!(mr_id = %entry.merge_request_id, "MR not found for queue entry");
-            state
-                .merge_queue
-                .update_status(
-                    &entry.id,
-                    MergeQueueEntryStatus::Failed,
-                    Some("merge request not found".to_string()),
-                )
-                .await?;
-            return Ok(());
-        }
-    };
 
     // P5: Check dependency health (closed deps, gate failure escalation).
     if handle_dep_health_issues(state, &entry, &mr).await? {
@@ -517,23 +551,8 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     };
 
-    // If this MR is part of an atomic group, ensure all group members are ready.
-    if let Some(ref group) = mr.atomic_group {
-        match atomic_group_ready(state, group, &mr.id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                info!(entry_id = %entry.id, group = %group, "atomic group not ready, requeueing");
-                state
-                    .merge_queue
-                    .update_status(&entry.id, MergeQueueEntryStatus::Queued, None)
-                    .await?;
-                return Ok(());
-            }
-            Err(e) => {
-                warn!(entry_id = %entry.id, error = %e, "error checking atomic group");
-            }
-        }
-    }
+    // Note: Atomic group readiness (step 4c) is already verified in the
+    // selection loop above — no need to re-check here.
 
     // Check spec enforcement policy before merging.
     {
@@ -791,31 +810,8 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
-    // Check quality gates before merging.
-    match crate::gate_executor::check_gates_for_mr(state, &mr.id).await {
-        Ok(true) => {} // all passed or no gates
-        Ok(false) => {
-            // Gates still running — put the entry back to Queued to retry later.
-            info!(entry_id = %entry.id, "quality gates still running, requeueing");
-            state
-                .merge_queue
-                .update_status(&entry.id, MergeQueueEntryStatus::Queued, None)
-                .await?;
-            return Ok(());
-        }
-        Err(reason) => {
-            warn!(entry_id = %entry.id, reason = %reason, "quality gate failed, blocking merge");
-            state
-                .merge_queue
-                .update_status(
-                    &entry.id,
-                    MergeQueueEntryStatus::Failed,
-                    Some(format!("quality gate failed: {reason}")),
-                )
-                .await?;
-            return Ok(());
-        }
-    }
+    // Note: Quality gates (step 4b) are already verified in the selection
+    // loop above — no need to re-check here.
 
     // Phase 3 (TASK-008): Constraint enforcement — block merge if attestation
     // chain is invalid or any constraint fails. Evaluated before the merge so we
@@ -2578,5 +2574,224 @@ mod tests {
         let sorted = topological_sort_with_priority(&entries, &graph);
         assert!(sorted.is_empty());
         assert_eq!(compute_max_chain_depth(&graph), 0);
+    }
+
+    /// F1 scenario: When the highest-priority candidate has pending gates, the
+    /// selection loop should skip it and process the next candidate whose gates
+    /// have passed. Before the fix, the loop selected the first deps-satisfied
+    /// candidate and only checked gates after the loop — if gates were pending,
+    /// the entry was requeued and subsequent candidates were never tried.
+    #[tokio::test]
+    async fn selection_skips_gates_pending_tries_next_candidate() {
+        use gyre_domain::{GateResult, GateType, QualityGate};
+
+        let state = test_state();
+
+        // Create a repo for the MRs.
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // Create two independent MRs (no dependencies between them).
+        let mut mr_a = gyre_domain::MergeRequest::new(
+            Id::new("mr-a"),
+            repo.id.clone(),
+            "MR A (gates pending)",
+            "feat/a",
+            "main",
+            1000,
+        );
+        mr_a.workspace_id = Id::new("ws-1");
+        state.merge_requests.create(&mr_a).await.unwrap();
+
+        let mut mr_b = gyre_domain::MergeRequest::new(
+            Id::new("mr-b"),
+            repo.id.clone(),
+            "MR B (gates passed)",
+            "feat/b",
+            "main",
+            1000,
+        );
+        mr_b.workspace_id = Id::new("ws-1");
+        state.merge_requests.create(&mr_b).await.unwrap();
+
+        // Enqueue: mr-a with higher priority, mr-b with lower priority.
+        enqueue_mr(&state, "mr-a", 100, 1000).await;
+        enqueue_mr(&state, "mr-b", 50, 1001).await;
+
+        // Create a required quality gate.
+        let gate = QualityGate {
+            id: Id::new("gate-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            created_at: 1000,
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        // mr-a has a pending gate result → check_gates_for_mr returns Ok(false).
+        let gate_result_a = GateResult {
+            id: Id::new("gr-a"),
+            gate_id: Id::new("gate-1"),
+            mr_id: Id::new("mr-a"),
+            status: GateStatus::Pending,
+            output: None,
+            started_at: None,
+            finished_at: None,
+        };
+        state.gate_results.save(&gate_result_a).await.unwrap();
+
+        // mr-b has NO gate results → check_gates_for_mr returns Ok(true) (all passed).
+        // (No gate result means no required gates are pending/failed.)
+
+        // Run a merge-processor cycle.
+        // event-emission:ok — this test verifies candidate selection behavior (gates pending → skip),
+        // not merge-time event emission which is covered by other tests.
+        process_next(&state).await.unwrap();
+
+        // Verify: mr-b was selected and merged (not mr-a).
+        let updated_b = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-b"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_b.status,
+            MrStatus::Merged,
+            "mr-b should be merged because it was the next candidate after mr-a was skipped"
+        );
+
+        // Verify: mr-a was NOT processed — still Open status.
+        let updated_a = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-a"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_a.status,
+            MrStatus::Open,
+            "mr-a should remain Open because its gates are pending"
+        );
+
+        // Verify queue states: mr-b's entry should be Merged, mr-a's should still be Queued.
+        let entry_a = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-a"))
+            .await
+            .unwrap()
+            .expect("mr-a entry should exist");
+        assert_eq!(
+            entry_a.status,
+            MergeQueueEntryStatus::Queued,
+            "mr-a queue entry should remain Queued"
+        );
+
+        let entry_b = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-b"))
+            .await
+            .unwrap()
+            .expect("mr-b entry should exist");
+        assert_eq!(
+            entry_b.status,
+            MergeQueueEntryStatus::Merged,
+            "mr-b queue entry should be Merged"
+        );
+    }
+
+    /// Verify that a candidate with failed gates is marked Failed during selection
+    /// and the next candidate is tried.
+    #[tokio::test]
+    async fn selection_fails_gates_failed_entry_tries_next() {
+        use gyre_domain::{GateResult, GateType, QualityGate};
+
+        let state = test_state();
+
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // Create two independent MRs.
+        let mut mr_a = gyre_domain::MergeRequest::new(
+            Id::new("mr-a"),
+            repo.id.clone(),
+            "MR A (gate failed)",
+            "feat/a",
+            "main",
+            1000,
+        );
+        mr_a.workspace_id = Id::new("ws-1");
+        state.merge_requests.create(&mr_a).await.unwrap();
+
+        let mut mr_b = gyre_domain::MergeRequest::new(
+            Id::new("mr-b"),
+            repo.id.clone(),
+            "MR B (no gates)",
+            "feat/b",
+            "main",
+            1000,
+        );
+        mr_b.workspace_id = Id::new("ws-1");
+        state.merge_requests.create(&mr_b).await.unwrap();
+
+        enqueue_mr(&state, "mr-a", 100, 1000).await;
+        enqueue_mr(&state, "mr-b", 50, 1001).await;
+
+        // Create a required gate and a failed result for mr-a.
+        let gate = QualityGate {
+            id: Id::new("gate-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            created_at: 1000,
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        let gate_result_a = GateResult {
+            id: Id::new("gr-a"),
+            gate_id: Id::new("gate-1"),
+            mr_id: Id::new("mr-a"),
+            status: GateStatus::Failed,
+            output: Some("test failure".to_string()),
+            started_at: Some(1000),
+            finished_at: Some(1001),
+        };
+        state.gate_results.save(&gate_result_a).await.unwrap();
+
+        // event-emission:ok — this test verifies candidate selection behavior (gate failed → fail entry,
+        // try next), not merge-time event emission which is covered by other tests.
+        process_next(&state).await.unwrap();
+
+        // mr-a should be Failed (gate failure during selection).
+        let entry_a = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-a"))
+            .await
+            .unwrap()
+            .expect("mr-a entry should exist");
+        assert_eq!(
+            entry_a.status,
+            MergeQueueEntryStatus::Failed,
+            "mr-a queue entry should be Failed due to gate failure"
+        );
+
+        // mr-b should be merged (selected after mr-a was failed).
+        let updated_b = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-b"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_b.status,
+            MrStatus::Merged,
+            "mr-b should be merged after mr-a was failed due to gate failure"
+        );
     }
 }
