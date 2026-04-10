@@ -347,12 +347,16 @@
       }
       case 'view_query': {
         const query = msg.query ?? msg.view_query;
-        if (!query || typeof query !== 'object' || !query.scope) break;
 
         // Validate the view query before applying
         const validation = validateViewQuery(query);
         if (!validation.valid) {
           console.warn('[ExplorerChat] Invalid view query:', validation.errors);
+          // Finalize any in-flight streaming text before showing the error
+          if (streamingText.trim()) {
+            messages = capMessages([...messages, { id: nextMsgId++, role: 'assistant', content: streamingText, timestamp: Date.now() }]);
+            streamingText = '';
+          }
           messages = capMessages([...messages, {
             id: nextMsgId++,
             role: 'assistant',
