@@ -102,6 +102,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dep edge; **Admin only** (H-13, M22.4) |
 | `GET` | `/api/v1/repos/{id}/blast-radius` | BFS transitive dependents -- repos affected if this one changes (M22.4) |
 | `GET` | `/api/v1/dependencies/graph` | Full tenant-wide dependency DAG: `{nodes, edges}` (M22.4) |
+| `GET` | `/api/v1/workspaces/{id}/dependency-graph` | Workspace-scoped dependency DAG: `{nodes, edges}` — includes edges where at least one endpoint is in the workspace (TASK-046) |
 | `GET` | `/api/v1/dependencies/stale` | Stale dependencies tenant-wide (optional `?workspace_id=` filter) — `[{id, source_repo_id, target_repo_id, dependency_type, source_artifact, target_artifact, version_pinned, target_version_current, version_drift, detection_method, status, detected_at, last_verified_at}]` (TASK-021) |
 | `GET` | `/api/v1/dependencies/breaking` | List unacknowledged breaking changes tenant-wide — `[{id, dependency_edge_id, source_repo_id, commit_sha, description, detected_at, acknowledged, acknowledged_by?, acknowledged_at?}]` (TASK-020) |
 | `POST` | `/api/v1/dependencies/breaking/{id}/acknowledge` | Acknowledge a breaking change, clearing any merge block; returns 204 No Content (TASK-020) |

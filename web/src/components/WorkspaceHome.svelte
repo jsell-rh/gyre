@@ -17,6 +17,8 @@
   import { relativeTime, formatDuration } from '../lib/timeFormat.js';
   import { specStatusTooltip, taskStatusTooltip, mrStatusTooltip, agentStatusTooltip, SPEC_STATUS_ICONS } from '../lib/statusTooltips.js';
   import RepoCard from './RepoCard.svelte';
+  import DependencyHealthCard from './DependencyHealthCard.svelte';
+  import DependencyGraph from './DependencyGraph.svelte';
   import Modal from '../lib/Modal.svelte';
   import Icon from '../lib/Icon.svelte';
   import CopyableId from '../lib/CopyableId.svelte';
@@ -375,6 +377,60 @@
     }
   }
 
+
+  // ── Dependency health: state + load ─────────────────────────────────────
+  let depHealthLoading = $state(true);
+  let depHealthData = $state({ totalWithDeps: 0, staleCount: 0, breakingCount: 0 });
+  let depGraphOpen = $state(false);
+  let depGraphScope = $state('workspace');
+  let depGraphNodes = $state([]);
+  let depGraphEdges = $state([]);
+
+  async function loadDepHealth() {
+    if (!workspace?.id) return;
+    depHealthLoading = true;
+    try {
+      const [graphData, staleEdges, breakingList] = await Promise.all([
+        api.workspaceDependencyGraph(workspace.id).catch(() => ({ nodes: [], edges: [] })),
+        api.staleDependencies(workspace.id).catch(() => []),
+        api.breakingChanges().catch(() => []),
+      ]);
+      const nodesWithEdges = new Set();
+      for (const e of graphData.edges ?? []) {
+        nodesWithEdges.add(e.source);
+        nodesWithEdges.add(e.target);
+      }
+      // Count repos with stale deps (unique source repos among stale edges)
+      const staleRepos = new Set((staleEdges ?? []).map(e => e.source_repo_id));
+      depGraphNodes = graphData.nodes ?? [];
+      depGraphEdges = graphData.edges ?? [];
+      depHealthData = {
+        totalWithDeps: nodesWithEdges.size,
+        staleCount: staleRepos.size,
+        breakingCount: (breakingList ?? []).filter(b => !b.acknowledged).length,
+      };
+    } catch {
+      depHealthData = { totalWithDeps: 0, staleCount: 0, breakingCount: 0 };
+      depGraphNodes = [];
+      depGraphEdges = [];
+    } finally {
+      depHealthLoading = false;
+    }
+  }
+
+  async function handleDepScopeChange(newScope) {
+    depGraphScope = newScope;
+    try {
+      const data = newScope === 'tenant'
+        ? await api.dependencyGraph()
+        : await api.workspaceDependencyGraph(workspace?.id);
+      depGraphNodes = data.nodes ?? [];
+      depGraphEdges = data.edges ?? [];
+    } catch {
+      depGraphNodes = [];
+      depGraphEdges = [];
+    }
+  }
 
   // ── Notification inline actions ────────────────────────────────────────
   async function handleApproveSpec(n) {
@@ -961,6 +1017,7 @@
     loadActivity();
     loadBudget();
     loadMergeQueue();
+    loadDepHealth();
   });
 </script>
 
@@ -1205,6 +1262,28 @@
             {/if}
           {/if}
 
+          <!-- Dependency Graph (TASK-046) — toggleable via health card -->
+          {#if depGraphOpen}
+            <section class="dep-graph-section" data-testid="section-dep-graph">
+              <div class="section-header-row">
+                <h2 class="section-heading">Dependency Graph</h2>
+                <button class="section-btn section-btn-compact" onclick={() => { depGraphOpen = false; }}>Close</button>
+              </div>
+              <div class="dep-graph-wrapper">
+                <DependencyGraph
+                  nodes={depGraphNodes}
+                  edges={depGraphEdges}
+                  scope={depGraphScope}
+                  onScopeChange={handleDepScopeChange}
+                  onNodeClick={(node) => {
+                    const repo = repos.find(r => r.id === node.repo_id);
+                    if (repo) onSelectRepo?.(repo);
+                  }}
+                />
+              </div>
+            </section>
+          {/if}
+
           <!-- Repos (primary content — the main thing users interact with) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
@@ -1341,6 +1420,17 @@
             </div>
           {/if}
 
+          <!-- Dependency Health (TASK-046) -->
+          <div class="sidebar-widget" data-testid="section-dep-health">
+            <DependencyHealthCard
+              totalWithDeps={depHealthData.totalWithDeps}
+              staleCount={depHealthData.staleCount}
+              breakingCount={depHealthData.breakingCount}
+              loading={depHealthLoading}
+              onViewGraph={() => { depGraphOpen = !depGraphOpen; }}
+            />
+          </div>
+
           <!-- Recently Shipped -->
           {#if !mrsLoading}
             {@const recentlyMerged = wsMrs.filter(m => m.status === 'merged').sort((a, b) => (b.merged_at ?? b.updated_at ?? 0) - (a.merged_at ?? a.updated_at ?? 0)).slice(0, 5)}
@@ -1464,6 +1554,17 @@
   .section-header-actions {
     display: flex;
     gap: var(--space-1);
+  }
+
+  .dep-graph-section {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: var(--space-3, 12px);
+  }
+
+  .dep-graph-wrapper {
+    height: 500px;
+    min-height: 400px;
   }
 
   .repos-section {

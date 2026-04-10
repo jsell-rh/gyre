@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §UI (lines 228–232)
 
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 **Depends on:** TASK-020 (breaking change detection), TASK-021 (version drift tracking)
 

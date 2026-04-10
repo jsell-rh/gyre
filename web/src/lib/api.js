@@ -493,9 +493,12 @@ export const api = {
     request(`/personas/resolve?slug=${encodeURIComponent(slug)}&scope_kind=${encodeURIComponent(scopeKind)}&scope_id=${encodeURIComponent(scopeId)}`),
   // Dependency graph (M22.5)
   dependencyGraph: () => request('/dependencies/graph'),
+  workspaceDependencyGraph: (wsId) => request(`/workspaces/${wsId}/dependency-graph`),
   repoDependencies: (id) => request(`/repos/${id}/dependencies`),
   repoDependents: (id) => request(`/repos/${id}/dependents`),
   repoBlastRadius: (id) => request(`/repos/${id}/blast-radius`),
+  staleDependencies: (wsId) => request(`/dependencies/stale${wsId ? '?workspace_id=' + encodeURIComponent(wsId) : ''}`),
+  breakingChanges: () => request('/dependencies/breaking'),
   // User profile (M22.5)
   me: () => request('/users/me'),
   updateMe: (data) =>

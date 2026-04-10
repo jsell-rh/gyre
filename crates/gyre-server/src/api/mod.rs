@@ -549,6 +549,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(dependencies::blast_radius),
         )
         .route("/api/v1/dependencies/graph", get(dependencies::get_graph))
+        // Workspace-scoped dependency graph (TASK-046)
+        .route(
+            "/api/v1/workspaces/:id/dependency-graph",
+            get(dependencies::get_workspace_dependency_graph),
+        )
         // Stale dependencies (TASK-021)
         .route(
             "/api/v1/dependencies/stale",

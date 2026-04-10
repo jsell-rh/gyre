@@ -922,7 +922,9 @@ mod tests {
         mr_id: &str,
     ) {
         use gyre_common::Id;
-        use gyre_domain::{Agent, AgentCommit, AgentStatus, AgentWorktree, MergeRequest, Repository};
+        use gyre_domain::{
+            Agent, AgentCommit, AgentStatus, AgentWorktree, MergeRequest, Repository,
+        };
 
         // Create repo if it doesn't exist.
         if state

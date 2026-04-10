@@ -274,12 +274,7 @@ impl GitOpsPort for ConfigurableGitOps {
         Ok("0000000000000000000000000000000000000000".to_string())
     }
 
-    async fn reset_branch(
-        &self,
-        _repo_path: &str,
-        _branch: &str,
-        _target_sha: &str,
-    ) -> Result<()> {
+    async fn reset_branch(&self, _repo_path: &str, _branch: &str, _target_sha: &str) -> Result<()> {
         Ok(())
     }
 

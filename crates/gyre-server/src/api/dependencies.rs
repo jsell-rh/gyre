@@ -288,6 +288,80 @@ pub async fn get_graph(
     Ok(Json(GraphResponse { nodes, edges }))
 }
 
+/// GET /api/v1/workspaces/{id}/dependency-graph
+/// Returns the dependency graph scoped to repos within a workspace.
+/// Includes edges where at least one endpoint (source or target) is in the workspace.
+pub async fn get_workspace_dependency_graph(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<GraphResponse>, ApiError> {
+    let workspace_id = Id::new(&id);
+
+    state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+
+    let ws_repos = state
+        .repos
+        .list_by_workspace(&workspace_id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let ws_repo_ids: HashSet<String> = ws_repos.iter().map(|r| r.id.to_string()).collect();
+
+    let all_edges = state
+        .dependencies
+        .list_all()
+        .await
+        .map_err(ApiError::Internal)?;
+
+    // Keep edges where at least one endpoint is in the workspace.
+    let filtered_edges: Vec<DependencyEdge> = all_edges
+        .into_iter()
+        .filter(|e| {
+            ws_repo_ids.contains(&e.source_repo_id.to_string())
+                || ws_repo_ids.contains(&e.target_repo_id.to_string())
+        })
+        .collect();
+
+    // Collect all repo IDs referenced by filtered edges.
+    let mut repo_ids: HashSet<String> = HashSet::new();
+    for edge in &filtered_edges {
+        repo_ids.insert(edge.source_repo_id.to_string());
+        repo_ids.insert(edge.target_repo_id.to_string());
+    }
+
+    let mut nodes = Vec::new();
+    for rid in repo_ids {
+        let name = state
+            .repos
+            .find_by_id(&Id::new(&rid))
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.name)
+            .unwrap_or_else(|| rid.clone());
+        nodes.push(GraphNode { repo_id: rid, name });
+    }
+    nodes.sort_by(|a, b| a.repo_id.cmp(&b.repo_id));
+
+    let edges = filtered_edges
+        .into_iter()
+        .map(|e| GraphEdgeResponse {
+            id: e.id.to_string(),
+            source: e.source_repo_id.to_string(),
+            target: e.target_repo_id.to_string(),
+            edge_type: e.dependency_type,
+            status: e.status,
+        })
+        .collect();
+
+    Ok(Json(GraphResponse { nodes, edges }))
+}
+
 /// GET /api/v1/repos/{id}/blast-radius
 /// BFS from the specified repo to find all transitive dependents.
 pub async fn blast_radius(
