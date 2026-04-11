@@ -1,0 +1,7 @@
+# Comparative test claim exemptions (JS/TS)
+# File paths (partial match), one per line. Tests in listed files are
+# excluded from check-comparative-test-claims-js.sh.
+#
+# Format: partial file path (e.g., ExplorerCanvas-performance.test.js)
+# Add exemptions only when the test's comparative claim is intentionally
+# aspirational AND a comment in the test body explains what IS verified.
