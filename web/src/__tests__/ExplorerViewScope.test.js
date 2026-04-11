@@ -79,7 +79,7 @@ describe('ExplorerView scope branching', () => {
   });
 
   it('renders repo graph view at repo scope', async () => {
-    // Don't set repoId to avoid triggering MoldableView (canvas) render
+    // Don't set repoId to avoid triggering ExplorerCanvas render
     const { getByText } = render(ExplorerView, {
       props: { scope: { type: 'repo' } },
     });

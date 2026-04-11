@@ -6,7 +6,7 @@
  *
  * These tests verify that:
  * 1. view_spec with `concept` triggers concept search
- * 2. view_spec with `node_types` sets nodeTypeFilter (passed to MoldableView)
+ * 2. view_spec with `node_types` sets nodeTypeFilter (passed to ExplorerCanvas)
  * 3. The explanation text is still displayed
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
