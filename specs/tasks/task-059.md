@@ -59,3 +59,5 @@ When working on this task:
 7. On completion, update progress to `ready-for-review` and list git commits below
 
 ## Git Commits
+
+- `7ec53ae0` feat(provenance): derive attestation_level from workload data and remove Phase 2 guards (TASK-059)
