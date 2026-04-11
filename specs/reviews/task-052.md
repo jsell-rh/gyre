@@ -42,3 +42,30 @@
 - [-] [process-revision-complete] **F7: Dead import — PipelineOverview imported but never rendered in WorkspaceHome.** `WorkspaceHome.svelte:23` imports `PipelineOverview from './PipelineOverview.svelte'` but no `<PipelineOverview>` tag appears anywhere in WorkspaceHome's template. The F4 fix added the breaking change button directly to WorkspaceHome's own inline pipeline bar (the `<button class="pipeline-breaking-btn">` at line ~1138), making the import dead code. The PipelineOverview component itself remains unreachable — it is never rendered by any component in the application (`grep -r '<PipelineOverview' web/src/` returns zero hits). The `breakingCount` and `onImpactAnalysis` props added to PipelineOverview by this task are unreachable dead code. Fix: either remove the dead import (and accept that PipelineOverview is a pre-existing dead component), or actually render `<PipelineOverview>` in WorkspaceHome and remove the duplicate inline button.
 
 - [-] [process-revision-complete] **F8: PipelineOverview.test.js tests dead code — WorkspaceHome's live breaking change button untested.** `PipelineOverview.test.js` has 3 breaking-change tests (shows button when `breakingCount > 0`, hides when 0, calls `onImpactAnalysis` on click) — but PipelineOverview is never rendered in the app, so these tests validate unreachable code. The WorkspaceHome breaking change button (the actual, functional trigger added by the F4 fix) has zero test coverage: no test in `WorkspaceHomeSections.test.js`, `WorkspaceHome.test.js`, or any other file verifies (a) the button appears when `depHealthData.breakingCount > 0`, (b) clicking it calls `openImpactAnalysis()` and opens ImpactAnalysisModal, or (c) the button is hidden when `breakingCount === 0`. The acceptance criterion "Component tests verify rendering and interaction" is not satisfied for the merge queue trigger point — the tests exist but cover the dead component, not the live surface.
+
+---
+
+# TASK-052 Review — R3
+
+**Reviewer:** Verifier  
+**Date:** 2026-04-11  
+**Verdict:** `complete` (0 findings)
+
+## R2 Finding Resolution
+
+- F7: **Resolved.** Dead `import PipelineOverview` removed from WorkspaceHome.svelte (commit `0b6c0f81`). TASK-052-added breaking change props (`breakingCount`, `onImpactAnalysis`), button template, and CSS removed from PipelineOverview.svelte. PipelineOverview.svelte itself retained as a pre-existing component (not introduced by this task).
+- F8: **Resolved.** Three dedicated tests added to `WorkspaceHomeSections.test.js` covering the live breaking change button in WorkspaceHome: (a) shows button with correct count when workspace has unacknowledged breaking changes, (b) button hidden when `breakingCount === 0`, (c) clicking button opens ImpactAnalysisModal (verifies `role="dialog"` and impact-specific testids appear). Dead breaking-change tests removed from PipelineOverview.test.js.
+
+## Verification Summary
+
+All 8 findings from R1 and R2 are resolved. Implementation satisfies all acceptance criteria:
+
+- ImpactAnalysisModal renders blast radius summary (total, direct, transitive counts) and dependency tree
+- Per-repo health table shows: repo name, pinned version, current version, drift, test status
+- Cascade test results shown when available (per-repo pass/fail via `cascadeTestResults` API)
+- "Trigger Cascade Tests" button functional with onclick handler calling `api.triggerCascadeTests`
+- Modal accessible from merge queue (WorkspaceHome pipeline breaking button) and MR detail (DetailPanel "Check Impact" button)
+- Acknowledgment flow: per-dependent "Acknowledge" button for `block` policy, correlating breaking changes to specific dependents via `edgeToDependent` map
+- Graceful degradation: blast radius without breaking changes, cascade tests "not configured" when TASK-022 unavailable, "--" for drift when TASK-021 unavailable, workspace ID resolved via repo lookup fallback
+- 20 component tests pass (ImpactAnalysisModal), 3 integration tests pass (WorkspaceHome breaking button), 2 tests pass (DetailPanel trigger)
+- `npm test` passes (TASK-052 tests; pre-existing failures in ExplorerViewAskViewSpec and MoldableViewNodeTypeFilter are unrelated)
