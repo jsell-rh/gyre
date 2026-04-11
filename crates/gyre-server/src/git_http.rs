@@ -2176,6 +2176,40 @@ pub(crate) async fn reconcile_dependencies(
     }
 }
 
+/// List all files in a repo at a given SHA that end with the specified extension.
+///
+/// Uses `git ls-tree -r --name-only <sha>` to enumerate all files, then filters
+/// by the given extension suffix (e.g., ".proto"). Used by multi-file detection
+/// methods that must scan ALL files of a type — not just changed ones — to produce
+/// a complete edge set for reconciliation (see TASK-048 F4).
+async fn list_files_by_extension(
+    git_bin: &str,
+    repo_path: &str,
+    sha: &str,
+    extension: &str,
+) -> Vec<String> {
+    let out = Command::new(git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("ls-tree")
+        .arg("-r")
+        .arg("--name-only")
+        .arg(sha)
+        .output()
+        .await;
+
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .filter(|line| line.ends_with(extension))
+        .map(|line| line.to_string())
+        .collect()
+}
+
 /// Post-push auto-detection: scan changed files for dependency declarations.
 ///
 /// On pushes to the default branch, reads dependency files at the new SHA and creates
@@ -2440,27 +2474,31 @@ pub(crate) async fn detect_dependencies_on_push(
     }
 
     // --- Protobuf imports ---
+    // Proto is a multi-file detection method (many *.proto files per repo), so when
+    // triggered we must scan ALL .proto files — not just changed ones. Scanning only
+    // changed files while inserting ProtoImport into ran_methods would cause
+    // reconciliation to falsely orphan edges from unchanged .proto files (TASK-048 F4).
     if has_proto {
         ran_methods.insert(DetectionMethod::ProtoImport);
-        for changed_file in &changed {
-            if changed_file.ends_with(".proto") {
-                if let Some(content) =
-                    crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, changed_file)
-                        .await
-                {
-                    let refs = detect_proto_imports(&content, &repo_names);
-                    for ref_name in &refs {
-                        if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
-                            if target_repo.id.as_str() != repo_id {
-                                detected_edges.push(DetectedEdge {
-                                    target_repo_id: target_repo.id.to_string(),
-                                    source_artifact: changed_file.to_string(),
-                                    target_artifact: ref_name.to_string(),
-                                    dep_type: DependencyType::Schema,
-                                    method: DetectionMethod::ProtoImport,
-                                    version: None,
-                                });
-                            }
+        // Enumerate all .proto files in the repo at the pushed commit.
+        let all_proto_files = list_files_by_extension(&git_bin, repo_path, new_sha, ".proto").await;
+        for proto_file in &all_proto_files {
+            if let Some(content) =
+                crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, proto_file)
+                    .await
+            {
+                let refs = detect_proto_imports(&content, &repo_names);
+                for ref_name in &refs {
+                    if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
+                        if target_repo.id.as_str() != repo_id {
+                            detected_edges.push(DetectedEdge {
+                                target_repo_id: target_repo.id.to_string(),
+                                source_artifact: proto_file.to_string(),
+                                target_artifact: ref_name.to_string(),
+                                dep_type: DependencyType::Schema,
+                                method: DetectionMethod::ProtoImport,
+                                version: None,
+                            });
                         }
                     }
                 }

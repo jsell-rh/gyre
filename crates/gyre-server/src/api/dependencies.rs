@@ -2315,4 +2315,151 @@ import "google/protobuf/empty.proto";
         assert_eq!(pkg_edge.status, DependencyStatus::Active);
         assert_eq!(pkg_edge.target_artifact, "repo-c");
     }
+
+    /// F4 regression test: when ProtoImport detection runs, ALL proto file edges
+    /// must be in the detected set — not just edges from changed proto files.
+    /// If only changed proto edges are included, unchanged proto edges will be
+    /// falsely orphaned because ProtoImport is in ran_methods.
+    #[tokio::test]
+    async fn test_reconcile_proto_all_files_required_for_complete_detection() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+        let repo_c = create_repo(&state, "repo-c").await;
+
+        // Push 1: both a.proto and b.proto are scanned. Two ProtoImport edges created.
+        let detected_1 = vec![
+            DetectedEdge {
+                target_repo_id: repo_b.to_string(),
+                source_artifact: "a.proto".to_string(),
+                target_artifact: "auth-service".to_string(),
+                dep_type: DependencyType::Schema,
+                method: gyre_domain::DetectionMethod::ProtoImport,
+                version: None,
+            },
+            DetectedEdge {
+                target_repo_id: repo_c.to_string(),
+                source_artifact: "b.proto".to_string(),
+                target_artifact: "payment-service".to_string(),
+                dep_type: DependencyType::Schema,
+                method: gyre_domain::DetectionMethod::ProtoImport,
+                version: None,
+            },
+        ];
+        let ran_1 = methods_set(&[gyre_domain::DetectionMethod::ProtoImport]);
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_1, &ran_1).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 2);
+
+        // Push 2: a.proto changes (minor edit). If the detector only scans changed
+        // files, only a.proto's edge is in detected_edges. With ProtoImport in
+        // ran_methods, reconciliation would orphan b.proto's edge — a false orphan.
+        //
+        // The CORRECT behavior (after F4 fix): the detector scans ALL proto files,
+        // so both edges are in detected_edges and nothing is orphaned.
+        // Simulate correct behavior: both edges are detected (all proto files scanned).
+        let detected_2 = vec![
+            DetectedEdge {
+                target_repo_id: repo_b.to_string(),
+                source_artifact: "a.proto".to_string(),
+                target_artifact: "auth-service".to_string(),
+                dep_type: DependencyType::Schema,
+                method: gyre_domain::DetectionMethod::ProtoImport,
+                version: None,
+            },
+            DetectedEdge {
+                target_repo_id: repo_c.to_string(),
+                source_artifact: "b.proto".to_string(),
+                target_artifact: "payment-service".to_string(),
+                dep_type: DependencyType::Schema,
+                method: gyre_domain::DetectionMethod::ProtoImport,
+                version: None,
+            },
+        ];
+        let ran_2 = methods_set(&[gyre_domain::DetectionMethod::ProtoImport]);
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_2, &ran_2).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 2);
+
+        // Both edges remain Active — b.proto's edge was NOT orphaned.
+        let a_edge = edges
+            .iter()
+            .find(|e| e.source_artifact == "a.proto")
+            .unwrap();
+        assert_eq!(a_edge.status, DependencyStatus::Active);
+        assert_eq!(a_edge.target_artifact, "auth-service");
+
+        let b_edge = edges
+            .iter()
+            .find(|e| e.source_artifact == "b.proto")
+            .unwrap();
+        assert_eq!(b_edge.status, DependencyStatus::Active);
+        assert_eq!(b_edge.target_artifact, "payment-service");
+    }
+
+    /// F4 negative test: when ProtoImport runs but only includes ONE proto file's
+    /// edges (simulating the old buggy behavior), the other proto edge IS orphaned.
+    /// This confirms the reconciliation mechanism actually detects the problem.
+    #[tokio::test]
+    async fn test_reconcile_proto_incomplete_scan_orphans_missing_edges() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+        let repo_c = create_repo(&state, "repo-c").await;
+
+        // Push 1: both proto edges created.
+        let detected_1 = vec![
+            DetectedEdge {
+                target_repo_id: repo_b.to_string(),
+                source_artifact: "a.proto".to_string(),
+                target_artifact: "auth-service".to_string(),
+                dep_type: DependencyType::Schema,
+                method: gyre_domain::DetectionMethod::ProtoImport,
+                version: None,
+            },
+            DetectedEdge {
+                target_repo_id: repo_c.to_string(),
+                source_artifact: "b.proto".to_string(),
+                target_artifact: "payment-service".to_string(),
+                dep_type: DependencyType::Schema,
+                method: gyre_domain::DetectionMethod::ProtoImport,
+                version: None,
+            },
+        ];
+        let ran_1 = methods_set(&[gyre_domain::DetectionMethod::ProtoImport]);
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_1, &ran_1).await;
+
+        // Push 2 (simulating OLD buggy behavior): ProtoImport ran, but only a.proto
+        // was scanned. b.proto's edge is missing from detected_edges.
+        let detected_2 = vec![DetectedEdge {
+            target_repo_id: repo_b.to_string(),
+            source_artifact: "a.proto".to_string(),
+            target_artifact: "auth-service".to_string(),
+            dep_type: DependencyType::Schema,
+            method: gyre_domain::DetectionMethod::ProtoImport,
+            version: None,
+        }];
+        let ran_2 = methods_set(&[gyre_domain::DetectionMethod::ProtoImport]);
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_2, &ran_2).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 2);
+
+        // a.proto's edge is still Active.
+        let a_edge = edges
+            .iter()
+            .find(|e| e.source_artifact == "a.proto")
+            .unwrap();
+        assert_eq!(a_edge.status, DependencyStatus::Active);
+
+        // b.proto's edge was orphaned — this is the bug the F4 fix prevents by
+        // scanning ALL proto files, not just changed ones.
+        let b_edge = edges
+            .iter()
+            .find(|e| e.source_artifact == "b.proto")
+            .unwrap();
+        assert_eq!(b_edge.status, DependencyStatus::Orphaned);
+    }
 }
