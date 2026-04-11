@@ -560,13 +560,22 @@ pub async fn approve_spec(
                     forbidden_paths: vec![],
                 });
 
+                // Populate meta_spec_set_sha from the workspace's current
+                // meta-spec set (§2.2). When no set is configured, remains
+                // empty string (graceful fallback).
+                let meta_spec_set_sha = crate::compute_meta_spec_set_sha(
+                    state.meta_spec_sets.as_ref(),
+                    &gyre_common::Id::new(&workspace_id),
+                )
+                .await;
+
                 let input_content = gyre_common::InputContent {
                     spec_path: spec_path.clone(),
                     spec_sha: req.sha.clone(),
                     workspace_id: workspace_id.clone(),
                     repo_id: repo_id.clone(),
                     persona_constraints,
-                    meta_spec_set_sha: String::new(),
+                    meta_spec_set_sha,
                     scope: scope.clone(),
                 };
 
@@ -1607,15 +1616,8 @@ pub async fn dry_run_constraints(
     });
 
     // Build a representative agent context from workspace state.
-    let meta_spec_set_sha = match state.meta_spec_sets.get(&ws_id).await {
-        Ok(Some(json)) => {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(json.as_bytes());
-            hex::encode(hasher.finalize())
-        }
-        _ => String::new(),
-    };
+    let meta_spec_set_sha =
+        crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
 
     let agent_ctx = AgentContext {
         id: "dry-run-preview".to_string(),
@@ -3127,6 +3129,129 @@ specs:
                         .verify(content_hash.as_ref(), &signed.signature)
                         .expect("SignedInput.signature must verify against KeyBinding public key");
                 }
+            }
+            _ => panic!("expected SignedInput, got DerivedInput"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_populates_meta_spec_set_sha_from_workspace() {
+        let state = test_state();
+        let ws_id = "ws-meta-test";
+        let spec_path = "system/design-principles.md";
+
+        // Seed a spec with a known workspace_id.
+        state
+            .spec_ledger
+            .save(&SpecLedgerEntry {
+                path: spec_path.to_string(),
+                title: "Design Principles".to_string(),
+                owner: "user:jsell".to_string(),
+                kind: None,
+                current_sha: "c".repeat(40),
+                approval_mode: "human_only".to_string(),
+                approval_status: ApprovalStatus::Pending,
+                linked_tasks: vec![],
+                linked_mrs: vec![],
+                drift_status: "unknown".to_string(),
+                created_at: 1700000000,
+                updated_at: 1700000000,
+                repo_id: Some("repo-meta".to_string()),
+                workspace_id: Some(ws_id.to_string()),
+            })
+            .await
+            .unwrap();
+
+        // Seed a meta-spec set for the workspace.
+        let meta_set_json = r#"{"workspace_id":"ws-meta-test","personas":{"security":{}}}"#;
+        state
+            .meta_spec_sets
+            .upsert(&gyre_common::Id::new(ws_id), meta_set_json)
+            .await
+            .unwrap();
+
+        // Compute the expected SHA (same algorithm as compute_meta_spec_set_sha).
+        let expected_sha = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(meta_set_json.as_bytes());
+            hex::encode(hasher.finalize())
+        };
+
+        // Generate a real Ed25519 keypair.
+        let (pkcs8_bytes, pub_key) = generate_test_ed25519_keypair();
+
+        // Pre-create a KeyBinding for the approver.
+        let kb = gyre_common::KeyBinding {
+            public_key: pub_key.clone(),
+            user_identity: "user:system".to_string(),
+            issuer: "http://localhost:3000".to_string(),
+            trust_anchor_id: "tenant-idp".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+        state.key_bindings.store("default", &kb).await.unwrap();
+
+        // Pre-compute the InputContent — must match what the server builds,
+        // including the workspace's meta_spec_set_sha.
+        let input_content = gyre_common::InputContent {
+            spec_path: spec_path.to_string(),
+            spec_sha: "c".repeat(40),
+            workspace_id: ws_id.to_string(),
+            repo_id: "repo-meta".to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: expected_sha.clone(),
+            scope: gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+        let user_content_signature = sign_input_content(&pkcs8_bytes, &input_content);
+
+        let body = serde_json::json!({
+            "sha": "c".repeat(40),
+            "user_content_signature": user_content_signature
+        });
+
+        let router = crate::api::api_router().with_state(state.clone());
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Verify the stored attestation has the correct meta_spec_set_sha.
+        let attestations = state
+            .chain_attestations
+            .find_by_repo("repo-meta", 0, u64::MAX)
+            .await
+            .unwrap();
+        assert!(
+            !attestations.is_empty(),
+            "should have stored a SignedInput attestation"
+        );
+
+        let att = &attestations[0];
+        match &att.input {
+            gyre_common::AttestationInput::Signed(signed) => {
+                assert_eq!(
+                    signed.content.meta_spec_set_sha, expected_sha,
+                    "meta_spec_set_sha should be SHA256 of workspace's meta-spec set JSON"
+                );
+                assert!(
+                    !signed.content.meta_spec_set_sha.is_empty(),
+                    "meta_spec_set_sha should be non-empty when workspace has a meta-spec set"
+                );
             }
             _ => panic!("expected SignedInput, got DerivedInput"),
         }

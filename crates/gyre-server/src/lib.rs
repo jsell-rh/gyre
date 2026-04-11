@@ -396,6 +396,27 @@ pub struct AppState {
     pub ws_tickets: auth::WsTicketStore,
 }
 
+/// Compute the SHA-256 hash of a workspace's meta-spec set JSON.
+///
+/// Returns the hex-encoded hash, or an empty string if no meta-spec set is
+/// configured for the workspace. Used at spec approval time (to populate
+/// `InputContent.meta_spec_set_sha`) and during constraint evaluation (to
+/// populate `AgentContext.meta_spec_set_sha`).
+pub(crate) async fn compute_meta_spec_set_sha(
+    meta_spec_sets: &dyn gyre_ports::MetaSpecSetRepository,
+    workspace_id: &Id,
+) -> String {
+    use sha2::{Digest, Sha256};
+    match meta_spec_sets.get(workspace_id).await {
+        Ok(Some(json)) => {
+            let mut hasher = Sha256::new();
+            hasher.update(json.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+        _ => String::new(),
+    }
+}
+
 /// Helper: sign a bus message and return (base64_signature, key_id).
 fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, String) {
     use sha2::{Digest, Sha256};

@@ -14,7 +14,6 @@ use gyre_common::{AttestationInput, Id, NotificationType, VerificationResult};
 use gyre_domain::constraint_evaluator::{
     self, Action, AgentContext, ConstraintInput, DiffStatsContext, OutputContext, TargetContext,
 };
-use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::AppState;
@@ -945,14 +944,8 @@ pub(crate) async fn build_agent_context(
     // The agent runs in this workspace, so its meta-spec set is the workspace's
     // current set. If no set is configured, the SHA is empty (correctly fails
     // against a non-empty input SHA, indicating the set has changed).
-    let meta_spec_set_sha = match state.meta_spec_sets.get(workspace_id).await {
-        Ok(Some(json)) => {
-            let mut hasher = Sha256::new();
-            hasher.update(json.as_bytes());
-            hex::encode(hasher.finalize())
-        }
-        _ => String::new(),
-    };
+    let meta_spec_set_sha =
+        crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), workspace_id).await;
 
     // Workload attestation: populate container_id, image_hash, and stack_hash
     // from the KV-cached workload attestation record if available.
@@ -1638,8 +1631,9 @@ mod tests {
     }
 
     /// Compute the SHA256 of a meta-spec set JSON string (same algorithm as
-    /// `build_agent_context`).
+    /// `compute_meta_spec_set_sha`).
     fn meta_spec_sha(json: &str) -> String {
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(json.as_bytes());
         hex::encode(hasher.finalize())

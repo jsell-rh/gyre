@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §2.2 (`InputContent.meta_spec_set_sha`), §3.2 (strategy-implied constraint: `agent.meta_spec_set_sha == input.meta_spec_set_sha`)  
 **Depends on:** TASK-006 (key binding + signed input — complete)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -69,3 +69,5 @@ When working on this task:
 5. On completion, update progress to `ready-for-review` and list git commits below
 
 ## Git Commits
+
+- `feat(provenance): populate meta_spec_set_sha in InputContent at spec approval time (TASK-058)`
