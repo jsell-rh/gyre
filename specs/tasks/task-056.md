@@ -2,7 +2,7 @@
 
 **Spec reference:** `human-system-interface.md` §8 (Inbox Detail, priority 9: Abandoned Branch)
 **Depends on:** None (notification system, MR port, job registry all exist)
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -96,4 +96,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(server): implement abandoned branch detection job (TASK-056)`

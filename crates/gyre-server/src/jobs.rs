@@ -302,14 +302,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 interval_secs: 86400,
                 enabled: true,
             },
-            |_state| async move {
-                // Stub: real impl queries open MRs where source_branch starts with
-                // "spec-edit/" and updated_at < now - 604800 (7 days in seconds),
-                // then creates priority-9 notifications for workspace Admin/Developer
-                // members per the HSI §8 Inbox priority table.
-                tracing::debug!("abandoned_branch_check: stub, no-op");
-                Ok(())
-            },
+            |state| async move { crate::abandoned_branch::run_once(&state).await },
         )
         .await;
 
