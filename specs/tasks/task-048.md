@@ -2,8 +2,8 @@
 
 **Spec reference:** `dependency-graph.md` §Automatic Detection
 **Depends on:** None (builds on M22.4 base dep-graph infrastructure — done)
-**Progress:** `ready-for-review`
-**Review:** [R1](../reviews/task-048.md) — 3 findings
+**Progress:** `needs-revision`
+**Review:** [R2](../reviews/task-048.md) — 1 finding (3 R1 findings resolved)
 
 ## Spec Excerpt
 
