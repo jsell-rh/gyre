@@ -1248,6 +1248,58 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
+    // TASK-061 (§7.2): Populate attestation chain ABAC subject attributes
+    // and evaluate policies with action=merge, resource_type=attestation.
+    // Audit-only — logged but not enforced (merge proceeds regardless).
+    // Look up attestation chain via the source branch head commit or agent task.
+    {
+        let mut chain_found = false;
+
+        // Try by source branch head commit first.
+        if let Some(ref source_sha) =
+            crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.source_branch))
+                .await
+        {
+            if let Ok(Some(chain_att)) = state.chain_attestations.find_by_commit(source_sha).await {
+                let chain = state
+                    .chain_attestations
+                    .load_chain(&chain_att.id)
+                    .await
+                    .unwrap_or_default();
+                evaluate_attestation_abac(state, &chain, &chain_att, &mr, &entry, &repo, "merge")
+                    .await;
+                chain_found = true;
+            }
+        }
+
+        // Fallback: look up via agent's current task.
+        if !chain_found {
+            if let Some(ref author_id) = mr.author_agent_id {
+                if let Ok(Some(agent)) = state.agents.find_by_id(author_id).await {
+                    if let Some(ref task_id) = agent.current_task_id {
+                        if let Ok(atts) = state
+                            .chain_attestations
+                            .find_by_task(task_id.as_str())
+                            .await
+                        {
+                            if let Some(leaf) = atts.iter().max_by_key(|a| a.metadata.chain_depth) {
+                                let chain = state
+                                    .chain_attestations
+                                    .load_chain(&leaf.id)
+                                    .await
+                                    .unwrap_or_default();
+                                evaluate_attestation_abac(
+                                    state, &chain, leaf, &mr, &entry, &repo, "merge",
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Attempt the merge
     let result = state
         .git_ops
@@ -1815,6 +1867,52 @@ pub(crate) async fn report_cascade_test_result(
             "cascade test failed, follow-up task created"
         );
     }
+}
+
+/// TASK-061 (§7.2): Evaluate ABAC policies with attestation chain subject attributes.
+///
+/// Builds an `AttributeContext` from the attestation chain (chain_depth,
+/// root_signer, constraint_count) and evaluates policies with the given
+/// action and resource_type=attestation. Audit-only — result is logged.
+async fn evaluate_attestation_abac(
+    state: &AppState,
+    chain: &[gyre_common::Attestation],
+    leaf: &gyre_common::Attestation,
+    mr: &MergeRequest,
+    entry: &MergeQueueEntry,
+    repo: &gyre_domain::Repository,
+    action: &str,
+) {
+    let chain_depth = leaf.metadata.chain_depth;
+    let signer = gyre_domain::root_signer(chain);
+    let cc = gyre_domain::constraint_count(chain) as i64;
+
+    let mut ctx = crate::policy_engine::AttributeContext::default();
+    ctx.set("subject.type", "agent");
+    if let Some(ref author) = mr.author_agent_id {
+        ctx.set("subject.id", author.as_str());
+    }
+    ctx.set_number("subject.chain_depth", chain_depth as i64);
+    ctx.set_number("subject.constraint_count", cc);
+    if let Some(ref rs) = signer {
+        ctx.set("subject.root_signer", rs);
+    }
+    ctx.set("resource.type", "attestation");
+    ctx.set("resource.repo_id", repo.id.as_str());
+
+    let policies = state.policies.list().await.unwrap_or_default();
+    let eval_result = crate::policy_engine::evaluate(policies, &ctx, action, "attestation");
+
+    tracing::info!(
+        entry_id = %entry.id,
+        mr_id = %mr.id,
+        chain_depth = chain_depth,
+        root_signer = ?signer,
+        constraint_count = cc,
+        decision = ?eval_result.effect,
+        matched_policy = ?eval_result.matched_policy,
+        "attestation ABAC evaluation for {action} (audit-only)"
+    );
 }
 
 #[cfg(test)]

@@ -59,7 +59,9 @@ pub use agent::{Agent, AgentError, AgentStatus, AgentUsage, DisconnectedBehavior
 pub use agent_card::AgentCard;
 pub use agent_tracking::{AgentCommit, AgentWorktree, LoopConfig, Session};
 pub use analytics::{AnalyticsEvent, CostEntry};
-pub use attestation::{AttestationBundle, AttestationGateResult, MergeAttestation};
+pub use attestation::{
+    constraint_count, root_signer, AttestationBundle, AttestationGateResult, MergeAttestation,
+};
 pub use audit::{AuditEvent, AuditEventType};
 pub use budget::{BudgetCallRecord, BudgetConfig, BudgetUsage};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};

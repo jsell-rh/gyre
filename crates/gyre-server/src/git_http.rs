@@ -587,6 +587,47 @@ pub async fn git_receive_pack(
                             );
                         }
                     }
+
+                    // TASK-061 (§7.2): Populate attestation chain ABAC subject
+                    // attributes and evaluate policies with action=push,
+                    // resource_type=attestation. Audit-only — logged but not enforced.
+                    if let Some(leaf) = attestations.last() {
+                        let chain = state_clone
+                            .chain_attestations
+                            .load_chain(&leaf.id)
+                            .await
+                            .unwrap_or_default();
+                        let chain_depth = leaf.metadata.chain_depth;
+                        let signer = gyre_domain::root_signer(&chain);
+                        let cc = gyre_domain::constraint_count(&chain) as i64;
+
+                        let mut ctx = crate::policy_engine::AttributeContext::default();
+                        ctx.set("subject.type", "agent");
+                        ctx.set("subject.id", &agent_id);
+                        ctx.set("subject.tenant_id", &push_tenant_id);
+                        ctx.set_number("subject.chain_depth", chain_depth as i64);
+                        ctx.set_number("subject.constraint_count", cc);
+                        if let Some(ref rs) = signer {
+                            ctx.set("subject.root_signer", rs);
+                        }
+                        ctx.set("resource.type", "attestation");
+                        ctx.set("resource.repo_id", &repo_id_clone);
+
+                        let policies = state_clone.policies.list().await.unwrap_or_default();
+                        let eval_result =
+                            crate::policy_engine::evaluate(policies, &ctx, "push", "attestation");
+
+                        tracing::info!(
+                            task_id = %tid,
+                            repo_id = %repo_id_clone,
+                            chain_depth = chain_depth,
+                            root_signer = ?signer,
+                            constraint_count = cc,
+                            decision = ?eval_result.effect,
+                            matched_policy = ?eval_result.matched_policy,
+                            "attestation ABAC evaluation for push (audit-only)"
+                        );
+                    }
                 }
                 Ok(_) => {
                     tracing::debug!(

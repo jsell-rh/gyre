@@ -2,10 +2,10 @@
 
 **Spec reference:** `authorization-provenance.md` §7.2
 
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 **Git commits:**
-_(none yet)_
+_(will be added after commit)_
 
 ---
 
