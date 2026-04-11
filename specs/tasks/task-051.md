@@ -74,3 +74,4 @@ When working on this task:
 ## Git Commits
 
 - `798a0647` feat(ui): add spec links impact analysis view (TASK-051)
+- `de992204` fix(ui): address TASK-051 R1 findings — impact analysis correctness
