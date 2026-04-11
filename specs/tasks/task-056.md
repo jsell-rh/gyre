@@ -2,7 +2,8 @@
 
 **Spec reference:** `human-system-interface.md` §8 (Inbox Detail, priority 9: Abandoned Branch)
 **Depends on:** None (notification system, MR port, job registry all exist)
-**Progress:** `ready-for-review`
+**Progress:** `complete`
+**Review:** [`specs/reviews/task-056.md`](../reviews/task-056.md) — R1, complete (0 findings)
 
 ## Spec Excerpt
 
