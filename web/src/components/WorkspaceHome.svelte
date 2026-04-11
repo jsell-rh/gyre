@@ -20,7 +20,6 @@
   import DependencyHealthCard from './DependencyHealthCard.svelte';
   import DependencyGraph from './DependencyGraph.svelte';
   import MergeQueueGraph from './MergeQueueGraph.svelte';
-  import PipelineOverview from './PipelineOverview.svelte';
   import ImpactAnalysisModal from './ImpactAnalysisModal.svelte';
   import Modal from '../lib/Modal.svelte';
   import Icon from '../lib/Icon.svelte';

@@ -22,45 +22,6 @@ describe('PipelineOverview', () => {
     expect(overview.textContent).toContain('Merged');
   });
 
-  it('shows breaking change button when breakingCount > 0', () => {
-    const { container } = render(PipelineOverview, {
-      props: {
-        breakingCount: 3,
-      },
-    });
-
-    const breakingBtn = container.querySelector('[data-testid="pipeline-impact-btn"]');
-    expect(breakingBtn).toBeTruthy();
-    expect(breakingBtn.textContent).toContain('3');
-    expect(breakingBtn.textContent).toContain('Breaking');
-  });
-
-  it('does not show breaking change button when breakingCount is 0', () => {
-    const { container } = render(PipelineOverview, {
-      props: {
-        breakingCount: 0,
-      },
-    });
-
-    const breakingBtn = container.querySelector('[data-testid="pipeline-impact-btn"]');
-    expect(breakingBtn).toBeFalsy();
-  });
-
-  it('calls onImpactAnalysis when breaking change button is clicked', async () => {
-    const onImpactAnalysis = vi.fn();
-    const { container } = render(PipelineOverview, {
-      props: {
-        breakingCount: 2,
-        onImpactAnalysis,
-      },
-    });
-
-    const breakingBtn = container.querySelector('[data-testid="pipeline-impact-btn"]');
-    expect(breakingBtn).toBeTruthy();
-    await fireEvent.click(breakingBtn);
-    expect(onImpactAnalysis).toHaveBeenCalledOnce();
-  });
-
   it('calls onStageClick when a pipeline stage is clicked', async () => {
     const onStageClick = vi.fn();
     const { container } = render(PipelineOverview, {

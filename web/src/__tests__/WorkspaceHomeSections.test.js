@@ -51,6 +51,11 @@ vi.mock('../lib/api.js', () => ({
     dependencyGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     staleDependencies: vi.fn().mockResolvedValue([]),
     breakingChanges: vi.fn().mockResolvedValue([]),
+    repoBlastRadius: vi.fn().mockResolvedValue({ direct: [], transitive: [], total: 0 }),
+    repoDependents: vi.fn().mockResolvedValue([]),
+    workspaceDependencyPolicy: vi.fn().mockResolvedValue(null),
+    cascadeTestResults: vi.fn().mockResolvedValue(null),
+    acknowledgeBreakingChange: vi.fn().mockResolvedValue({}),
   },
 }));
 
@@ -1021,6 +1026,93 @@ describe('WorkspaceHome — external node click feedback', () => {
       expect.objectContaining({ id: 'repo-1', name: 'payment-api' })
     );
     expect(toastError).not.toHaveBeenCalled();
+  });
+});
+
+// ── Breaking change button — merge queue trigger (F8 fix) ─────────────────────
+
+describe('WorkspaceHome — breaking change button in pipeline bar', () => {
+  it('shows breaking change button when workspace has unacknowledged breaking changes', async () => {
+    api.workspaceRepos.mockResolvedValue([
+      { id: 'repo-1', name: 'payment-api', active_spec_count: 0, active_agents: 0 },
+    ]);
+    api.workspaceDependencyGraph.mockResolvedValue({
+      nodes: [{ repo_id: 'repo-1', name: 'payment-api' }],
+      edges: [{ id: 'e1', source: 'repo-1', target: 'repo-1', type: 'code', status: 'active' }],
+    });
+    api.staleDependencies.mockResolvedValue([]);
+    api.breakingChanges.mockResolvedValue([
+      { id: 'bc-1', source_repo_id: 'repo-1', acknowledged: false },
+      { id: 'bc-2', source_repo_id: 'repo-1', acknowledged: false },
+    ]);
+
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+
+    await waitFor(() => {
+      const btn = container.querySelector('[data-testid="pipeline-impact-btn"]');
+      expect(btn).toBeTruthy();
+      expect(btn.textContent).toContain('2');
+      expect(btn.textContent).toContain('Breaking');
+    });
+  });
+
+  it('does not show breaking change button when breakingCount is 0', async () => {
+    api.workspaceRepos.mockResolvedValue([
+      { id: 'repo-1', name: 'payment-api', active_spec_count: 0, active_agents: 0 },
+    ]);
+    api.workspaceDependencyGraph.mockResolvedValue({
+      nodes: [{ repo_id: 'repo-1', name: 'payment-api' }],
+      edges: [],
+    });
+    api.staleDependencies.mockResolvedValue([]);
+    api.breakingChanges.mockResolvedValue([]);
+
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+
+    // Wait for dependency health card to finish loading (no longer shows skeleton)
+    await waitFor(() => {
+      const card = container.querySelector('[data-testid="dep-health-card"]');
+      expect(card).toBeTruthy();
+      expect(container.querySelector('[data-testid="dep-health-loading"]')).toBeFalsy();
+    });
+
+    // Breaking button should NOT be present
+    const btn = container.querySelector('[data-testid="pipeline-impact-btn"]');
+    expect(btn).toBeFalsy();
+  });
+
+  it('opens impact analysis modal when breaking change button is clicked', async () => {
+    api.workspaceRepos.mockResolvedValue([
+      { id: 'repo-1', name: 'payment-api', active_spec_count: 0, active_agents: 0 },
+    ]);
+    api.workspaceDependencyGraph.mockResolvedValue({
+      nodes: [{ repo_id: 'repo-1', name: 'payment-api' }],
+      edges: [{ id: 'e1', source: 'repo-1', target: 'repo-1', type: 'code', status: 'active' }],
+    });
+    api.staleDependencies.mockResolvedValue([]);
+    api.breakingChanges.mockResolvedValue([
+      { id: 'bc-1', source_repo_id: 'repo-1', acknowledged: false },
+    ]);
+
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+
+    // Wait for the breaking change button to appear
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="pipeline-impact-btn"]')).toBeTruthy();
+    });
+
+    // Click the button
+    await fireEvent.click(container.querySelector('[data-testid="pipeline-impact-btn"]'));
+
+    // The ImpactAnalysisModal should open — it renders inside a Modal with role="dialog"
+    // containing impact analysis content (loading state or summary)
+    await waitFor(() => {
+      const modal = container.querySelector('[role="dialog"]');
+      expect(modal).toBeTruthy();
+      // Verify it's the impact analysis modal by checking for its loading or summary testid
+      const impactContent = container.querySelector('[data-testid="impact-loading"], [data-testid="impact-summary"], [data-testid="impact-empty"]');
+      expect(impactContent).toBeTruthy();
+    });
   });
 });
 
