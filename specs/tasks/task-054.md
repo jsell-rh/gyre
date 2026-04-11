@@ -53,4 +53,4 @@ When working on this task:
 
 ## Git Commits
 
-(listed after commit)
+- `6e752e6d` test(conversations): add integration tests for GET /api/v1/conversations/:sha (TASK-054)
