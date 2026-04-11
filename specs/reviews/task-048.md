@@ -48,7 +48,7 @@ All three R1 findings have been properly addressed:
 
 ## Findings
 
-- [ ] **F4: Proto detection scans only CHANGED `.proto` files, but `ran_methods` marks `ProtoImport` as having run — causing false orphaning of ProtoImport edges from unchanged `.proto` files.**
+- [-] [process-revision-complete] **F4: Proto detection scans only CHANGED `.proto` files, but `ran_methods` marks `ProtoImport` as having run — causing false orphaning of ProtoImport edges from unchanged `.proto` files.**
   In `git_http.rs:2442–2469`, when any `.proto` file changes, `DetectionMethod::ProtoImport` is inserted into `ran_methods`, but only the **changed** `.proto` files are scanned. Every other detection method (CargoToml, PackageJson, GoMod, PyprojectToml, ManifestLink, OpenApiRef, McpToolRef) reads the **full** current-state file when triggered — producing a complete edge set for that method. Proto is the only method that scans a subset of its source files (only changed `.proto` files) while claiming the entire method ran.
   **Scenario:**
   1. Repo has `a.proto` (imports `auth-service`) and `b.proto` (imports `payment-service`). Both edges exist as `ProtoImport` edges.
