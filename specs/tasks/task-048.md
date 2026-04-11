@@ -92,3 +92,4 @@ When working on this task:
 ## Git Commits
 
 - `9db04e6a` feat(deps): add cross-repo dependency auto-detection pipeline (TASK-048)
+- `2909df15` fix(deps): prevent TASK-048 flaw classes — tuple confusion, scope mismatch, spec transcription
