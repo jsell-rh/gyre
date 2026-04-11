@@ -72,3 +72,4 @@ When working on this task:
 - `feat(ui): add responsive layout and large graph performance (TASK-053)`
 - `fix(process): add JS/TS mirrored-logic and tautological assertion checks (TASK-053)`
 - `fix(ui): address R1 review findings — viewport sync, real tests (TASK-053)`
+- `fix(ui): address R2 review findings — comparative tests, dead code, edge assertions (TASK-053)`
