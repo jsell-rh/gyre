@@ -1695,21 +1695,93 @@ serde = "1.0"
     }
 
     #[test]
-    fn test_detect_go_mod_single_replace() {
+    fn test_detect_go_mod_single_require() {
+        let content = r#"
+module example.com/my-service
+
+go 1.21
+
+require forge.internal/workspace/shared-lib v1.0.0
+"#;
+        let deps = crate::git_http::detect_go_mod_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, "forge.internal/workspace/shared-lib");
+        assert_eq!(deps[0].1, Some("v1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_detect_go_mod_block_require() {
         let content = r#"
 module example.com/my-service
 
 go 1.21
 
 require (
+    forge.internal/workspace/lib-a v1.2.0
+    forge.internal/workspace/lib-b v0.3.0
     github.com/gin-gonic/gin v1.9.0
 )
+"#;
+        let deps = crate::git_http::detect_go_mod_deps(content);
+        assert_eq!(deps.len(), 3);
+        assert_eq!(deps[0].0, "forge.internal/workspace/lib-a");
+        assert_eq!(deps[0].1, Some("v1.2.0".to_string()));
+        assert_eq!(deps[1].0, "forge.internal/workspace/lib-b");
+        assert_eq!(deps[1].1, Some("v0.3.0".to_string()));
+        // External deps are also returned; filtering by known repos happens in
+        // detect_dependencies_on_push, not in the parser.
+        assert_eq!(deps[2].0, "github.com/gin-gonic/gin");
+        assert_eq!(deps[2].1, Some("v1.9.0".to_string()));
+    }
+
+    #[test]
+    fn test_detect_go_mod_require_with_inline_comment() {
+        let content = r#"
+module example.com/my-service
+
+go 1.21
+
+require (
+    forge.internal/workspace/lib-a v1.0.0 // indirect
+)
+"#;
+        let deps = crate::git_http::detect_go_mod_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, "forge.internal/workspace/lib-a");
+        assert_eq!(deps[0].1, Some("v1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_detect_go_mod_replace_supplementary() {
+        // replace directives with local paths are still detected as supplementary.
+        let content = r#"
+module example.com/my-service
+
+go 1.21
 
 replace example.com/shared-lib v1.0.0 => ../shared-lib
 "#;
         let deps = crate::git_http::detect_go_mod_deps(content);
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].0, "example.com/shared-lib");
+        assert_eq!(deps[0].1, Some("v1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_detect_go_mod_replace_dedup_with_require() {
+        // If a module appears in both require and replace, it should only appear once.
+        let content = r#"
+module example.com/my-service
+
+go 1.21
+
+require forge.internal/workspace/shared-lib v1.0.0
+
+replace forge.internal/workspace/shared-lib v1.0.0 => ../shared-lib
+"#;
+        let deps = crate::git_http::detect_go_mod_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, "forge.internal/workspace/shared-lib");
         assert_eq!(deps[0].1, Some("v1.0.0".to_string()));
     }
 
@@ -1735,12 +1807,24 @@ replace (
 
     #[test]
     fn test_detect_go_mod_no_local_replace() {
+        // Remote-only replace (no local path) should not be detected via replace.
         let content = r#"
 module example.com/my-service
 
 go 1.21
 
 replace example.com/foo v1.0.0 => example.com/bar v1.1.0
+"#;
+        let deps = crate::git_http::detect_go_mod_deps(content);
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_detect_go_mod_empty_file() {
+        let content = r#"
+module example.com/my-service
+
+go 1.21
 "#;
         let deps = crate::git_http::detect_go_mod_deps(content);
         assert!(deps.is_empty());
@@ -1941,26 +2025,38 @@ import "google/protobuf/empty.proto";
 
     // ── Reconciliation tests ──────────────────────────────────────────
 
+    use crate::git_http::DetectedEdge;
+
+    /// Helper: build a `ran_methods` set from a slice of detection methods.
+    fn methods_set(
+        methods: &[gyre_domain::DetectionMethod],
+    ) -> std::collections::HashSet<gyre_domain::DetectionMethod> {
+        methods.iter().cloned().collect()
+    }
+
     #[tokio::test]
     async fn test_reconcile_creates_new_edges() {
         let state = setup();
         let repo_a = create_repo(&state, "repo-a").await;
         let repo_b = create_repo(&state, "repo-b").await;
 
-        let detected = vec![(
-            repo_b.to_string(),
-            "Cargo.toml".to_string(),
-            DependencyType::Code,
-            gyre_domain::DetectionMethod::CargoToml,
-            Some("1.0.0".to_string()),
-        )];
+        let detected = vec![DetectedEdge {
+            target_repo_id: repo_b.to_string(),
+            source_artifact: "Cargo.toml".to_string(),
+            target_artifact: "repo-b".to_string(),
+            dep_type: DependencyType::Code,
+            method: gyre_domain::DetectionMethod::CargoToml,
+            version: Some("1.0.0".to_string()),
+        }];
+        let ran = methods_set(&[gyre_domain::DetectionMethod::CargoToml]);
 
-        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected).await;
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected, &ran).await;
 
         let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].target_repo_id, repo_b);
         assert_eq!(edges[0].source_artifact, "Cargo.toml");
+        assert_eq!(edges[0].target_artifact, "repo-b");
         assert_eq!(edges[0].version_pinned, Some("1.0.0".to_string()));
         assert_eq!(edges[0].status, DependencyStatus::Active);
     }
@@ -1985,15 +2081,11 @@ import "google/protobuf/empty.proto";
         state.dependencies.save(&edge).await.unwrap();
 
         // Reconcile with empty detection (dep no longer found).
-        let detected: Vec<(
-            String,
-            String,
-            DependencyType,
-            gyre_domain::DetectionMethod,
-            Option<String>,
-        )> = Vec::new();
+        // CargoToml detection ran but found nothing.
+        let detected: Vec<DetectedEdge> = Vec::new();
+        let ran = methods_set(&[gyre_domain::DetectionMethod::CargoToml]);
 
-        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected).await;
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected, &ran).await;
 
         let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
         assert_eq!(edges.len(), 1);
@@ -2021,15 +2113,17 @@ import "google/protobuf/empty.proto";
         state.dependencies.save(&edge).await.unwrap();
 
         // Reconcile with updated version.
-        let detected = vec![(
-            repo_b.to_string(),
-            "Cargo.toml".to_string(),
-            DependencyType::Code,
-            gyre_domain::DetectionMethod::CargoToml,
-            Some("2.0.0".to_string()),
-        )];
+        let detected = vec![DetectedEdge {
+            target_repo_id: repo_b.to_string(),
+            source_artifact: "Cargo.toml".to_string(),
+            target_artifact: "repo-b".to_string(),
+            dep_type: DependencyType::Code,
+            method: gyre_domain::DetectionMethod::CargoToml,
+            version: Some("2.0.0".to_string()),
+        }];
+        let ran = methods_set(&[gyre_domain::DetectionMethod::CargoToml]);
 
-        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected).await;
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected, &ran).await;
 
         let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
         assert_eq!(edges.len(), 1);
@@ -2057,15 +2151,10 @@ import "google/protobuf/empty.proto";
         state.dependencies.save(&edge).await.unwrap();
 
         // Reconcile with no detected edges — Manual edge should NOT be orphaned.
-        let detected: Vec<(
-            String,
-            String,
-            DependencyType,
-            gyre_domain::DetectionMethod,
-            Option<String>,
-        )> = Vec::new();
+        let detected: Vec<DetectedEdge> = Vec::new();
+        let ran = methods_set(&[gyre_domain::DetectionMethod::CargoToml]);
 
-        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected).await;
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected, &ran).await;
 
         let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
         assert_eq!(edges.len(), 1);
@@ -2083,40 +2172,45 @@ import "google/protobuf/empty.proto";
         let repo_b = create_repo(&state, "repo-b").await;
         let repo_c = create_repo(&state, "repo-c").await;
 
-        // First push: detect B and C.
+        // First push: detect B and C via package.json.
         let detected_1 = vec![
-            (
-                repo_b.to_string(),
-                "package.json".to_string(),
-                DependencyType::Code,
-                gyre_domain::DetectionMethod::PackageJson,
-                None,
-            ),
-            (
-                repo_c.to_string(),
-                "package.json".to_string(),
-                DependencyType::Code,
-                gyre_domain::DetectionMethod::PackageJson,
-                Some("^1.0.0".to_string()),
-            ),
+            DetectedEdge {
+                target_repo_id: repo_b.to_string(),
+                source_artifact: "package.json".to_string(),
+                target_artifact: "repo-b".to_string(),
+                dep_type: DependencyType::Code,
+                method: gyre_domain::DetectionMethod::PackageJson,
+                version: None,
+            },
+            DetectedEdge {
+                target_repo_id: repo_c.to_string(),
+                source_artifact: "package.json".to_string(),
+                target_artifact: "repo-c".to_string(),
+                dep_type: DependencyType::Code,
+                method: gyre_domain::DetectionMethod::PackageJson,
+                version: Some("^1.0.0".to_string()),
+            },
         ];
+        let ran_1 = methods_set(&[gyre_domain::DetectionMethod::PackageJson]);
 
-        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_1).await;
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_1, &ran_1).await;
 
         let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
         assert_eq!(edges.len(), 2);
         assert!(edges.iter().all(|e| e.status == DependencyStatus::Active));
 
         // Second push: only B detected (C removed from package.json).
-        let detected_2 = vec![(
-            repo_b.to_string(),
-            "package.json".to_string(),
-            DependencyType::Code,
-            gyre_domain::DetectionMethod::PackageJson,
-            None,
-        )];
+        let detected_2 = vec![DetectedEdge {
+            target_repo_id: repo_b.to_string(),
+            source_artifact: "package.json".to_string(),
+            target_artifact: "repo-b".to_string(),
+            dep_type: DependencyType::Code,
+            method: gyre_domain::DetectionMethod::PackageJson,
+            version: None,
+        }];
+        let ran_2 = methods_set(&[gyre_domain::DetectionMethod::PackageJson]);
 
-        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_2).await;
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_2, &ran_2).await;
 
         let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
         assert_eq!(edges.len(), 2);
@@ -2149,19 +2243,76 @@ import "google/protobuf/empty.proto";
         state.dependencies.save(&edge).await.unwrap();
 
         // Re-detect the same edge.
-        let detected = vec![(
-            repo_b.to_string(),
-            "go.mod".to_string(),
-            DependencyType::Code,
-            gyre_domain::DetectionMethod::GoMod,
-            Some("v1.5.0".to_string()),
-        )];
+        let detected = vec![DetectedEdge {
+            target_repo_id: repo_b.to_string(),
+            source_artifact: "go.mod".to_string(),
+            target_artifact: "forge.internal/workspace/repo-b".to_string(),
+            dep_type: DependencyType::Code,
+            method: gyre_domain::DetectionMethod::GoMod,
+            version: Some("v1.5.0".to_string()),
+        }];
+        let ran = methods_set(&[gyre_domain::DetectionMethod::GoMod]);
 
-        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected).await;
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected, &ran).await;
 
         let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].status, DependencyStatus::Active);
         assert_eq!(edges[0].version_pinned, Some("v1.5.0".to_string()));
+    }
+
+    /// F2 regression test: a push that only touches package.json must NOT orphan
+    /// edges from Cargo.toml detection (Cargo.toml wasn't scanned).
+    #[tokio::test]
+    async fn test_reconcile_does_not_orphan_edges_from_unscanned_methods() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+        let repo_c = create_repo(&state, "repo-c").await;
+
+        // Push 1: detect repo-b via CargoToml.
+        let detected_1 = vec![DetectedEdge {
+            target_repo_id: repo_b.to_string(),
+            source_artifact: "Cargo.toml".to_string(),
+            target_artifact: "repo-b".to_string(),
+            dep_type: DependencyType::Code,
+            method: gyre_domain::DetectionMethod::CargoToml,
+            version: Some("1.0.0".to_string()),
+        }];
+        let ran_1 = methods_set(&[gyre_domain::DetectionMethod::CargoToml]);
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_1, &ran_1).await;
+
+        // Push 2: only package.json changed — detect repo-c via PackageJson.
+        // Cargo.toml was NOT scanned (not in ran_methods).
+        let detected_2 = vec![DetectedEdge {
+            target_repo_id: repo_c.to_string(),
+            source_artifact: "package.json".to_string(),
+            target_artifact: "repo-c".to_string(),
+            dep_type: DependencyType::Code,
+            method: gyre_domain::DetectionMethod::PackageJson,
+            version: None,
+        }];
+        // Only PackageJson ran — CargoToml did NOT run.
+        let ran_2 = methods_set(&[gyre_domain::DetectionMethod::PackageJson]);
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_2, &ran_2).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 2);
+
+        // The CargoToml edge should still be Active (not orphaned).
+        let cargo_edge = edges
+            .iter()
+            .find(|e| e.detection_method == gyre_domain::DetectionMethod::CargoToml)
+            .unwrap();
+        assert_eq!(cargo_edge.status, DependencyStatus::Active);
+        assert_eq!(cargo_edge.target_artifact, "repo-b");
+
+        // The PackageJson edge should also be Active.
+        let pkg_edge = edges
+            .iter()
+            .find(|e| e.detection_method == gyre_domain::DetectionMethod::PackageJson)
+            .unwrap();
+        assert_eq!(pkg_edge.status, DependencyStatus::Active);
+        assert_eq!(pkg_edge.target_artifact, "repo-c");
     }
 }

@@ -78,7 +78,7 @@ pub enum DependencyType {
 }
 
 /// How the dependency was detected.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum DetectionMethod {
     CargoToml,

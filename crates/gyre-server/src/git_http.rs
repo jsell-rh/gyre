@@ -1784,27 +1784,68 @@ pub fn detect_package_json_deps(content: &str) -> Vec<(String, Option<String>)> 
     results
 }
 
-/// Parse `go.mod` for `replace` directives pointing to local paths.
+/// Parse `go.mod` for `require` directives referencing Gyre modules.
 ///
-/// Returns `(module_path, version)` tuples. Only `replace` directives with local
-/// filesystem paths (starting with `./` or `../`) are returned.
+/// Per dependency-graph.md §1: "go.mod -> extract require directives referencing
+/// Gyre modules". The forge matches module paths against known repos in the tenant.
+///
+/// Also parses `replace` directives with local paths as a supplementary detection
+/// path (local `replace` directives indicate in-development cross-repo references).
+///
+/// Returns `(module_path, version)` tuples.
 pub fn detect_go_mod_deps(content: &str) -> Vec<(String, Option<String>)> {
     let mut results = Vec::new();
+    let mut in_require_block = false;
     let mut in_replace_block = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
 
+        // Skip comments and empty lines.
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+
+        // Handle block `require (` ... `)` syntax.
+        if trimmed == "require (" {
+            in_require_block = true;
+            continue;
+        }
         // Handle block `replace (` ... `)` syntax.
         if trimmed == "replace (" {
             in_replace_block = true;
             continue;
         }
-        if in_replace_block && trimmed == ")" {
+        if (in_require_block || in_replace_block) && trimmed == ")" {
+            in_require_block = false;
             in_replace_block = false;
             continue;
         }
 
+        // --- require directives ---
+        // Single-line: `require module/path v1.0.0`
+        // Block-line:  `module/path v1.0.0`
+        let require_line = if in_require_block {
+            Some(trimmed)
+        } else if let Some(rest) = trimmed.strip_prefix("require ") {
+            Some(rest.trim())
+        } else {
+            None
+        };
+
+        if let Some(rline) = require_line {
+            // Strip inline comments.
+            let rline = rline.split("//").next().unwrap_or(rline).trim();
+            let parts: Vec<&str> = rline.split_whitespace().collect();
+            if !parts.is_empty() {
+                let module_path = parts[0];
+                let version = parts.get(1).map(|v| v.to_string());
+                results.push((module_path.to_string(), version));
+            }
+            continue;
+        }
+
+        // --- replace directives (supplementary) ---
         // Single-line: `replace module/path v1.0.0 => ../local-path`
         // Block-line:  `module/path v1.0.0 => ../local-path`
         let replace_line = if in_replace_block {
@@ -1823,9 +1864,11 @@ pub fn detect_go_mod_deps(content: &str) -> Vec<(String, Option<String>)> {
                     // Extract the original module path (before any version).
                     let original = rline[..arrow_pos].trim();
                     let module_path = original.split_whitespace().next().unwrap_or(original);
-                    // Check if original has a version.
-                    let version = original.split_whitespace().nth(1).map(|v| v.to_string());
-                    results.push((module_path.to_string(), version));
+                    // Avoid duplicates — require block may already have this module.
+                    if !results.iter().any(|(m, _)| m == module_path) {
+                        let version = original.split_whitespace().nth(1).map(|v| v.to_string());
+                        results.push((module_path.to_string(), version));
+                    }
                 }
             }
         }
@@ -1990,22 +2033,35 @@ pub fn detect_mcp_refs(content: &str, known_repos: &[&str]) -> Vec<String> {
     results
 }
 
+/// A single auto-detected dependency edge collected during push-time scanning.
+///
+/// Named struct replaces an unnamed 6-element tuple for clarity and to prevent
+/// positional field confusion (e.g., swapping source_artifact and target_artifact).
+#[derive(Clone, Debug)]
+pub(crate) struct DetectedEdge {
+    pub target_repo_id: String,
+    pub source_artifact: String,
+    pub target_artifact: String,
+    pub dep_type: gyre_domain::DependencyType,
+    pub method: gyre_domain::DetectionMethod,
+    pub version: Option<String>,
+}
+
 /// Reconcile detected dependency edges against existing edges for a repo.
 ///
 /// - New edges (detected but not in existing set): created with `Active` status.
 /// - Orphaned edges (existing but no longer detected): marked `Orphaned`.
 /// - Version changes: updates `version_pinned` on existing edges.
 /// - `Manual` edges are never modified.
+/// - Only edges whose `detection_method` is in `ran_methods` are considered for
+///   orphaning — edges from detection methods that did not run in this push are
+///   left untouched (prevents false orphaning when only a subset of dependency
+///   files changed).
 pub(crate) async fn reconcile_dependencies(
     state: &Arc<AppState>,
     repo_id: &str,
-    detected_edges: &[(
-        String,
-        String,
-        gyre_domain::DependencyType,
-        gyre_domain::DetectionMethod,
-        Option<String>,
-    )],
+    detected_edges: &[DetectedEdge],
+    ran_methods: &std::collections::HashSet<gyre_domain::DetectionMethod>,
 ) {
     use gyre_common::Id;
     use gyre_domain::{DependencyStatus, DetectionMethod};
@@ -2024,20 +2080,25 @@ pub(crate) async fn reconcile_dependencies(
     // Build a lookup key for detected edges: (target_repo_id, source_artifact, detection_method).
     let detected_keys: std::collections::HashSet<(String, String, String)> = detected_edges
         .iter()
-        .map(
-            |(target_id, source_artifact, _dep_type, method, _version)| {
-                (
-                    target_id.clone(),
-                    source_artifact.clone(),
-                    format!("{method:?}"),
-                )
-            },
-        )
+        .map(|de| {
+            (
+                de.target_repo_id.clone(),
+                de.source_artifact.clone(),
+                format!("{:?}", de.method),
+            )
+        })
         .collect();
 
     // Mark existing non-Manual edges as Orphaned if no longer detected.
+    // Only consider edges whose detection_method is in `ran_methods` — edges from
+    // detection methods that did not run in this push are left untouched.
     for edge in &existing {
         if edge.detection_method == DetectionMethod::Manual {
+            continue;
+        }
+
+        // Skip edges whose detection method did not run in this push.
+        if !ran_methods.contains(&edge.detection_method) {
             continue;
         }
 
@@ -2065,19 +2126,19 @@ pub(crate) async fn reconcile_dependencies(
     }
 
     // Create or update detected edges.
-    for (target_id, source_artifact, dep_type, method, version) in detected_edges {
+    for de in detected_edges {
         // Check if an existing edge matches.
         let existing_edge = existing.iter().find(|e| {
-            e.target_repo_id.as_str() == target_id
-                && e.source_artifact == *source_artifact
-                && format!("{:?}", e.detection_method) == format!("{method:?}")
+            e.target_repo_id.as_str() == de.target_repo_id
+                && e.source_artifact == de.source_artifact
+                && format!("{:?}", e.detection_method) == format!("{:?}", de.method)
         });
 
         if let Some(edge) = existing_edge {
             // Update version_pinned if changed, and un-orphan.
-            if edge.version_pinned != *version || edge.status == DependencyStatus::Orphaned {
+            if edge.version_pinned != de.version || edge.status == DependencyStatus::Orphaned {
                 let mut updated = edge.clone();
-                updated.version_pinned = version.clone();
+                updated.version_pinned = de.version.clone();
                 updated.last_verified_at = now;
                 if updated.status == DependencyStatus::Orphaned {
                     updated.status = DependencyStatus::Active;
@@ -2091,22 +2152,23 @@ pub(crate) async fn reconcile_dependencies(
             let mut edge = gyre_domain::DependencyEdge::new(
                 Id::new(uuid::Uuid::new_v4().to_string()),
                 source_id.clone(),
-                Id::new(target_id),
-                dep_type.clone(),
-                source_artifact.as_str(),
-                source_artifact.as_str(),
-                method.clone(),
+                Id::new(&de.target_repo_id),
+                de.dep_type.clone(),
+                de.source_artifact.as_str(),
+                de.target_artifact.as_str(),
+                de.method.clone(),
                 now,
             );
-            edge.version_pinned = version.clone();
+            edge.version_pinned = de.version.clone();
             if let Err(e) = state.dependencies.save(&edge).await {
                 warn!("reconcile-deps: failed to create new edge: {e}");
             } else {
                 tracing::info!(
                     source = repo_id,
-                    target = target_id.as_str(),
-                    artifact = source_artifact.as_str(),
-                    method = ?method,
+                    target = de.target_repo_id.as_str(),
+                    artifact = de.source_artifact.as_str(),
+                    target_artifact = de.target_artifact.as_str(),
+                    method = ?de.method,
                     "new dependency edge detected"
                 );
             }
@@ -2208,17 +2270,14 @@ pub(crate) async fn detect_dependencies_on_push(
         .map(|r| r.name.as_str())
         .collect();
 
-    // Collect all detected edges: (target_repo_id, source_artifact, dep_type, method, version).
-    let mut detected_edges: Vec<(
-        String,
-        String,
-        DependencyType,
-        DetectionMethod,
-        Option<String>,
-    )> = Vec::new();
+    // Collect all detected edges and track which detection methods ran.
+    let mut detected_edges: Vec<DetectedEdge> = Vec::new();
+    let mut ran_methods: std::collections::HashSet<DetectionMethod> =
+        std::collections::HashSet::new();
 
     // --- Cargo.toml ---
     if has_cargo_toml {
+        ran_methods.insert(DetectionMethod::CargoToml);
         if let Some(content) =
             crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "Cargo.toml").await
         {
@@ -2231,13 +2290,14 @@ pub(crate) async fn detect_dependencies_on_push(
                 if let Some(target_repo) = all_repos.iter().find(|r| r.name == basename) {
                     if target_repo.id.as_str() != repo_id {
                         let version = extract_dep_version(&content, basename);
-                        detected_edges.push((
-                            target_repo.id.to_string(),
-                            "Cargo.toml".to_string(),
-                            DependencyType::Code,
-                            DetectionMethod::CargoToml,
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "Cargo.toml".to_string(),
+                            target_artifact: basename.to_string(),
+                            dep_type: DependencyType::Code,
+                            method: DetectionMethod::CargoToml,
                             version,
-                        ));
+                        });
                     }
                 }
             }
@@ -2246,6 +2306,7 @@ pub(crate) async fn detect_dependencies_on_push(
 
     // --- package.json ---
     if has_package_json {
+        ran_methods.insert(DetectionMethod::PackageJson);
         if let Some(content) =
             crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "package.json").await
         {
@@ -2258,13 +2319,14 @@ pub(crate) async fn detect_dependencies_on_push(
                     .unwrap_or(ref_val);
                 if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
                     if target_repo.id.as_str() != repo_id {
-                        detected_edges.push((
-                            target_repo.id.to_string(),
-                            "package.json".to_string(),
-                            DependencyType::Code,
-                            DetectionMethod::PackageJson,
-                            version.clone(),
-                        ));
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "package.json".to_string(),
+                            target_artifact: candidate.to_string(),
+                            dep_type: DependencyType::Code,
+                            method: DetectionMethod::PackageJson,
+                            version: version.clone(),
+                        });
                     }
                 }
             }
@@ -2273,6 +2335,7 @@ pub(crate) async fn detect_dependencies_on_push(
 
     // --- go.mod ---
     if has_go_mod {
+        ran_methods.insert(DetectionMethod::GoMod);
         if let Some(content) =
             crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "go.mod").await
         {
@@ -2282,13 +2345,14 @@ pub(crate) async fn detect_dependencies_on_push(
                 let candidate = module_path.rsplit('/').next().unwrap_or(module_path);
                 if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
                     if target_repo.id.as_str() != repo_id {
-                        detected_edges.push((
-                            target_repo.id.to_string(),
-                            "go.mod".to_string(),
-                            DependencyType::Code,
-                            DetectionMethod::GoMod,
-                            version.clone(),
-                        ));
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "go.mod".to_string(),
+                            target_artifact: module_path.to_string(),
+                            dep_type: DependencyType::Code,
+                            method: DetectionMethod::GoMod,
+                            version: version.clone(),
+                        });
                     }
                 }
             }
@@ -2297,25 +2361,27 @@ pub(crate) async fn detect_dependencies_on_push(
 
     // --- pyproject.toml ---
     if has_pyproject {
+        ran_methods.insert(DetectionMethod::PyprojectToml);
         if let Some(content) =
             crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "pyproject.toml")
                 .await
         {
             let py_deps = detect_pyproject_deps(&content);
-            for (path_val, _pkg_name) in &py_deps {
+            for (path_val, pkg_name) in &py_deps {
                 let candidate = std::path::Path::new(path_val)
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(path_val);
                 if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
                     if target_repo.id.as_str() != repo_id {
-                        detected_edges.push((
-                            target_repo.id.to_string(),
-                            "pyproject.toml".to_string(),
-                            DependencyType::Code,
-                            DetectionMethod::PyprojectToml,
-                            None,
-                        ));
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "pyproject.toml".to_string(),
+                            target_artifact: pkg_name.as_deref().unwrap_or(candidate).to_string(),
+                            dep_type: DependencyType::Code,
+                            method: DetectionMethod::PyprojectToml,
+                            version: None,
+                        });
                     }
                 }
             }
@@ -2324,21 +2390,23 @@ pub(crate) async fn detect_dependencies_on_push(
 
     // --- specs/manifest.yaml ---
     if has_manifest {
+        ran_methods.insert(DetectionMethod::ManifestLink);
         if let Some(content) =
             crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "specs/manifest.yaml")
                 .await
         {
             let spec_links = detect_manifest_spec_links(&content);
-            for (target_repo_name, _target_path, _link_type) in &spec_links {
+            for (target_repo_name, target_path, _link_type) in &spec_links {
                 if let Some(target_repo) = all_repos.iter().find(|r| r.name == *target_repo_name) {
                     if target_repo.id.as_str() != repo_id {
-                        detected_edges.push((
-                            target_repo.id.to_string(),
-                            "specs/manifest.yaml".to_string(),
-                            DependencyType::Spec,
-                            DetectionMethod::ManifestLink,
-                            None,
-                        ));
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "specs/manifest.yaml".to_string(),
+                            target_artifact: target_path.to_string(),
+                            dep_type: DependencyType::Spec,
+                            method: DetectionMethod::ManifestLink,
+                            version: None,
+                        });
                     }
                 }
             }
@@ -2347,6 +2415,7 @@ pub(crate) async fn detect_dependencies_on_push(
 
     // --- OpenAPI / Swagger ---
     if has_openapi {
+        ran_methods.insert(DetectionMethod::OpenApiRef);
         for api_file in &["openapi.yaml", "openapi.yml", "swagger.json"] {
             if let Some(content) =
                 crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, api_file).await
@@ -2355,13 +2424,14 @@ pub(crate) async fn detect_dependencies_on_push(
                 for ref_name in &refs {
                     if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
                         if target_repo.id.as_str() != repo_id {
-                            detected_edges.push((
-                                target_repo.id.to_string(),
-                                api_file.to_string(),
-                                DependencyType::Api,
-                                DetectionMethod::OpenApiRef,
-                                None,
-                            ));
+                            detected_edges.push(DetectedEdge {
+                                target_repo_id: target_repo.id.to_string(),
+                                source_artifact: api_file.to_string(),
+                                target_artifact: ref_name.to_string(),
+                                dep_type: DependencyType::Api,
+                                method: DetectionMethod::OpenApiRef,
+                                version: None,
+                            });
                         }
                     }
                 }
@@ -2371,6 +2441,7 @@ pub(crate) async fn detect_dependencies_on_push(
 
     // --- Protobuf imports ---
     if has_proto {
+        ran_methods.insert(DetectionMethod::ProtoImport);
         for changed_file in &changed {
             if changed_file.ends_with(".proto") {
                 if let Some(content) =
@@ -2381,13 +2452,14 @@ pub(crate) async fn detect_dependencies_on_push(
                     for ref_name in &refs {
                         if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
                             if target_repo.id.as_str() != repo_id {
-                                detected_edges.push((
-                                    target_repo.id.to_string(),
-                                    changed_file.to_string(),
-                                    DependencyType::Schema,
-                                    DetectionMethod::ProtoImport,
-                                    None,
-                                ));
+                                detected_edges.push(DetectedEdge {
+                                    target_repo_id: target_repo.id.to_string(),
+                                    source_artifact: changed_file.to_string(),
+                                    target_artifact: ref_name.to_string(),
+                                    dep_type: DependencyType::Schema,
+                                    method: DetectionMethod::ProtoImport,
+                                    version: None,
+                                });
                             }
                         }
                     }
@@ -2398,6 +2470,7 @@ pub(crate) async fn detect_dependencies_on_push(
 
     // --- mcp.json ---
     if has_mcp_json {
+        ran_methods.insert(DetectionMethod::McpToolRef);
         if let Some(content) =
             crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "mcp.json").await
         {
@@ -2405,13 +2478,14 @@ pub(crate) async fn detect_dependencies_on_push(
             for ref_name in &refs {
                 if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
                     if target_repo.id.as_str() != repo_id {
-                        detected_edges.push((
-                            target_repo.id.to_string(),
-                            "mcp.json".to_string(),
-                            DependencyType::Api,
-                            DetectionMethod::McpToolRef,
-                            None,
-                        ));
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "mcp.json".to_string(),
+                            target_artifact: ref_name.to_string(),
+                            dep_type: DependencyType::Api,
+                            method: DetectionMethod::McpToolRef,
+                            version: None,
+                        });
                     }
                 }
             }
@@ -2425,7 +2499,7 @@ pub(crate) async fn detect_dependencies_on_push(
     );
 
     // Run reconciliation: create new edges, mark orphaned, update versions.
-    reconcile_dependencies(state, repo_id, &detected_edges).await;
+    reconcile_dependencies(state, repo_id, &detected_edges, &ran_methods).await;
 
     // Post-reconciliation: apply version drift and staleness checks for Cargo.toml edges.
     // Look up the source repo's workspace_id for policy lookup (TASK-021 F1).
