@@ -93,3 +93,4 @@ When working on this task:
 
 - `9db04e6a` feat(deps): add cross-repo dependency auto-detection pipeline (TASK-048)
 - `2909df15` fix(deps): prevent TASK-048 flaw classes — tuple confusion, scope mismatch, spec transcription
+- `7bb6e99d` fix(deps): prevent TASK-048 F4 flaw class — intra-method partial scan completeness claim
