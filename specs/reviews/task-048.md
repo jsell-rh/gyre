@@ -75,7 +75,7 @@ F4 has been properly addressed:
 
 ## Findings
 
-- [ ] **F5: Missing `emit_event()` for new dependency detection — spec §4 says "log activity event" but code only uses `tracing::info!`.**
+- [-] [process-revision-complete] **F5: Missing `emit_event()` for new dependency detection — spec §4 says "log activity event" but code only uses `tracing::info!`.**
   The spec's §4 Reconcile says: "New dependency detected → create edge, **log activity event**." The `reconcile_dependencies` function creates the edge (`git_http.rs:2152–2162`) and logs a `tracing::info!` (`git_http.rs:2166–2173`), but does not call `state.emit_event()`.
   In this codebase, "activity event" has a specific meaning: the `emit_event()` system on `AppState`, which stores events and broadcasts them via the unified message bus to WebSocket-connected consumers (orchestrators, dashboard UI). `tracing::info!` is infrastructure-level structured logging — it is not surfaced in the activity feed or delivered to workspace subscribers.
   The same file demonstrates the correct pattern: the breaking change detection function (`git_http.rs:2828–2835`) calls `state.emit_event()` with `MessageKind::Custom("breaking_change_detected")` after detecting a breaking change. The dependency detection path should follow the same pattern — e.g., `MessageKind::Custom("dependency_detected")` — with a payload including `source_repo_id`, `target_repo_id`, `source_artifact`, `target_artifact`, `detection_method`, and `dependency_type`.

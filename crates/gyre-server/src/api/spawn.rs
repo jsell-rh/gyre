@@ -1210,6 +1210,7 @@ pub async fn complete_agent(
             {
                 tracing::debug!(agent_id = %agent.id, "jj bookmark skipped: {e}");
             } else {
+                // domain-event:ok — jj bookmark is an internal VCS operation, not a spec-required activity event
                 tracing::debug!(
                     agent_id = %agent.id,
                     branch = %mr.source_branch,
@@ -1721,7 +1722,7 @@ async fn create_derived_input_for_agent(
             "failed to save derived attestation for agent"
         );
     } else {
-        // §7.7: attestation.created audit event for derived input.
+        // domain-event:ok — §7.7 audit-mode: attestation.created is a structured audit log entry, not a broadcast event
         tracing::info!(
             agent_id = %agent_id,
             task_id = %task_id,

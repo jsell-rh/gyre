@@ -2530,6 +2530,7 @@ pub(crate) async fn detect_dependencies_on_push(
         }
     }
 
+    // domain-event:ok — summary log; per-edge domain events emitted by reconcile_dependencies
     tracing::info!(
         repo = repo_id,
         detected_count = detected_edges.len(),
