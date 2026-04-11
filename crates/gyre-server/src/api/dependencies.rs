@@ -2462,4 +2462,151 @@ import "google/protobuf/empty.proto";
             .unwrap();
         assert_eq!(b_edge.status, DependencyStatus::Orphaned);
     }
+
+    /// F5: reconcile_dependencies must emit a domain event via emit_event()
+    /// when a new dependency edge is created, not just tracing::info!.
+    #[tokio::test]
+    async fn test_reconcile_emits_domain_event_for_new_edge() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+
+        // Subscribe to broadcast BEFORE calling the function.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        let detected = vec![DetectedEdge {
+            target_repo_id: repo_b.to_string(),
+            source_artifact: "Cargo.toml".to_string(),
+            target_artifact: "repo-b".to_string(),
+            dep_type: DependencyType::Code,
+            method: gyre_domain::DetectionMethod::CargoToml,
+            version: Some("2.0.0".to_string()),
+        }];
+        let ran = methods_set(&[gyre_domain::DetectionMethod::CargoToml]);
+
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected, &ran).await;
+
+        // Verify domain event was broadcast.
+        let msg = rx.try_recv().expect("expected a domain event to be broadcast");
+        assert_eq!(
+            msg.kind,
+            gyre_common::MessageKind::Custom("dependency_detected".to_string())
+        );
+        assert_eq!(
+            msg.workspace_id,
+            Some(gyre_common::Id::new("proj-1"))
+        );
+
+        // Verify payload fields.
+        let payload = msg.payload.expect("event should have a payload");
+        assert_eq!(payload["event"], "dependency_detected");
+        assert_eq!(payload["source_repo_id"], repo_a.as_str());
+        assert_eq!(payload["target_repo_id"], repo_b.as_str());
+        assert_eq!(payload["source_artifact"], "Cargo.toml");
+        assert_eq!(payload["target_artifact"], "repo-b");
+        assert_eq!(payload["detection_method"], "cargo_toml");
+        assert_eq!(payload["dependency_type"], "code");
+    }
+
+    /// F5 negative test: re-detected existing edge does NOT emit a domain event
+    /// (only truly new edges trigger the event).
+    #[tokio::test]
+    async fn test_reconcile_no_event_for_existing_edge() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+
+        // Create an existing edge first.
+        let edge = DependencyEdge::new(
+            Id::new("edge-existing"),
+            repo_a.clone(),
+            repo_b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "repo-b",
+            gyre_domain::DetectionMethod::CargoToml,
+            0,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Subscribe to broadcast BEFORE the reconciliation call.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        // Detect the same edge (no version change, no orphan).
+        let detected = vec![DetectedEdge {
+            target_repo_id: repo_b.to_string(),
+            source_artifact: "Cargo.toml".to_string(),
+            target_artifact: "repo-b".to_string(),
+            dep_type: DependencyType::Code,
+            method: gyre_domain::DetectionMethod::CargoToml,
+            version: None,
+        }];
+        let ran = methods_set(&[gyre_domain::DetectionMethod::CargoToml]);
+
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected, &ran).await;
+
+        // No domain event should be emitted for an already-existing edge.
+        assert!(
+            rx.try_recv().is_err(),
+            "no domain event should be emitted for an already-existing edge"
+        );
+    }
+
+    /// F5: when multiple new edges are detected, each one emits a domain event.
+    #[tokio::test]
+    async fn test_reconcile_emits_event_per_new_edge() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+        let repo_c = create_repo(&state, "repo-c").await;
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        let detected = vec![
+            DetectedEdge {
+                target_repo_id: repo_b.to_string(),
+                source_artifact: "Cargo.toml".to_string(),
+                target_artifact: "repo-b".to_string(),
+                dep_type: DependencyType::Code,
+                method: gyre_domain::DetectionMethod::CargoToml,
+                version: None,
+            },
+            DetectedEdge {
+                target_repo_id: repo_c.to_string(),
+                source_artifact: "package.json".to_string(),
+                target_artifact: "repo-c".to_string(),
+                dep_type: DependencyType::Code,
+                method: gyre_domain::DetectionMethod::PackageJson,
+                version: Some("1.0.0".to_string()),
+            },
+        ];
+        let ran = methods_set(&[
+            gyre_domain::DetectionMethod::CargoToml,
+            gyre_domain::DetectionMethod::PackageJson,
+        ]);
+
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected, &ran).await;
+
+        // Should receive exactly 2 domain events.
+        let msg1 = rx.try_recv().expect("expected first domain event");
+        assert_eq!(
+            msg1.kind,
+            gyre_common::MessageKind::Custom("dependency_detected".to_string())
+        );
+        let p1 = msg1.payload.unwrap();
+        assert_eq!(p1["target_repo_id"], repo_b.as_str());
+        assert_eq!(p1["detection_method"], "cargo_toml");
+
+        let msg2 = rx.try_recv().expect("expected second domain event");
+        assert_eq!(
+            msg2.kind,
+            gyre_common::MessageKind::Custom("dependency_detected".to_string())
+        );
+        let p2 = msg2.payload.unwrap();
+        assert_eq!(p2["target_repo_id"], repo_c.as_str());
+        assert_eq!(p2["detection_method"], "package_json");
+
+        // No more events.
+        assert!(rx.try_recv().is_err(), "no more events expected");
+    }
 }

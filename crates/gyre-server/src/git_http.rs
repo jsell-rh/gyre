@@ -2067,6 +2067,16 @@ pub(crate) async fn reconcile_dependencies(
     use gyre_domain::{DependencyStatus, DetectionMethod};
 
     let source_id = Id::new(repo_id);
+
+    // Resolve the source repo's workspace_id for domain event emission (TASK-048 F5).
+    let source_workspace_id = state
+        .repos
+        .find_by_id(&source_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.workspace_id);
+
     let existing = match state.dependencies.list_by_repo(&source_id).await {
         Ok(edges) => edges,
         Err(e) => {
@@ -2171,6 +2181,33 @@ pub(crate) async fn reconcile_dependencies(
                     method = ?de.method,
                     "new dependency edge detected"
                 );
+
+                // Emit domain event for new dependency detection (TASK-048 F5).
+                // The spec §4 says "New dependency detected → create edge, log activity event."
+                // emit_event() broadcasts via the unified message bus to WebSocket consumers
+                // (orchestrators, dashboard UI). tracing::info! alone is infrastructure logging.
+                if let Some(ws_id) = &source_workspace_id {
+                    let payload = serde_json::json!({
+                        "event": "dependency_detected",
+                        "source_repo_id": repo_id,
+                        "target_repo_id": de.target_repo_id,
+                        "source_artifact": de.source_artifact,
+                        "target_artifact": de.target_artifact,
+                        "detection_method": serde_json::to_value(&de.method).unwrap_or_default(),
+                        "dependency_type": serde_json::to_value(&de.dep_type).unwrap_or_default(),
+                    });
+
+                    state
+                        .emit_event(
+                            Some(ws_id.clone()),
+                            gyre_common::message::Destination::Workspace(ws_id.clone()),
+                            gyre_common::MessageKind::Custom(
+                                "dependency_detected".to_string(),
+                            ),
+                            Some(payload),
+                        )
+                        .await;
+                }
             }
         }
     }
