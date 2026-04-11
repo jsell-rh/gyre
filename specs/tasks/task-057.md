@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-implementation.md` §Migration Plan > Phase 4: Polish; §Testing > Visual Tests  
 **Depends on:** TASK-029 (lens toggle, complete), TASK-030 (structural coloring, complete), TASK-031 (drill-down, complete), TASK-032 (causal flow trace, complete), TASK-033 (evaluative heat map, complete), TASK-037 (view query types, complete), TASK-053 (performance + responsive, complete)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [`specs/reviews/task-057.md`](../reviews/task-057.md)
 
 ## Spec Excerpt
@@ -85,3 +85,5 @@ When working on this task:
 
 - feat(explorer): add visual regression tests with Playwright (TASK-057)
 - fix(explorer): rewrite visual regression tests to use real UI interactions (TASK-057)
+- fix(process): prevent duplicate visual baselines and stale mechanism claims (TASK-057)
+- fix(explorer): distinct mid-zoom baseline and accurate blast radius comments (TASK-057)

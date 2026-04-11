@@ -331,7 +331,20 @@ test.describe('Semantic zoom visual regression', () => {
   test('zoom_level_1_modules', async ({ page }) => {
     await navigateToExplorer(page);
 
-    // Default zoom shows the full graph — no zoom adjustment needed
+    // Zoom in slightly to show module-level detail (mid zoom between
+    // fully zoomed out packages and fully zoomed in types/functions)
+    await page.evaluate(() => {
+      const canvas = document.querySelector('canvas.treemap-canvas');
+      if (canvas) {
+        for (let i = 0; i < 5; i++) {
+          canvas.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: -100, clientX: 640, clientY: 360, bubbles: true,
+          }));
+        }
+      }
+    });
+    await page.waitForTimeout(800);
+
     const canvasArea = page.locator('.treemap-canvas-area');
     await expect(canvasArea).toHaveScreenshot('zoom-level-1-modules.png', {
       maxDiffPixelRatio: 0.02,
@@ -533,14 +546,15 @@ test.describe('Blast radius visual regression', () => {
     await navigateToExplorer(page);
 
     // Apply the blast radius query via the query editor.
-    // The blast radius query uses $clicked as scope.node, which makes
-    // ExplorerCanvas store it as an interactive query template.
-    // The tiered coloring only activates after clicking a node.
+    // BLAST_RADIUS_QUERY uses a fixed focus node ('fn-spawn-agent'),
+    // so tiered coloring activates immediately from the focus query
+    // without requiring a click. The click below tests node selection
+    // on top of the already-active tiered coloring.
     await applyQueryViaEditor(page, BLAST_RADIUS_QUERY);
 
-    // Click a node on the canvas to trigger blast radius BFS coloring.
-    // Since the canvas is Canvas 2D (not DOM), we click at a position
-    // where nodes are likely rendered by the treemap layout.
+    // Click a node on the canvas to test node selection overlay on top
+    // of the tiered coloring. Since the canvas is Canvas 2D (not DOM),
+    // we click at a position where nodes are rendered by the treemap.
     const canvas = page.locator('canvas.treemap-canvas');
     const box = await canvas.boundingBox();
     expect(box).toBeTruthy();
