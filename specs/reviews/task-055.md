@@ -8,7 +8,7 @@
 
 ## R1 Findings
 
-- [ ] **F1 (HIGH): Backward ghosts structurally impossible — `removed` always returns `[]`**
+- [-] [process-revision-complete] **F1 (HIGH): Backward ghosts structurally impossible — `removed` always returns `[]`**
 
   `timelineFilteredGraph` is derived by filtering `graph.nodes` on `first_seen_at <= cutoff` (ExplorerView.svelte:984-989). Since `timelineFilteredGraph.nodes` is a strict subset of `graph.nodes`, every node in the historical graph is also in the current graph by construction.
 
@@ -28,7 +28,7 @@
 
   **Fix direction:** To detect removed nodes, the implementation must consult the `ArchitecturalDelta` records (specifically `nodes_added` arrays in `delta_json` from deltas AFTER the scrubber position). Nodes that appear in `nodes_added` of deltas between the scrubber time and now but are NOT in the current graph were added then removed. Alternatively, if the current graph's nodes include `deleted_at` or a removal marker, filtering on that would work. The current approach of filtering the current graph by `first_seen_at` can only identify forward ghosts (added since) and modified nodes — never removed nodes, because removed nodes are absent from `graph.nodes`.
 
-- [ ] **F2 (MED): Delta summary shows only aggregate counts — missing per-type breakdown**
+- [-] [process-revision-complete] **F2 (MED): Delta summary shows only aggregate counts — missing per-type breakdown**
 
   Spec §6 says: *"The sidebar shows the delta: 'Between then and now: +12 types, -3 types, +2 traits, 8 types modified'"* — the delta is categorized by node type.
 
@@ -42,7 +42,7 @@
 
   **Violates:** Acceptance criterion "Delta summary panel shows '+N types, -M types' counts"; spec §6 per-type breakdown format.
 
-- [ ] **F3 (MED): "Preview Mode" banner shows "predicted changes" for confirmed historical diffs**
+- [-] [process-revision-complete] **F3 (MED): "Preview Mode" banner shows "predicted changes" for confirmed historical diffs**
 
   When timeline ghosts are active, ExplorerCanvas renders its existing "Preview Mode" bar (line 5055) with text "N predicted changes" (line 5059). Timeline ghost overlays are confirmed historical diffs (`confidence: 'confirmed'`), not predictions.
 
@@ -52,7 +52,7 @@
 
   **Fix direction:** When `timelineActive` is true and `hasGhosts` is true, the banner should display time-travel-appropriate text (e.g., "Time Travel Mode" / "N historical changes") instead of "Preview Mode" / "predicted changes."
 
-- [ ] **F4 (MED): Compound acceptance criterion partially satisfied — no ghost overlay or delta computation test**
+- [-] [process-revision-complete] **F4 (MED): Compound acceptance criterion partially satisfied — no ghost overlay or delta computation test**
 
   Acceptance criterion: *"Component test for scrubber rendering, ghost overlay, and delta summary"*
 
