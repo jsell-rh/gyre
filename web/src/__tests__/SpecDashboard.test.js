@@ -14,6 +14,7 @@ vi.mock('../lib/api.js', () => ({
         approval_status: 'approved',
         updated_at: 1700000000,
         repo_id: 'repo-1',
+        repo_name: 'main-repo',
       },
       {
         path: 'system/payment-retry.md',
@@ -22,7 +23,8 @@ vi.mock('../lib/api.js', () => ({
         kind: 'feature',
         approval_status: 'pending',
         updated_at: 1700003600,
-        repo_id: 'repo-1',
+        repo_id: 'repo-2',
+        repo_name: 'payments',
       },
       {
         path: 'system/identity.md',
@@ -32,6 +34,7 @@ vi.mock('../lib/api.js', () => ({
         approval_status: 'deprecated',
         updated_at: 1699999000,
         repo_id: 'repo-1',
+        repo_name: 'main-repo',
       },
     ]),
     specProgress: vi.fn().mockResolvedValue({
@@ -43,7 +46,31 @@ vi.mock('../lib/api.js', () => ({
       ],
     }),
     specsSave: vi.fn().mockResolvedValue({ branch: 'spec-edit/foo-a1b2', mr_id: '42' }),
+    specsGraph: vi.fn().mockResolvedValue({
+      nodes: [
+        { path: 'system/vision.md', title: 'Vision', approval_status: 'approved' },
+        { path: 'system/payment-retry.md', title: 'Payment Retry', approval_status: 'pending' },
+        { path: 'system/identity.md', title: 'Identity', approval_status: 'deprecated' },
+      ],
+      edges: [
+        { source: 'system/payment-retry.md', target: 'system/vision.md', link_type: 'depends_on', status: 'active' },
+        { source: 'system/identity.md', target: 'system/vision.md', link_type: 'implements', status: 'active' },
+      ],
+    }),
+    approveSpec: vi.fn().mockResolvedValue({}),
+    rejectSpec: vi.fn().mockResolvedValue({}),
   },
+}));
+
+// Mock elkLayout for SpecGraphDAG (used inside SpecDashboard's graph view)
+vi.mock('../lib/layout-engines.js', () => ({
+  elkLayout: vi.fn().mockImplementation(async (nodes) => {
+    const positions = {};
+    nodes.forEach((n, i) => {
+      positions[n.id] = { x: 100 + i * 200, y: 80 + i * 100 };
+    });
+    return positions;
+  }),
 }));
 
 // Reference data for assertions (NOT used inside vi.mock)
@@ -280,5 +307,123 @@ describe('SpecDashboard', () => {
         expect.objectContaining({ spec_path: 'system/new-feature.md' }),
       ),
     );
+  });
+
+  // ── Impact analysis — SpecDashboard ─────────────────────────────────────
+
+  describe('impact analysis', () => {
+    async function enterGraphAndImpactMode(container) {
+      // Switch to graph view
+      const graphBtn = screen.getByRole('button', { name: /graph/i });
+      await fireEvent.click(graphBtn);
+
+      // Wait for graph to load and render
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+      });
+
+      // Click "Analyze Impact" button
+      const impactBtn = container.querySelector('[data-testid="analyze-impact-btn"]');
+      expect(impactBtn).toBeTruthy();
+      await fireEvent.click(impactBtn);
+    }
+
+    it('shows impact summary panel with correct spec/repo counts after selecting a node', async () => {
+      const { container } = render(SpecDashboard, { props: { scope: 'workspace' } });
+      await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
+
+      await enterGraphAndImpactMode(container);
+
+      // Impact mode prompt should be visible
+      expect(container.querySelector('[data-testid="impact-prompt"]')).toBeTruthy();
+
+      // Click vision.md node to analyze its impact
+      const visionNode = container.querySelector('[data-testid="dag-node-system/vision.md"]');
+      expect(visionNode).toBeTruthy();
+      await fireEvent.click(visionNode);
+
+      // Summary panel should appear with 2 dependents across 2 repos
+      // (payment-retry depends_on vision, identity implements vision)
+      await waitFor(() => {
+        const summary = container.querySelector('[data-testid="impact-summary"]');
+        expect(summary).toBeTruthy();
+      });
+
+      const summaryTitle = container.querySelector('[data-testid="impact-summary-title"]');
+      expect(summaryTitle).toBeTruthy();
+      expect(summaryTitle.textContent).toContain('2 specs');
+      expect(summaryTitle.textContent).toContain('2 repos');
+      expect(summaryTitle.textContent).toContain('need review');
+    });
+
+    it('shows grouped-by-repo details with link types and approval badges', async () => {
+      const { container } = render(SpecDashboard, { props: { scope: 'workspace' } });
+      await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
+
+      await enterGraphAndImpactMode(container);
+
+      // Select vision.md
+      const visionNode = container.querySelector('[data-testid="dag-node-system/vision.md"]');
+      await fireEvent.click(visionNode);
+
+      await waitFor(() => {
+        const details = container.querySelector('[data-testid="impact-details"]');
+        expect(details).toBeTruthy();
+      });
+
+      // Check dependents are listed
+      const depItems = container.querySelectorAll('.impact-dep-item');
+      expect(depItems.length).toBe(2);
+
+      // Each dependent should have link type badge and approval status badge
+      depItems.forEach(item => {
+        const badges = item.querySelectorAll('[class*="badge"]');
+        expect(badges.length).toBeGreaterThanOrEqual(2);
+      });
+    });
+
+    it('shows "Exit Impact Analysis" button and exits on click', async () => {
+      const { container } = render(SpecDashboard, { props: { scope: 'workspace' } });
+      await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
+
+      await enterGraphAndImpactMode(container);
+
+      // Exit button should be visible
+      const exitBtn = container.querySelector('[data-testid="exit-impact-mode"]');
+      expect(exitBtn).toBeTruthy();
+      expect(exitBtn.textContent).toContain('Exit Impact Analysis');
+
+      // Click exit
+      await fireEvent.click(exitBtn);
+
+      // "Analyze Impact" button should reappear
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="analyze-impact-btn"]')).toBeTruthy();
+      });
+      // Impact prompt should not be shown
+      expect(container.querySelector('[data-testid="impact-prompt"]')).toBeNull();
+    });
+
+    it('clears selection when same node is clicked again (deselect toggle)', async () => {
+      const { container } = render(SpecDashboard, { props: { scope: 'workspace' } });
+      await waitFor(() => expect(findSpecByPath('system/vision.md')).toBeTruthy());
+
+      await enterGraphAndImpactMode(container);
+
+      // Select vision.md
+      const visionNode = container.querySelector('[data-testid="dag-node-system/vision.md"]');
+      await fireEvent.click(visionNode);
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="impact-summary"]')).toBeTruthy();
+      });
+
+      // Click same node again to deselect
+      await fireEvent.click(visionNode);
+      await waitFor(() => {
+        // Summary should disappear, prompt should appear
+        expect(container.querySelector('[data-testid="impact-summary"]')).toBeNull();
+        expect(container.querySelector('[data-testid="impact-prompt"]')).toBeTruthy();
+      });
+    });
   });
 });

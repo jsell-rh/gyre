@@ -436,6 +436,8 @@ describe('SpecGraphDAG', () => {
       { source: 'system/auth.md', target: 'system/core.md', link_type: 'depends_on', status: 'active' },
       { source: 'system/billing.md', target: 'system/core.md', link_type: 'implements', status: 'active' },
       { source: 'system/deep.md', target: 'system/auth.md', link_type: 'extends', status: 'active' },
+      // unrelated edge — not part of core's impact set
+      { source: 'system/unrelated.md', target: 'system/deep.md', link_type: 'references', status: 'active' },
     ];
 
     it('dims non-dependent nodes when impactPath is set', async () => {
@@ -508,7 +510,7 @@ describe('SpecGraphDAG', () => {
       expect(authNode.getAttribute('aria-label')).toContain('(dependent)');
     });
 
-    it('dims non-highlighted edges', async () => {
+    it('dims non-highlighted edges and highlights impacted edges', async () => {
       const { container } = render(SpecGraphDAG, {
         props: { nodes: IMPACT_NODES, edges: IMPACT_EDGES, impactPath: 'system/core.md' },
       });
@@ -517,11 +519,21 @@ describe('SpecGraphDAG', () => {
         expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
       });
 
-      // All edges in IMPACT_EDGES connect to dependents of core, so all should be highlighted
-      const edgeGroups = container.querySelectorAll('.dag-edge');
-      edgeGroups.forEach(eg => {
-        expect(eg.getAttribute('opacity')).toBe('1');
-      });
+      // The first 3 edges (depends_on, implements, extends) connect to dependents of core — highlighted
+      const highlightedEdge = container.querySelector('[data-testid="dag-edge-0"]');
+      expect(highlightedEdge.getAttribute('opacity')).toBe('1');
+
+      const highlightedEdge1 = container.querySelector('[data-testid="dag-edge-1"]');
+      expect(highlightedEdge1.getAttribute('opacity')).toBe('1');
+
+      const highlightedEdge2 = container.querySelector('[data-testid="dag-edge-2"]');
+      expect(highlightedEdge2.getAttribute('opacity')).toBe('1');
+
+      // The 4th edge (references: unrelated→deep) has source "unrelated" which is NOT
+      // a dependent of core (references links are excluded from impact traversal),
+      // so this edge should be dimmed
+      const dimmedEdge = container.querySelector('[data-testid="dag-edge-3"]');
+      expect(dimmedEdge.getAttribute('opacity')).toBe('0.15');
     });
 
     it('calls onImpactSelect in impact mode', async () => {

@@ -239,6 +239,129 @@ describe('DetailPanel', () => {
     });
   });
 
+  // ── Impact Analysis in Links tab ──────────────────────────────────────────
+  describe('Impact analysis in spec Links tab', () => {
+    const specEntityWithRepo = {
+      type: 'spec',
+      id: 'system/core.md',
+      data: { name: 'core.md', repo_id: 'repo-core' },
+    };
+
+    function mockFetchForImpact() {
+      const mockDependents = [
+        {
+          id: 'link-1',
+          source_path: 'system/auth.md',
+          source_repo_id: 'repo-auth',
+          link_type: 'depends_on',
+          target_path: 'system/core.md',
+          target_repo_id: 'repo-core',
+          status: 'active',
+          created_at: 1700000000,
+        },
+        {
+          id: 'link-2',
+          source_path: 'system/billing.md',
+          source_repo_id: 'repo-billing',
+          link_type: 'implements',
+          target_path: 'system/core.md',
+          target_repo_id: 'repo-core',
+          status: 'active',
+          created_at: 1700000000,
+        },
+      ];
+
+      const mockGraph = {
+        nodes: [
+          { path: 'system/core.md', title: 'Core', approval_status: 'approved' },
+          { path: 'system/auth.md', title: 'Auth', approval_status: 'pending' },
+          { path: 'system/billing.md', title: 'Billing', approval_status: 'approved' },
+        ],
+        edges: [
+          { source: 'system/auth.md', target: 'system/core.md', link_type: 'depends_on', status: 'active' },
+          { source: 'system/billing.md', target: 'system/core.md', link_type: 'implements', status: 'active' },
+        ],
+      };
+
+      global.fetch.mockImplementation((url) => {
+        const urlStr = typeof url === 'string' ? url : url.toString();
+        if (urlStr.includes('/dependents')) {
+          return Promise.resolve({
+            ok: true, status: 200, json: async () => mockDependents,
+          });
+        }
+        if (urlStr.includes('/specs/graph')) {
+          return Promise.resolve({
+            ok: true, status: 200, json: async () => mockGraph,
+          });
+        }
+        if (urlStr.includes('/links')) {
+          return Promise.resolve({
+            ok: true, status: 200, json: async () => [],
+          });
+        }
+        // Default: spec content, progress, etc.
+        return Promise.resolve({
+          ok: true, status: 200,
+          json: async () => ({ content: '# Core', total_tasks: 0, completed_tasks: 0 }),
+        });
+      });
+    }
+
+    async function openLinksAndClickAnalyze(container) {
+      // Switch to Links tab
+      const linksTab = screen.getByRole('tab', { name: /links/i });
+      await fireEvent.click(linksTab);
+
+      // Wait for the impact analysis section to appear
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="impact-analysis-section"]')).toBeTruthy();
+      });
+
+      // Click "Analyze Impact" button (Button component doesn't forward data-testid)
+      const analyzeBtn = screen.getByRole('button', { name: /analyze impact/i });
+      expect(analyzeBtn).toBeTruthy();
+      await fireEvent.click(analyzeBtn);
+
+      // Wait for impact tree to render
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="impact-tree"]')).toBeTruthy();
+      });
+    }
+
+    it('renders impact tree after clicking Analyze Impact in Links tab', async () => {
+      mockFetchForImpact();
+      const { container } = render(DetailPanel, { props: { entity: specEntityWithRepo } });
+      await openLinksAndClickAnalyze(container);
+
+      // Header should show correct counts
+      const header = container.querySelector('[data-testid="impact-tree-header"]');
+      expect(header).toBeTruthy();
+      expect(header.textContent).toContain('2 specs');
+      expect(header.textContent).toContain('2 repos');
+      expect(header.textContent).toContain('would need review');
+    });
+
+    it('shows grouped items with link type and approval status badges', async () => {
+      mockFetchForImpact();
+      const { container } = render(DetailPanel, { props: { entity: specEntityWithRepo } });
+      await openLinksAndClickAnalyze(container);
+
+      // Each item should show link type badge, approval status badge, and depth
+      const items = container.querySelectorAll('.impact-tree-item');
+      expect(items.length).toBe(2);
+
+      // Both are direct (depth 1)
+      items.forEach(item => {
+        expect(item.querySelector('.impact-tree-depth').textContent).toBe('direct');
+      });
+
+      // Repo groups should show repo IDs as headers
+      const repoGroups = container.querySelectorAll('.impact-tree-repo');
+      expect(repoGroups.length).toBe(2);
+    });
+  });
+
   describe('Editor Split pop-out', () => {
     const specEntityWithRepo = {
       type: 'spec',

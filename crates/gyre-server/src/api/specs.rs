@@ -1000,6 +1000,9 @@ pub async fn spec_approval_history(
 pub struct SpecLinkResponse {
     pub id: String,
     pub source_path: String,
+    /// Repo ID that owns the source spec (for cross-workspace link scoping).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_repo_id: Option<String>,
     pub link_type: String,
     pub target_path: String,
     /// Resolved target repo UUID. Null for unresolved cross-workspace links.
@@ -1020,6 +1023,7 @@ impl From<SpecLinkEntry> for SpecLinkResponse {
         Self {
             id: e.id,
             source_path: e.source_path,
+            source_repo_id: e.source_repo_id,
             link_type: e.link_type.to_string(),
             target_path: e.target_path,
             target_repo_id: e.target_repo_id,

@@ -1179,6 +1179,9 @@
       }
 
       // BFS from the current spec
+      // Use BFS depth to determine directness (depth === 1 → direct), not API
+      // response membership, since the server only returns depends_on/implements
+      // but not extends links in directDeps.
       const visited = new Map();
       const queue = [{ path, depth: 0 }];
       while (queue.length > 0) {
@@ -1186,23 +1189,28 @@
         const sources = reverseAdj.get(current) ?? [];
         for (const { source, link_type } of sources) {
           if (!visited.has(source)) {
-            visited.set(source, { link_type, depth: depth + 1, direct: directDeps.some(d => d.source_path === source) });
+            visited.set(source, { link_type, depth: depth + 1 });
             queue.push({ path: source, depth: depth + 1 });
           }
         }
       }
 
+      // Build a lookup of source_repo_id from directDeps (keyed by source_path)
+      const depRepoMap = new Map();
+      for (const d of directDeps) {
+        depRepoMap.set(d.source_path, d.source_repo_id ?? null);
+      }
+
       // Build result grouped by repo
       const deps = Array.from(visited.entries()).map(([depPath, info]) => {
         const node = allNodes.find(n => n.path === depPath);
-        const directDep = directDeps.find(d => d.source_path === depPath);
         return {
           path: depPath,
           link_type: info.link_type,
           depth: info.depth,
-          direct: info.direct,
+          direct: info.depth === 1,
           approval_status: node?.approval_status ?? 'unknown',
-          repo_id: directDep?.target_repo_id ?? null,
+          repo_id: depRepoMap.get(depPath) ?? null,
         };
       }).sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path));
 
