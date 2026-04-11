@@ -1485,8 +1485,8 @@ async fn create_derived_input_for_agent(
         }
     };
 
-    // Find the leaf attestation (most recent) to derive from.
-    let parent_att = match attestations.last() {
+    // Find the leaf attestation (highest chain_depth) to derive from.
+    let parent_att = match attestations.iter().max_by_key(|a| a.metadata.chain_depth) {
         Some(a) => a,
         None => return,
     };

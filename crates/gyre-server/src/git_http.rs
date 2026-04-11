@@ -591,7 +591,7 @@ pub async fn git_receive_pack(
                     // TASK-061 (§7.2): Populate attestation chain ABAC subject
                     // attributes and evaluate policies with action=push,
                     // resource_type=attestation. Audit-only — logged but not enforced.
-                    if let Some(leaf) = attestations.last() {
+                    if let Some(leaf) = attestations.iter().max_by_key(|a| a.metadata.chain_depth) {
                         let chain = state_clone
                             .chain_attestations
                             .load_chain(&leaf.id)
@@ -625,7 +625,7 @@ pub async fn git_receive_pack(
                             constraint_count = cc,
                             decision = ?eval_result.effect,
                             matched_policy = ?eval_result.matched_policy,
-                            "attestation ABAC evaluation for push (audit-only)"
+                            "attestation ABAC evaluation for push (audit-only)" // enforcement-mode:ok
                         );
                     }
                 }

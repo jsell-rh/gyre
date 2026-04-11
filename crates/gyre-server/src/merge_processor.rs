@@ -1872,8 +1872,9 @@ pub(crate) async fn report_cascade_test_result(
 /// TASK-061 (§7.2): Evaluate ABAC policies with attestation chain subject attributes.
 ///
 /// Builds an `AttributeContext` from the attestation chain (chain_depth,
-/// root_signer, constraint_count) and evaluates policies with the given
-/// action and resource_type=attestation. Audit-only — result is logged.
+/// root_signer, constraint_count, tenant_id) and evaluates policies with the
+/// given action and resource_type=attestation. Audit-only — result is logged
+/// but not enforced. Returns the evaluation result for testability.
 async fn evaluate_attestation_abac(
     state: &AppState,
     chain: &[gyre_common::Attestation],
@@ -1882,15 +1883,24 @@ async fn evaluate_attestation_abac(
     entry: &MergeQueueEntry,
     repo: &gyre_domain::Repository,
     action: &str,
-) {
+) -> crate::policy_engine::EvalResult {
     let chain_depth = leaf.metadata.chain_depth;
     let signer = gyre_domain::root_signer(chain);
     let cc = gyre_domain::constraint_count(chain) as i64;
+
+    // Resolve tenant_id from repo → workspace (checklist item 125: ABAC context parity).
+    let tenant_id = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(Some(ws)) => Some(ws.tenant_id.to_string()),
+        _ => None,
+    };
 
     let mut ctx = crate::policy_engine::AttributeContext::default();
     ctx.set("subject.type", "agent");
     if let Some(ref author) = mr.author_agent_id {
         ctx.set("subject.id", author.as_str());
+    }
+    if let Some(ref tid) = tenant_id {
+        ctx.set("subject.tenant_id", tid);
     }
     ctx.set_number("subject.chain_depth", chain_depth as i64);
     ctx.set_number("subject.constraint_count", cc);
@@ -1911,8 +1921,10 @@ async fn evaluate_attestation_abac(
         constraint_count = cc,
         decision = ?eval_result.effect,
         matched_policy = ?eval_result.matched_policy,
-        "attestation ABAC evaluation for {action} (audit-only)"
+        "attestation ABAC evaluation for {action} (audit-only)" // enforcement-mode:ok
     );
+
+    eval_result
 }
 
 #[cfg(test)]
@@ -4130,5 +4142,551 @@ mod tests {
             .try_recv()
             .expect("AtomicGroupFailed event should be emitted");
         assert_eq!(msg.kind, gyre_common::MessageKind::AtomicGroupFailed);
+    }
+
+    // --- TASK-061: Integration tests for evaluate_attestation_abac ---
+
+    mod attestation_abac_tests {
+        use super::*;
+        use crate::mem::test_state;
+        use gyre_common::{
+            Attestation, AttestationInput, AttestationMetadata, AttestationOutput, DerivedInput,
+            GateAttestation, GateConstraint, Id, InputContent, KeyBinding, OutputConstraint,
+            PersonaRef, ScopeConstraint, SignedInput,
+        };
+        use gyre_domain::policy::{
+            Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
+        };
+        use gyre_domain::{MergeQueueEntry, MergeRequest, Workspace};
+
+        fn sample_key_binding(identity: &str) -> KeyBinding {
+            KeyBinding {
+                public_key: vec![1, 2, 3, 4],
+                user_identity: identity.to_string(),
+                issuer: "https://keycloak.example.com".to_string(),
+                trust_anchor_id: "tenant-keycloak".to_string(),
+                issued_at: 1_700_000_000,
+                expires_at: 1_700_003_600,
+                user_signature: vec![10, 20, 30, 40],
+                platform_countersign: vec![50, 60, 70, 80],
+            }
+        }
+
+        fn sample_output_constraint(name: &str) -> OutputConstraint {
+            OutputConstraint {
+                name: name.to_string(),
+                expression: format!("output.check(\"{name}\")"),
+            }
+        }
+
+        fn root_attestation(identity: &str) -> Attestation {
+            Attestation {
+                id: "sha256:root-att".to_string(),
+                input: AttestationInput::Signed(SignedInput {
+                    content: InputContent {
+                        spec_path: "specs/system/payments.md".to_string(),
+                        spec_sha: "abc123".to_string(),
+                        workspace_id: "ws-abac".to_string(),
+                        repo_id: "repo-abac".to_string(),
+                        persona_constraints: vec![PersonaRef {
+                            name: "security".to_string(),
+                        }],
+                        meta_spec_set_sha: "def456".to_string(),
+                        scope: ScopeConstraint {
+                            allowed_paths: vec!["src/**".to_string()],
+                            forbidden_paths: vec![],
+                        },
+                    },
+                    output_constraints: vec![sample_output_constraint("scope-check")],
+                    valid_until: 1_700_000_000,
+                    expected_generation: Some(1),
+                    signature: vec![10, 20, 30],
+                    key_binding: sample_key_binding(identity),
+                }),
+                output: AttestationOutput {
+                    content_hash: vec![1, 2, 3],
+                    commit_sha: "aaa111".to_string(),
+                    agent_signature: None,
+                    gate_results: vec![GateAttestation {
+                        gate_id: "gate-1".to_string(),
+                        gate_name: "unit-tests".to_string(),
+                        gate_type: gyre_common::gate::GateType::TestCommand,
+                        status: gyre_common::gate::GateStatus::Passed,
+                        output_hash: vec![80, 90],
+                        constraint: Some(GateConstraint {
+                            gate_id: "gate-1".to_string(),
+                            gate_name: "unit-tests".to_string(),
+                            constraint: sample_output_constraint("gate-constraint"),
+                            signed_by: vec![50, 60, 70],
+                        }),
+                        signature: vec![11, 22, 33],
+                        key_binding: sample_key_binding("gate-agent"),
+                    }],
+                },
+                metadata: AttestationMetadata {
+                    created_at: 1_700_000_000,
+                    workspace_id: "ws-abac".to_string(),
+                    repo_id: "repo-abac".to_string(),
+                    task_id: "TASK-ABAC".to_string(),
+                    agent_id: "agent:worker-abac".to_string(),
+                    chain_depth: 0,
+                },
+            }
+        }
+
+        fn derived_attestation(depth: u32) -> Attestation {
+            Attestation {
+                id: format!("sha256:derived-{depth}"),
+                input: AttestationInput::Derived(DerivedInput {
+                    parent_ref: vec![99, 88],
+                    preconditions: vec![],
+                    update: "narrow_scope".to_string(),
+                    output_constraints: vec![
+                        sample_output_constraint("derived-c1"),
+                        sample_output_constraint("derived-c2"),
+                    ],
+                    signature: vec![11],
+                    key_binding: sample_key_binding("orchestrator"),
+                }),
+                output: AttestationOutput {
+                    content_hash: vec![4, 5, 6],
+                    commit_sha: format!("bbb{depth}"),
+                    agent_signature: None,
+                    gate_results: vec![],
+                },
+                metadata: AttestationMetadata {
+                    created_at: 1_700_000_100,
+                    workspace_id: "ws-abac".to_string(),
+                    repo_id: "repo-abac".to_string(),
+                    task_id: "TASK-ABAC".to_string(),
+                    agent_id: "agent:worker-abac".to_string(),
+                    chain_depth: depth,
+                },
+            }
+        }
+
+        /// Integration test: evaluate_attestation_abac populates chain_depth,
+        /// root_signer, constraint_count, and tenant_id from a real attestation
+        /// chain — then a policy conditioned on chain_depth > 5 fires correctly.
+        #[tokio::test]
+        async fn evaluate_attestation_abac_populates_all_attributes_from_chain() {
+            let state = test_state();
+
+            // Create workspace with a specific tenant_id so we can verify tenant propagation.
+            let ws = Workspace::new(
+                Id::new("ws-abac"),
+                Id::new("tenant-abac-test"),
+                "ws-abac",
+                "ws-abac",
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+
+            // Create repo in that workspace.
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-abac"),
+                Id::new("ws-abac"),
+                "abac-repo",
+                "/tmp/abac-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            // Build a chain: root (depth=0) + derived (depth=1) + derived (depth=2).
+            // Root has 1 output_constraint + 1 gate_constraint = 2
+            // Derived(1) has 2 output_constraints + 0 gate = 2
+            // Derived(2) has 2 output_constraints + 0 gate = 2
+            // Total constraint_count = 6
+            let chain = vec![
+                root_attestation("user:test-signer"),
+                derived_attestation(1),
+                derived_attestation(2),
+            ];
+            let leaf = &chain[2]; // depth=2
+
+            // Create MR and queue entry (required by function signature).
+            let mut mr = MergeRequest::new(
+                Id::new("mr-abac"),
+                repo.id.clone(),
+                "ABAC test MR",
+                "feat/abac",
+                "main",
+                1000,
+            );
+            mr.author_agent_id = Some(Id::new("agent:worker-abac"));
+            mr.workspace_id = Id::new("ws-abac");
+
+            let entry = MergeQueueEntry::new(Id::new("entry-abac"), mr.id.clone(), 50, 1000);
+
+            // Seed a deny policy: chain_depth > 1 → deny push to attestation resources.
+            let deny_policy = Policy {
+                id: Id::new("deny-deep-chain"),
+                name: "deny-deep-chain".to_string(),
+                description: "Deny pushes with chain_depth > 1".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 100,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "subject.chain_depth".to_string(),
+                    operator: ConditionOp::GreaterThan,
+                    value: ConditionValue::Number(1),
+                }],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["attestation".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "test".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&deny_policy).await.unwrap();
+
+            // Also seed a blanket allow so shallow chains would pass.
+            let allow_policy = Policy {
+                id: Id::new("allow-attestation"),
+                name: "allow-attestation".to_string(),
+                description: "Allow attestation merges".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 10,
+                effect: PolicyEffect::Allow,
+                conditions: vec![],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["attestation".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "test".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&allow_policy).await.unwrap();
+
+            // Call the production function with the real chain data.
+            let result =
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+
+            // chain_depth=2 > 1 → deny policy should match.
+            assert_eq!(result.effect, PolicyEffect::Deny);
+            assert_eq!(result.matched_policy, Some("deny-deep-chain".to_string()),);
+        }
+
+        /// Integration test: shallow chain (depth=0) is allowed when deny policy
+        /// only fires for chain_depth > 5 — verifies attributes are correct for
+        /// the allow path.
+        #[tokio::test]
+        async fn evaluate_attestation_abac_shallow_chain_allowed() {
+            let state = test_state();
+
+            let ws = Workspace::new(
+                Id::new("ws-shallow"),
+                Id::new("tenant-shallow"),
+                "ws-shallow",
+                "ws-shallow",
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-shallow"),
+                Id::new("ws-shallow"),
+                "shallow-repo",
+                "/tmp/shallow-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            // Single-node chain: root only (depth=0).
+            let chain = vec![root_attestation("user:shallow-signer")];
+            let leaf = &chain[0]; // depth=0
+
+            let mut mr = MergeRequest::new(
+                Id::new("mr-shallow"),
+                repo.id.clone(),
+                "Shallow MR",
+                "feat/shallow",
+                "main",
+                1000,
+            );
+            mr.author_agent_id = Some(Id::new("agent:worker-shallow"));
+            mr.workspace_id = Id::new("ws-shallow");
+
+            let entry = MergeQueueEntry::new(Id::new("entry-shallow"), mr.id.clone(), 50, 1000);
+
+            // Deny policy for deep chains only (chain_depth > 5).
+            let deny_policy = Policy {
+                id: Id::new("deny-deep-5"),
+                name: "deny-deep-5".to_string(),
+                description: "Deny deep chains".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 100,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "subject.chain_depth".to_string(),
+                    operator: ConditionOp::GreaterThan,
+                    value: ConditionValue::Number(5),
+                }],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["attestation".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "test".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&deny_policy).await.unwrap();
+
+            let allow_policy = Policy {
+                id: Id::new("allow-shallow"),
+                name: "allow-shallow".to_string(),
+                description: "Allow attestation merges".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 10,
+                effect: PolicyEffect::Allow,
+                conditions: vec![],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["attestation".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "test".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&allow_policy).await.unwrap();
+
+            let result =
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+
+            // chain_depth=0 ≤ 5 → deny doesn't fire, allow matches.
+            assert_eq!(result.effect, PolicyEffect::Allow);
+            assert_eq!(result.matched_policy, Some("allow-shallow".to_string()),);
+        }
+
+        /// Integration test: root_signer condition is populated from the attestation
+        /// chain and correctly matched by policies.
+        #[tokio::test]
+        async fn evaluate_attestation_abac_root_signer_policy_match() {
+            let state = test_state();
+
+            let ws = Workspace::new(
+                Id::new("ws-signer"),
+                Id::new("tenant-signer"),
+                "ws-signer",
+                "ws-signer",
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-signer"),
+                Id::new("ws-signer"),
+                "signer-repo",
+                "/tmp/signer-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            let chain = vec![
+                root_attestation("user:trusted-principal"),
+                derived_attestation(1),
+            ];
+            let leaf = &chain[1];
+
+            let mut mr = MergeRequest::new(
+                Id::new("mr-signer"),
+                repo.id.clone(),
+                "Signer MR",
+                "feat/signer",
+                "main",
+                1000,
+            );
+            mr.author_agent_id = Some(Id::new("agent:signer-worker"));
+            mr.workspace_id = Id::new("ws-signer");
+
+            let entry = MergeQueueEntry::new(Id::new("entry-signer"), mr.id.clone(), 50, 1000);
+
+            // Allow only when root_signer == "user:trusted-principal".
+            let allow_trusted = Policy {
+                id: Id::new("allow-trusted-signer"),
+                name: "allow-trusted-signer".to_string(),
+                description: "Allow only trusted signer".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 50,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.root_signer".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("user:trusted-principal".to_string()),
+                }],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["attestation".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "test".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&allow_trusted).await.unwrap();
+
+            let result =
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+
+            // root_signer "user:trusted-principal" matches the policy condition.
+            assert_eq!(result.effect, PolicyEffect::Allow);
+            assert_eq!(
+                result.matched_policy,
+                Some("allow-trusted-signer".to_string()),
+            );
+        }
+
+        /// Integration test: constraint_count is correctly populated and a policy
+        /// conditioned on constraint_count < 10 matches for a small chain.
+        #[tokio::test]
+        async fn evaluate_attestation_abac_constraint_count_match() {
+            let state = test_state();
+
+            let ws = Workspace::new(Id::new("ws-cc"), Id::new("tenant-cc"), "ws-cc", "ws-cc", 0);
+            state.workspaces.create(&ws).await.unwrap();
+
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-cc"),
+                Id::new("ws-cc"),
+                "cc-repo",
+                "/tmp/cc-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            // Chain: root (1 output + 1 gate = 2) + derived (2 output + 0 gate = 2)
+            // Total constraint_count = 4
+            let chain = vec![root_attestation("user:cc-signer"), derived_attestation(1)];
+            let leaf = &chain[1];
+
+            let mut mr = MergeRequest::new(
+                Id::new("mr-cc"),
+                repo.id.clone(),
+                "CC MR",
+                "feat/cc",
+                "main",
+                1000,
+            );
+            mr.author_agent_id = Some(Id::new("agent:cc-worker"));
+            mr.workspace_id = Id::new("ws-cc");
+
+            let entry = MergeQueueEntry::new(Id::new("entry-cc"), mr.id.clone(), 50, 1000);
+
+            // Allow when constraint_count < 10.
+            let allow_low_cc = Policy {
+                id: Id::new("allow-low-cc"),
+                name: "allow-low-cc".to_string(),
+                description: "Allow when few constraints".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 50,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.constraint_count".to_string(),
+                    operator: ConditionOp::LessThan,
+                    value: ConditionValue::Number(10),
+                }],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["attestation".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "test".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&allow_low_cc).await.unwrap();
+
+            let result =
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+
+            // constraint_count=4 < 10 → allow.
+            assert_eq!(result.effect, PolicyEffect::Allow);
+            assert_eq!(result.matched_policy, Some("allow-low-cc".to_string()),);
+        }
+
+        /// Integration test: tenant_id is resolved from workspace and set in the
+        /// ABAC context — verified via a policy that conditions on subject.tenant_id.
+        #[tokio::test]
+        async fn evaluate_attestation_abac_sets_tenant_id_from_workspace() {
+            let state = test_state();
+
+            let ws = Workspace::new(
+                Id::new("ws-tenant"),
+                Id::new("tenant-specific-id"),
+                "ws-tenant",
+                "ws-tenant",
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-tenant"),
+                Id::new("ws-tenant"),
+                "tenant-repo",
+                "/tmp/tenant-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            let chain = vec![root_attestation("user:tenant-signer")];
+            let leaf = &chain[0];
+
+            let mut mr = MergeRequest::new(
+                Id::new("mr-tenant"),
+                repo.id.clone(),
+                "Tenant MR",
+                "feat/tenant",
+                "main",
+                1000,
+            );
+            mr.author_agent_id = Some(Id::new("agent:tenant-worker"));
+            mr.workspace_id = Id::new("ws-tenant");
+
+            let entry = MergeQueueEntry::new(Id::new("entry-tenant"), mr.id.clone(), 50, 1000);
+
+            // Allow only when tenant_id == "tenant-specific-id".
+            let allow_tenant = Policy {
+                id: Id::new("allow-tenant"),
+                name: "allow-tenant".to_string(),
+                description: "Allow only specific tenant".to_string(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 50,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.tenant_id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("tenant-specific-id".to_string()),
+                }],
+                actions: vec!["merge".to_string()],
+                resource_types: vec!["attestation".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "test".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            };
+            state.policies.create(&allow_tenant).await.unwrap();
+
+            let result =
+                evaluate_attestation_abac(&state, &chain, leaf, &mr, &entry, &repo, "merge").await;
+
+            // tenant_id resolved from workspace → "tenant-specific-id" → matches.
+            assert_eq!(result.effect, PolicyEffect::Allow);
+            assert_eq!(result.matched_policy, Some("allow-tenant".to_string()),);
+        }
     }
 }

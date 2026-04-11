@@ -254,7 +254,7 @@ pub struct SubjectAttrs {
     pub chain_depth: Option<i64>,
     /// Root signer identity from the chain's root SignedInput key_binding.
     pub root_signer: Option<String>,
-    /// Total accumulated constraint count (explicit + strategy-implied + gate).
+    /// Total accumulated constraint count (explicit + gate).
     pub constraint_count: Option<i64>,
     /// Additional arbitrary JWT claims.
     #[serde(flatten)]
