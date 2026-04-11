@@ -419,4 +419,169 @@ describe('SpecGraphDAG', () => {
     const sourceNode = container.querySelector('[data-testid="dag-node-system/deprecated.md"]');
     expect(sourceNode.getAttribute('aria-label')).not.toContain('(superseded)');
   });
+
+  // ── Impact analysis ───────────────────────────────────────────────────
+
+  describe('impact analysis', () => {
+    const IMPACT_NODES = [
+      { path: 'system/core.md', approval_status: 'approved' },
+      { path: 'system/auth.md', approval_status: 'pending' },
+      { path: 'system/billing.md', approval_status: 'approved' },
+      { path: 'system/unrelated.md', approval_status: 'approved' },
+      { path: 'system/deep.md', approval_status: 'pending' },
+    ];
+
+    const IMPACT_EDGES = [
+      // auth depends_on core, billing depends_on core, deep depends_on auth
+      { source: 'system/auth.md', target: 'system/core.md', link_type: 'depends_on', status: 'active' },
+      { source: 'system/billing.md', target: 'system/core.md', link_type: 'implements', status: 'active' },
+      { source: 'system/deep.md', target: 'system/auth.md', link_type: 'extends', status: 'active' },
+    ];
+
+    it('dims non-dependent nodes when impactPath is set', async () => {
+      const { container } = render(SpecGraphDAG, {
+        props: { nodes: IMPACT_NODES, edges: IMPACT_EDGES, impactPath: 'system/core.md' },
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+      });
+
+      // Unrelated node should be dimmed (opacity 0.2)
+      const unrelatedNode = container.querySelector('[data-testid="dag-node-system/unrelated.md"]');
+      expect(unrelatedNode).toBeTruthy();
+      expect(unrelatedNode.getAttribute('data-impact')).toBe('dimmed');
+      expect(unrelatedNode.getAttribute('opacity')).toBe('0.2');
+    });
+
+    it('highlights transitive dependent nodes', async () => {
+      const { container } = render(SpecGraphDAG, {
+        props: { nodes: IMPACT_NODES, edges: IMPACT_EDGES, impactPath: 'system/core.md' },
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+      });
+
+      // auth, billing, deep are all transitive dependents of core
+      const authNode = container.querySelector('[data-testid="dag-node-system/auth.md"]');
+      expect(authNode.getAttribute('data-impact')).toBe('dependent');
+      expect(authNode.getAttribute('opacity')).toBe('1');
+
+      const billingNode = container.querySelector('[data-testid="dag-node-system/billing.md"]');
+      expect(billingNode.getAttribute('data-impact')).toBe('dependent');
+
+      // deep depends on auth which depends on core — transitive
+      const deepNode = container.querySelector('[data-testid="dag-node-system/deep.md"]');
+      expect(deepNode.getAttribute('data-impact')).toBe('dependent');
+    });
+
+    it('marks the impact root node', async () => {
+      const { container } = render(SpecGraphDAG, {
+        props: { nodes: IMPACT_NODES, edges: IMPACT_EDGES, impactPath: 'system/core.md' },
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+      });
+
+      const coreNode = container.querySelector('[data-testid="dag-node-system/core.md"]');
+      expect(coreNode.getAttribute('data-impact')).toBe('root');
+      expect(coreNode.getAttribute('opacity')).toBe('1');
+      // Should have impact ring
+      expect(coreNode.querySelector('[data-testid="impact-ring"]')).toBeTruthy();
+    });
+
+    it('includes impact status in aria-label', async () => {
+      const { container } = render(SpecGraphDAG, {
+        props: { nodes: IMPACT_NODES, edges: IMPACT_EDGES, impactPath: 'system/core.md' },
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+      });
+
+      const coreNode = container.querySelector('[data-testid="dag-node-system/core.md"]');
+      expect(coreNode.getAttribute('aria-label')).toContain('(impact analysis root)');
+
+      const authNode = container.querySelector('[data-testid="dag-node-system/auth.md"]');
+      expect(authNode.getAttribute('aria-label')).toContain('(dependent)');
+    });
+
+    it('dims non-highlighted edges', async () => {
+      const { container } = render(SpecGraphDAG, {
+        props: { nodes: IMPACT_NODES, edges: IMPACT_EDGES, impactPath: 'system/core.md' },
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+      });
+
+      // All edges in IMPACT_EDGES connect to dependents of core, so all should be highlighted
+      const edgeGroups = container.querySelectorAll('.dag-edge');
+      edgeGroups.forEach(eg => {
+        expect(eg.getAttribute('opacity')).toBe('1');
+      });
+    });
+
+    it('calls onImpactSelect in impact mode', async () => {
+      const onImpactSelect = vi.fn();
+      const onNodeClick = vi.fn();
+      const { container } = render(SpecGraphDAG, {
+        props: {
+          nodes: IMPACT_NODES,
+          edges: [],
+          impactMode: true,
+          onImpactSelect,
+          onNodeClick,
+        },
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+      });
+
+      const nodeGroup = container.querySelector('[data-testid="dag-node-system/core.md"]');
+      await fireEvent.click(nodeGroup);
+      expect(onImpactSelect).toHaveBeenCalledTimes(1);
+      expect(onImpactSelect).toHaveBeenCalledWith(IMPACT_NODES[0]);
+      // Should NOT call onNodeClick in impact mode
+      expect(onNodeClick).not.toHaveBeenCalled();
+    });
+
+    it('shows no dimming when impactPath is null', async () => {
+      const { container } = render(SpecGraphDAG, {
+        props: { nodes: IMPACT_NODES, edges: IMPACT_EDGES, impactPath: null },
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+      });
+
+      // No nodes should have data-impact attribute
+      const allNodes = container.querySelectorAll('.dag-node');
+      allNodes.forEach(node => {
+        expect(node.getAttribute('data-impact')).toBeNull();
+        expect(node.getAttribute('opacity')).toBe('1');
+      });
+    });
+
+    it('renders empty state when no dependents exist', async () => {
+      const { container } = render(SpecGraphDAG, {
+        props: {
+          nodes: [{ path: 'system/solo.md', approval_status: 'approved' }],
+          edges: [],
+          impactPath: 'system/solo.md',
+        },
+      });
+
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="dag-svg"]')).toBeTruthy();
+      });
+
+      // Root node should be highlighted as root
+      const soloNode = container.querySelector('[data-testid="dag-node-system/solo.md"]');
+      expect(soloNode.getAttribute('data-impact')).toBe('root');
+    });
+  });
 });

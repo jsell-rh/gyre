@@ -937,6 +937,11 @@
   let specHistory = $state(null);
   let specHistoryLoading = $state(false);
 
+  // Impact analysis state for links tab
+  let impactData = $state(null);
+  let impactLoading = $state(false);
+  let impactError = $state(null);
+
   // Edit tab
   let editContent = $state('');
   let llmInstruction = $state('');
@@ -1048,6 +1053,8 @@
       archLoaded = false;
       archError = null;
       archGhostOverlays = [];
+      impactData = null;
+      impactError = null;
     }
   });
 
@@ -1144,6 +1151,78 @@
       archLoaded = true; // mark loaded even on error so we don't retry automatically
     } finally {
       if (entity?.id === loadingEntityId) archLoading = false;
+    }
+  }
+
+  // ── Impact analysis for links tab ─────────────────────────────────────────
+  async function loadImpactAnalysis() {
+    const path = entity?.id;
+    if (!path || impactLoading) return;
+    impactLoading = true;
+    impactError = null;
+    try {
+      // Fetch direct dependents from the API
+      const directDeps = await api.specDependents(path);
+      // Fetch the full graph for transitive traversal
+      const graph = await api.specsGraph();
+      const allEdges = graph?.edges ?? [];
+      const allNodes = graph?.nodes ?? [];
+
+      // Build reverse adjacency for transitive traversal
+      const IMPACT_LINK_TYPES = new Set(['dependson', 'depends_on', 'implements', 'extends']);
+      const reverseAdj = new Map();
+      for (const e of allEdges) {
+        const lt = (e.link_type ?? '').toLowerCase();
+        if (!IMPACT_LINK_TYPES.has(lt)) continue;
+        if (!reverseAdj.has(e.target)) reverseAdj.set(e.target, []);
+        reverseAdj.get(e.target).push({ source: e.source, link_type: e.link_type });
+      }
+
+      // BFS from the current spec
+      const visited = new Map();
+      const queue = [{ path, depth: 0 }];
+      while (queue.length > 0) {
+        const { path: current, depth } = queue.shift();
+        const sources = reverseAdj.get(current) ?? [];
+        for (const { source, link_type } of sources) {
+          if (!visited.has(source)) {
+            visited.set(source, { link_type, depth: depth + 1, direct: directDeps.some(d => d.source_path === source) });
+            queue.push({ path: source, depth: depth + 1 });
+          }
+        }
+      }
+
+      // Build result grouped by repo
+      const deps = Array.from(visited.entries()).map(([depPath, info]) => {
+        const node = allNodes.find(n => n.path === depPath);
+        const directDep = directDeps.find(d => d.source_path === depPath);
+        return {
+          path: depPath,
+          link_type: info.link_type,
+          depth: info.depth,
+          direct: info.direct,
+          approval_status: node?.approval_status ?? 'unknown',
+          repo_id: directDep?.target_repo_id ?? null,
+        };
+      }).sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path));
+
+      // Group by repo
+      const groups = new Map();
+      for (const dep of deps) {
+        const key = dep.repo_id ?? 'unknown';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(dep);
+      }
+
+      impactData = {
+        total: deps.length,
+        repoCount: groups.size,
+        byRepo: Array.from(groups.entries()).map(([repo, items]) => ({ repo, items })),
+      };
+    } catch (e) {
+      impactError = e.message ?? 'Failed to load impact analysis';
+    } finally {
+      impactLoading = false;
     }
   }
 
@@ -3585,6 +3664,53 @@
             {:else}
               <p class="no-data">{$t('detail_panel.no_links')}</p>
             {/if}
+
+            <!-- Impact Analysis section -->
+            <div class="impact-analysis-section" data-testid="impact-analysis-section">
+              <div class="impact-analysis-header">
+                <span class="progress-section-label">Impact Analysis</span>
+                <Button
+                  variant="secondary"
+                  onclick={loadImpactAnalysis}
+                  disabled={impactLoading}
+                  data-testid="analyze-impact-detail-btn"
+                >
+                  {impactLoading ? 'Analyzing...' : 'Analyze Impact'}
+                </Button>
+              </div>
+              {#if impactError}
+                <p class="no-data" style="color: var(--color-danger);">{impactError}</p>
+              {/if}
+              {#if impactData}
+                <div class="impact-tree" data-testid="impact-tree">
+                  <p class="impact-tree-header" data-testid="impact-tree-header">
+                    {impactData.total} spec{impactData.total !== 1 ? 's' : ''} across {impactData.repoCount} repo{impactData.repoCount !== 1 ? 's' : ''} would need review
+                  </p>
+                  {#if impactData.total > 0}
+                    {#each impactData.byRepo as { repo, items }}
+                      <div class="impact-tree-repo" data-testid="impact-tree-repo-{repo}">
+                        <span class="impact-tree-repo-name">{repo}</span>
+                        <ul class="impact-tree-list">
+                          {#each items as dep}
+                            <li class="impact-tree-item" data-testid="impact-tree-item-{dep.path}">
+                              <span class="impact-tree-depth" title="Dependency depth: {dep.depth}">{dep.direct ? 'direct' : `depth ${dep.depth}`}</span>
+                              <button class="entity-link mono" title="Navigate to {dep.path}" onclick={() => navigateTo('spec', dep.path, { path: dep.path })}>{dep.path.split('/').pop()?.replace(/\.md$/, '')}</button>
+                              <Badge value={dep.link_type?.replace(/_/g, ' ') ?? 'related'} variant="info" />
+                              <Badge
+                                value={dep.approval_status}
+                                variant={dep.approval_status === 'approved' ? 'success' : dep.approval_status === 'rejected' ? 'danger' : dep.approval_status === 'pending' ? 'warning' : 'muted'}
+                              />
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/each}
+                  {:else}
+                    <p class="no-data">No specs depend on this spec.</p>
+                  {/if}
+                </div>
+              {/if}
+            </div>
           {/if}
         </div>
 
@@ -6146,6 +6272,69 @@
     text-transform: uppercase;
     color: var(--color-text-muted);
     flex-shrink: 0;
+  }
+
+  /* ── Impact analysis (links tab) ──────────────────────────────── */
+  .impact-analysis-section {
+    margin-top: var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
+  }
+  .impact-analysis-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+  .impact-tree {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .impact-tree-header {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0 0 var(--space-2) 0;
+  }
+  .impact-tree-repo {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .impact-tree-repo-name {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding-bottom: var(--space-1);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .impact-tree-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .impact-tree-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+  }
+  .impact-tree-depth {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    min-width: 50px;
   }
 
   .link-target {

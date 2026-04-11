@@ -10,12 +10,15 @@
    *   nodes    — SpecGraphNode[] from GET /api/v1/specs/graph
    *   edges    — SpecGraphEdge[] from GET /api/v1/specs/graph
    *   onNodeClick — (node) => void — called when a node is clicked
+   *   impactPath  — string | null — when set, highlights transitive dependents
+   *   onImpactSelect — (node) => void — called in impact mode when node selected
+   *   impactMode — boolean — when true, clicking selects for impact analysis
    */
 
   import { onMount } from 'svelte';
   import { elkLayout } from '../lib/layout-engines.js';
 
-  let { nodes = [], edges = [], onNodeClick = () => {} } = $props();
+  let { nodes = [], edges = [], onNodeClick = () => {}, impactPath = null, onImpactSelect = () => {}, impactMode = false } = $props();
 
   // ── Layout state ──────────────────────────────────────────────────────────
   let positions = $state({});
@@ -230,6 +233,59 @@
       return (lt === 'supersedes') && e.target === nodePath;
     });
   }
+
+  // ── Impact analysis: compute transitive dependents ────────────────────
+  // Edges: source depends_on/implements/extends target.
+  // Dependents of X = all specs that (transitively) have X as a target.
+  // We follow reverse edges: edge.target === X → edge.source is a dependent.
+  const IMPACT_LINK_TYPES = new Set(['dependson', 'depends_on', 'implements', 'extends']);
+
+  const impactDependents = $derived.by(() => {
+    if (!impactPath) return new Set();
+
+    // Build reverse adjacency: for each target, list all sources
+    const reverseAdj = new Map();
+    for (const e of edges) {
+      const lt = (e.link_type ?? '').toLowerCase();
+      if (!IMPACT_LINK_TYPES.has(lt)) continue;
+      if (!reverseAdj.has(e.target)) reverseAdj.set(e.target, []);
+      reverseAdj.get(e.target).push(e.source);
+    }
+
+    // BFS from impactPath following reverse edges
+    const visited = new Set();
+    const queue = [impactPath];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      const sources = reverseAdj.get(current) ?? [];
+      for (const src of sources) {
+        if (!visited.has(src)) {
+          visited.add(src);
+          queue.push(src);
+        }
+      }
+    }
+    return visited;
+  });
+
+  function isImpactHighlighted(nodePath) {
+    if (!impactPath) return false;
+    return nodePath === impactPath || impactDependents.has(nodePath);
+  }
+
+  function isImpactEdgeHighlighted(edge) {
+    if (!impactPath) return false;
+    // An edge is highlighted if both endpoints are in the impact set
+    return isImpactHighlighted(edge.source) && isImpactHighlighted(edge.target);
+  }
+
+  function handleNodeClick(node) {
+    if (impactMode) {
+      onImpactSelect(node);
+    } else {
+      onNodeClick(node);
+    }
+  }
 </script>
 
 {#if !layoutReady}
@@ -292,8 +348,9 @@
       {@const conflict = isConflict(edge)}
       {@const stale = edge.status === 'stale'}
       {@const markerId = stale ? 'arrow-stale' : `arrow-${style.label}`}
+      {@const edgeDimmed = impactPath ? !isImpactEdgeHighlighted(edge) : false}
       {#if path}
-        <g class="dag-edge" data-testid="dag-edge-{i}" data-link-type={style.label} data-status={edge.status ?? 'active'}>
+        <g class="dag-edge" data-testid="dag-edge-{i}" data-link-type={style.label} data-status={edge.status ?? 'active'} opacity={edgeDimmed ? 0.15 : 1}>
           <!-- Hit area (invisible wider stroke for hover) -->
           <path d={path} fill="none" stroke="transparent" stroke-width="12" />
           <!-- Visible edge -->
@@ -337,27 +394,47 @@
       {@const pos = positions[node.path]}
       {@const colors = nodeColor(node.approval_status)}
       {@const superseded = isSupersededTarget(node.path)}
+      {@const nodeDimmed = impactPath ? !isImpactHighlighted(node.path) : false}
+      {@const isImpactRoot = impactPath === node.path}
       {#if pos}
         <g
           class="dag-node"
           class:dag-node-superseded={superseded}
+          class:dag-node-impact-root={isImpactRoot}
           data-testid="dag-node-{node.path}"
           data-status={node.approval_status}
           data-superseded={superseded ? 'true' : undefined}
+          data-impact={impactPath ? (isImpactRoot ? 'root' : impactDependents.has(node.path) ? 'dependent' : 'dimmed') : undefined}
+          opacity={nodeDimmed ? 0.2 : 1}
           transform="translate({pos.x - NODE_W / 2}, {pos.y - NODE_H / 2})"
           tabindex="0"
           role="button"
-          aria-label="{nodeLabel(node.path)} — {node.approval_status}{superseded ? ' (superseded)' : ''}"
-          onclick={() => onNodeClick(node)}
-          onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onNodeClick(node); } }}
+          aria-label="{nodeLabel(node.path)} — {node.approval_status}{superseded ? ' (superseded)' : ''}{isImpactRoot ? ' (impact analysis root)' : impactDependents.has(node.path) ? ' (dependent)' : ''}"
+          onclick={() => handleNodeClick(node)}
+          onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleNodeClick(node); } }}
         >
+          {#if isImpactRoot}
+            <!-- Highlight ring for impact analysis root -->
+            <rect
+              width={NODE_W + 6}
+              height={NODE_H + 6}
+              x="-3"
+              y="-3"
+              rx={NODE_RX + 2}
+              fill="none"
+              stroke="#f59e0b"
+              stroke-width="2"
+              class="dag-impact-ring"
+              data-testid="impact-ring"
+            />
+          {/if}
           <rect
             width={NODE_W}
             height={NODE_H}
             rx={NODE_RX}
             fill={colors.fill}
-            stroke={colors.stroke}
-            stroke-width="2"
+            stroke={isImpactRoot ? '#f59e0b' : colors.stroke}
+            stroke-width={isImpactRoot ? 3 : 2}
           />
           <text
             class="dag-node-label"
@@ -449,6 +526,20 @@
 
   .dag-strikethrough {
     pointer-events: none;
+  }
+
+  .dag-impact-ring {
+    pointer-events: none;
+    animation: impact-pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes impact-pulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
+  }
+
+  .dag-node-impact-root rect {
+    filter: brightness(1.2);
   }
 
   .dag-edge-label {

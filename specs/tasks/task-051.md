@@ -2,7 +2,7 @@
 
 **Spec reference:** `spec-links.md` §UI (line 189)  
 **Depends on:** TASK-019 (spec dependents endpoint), TASK-045 (spec DAG visualization)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 

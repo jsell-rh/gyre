@@ -607,6 +607,8 @@ export const api = {
     request(`/specs/${encodeURIComponent(path)}/links${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
   specHistoryRepo: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}/history${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specDependents: (path) =>
+    request(`/specs/${encodeURIComponent(path)}/dependents`),
   checkSpecAssertions: (repoId, specPath, content) =>
     request(`/repos/${repoId}/spec-assertions/check`, {
       method: 'POST',

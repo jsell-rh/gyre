@@ -59,6 +59,10 @@
   let specGraphLoading = $state(false);
   let graphScope = $state('workspace');
 
+  // Impact analysis state
+  let impactMode = $state(false);
+  let impactPath = $state(null);
+
   async function loadSpecGraph() {
     specGraphLoading = true;
     try {
@@ -97,6 +101,84 @@
       openDetailPanel({ type: 'spec', id: path, data });
     }
   }
+
+  // ── Impact analysis ──────────────────────────────────────────────────────
+  function handleImpactSelect(node) {
+    if (impactPath === node.path) {
+      // Deselect
+      impactPath = null;
+    } else {
+      impactPath = node.path;
+    }
+  }
+
+  function exitImpactMode() {
+    impactMode = false;
+    impactPath = null;
+  }
+
+  // Compute transitive dependents from graph edges for the summary panel
+  const IMPACT_LINK_TYPES = new Set(['dependson', 'depends_on', 'implements', 'extends']);
+
+  const impactDependentsList = $derived.by(() => {
+    if (!impactPath || !specGraph) return [];
+
+    // Use the currently-displayed edges (workspace or tenant scope)
+    const currentEdges = graphEdges;
+
+    // Build reverse adjacency
+    const reverseAdj = new Map();
+    for (const e of currentEdges) {
+      const lt = (e.link_type ?? '').toLowerCase();
+      if (!IMPACT_LINK_TYPES.has(lt)) continue;
+      if (!reverseAdj.has(e.target)) reverseAdj.set(e.target, []);
+      reverseAdj.get(e.target).push({ source: e.source, link_type: e.link_type });
+    }
+
+    // BFS to find transitive dependents and their link types
+    const visited = new Map(); // path → { link_type, depth }
+    const queue = [{ path: impactPath, depth: 0 }];
+    while (queue.length > 0) {
+      const { path: current, depth } = queue.shift();
+      const sources = reverseAdj.get(current) ?? [];
+      for (const { source, link_type } of sources) {
+        if (!visited.has(source)) {
+          visited.set(source, { link_type, depth: depth + 1 });
+          queue.push({ path: source, depth: depth + 1 });
+        }
+      }
+    }
+
+    // Build list with node info
+    return Array.from(visited.entries()).map(([path, { link_type, depth }]) => {
+      const node = graphNodes.find(n => n.path === path);
+      const specData = specs.find(s => s.path === path);
+      return {
+        path,
+        link_type,
+        depth,
+        approval_status: node?.approval_status ?? 'unknown',
+        repo_id: specData?.repo_id ?? null,
+        repo_name: specData?.repo_name ?? specData?.repo_id ?? null,
+      };
+    }).sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path));
+  });
+
+  const impactRepoCount = $derived.by(() => {
+    if (!impactDependentsList.length) return 0;
+    return new Set(impactDependentsList.map(d => d.repo_id).filter(Boolean)).size;
+  });
+
+  const impactByRepo = $derived.by(() => {
+    if (!impactDependentsList.length) return [];
+    const groups = new Map();
+    for (const dep of impactDependentsList) {
+      const key = dep.repo_name ?? dep.repo_id ?? 'unknown';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(dep);
+    }
+    return Array.from(groups.entries()).map(([repo, deps]) => ({ repo, deps }));
+  });
 
   // ── Spec approval quick actions ──────────────────────────────────────────────
   let approvingSpec = $state(null);
@@ -446,23 +528,75 @@
             <span class="graph-stat">{graphNodes.length} spec{graphNodes.length !== 1 ? 's' : ''}</span>
             <span class="graph-stat">{graphEdges.length} relationship{graphEdges.length !== 1 ? 's' : ''}</span>
           </div>
-          <div class="graph-scope-toggle" role="group" aria-label="Graph scope">
-            <button
-              class="pill"
-              class:active={graphScope === 'workspace'}
-              onclick={() => { graphScope = 'workspace'; }}
-              aria-pressed={graphScope === 'workspace'}
-              data-testid="scope-workspace"
-            >Workspace</button>
-            <button
-              class="pill"
-              class:active={graphScope === 'tenant'}
-              onclick={() => { graphScope = 'tenant'; }}
-              aria-pressed={graphScope === 'tenant'}
-              data-testid="scope-tenant"
-            >Tenant</button>
+          <div class="graph-toolbar-actions">
+            {#if impactMode}
+              <button
+                class="pill active impact-exit-btn"
+                onclick={exitImpactMode}
+                data-testid="exit-impact-mode"
+                title="Exit impact analysis mode"
+              >Exit Impact Analysis</button>
+            {:else}
+              <button
+                class="pill impact-btn"
+                onclick={() => { impactMode = true; }}
+                data-testid="analyze-impact-btn"
+                title="Analyze impact — click a spec to see all transitive dependents"
+              >Analyze Impact</button>
+            {/if}
+            <div class="graph-scope-toggle" role="group" aria-label="Graph scope">
+              <button
+                class="pill"
+                class:active={graphScope === 'workspace'}
+                onclick={() => { graphScope = 'workspace'; }}
+                aria-pressed={graphScope === 'workspace'}
+                data-testid="scope-workspace"
+              >Workspace</button>
+              <button
+                class="pill"
+                class:active={graphScope === 'tenant'}
+                onclick={() => { graphScope = 'tenant'; }}
+                aria-pressed={graphScope === 'tenant'}
+                data-testid="scope-tenant"
+              >Tenant</button>
+            </div>
           </div>
         </div>
+        <!-- Impact analysis prompt -->
+        {#if impactMode && !impactPath}
+          <div class="impact-prompt" data-testid="impact-prompt">
+            Click a spec node to analyze its impact
+          </div>
+        {/if}
+        <!-- Impact analysis summary panel -->
+        {#if impactPath}
+          <div class="impact-summary" data-testid="impact-summary">
+            <div class="impact-summary-header">
+              <span class="impact-summary-title" data-testid="impact-summary-title">
+                {impactDependentsList.length} spec{impactDependentsList.length !== 1 ? 's' : ''} across {impactRepoCount} repo{impactRepoCount !== 1 ? 's' : ''} need review
+              </span>
+              <button class="impact-clear-btn" onclick={() => { impactPath = null; }} title="Clear selection" data-testid="impact-clear">Clear</button>
+            </div>
+            {#if impactDependentsList.length > 0}
+              <div class="impact-details" data-testid="impact-details">
+                {#each impactByRepo as { repo, deps }}
+                  <div class="impact-repo-group">
+                    <span class="impact-repo-name">{repo}</span>
+                    {#each deps as dep}
+                      <div class="impact-dep-item" data-testid="impact-dep-{dep.path}">
+                        <span class="impact-dep-path mono">{dep.path.split('/').pop()?.replace(/\.md$/, '')}</span>
+                        <Badge value={dep.link_type?.replace(/_/g, ' ') ?? 'related'} variant="info" />
+                        <Badge value={dep.approval_status} variant={statusColor(dep.approval_status)} />
+                      </div>
+                    {/each}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="impact-empty">No specs depend on this spec.</p>
+            {/if}
+          </div>
+        {/if}
         {#if graphNodes.length === 0}
           <EmptyState title="No spec relationships" description="Spec relationships appear when specs reference each other via manifest links (implements, conflicts, extends)." />
         {:else}
@@ -470,6 +604,9 @@
             nodes={graphNodes}
             edges={graphEdges}
             onNodeClick={handleGraphNodeClick}
+            {impactMode}
+            {impactPath}
+            onImpactSelect={handleImpactSelect}
           />
         {/if}
       {:else}
@@ -1301,5 +1438,96 @@
   }
   .spec-graph-info { display: flex; gap: var(--space-4); }
   .graph-stat { font-size: var(--text-sm); color: var(--color-text-secondary); font-weight: 600; }
+  .graph-toolbar-actions { display: flex; gap: var(--space-2); align-items: center; }
   .graph-scope-toggle { display: flex; gap: var(--space-1); }
+
+  /* ── Impact analysis ────────────────────────────────────────────── */
+  .impact-btn {
+    background: color-mix(in srgb, #f59e0b 12%, transparent) !important;
+    border-color: #f59e0b !important;
+    color: #f59e0b !important;
+  }
+  .impact-btn:hover { background: color-mix(in srgb, #f59e0b 20%, transparent) !important; }
+  .impact-exit-btn {
+    background: color-mix(in srgb, #f59e0b 20%, transparent) !important;
+    border-color: #f59e0b !important;
+    color: #f59e0b !important;
+  }
+  .impact-prompt {
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, #f59e0b 8%, transparent);
+    border: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+    border-radius: var(--radius);
+    color: #f59e0b;
+    font-size: var(--text-sm);
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .impact-summary {
+    padding: var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    flex-shrink: 0;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .impact-summary-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+  .impact-summary-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+  .impact-clear-btn {
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    font-family: var(--font-body);
+  }
+  .impact-clear-btn:hover { color: var(--color-text); border-color: var(--color-text-muted); }
+  .impact-details {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .impact-repo-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .impact-repo-name {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding-bottom: var(--space-1);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .impact-dep-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+  }
+  .impact-dep-path {
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    flex: 1;
+  }
+  .impact-empty {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin: 0;
+  }
 </style>
