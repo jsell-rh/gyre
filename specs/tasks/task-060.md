@@ -39,3 +39,5 @@ When working on this task:
 6. On completion, update progress to `ready-for-review` and list git commits below
 
 ## Git Commits
+
+- `1bd337c5` fix(tests): remove dead MoldableViewNodeTypeFilter test file (TASK-060)
