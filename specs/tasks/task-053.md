@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-implementation.md` §Migration Plan > Phase 4: Polish  
 **Depends on:** TASK-029 (lens toggle, complete), TASK-031 (drill-down, complete), TASK-036 (streaming, complete), TASK-038 (keyboard shortcuts, complete)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -68,4 +68,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(ui): add responsive layout and large graph performance (TASK-053)`

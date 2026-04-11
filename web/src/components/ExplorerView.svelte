@@ -612,6 +612,7 @@
   let showingRepoGraph = $state(false);
 
   let insightsCollapsed = $state(true);
+  let chatCollapsed = $state(false);
 
   // Manual view query editor state
   let queryEditorOpen = $state(false);
@@ -1785,19 +1786,44 @@
                 </div>
               </div>
             {/if}
-            <div class="explorer-chat-area">
-              <ExplorerChat
-                repoId={selectedRepoId}
-                canvasState={explorerCanvasState}
-                onViewQuery={(q) => { activeViewQuery = q; pushInteraction(`view:${q?.scope?.type ?? 'query'}`); }}
-                onOpenSpec={(path) => openSpecEditor(path)}
-                savedViews={explorerSavedViews}
-                onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
-                {graphHints}
-                graphNodes={graph?.nodes ?? []}
-                graphEdges={graph?.edges ?? []}
-              />
-            </div>
+            {#if !chatCollapsed}
+              <div class="explorer-chat-area">
+                <div class="chat-collapse-bar">
+                  <button
+                    class="chat-collapse-btn"
+                    onclick={() => { chatCollapsed = true; }}
+                    title="Collapse chat panel"
+                    aria-label="Collapse chat panel"
+                    type="button"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
+                  </button>
+                </div>
+                <ExplorerChat
+                  repoId={selectedRepoId}
+                  canvasState={explorerCanvasState}
+                  onViewQuery={(q) => { activeViewQuery = q; pushInteraction(`view:${q?.scope?.type ?? 'query'}`); }}
+                  onOpenSpec={(path) => openSpecEditor(path)}
+                  savedViews={explorerSavedViews}
+                  onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
+                  {graphHints}
+                  graphNodes={graph?.nodes ?? []}
+                  graphEdges={graph?.edges ?? []}
+                />
+              </div>
+            {/if}
+            {#if chatCollapsed}
+              <button
+                class="chat-expand-btn"
+                onclick={() => { chatCollapsed = false; }}
+                title="Open chat"
+                aria-label="Open chat panel"
+                type="button"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                <span class="chat-expand-label">Chat</span>
+              </button>
+            {/if}
           </div>
         {/if}
 
@@ -3468,17 +3494,131 @@
     outline-offset: 2px;
   }
 
-  @media (max-width: 900px) {
+  /* ── Chat panel collapse/expand controls ─────────────────────────── */
+  .chat-collapse-bar {
+    display: none;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    padding: var(--space-1) 0;
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
+  }
+
+  .chat-collapse-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: transparent;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+  .chat-collapse-btn:hover {
+    background: var(--color-surface-elevated);
+    color: var(--color-text);
+  }
+  .chat-collapse-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .chat-expand-btn {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    display: none;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-primary);
+    color: var(--color-text-inverse);
+    border: none;
+    border-radius: 24px;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    z-index: 100;
+    transition: background var(--transition-fast), transform var(--transition-fast);
+  }
+  .chat-expand-btn:hover {
+    background: var(--color-link-hover);
+    transform: scale(1.05);
+  }
+  .chat-expand-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+  .chat-expand-label {
+    display: inline;
+  }
+
+  /* ── Medium viewports (768px–1024px): collapsible chat ────────────── */
+  @media (max-width: 1024px) and (min-width: 769px) {
+    .chat-collapse-bar {
+      display: flex;
+    }
+    .chat-expand-btn {
+      display: flex;
+    }
+    .explorer-chat-area {
+      width: 300px;
+      min-width: 240px;
+      max-width: 360px;
+    }
+  }
+
+  /* ── Narrow viewports (<768px): stacked layout with chat overlay ─── */
+  @media (max-width: 768px) {
+    .explorer-header {
+      padding: var(--space-3) var(--space-4);
+    }
+    .header-right {
+      flex-wrap: wrap;
+      gap: var(--space-2);
+    }
     .explorer-split {
       flex-direction: column;
     }
+    .explorer-canvas-area {
+      flex: 1;
+      min-height: 200px;
+    }
     .explorer-chat-area {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      border-left: none;
+      z-index: 200;
+      background: var(--color-bg);
+    }
+    .chat-collapse-bar {
+      display: flex;
+      border-bottom: 1px solid var(--color-border);
+      padding: var(--space-2) var(--space-3);
+      justify-content: flex-start;
+    }
+    .chat-expand-btn {
+      display: flex;
+    }
+    .explorer-detail-area {
       width: 100%;
       max-width: 100%;
       min-width: 0;
       border-left: none;
       border-top: 1px solid var(--color-border);
-      max-height: 50%;
+      max-height: 40%;
     }
     .spec-editor-panel {
       width: 100%;
@@ -3495,6 +3635,16 @@
       border-left: none;
       border-top: 1px solid var(--color-border);
       max-height: 40%;
+    }
+  }
+
+  /* ── Wider-than-1024px: hide collapse controls, always show chat ── */
+  @media (min-width: 1025px) {
+    .chat-collapse-bar {
+      display: none;
+    }
+    .chat-expand-btn {
+      display: none !important;
     }
   }
 </style>
