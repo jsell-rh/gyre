@@ -2,7 +2,7 @@
 
 **Spec reference:** `development/frontend-testing.md` (tests must pass), `explorer-canvas.md` (MoldableView superseded by ExplorerCanvas)  
 **Depends on:** None  
-**Progress:** `ready-for-review`
+**Progress:** `complete`
 
 ## Problem
 
