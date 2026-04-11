@@ -1073,7 +1073,8 @@ async fn check_pre_accept_gates(
         .kv_get("repo_stack_policies", repo_id)
         .await
         .ok()
-        .flatten();
+        .flatten()
+        .map(|value| crate::api::stack_attest::parse_stack_policy(&value).fingerprint);
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -2201,9 +2202,7 @@ pub(crate) async fn reconcile_dependencies(
                         .emit_event(
                             Some(ws_id.clone()),
                             gyre_common::message::Destination::Workspace(ws_id.clone()),
-                            gyre_common::MessageKind::Custom(
-                                "dependency_detected".to_string(),
-                            ),
+                            gyre_common::MessageKind::Custom("dependency_detected".to_string()),
                             Some(payload),
                         )
                         .await;
@@ -2521,8 +2520,7 @@ pub(crate) async fn detect_dependencies_on_push(
         let all_proto_files = list_files_by_extension(&git_bin, repo_path, new_sha, ".proto").await;
         for proto_file in &all_proto_files {
             if let Some(content) =
-                crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, proto_file)
-                    .await
+                crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, proto_file).await
             {
                 let refs = detect_proto_imports(&content, &repo_names);
                 for ref_name in &refs {

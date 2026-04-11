@@ -111,8 +111,7 @@ pub async fn evaluate_push_constraints(
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
     // Derive strategy-implied constraints, including repo attestation level policy.
-    let required_attestation_level =
-        get_repo_required_attestation_level(state, repo_id).await;
+    let required_attestation_level = get_repo_required_attestation_level(state, repo_id).await;
     let strategy_constraints = constraint_evaluator::derive_strategy_constraints(
         &signed_input.content,
         trust_level.as_deref(),
@@ -345,8 +344,7 @@ pub async fn enforce_push_constraints(
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
     // Derive strategy-implied constraints, including repo attestation level policy.
-    let required_attestation_level =
-        get_repo_required_attestation_level(state, repo_id).await;
+    let required_attestation_level = get_repo_required_attestation_level(state, repo_id).await;
     let strategy_constraints = constraint_evaluator::derive_strategy_constraints(
         &signed_input.content,
         trust_level.as_deref(),
@@ -573,8 +571,7 @@ pub async fn enforce_merge_constraints(
         .as_ref()
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
-    let required_attestation_level =
-        get_repo_required_attestation_level(state, repo_id).await;
+    let required_attestation_level = get_repo_required_attestation_level(state, repo_id).await;
     let strategy_constraints = constraint_evaluator::derive_strategy_constraints(
         &signed_input.content,
         trust_level.as_deref(),
@@ -793,8 +790,7 @@ pub async fn evaluate_merge_constraints(
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
     // Derive strategy-implied constraints, including repo attestation level policy.
-    let required_attestation_level =
-        get_repo_required_attestation_level(state, repo_id).await;
+    let required_attestation_level = get_repo_required_attestation_level(state, repo_id).await;
     let strategy_constraints = constraint_evaluator::derive_strategy_constraints(
         &signed_input.content,
         trust_level.as_deref(),
@@ -923,25 +919,22 @@ fn derive_attestation_level(
 
 /// Look up the repo's required minimum attestation level from its stack policy.
 ///
-/// If the repo has a `repo_stack_policies` entry (a required fingerprint), the
-/// repo requires at minimum Level 2 (stack-attested). Returns `None` when no
-/// stack policy is configured (supply-chain.md §2, Policy per Level).
+/// Parses the `repo_stack_policies` KV entry as structured JSON containing
+/// `{"fingerprint": "...", "required_level": N}`. Returns the `required_level`
+/// from the policy, or `None` when no stack policy is configured.
+/// Handles legacy plain-string entries by defaulting to Level 2
+/// (supply-chain.md §2, Policy per Level).
 pub(crate) async fn get_repo_required_attestation_level(
     state: &AppState,
     repo_id: &str,
 ) -> Option<i64> {
-    let has_policy = state
+    state
         .kv_store
         .kv_get("repo_stack_policies", repo_id)
         .await
         .ok()
         .flatten()
-        .is_some();
-    if has_policy {
-        Some(2)
-    } else {
-        None
-    }
+        .map(|value| crate::api::stack_attest::parse_stack_policy(&value).required_level)
 }
 
 /// Build an `AgentContext` from the agent record, JWT claims, workspace
@@ -2209,19 +2202,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_repo_required_attestation_level_with_policy() {
-        // Repo with stack policy → Some(2).
+    async fn get_repo_required_attestation_level_with_policy_level2() {
+        // Repo with stack policy at Level 2 → Some(2).
         let state = crate::mem::test_state();
+        let policy = serde_json::json!({
+            "fingerprint": "sha256:required-fingerprint",
+            "required_level": 2
+        });
         state
             .kv_store
             .kv_set(
                 "repo_stack_policies",
                 "repo-with-policy",
-                "sha256:required-fingerprint".to_string(),
+                serde_json::to_string(&policy).unwrap(),
             )
             .await
             .unwrap();
         let level = get_repo_required_attestation_level(&state, "repo-with-policy").await;
+        assert_eq!(level, Some(2));
+    }
+
+    #[tokio::test]
+    async fn get_repo_required_attestation_level_with_policy_level3() {
+        // Repo with stack policy at Level 3 → Some(3).
+        let state = crate::mem::test_state();
+        let policy = serde_json::json!({
+            "fingerprint": "sha256:required-fingerprint",
+            "required_level": 3
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-level3",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+        let level = get_repo_required_attestation_level(&state, "repo-level3").await;
+        assert_eq!(level, Some(3));
+    }
+
+    #[tokio::test]
+    async fn get_repo_required_attestation_level_legacy_plain_string() {
+        // Legacy plain-string format (backward compat) → defaults to Some(2).
+        let state = crate::mem::test_state();
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-legacy",
+                "sha256:legacy-fingerprint".to_string(),
+            )
+            .await
+            .unwrap();
+        let level = get_repo_required_attestation_level(&state, "repo-legacy").await;
         assert_eq!(level, Some(2));
     }
 
@@ -2287,10 +2322,10 @@ mod tests {
     }
 
     #[test]
-    fn attestation_level_constraint_evaluates_against_real_level() {
-        // Level 0 agent with Level 3 repo policy → constraint fails.
-        // Level 3 agent with Level 3 repo policy → constraint passes.
-        // Level 2 agent with no repo policy → no attestation constraint generated.
+    fn attestation_level_constraints_generated_correctly() {
+        // Verifies derive_strategy_constraints produces correct attestation-level
+        // constraint text for various (workspace_strategy, repo_policy) combinations.
+        // Actual CEL evaluation is tested in gyre-domain constraint_evaluator tests.
         use gyre_domain::constraint_evaluator;
 
         let content = InputContent {
@@ -2307,8 +2342,11 @@ mod tests {
         };
 
         // Case 1: Repo requires Level 3, supervised workspace.
-        let strategy_with_policy =
-            constraint_evaluator::derive_strategy_constraints(&content, Some("supervised"), Some(3));
+        let strategy_with_policy = constraint_evaluator::derive_strategy_constraints(
+            &content,
+            Some("supervised"),
+            Some(3),
+        );
         assert!(
             strategy_with_policy
                 .iter()
