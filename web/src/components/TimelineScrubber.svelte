@@ -203,18 +203,18 @@
         </div>
       </div>
 
-      <!-- Delta stats summary -->
+      <!-- Delta stats summary — per-type breakdown (spec §6: "+12 types, -3 types, +2 traits") -->
       {#if deltaStats}
         <div class="tl-delta-stats">
-          {#if deltaStats.added > 0}
-            <span class="tl-stat-add">+{deltaStats.added}</span>
-          {/if}
-          {#if deltaStats.removed > 0}
-            <span class="tl-stat-remove">-{deltaStats.removed}</span>
-          {/if}
-          {#if deltaStats.modified > 0}
-            <span class="tl-stat-modify">{'\u0394'}{deltaStats.modified}</span>
-          {/if}
+          {#each Object.entries(deltaStats.addedByType ?? {}) as [nodeType, count]}
+            <span class="tl-stat-add">+{count} {count === 1 ? nodeType : nodeType + 's'}</span>
+          {/each}
+          {#each Object.entries(deltaStats.removedByType ?? {}) as [nodeType, count]}
+            <span class="tl-stat-remove">-{count} {count === 1 ? nodeType : nodeType + 's'}</span>
+          {/each}
+          {#each Object.entries(deltaStats.modifiedByType ?? {}) as [nodeType, count]}
+            <span class="tl-stat-modify">{count} {count === 1 ? nodeType : nodeType + 's'} modified</span>
+          {/each}
         </div>
       {/if}
 

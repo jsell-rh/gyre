@@ -103,22 +103,31 @@ describe('TimelineScrubber', () => {
     expect(dates).toBeTruthy();
   });
 
-  it('shows delta stats when provided and active', () => {
-    const stats = { added: 5, removed: 2, modified: 3, byType: { type: 3, function: 2 } };
+  it('shows delta stats with per-type breakdown when provided and active', () => {
+    const stats = {
+      added: 5, removed: 2, modified: 3,
+      addedByType: { type: 3, function: 2 },
+      removedByType: { trait: 2 },
+      modifiedByType: { type: 3 },
+    };
     const { container } = render(TimelineScrubber, {
       props: { timeline: TIMELINE, active: true, scrubIndex: 2, deltaStats: stats }
     });
     const statsEl = container.querySelector('.tl-delta-stats');
     expect(statsEl).toBeTruthy();
-    const addEl = container.querySelector('.tl-stat-add');
-    expect(addEl).toBeTruthy();
-    expect(addEl.textContent).toBe('+5');
-    const removeEl = container.querySelector('.tl-stat-remove');
-    expect(removeEl).toBeTruthy();
-    expect(removeEl.textContent).toBe('-2');
-    const modEl = container.querySelector('.tl-stat-modify');
-    expect(modEl).toBeTruthy();
-    expect(modEl.textContent).toContain('3');
+    // Per-type added: "+3 types" and "+2 functions"
+    const addEls = container.querySelectorAll('.tl-stat-add');
+    expect(addEls.length).toBe(2);
+    expect(addEls[0].textContent).toBe('+3 types');
+    expect(addEls[1].textContent).toBe('+2 functions');
+    // Per-type removed: "-2 traits"
+    const removeEls = container.querySelectorAll('.tl-stat-remove');
+    expect(removeEls.length).toBe(1);
+    expect(removeEls[0].textContent).toBe('-2 traits');
+    // Per-type modified: "3 types modified"
+    const modEls = container.querySelectorAll('.tl-stat-modify');
+    expect(modEls.length).toBe(1);
+    expect(modEls[0].textContent).toContain('3 types modified');
   });
 
   it('does not show delta stats section when not provided', () => {

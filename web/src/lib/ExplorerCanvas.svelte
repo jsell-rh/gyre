@@ -5055,8 +5055,8 @@
     <div class="preview-mode-bar" role="status" data-testid="preview-mode-indicator">
       <div class="preview-mode-content">
         <span class="preview-pulse-dot"></span>
-        <span class="preview-mode-label">Preview Mode</span>
-        <span class="preview-mode-count">{ghostOverlays.length} predicted {ghostOverlays.length === 1 ? 'change' : 'changes'}</span>
+        <span class="preview-mode-label">{timelineActive ? 'Time Travel Mode' : 'Preview Mode'}</span>
+        <span class="preview-mode-count">{ghostOverlays.length} {timelineActive ? 'historical' : 'predicted'} {ghostOverlays.length === 1 ? 'change' : 'changes'}</span>
       </div>
       <div class="ghost-legend-chips">
         {#if ghostOverlays.some(g => g.action === 'add')}
@@ -5068,8 +5068,8 @@
         {#if ghostOverlays.some(g => g.action === 'remove')}
           <span class="ghost-chip ghost-chip-remove">{'\u2212'} Removed ({ghostOverlays.filter(g => g.action === 'remove').length})</span>
         {/if}
-        {#if ghostOverlays.some(g => g.confidence)}
-          {@const confs = ghostOverlays.filter(g => g.confidence)}
+        {#if !timelineActive && ghostOverlays.some(g => g.confidence === 'high' || g.confidence === 'medium' || g.confidence === 'low')}
+          {@const confs = ghostOverlays.filter(g => g.confidence === 'high' || g.confidence === 'medium' || g.confidence === 'low')}
           {@const highCount = confs.filter(g => g.confidence === 'high').length}
           {@const medCount = confs.filter(g => g.confidence === 'medium').length}
           {@const lowCount = confs.filter(g => g.confidence === 'low').length}

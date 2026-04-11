@@ -3,6 +3,7 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
+  import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -1000,28 +1001,15 @@
   let effectiveGraph = $derived(timelineFilteredGraph ?? graph);
 
   // Compute delta stats between the scrubber position and the current graph (system-explorer.md §6)
+  // Uses imported functions from timeline-utils.js for testability.
   let timelineDeltaStats = $derived.by(() => {
     if (!timelineScrubActive || !timelineFilteredGraph || !graph?.nodes?.length) return null;
-    const currentIds = new Set(graph.nodes.map(n => n.id));
-    const historicalIds = new Set(timelineFilteredGraph.nodes.map(n => n.id));
-
-    // Forward ghosts: exist now but not at scrubber time (added since)
-    const added = graph.nodes.filter(n => !historicalIds.has(n.id));
-    // Backward ghosts: existed at scrubber time but not now (removed since)
-    const removed = timelineFilteredGraph.nodes.filter(n => !currentIds.has(n.id));
-    // Modified: exist at both times but may have changed
-    const modified = graph.nodes.filter(n => {
-      if (!historicalIds.has(n.id)) return false;
-      const hist = timelineFilteredGraph.nodes.find(h => h.id === n.id);
-      if (!hist) return false;
-      return n.last_modified_sha !== hist.last_modified_sha;
+    return computeTimelineDeltaStats({
+      graph,
+      timelineFilteredGraph,
+      timeline: graphTimeline,
+      scrubIndex: timelineScrubIndex,
     });
-
-    // By type breakdown
-    const byType = {};
-    for (const n of added) { byType[n.node_type ?? 'unknown'] = (byType[n.node_type ?? 'unknown'] ?? 0) + 1; }
-
-    return { added: added.length, removed: removed.length, modified: modified.length, byType };
   });
 
   // Compute ghost overlays for historical time travel (system-explorer.md §6)
@@ -1030,56 +1018,12 @@
   // Modified (yellow): nodes that exist at both times but changed
   let timelineGhostOverlays = $derived.by(() => {
     if (!timelineScrubActive || !timelineFilteredGraph || !graph?.nodes?.length) return [];
-    const currentIds = new Set(graph.nodes.map(n => n.id));
-    const historicalIds = new Set(timelineFilteredGraph.nodes.map(n => n.id));
-    const overlays = [];
-
-    // Forward ghosts: added since scrubber time (green dotted)
-    for (const n of graph.nodes) {
-      if (!historicalIds.has(n.id)) {
-        overlays.push({
-          id: n.id,
-          name: n.name ?? n.qualified_name ?? n.id,
-          type: n.node_type ?? 'type',
-          action: 'add',
-          confidence: 'confirmed',
-          reason: 'Added after this point in time',
-        });
-      }
-    }
-
-    // Backward ghosts: removed since scrubber time (red strikethrough)
-    for (const n of timelineFilteredGraph.nodes) {
-      if (!currentIds.has(n.id)) {
-        overlays.push({
-          id: n.id,
-          name: n.name ?? n.qualified_name ?? n.id,
-          type: n.node_type ?? 'type',
-          action: 'remove',
-          confidence: 'confirmed',
-          reason: 'Removed after this point in time',
-        });
-      }
-    }
-
-    // Modified highlights (yellow)
-    for (const n of graph.nodes) {
-      if (!historicalIds.has(n.id)) continue;
-      const hist = timelineFilteredGraph.nodes.find(h => h.id === n.id);
-      if (!hist) continue;
-      if (n.last_modified_sha !== hist.last_modified_sha) {
-        overlays.push({
-          id: n.id,
-          name: n.name ?? n.qualified_name ?? n.id,
-          type: n.node_type ?? 'type',
-          action: 'change',
-          confidence: 'confirmed',
-          reason: 'Modified after this point in time',
-        });
-      }
-    }
-
-    return overlays;
+    return computeTimelineGhostOverlays({
+      graph,
+      timelineFilteredGraph,
+      timeline: graphTimeline,
+      scrubIndex: timelineScrubIndex,
+    });
   });
 
   // Merged ghost overlays: spec-edit prediction ghosts + timeline ghosts
@@ -1238,9 +1182,15 @@
             {#if timelineScrubActive && timelineDeltaStats}
               <span class="stat-sep">·</span>
               <span class="stat timeline-delta-summary" title="Between then and now">
-                {#if timelineDeltaStats.added > 0}<span class="delta-add">+{timelineDeltaStats.added}</span>{/if}
-                {#if timelineDeltaStats.removed > 0}<span class="delta-remove">-{timelineDeltaStats.removed}</span>{/if}
-                {#if timelineDeltaStats.modified > 0}<span class="delta-modify">{'\u0394'}{timelineDeltaStats.modified}</span>{/if}
+                {#each Object.entries(timelineDeltaStats.addedByType ?? {}) as [nodeType, count]}
+                  <span class="delta-add">+{count} {count === 1 ? nodeType : nodeType + 's'}</span>
+                {/each}
+                {#each Object.entries(timelineDeltaStats.removedByType ?? {}) as [nodeType, count]}
+                  <span class="delta-remove">-{count} {count === 1 ? nodeType : nodeType + 's'}</span>
+                {/each}
+                {#each Object.entries(timelineDeltaStats.modifiedByType ?? {}) as [nodeType, count]}
+                  <span class="delta-modify">{count} {count === 1 ? nodeType : nodeType + 's'} modified</span>
+                {/each}
               </span>
             {/if}
           </div>
