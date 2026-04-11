@@ -3,6 +3,7 @@
   import { t } from 'svelte-i18n';
   import EmptyState from './EmptyState.svelte';
   import PlaybackControls from '../components/PlaybackControls.svelte';
+  import TimelineScrubber from '../components/TimelineScrubber.svelte';
   import NodeBadge from '../components/NodeBadge.svelte';
   import Breadcrumb from '../components/Breadcrumb.svelte';
   import EvaluativeOverlay from '../components/EvaluativeOverlay.svelte';
@@ -26,6 +27,14 @@
     assertionResults = [], // [{ line, assertion_text, passed, explanation }] from spec assertion check
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
     highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
+    // Architectural timeline (system-explorer.md §6)
+    timeline = [],             // ArchitecturalDelta records from graph/timeline endpoint
+    timelineActive = false,    // Whether time travel mode is active
+    timelineScrubIndex = -1,   // Current index into timeline array
+    onTimelineToggle = () => {},     // Callback to toggle time travel
+    onTimelineScrub = (_idx) => {},  // Callback when scrubber changes
+    onTimelineMarkerClick = (_delta) => {}, // Callback when key moment clicked
+    timelineDeltaStats = null, // { added, removed, modified, byType }
   } = $props();
 
   // ── Interactive $clicked / $selected modes ─────────────────────────────
@@ -5526,6 +5535,20 @@
       onPlayToggle={() => { evalPlaying = !evalPlaying; if (evalPlaying) scheduleRedraw(); }}
       onScrubberChange={(v) => { evalScrubber = v; scheduleRedraw(); }}
       onSpeedChange={(v) => { evalSpeed = v; }}
+    />
+  {/if}
+
+  <!-- Architectural timeline scrubber (system-explorer.md §6) -->
+  {#if lens !== 'evaluative'}
+    <TimelineScrubber
+      {timeline}
+      active={timelineActive}
+      scrubIndex={timelineScrubIndex}
+      {nodes}
+      onToggle={onTimelineToggle}
+      onScrub={onTimelineScrub}
+      onMarkerClick={onTimelineMarkerClick}
+      deltaStats={timelineDeltaStats}
     />
   {/if}
 

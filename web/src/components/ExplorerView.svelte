@@ -999,6 +999,96 @@
   // The effective graph passed to canvas: either time-filtered or full
   let effectiveGraph = $derived(timelineFilteredGraph ?? graph);
 
+  // Compute delta stats between the scrubber position and the current graph (system-explorer.md §6)
+  let timelineDeltaStats = $derived.by(() => {
+    if (!timelineScrubActive || !timelineFilteredGraph || !graph?.nodes?.length) return null;
+    const currentIds = new Set(graph.nodes.map(n => n.id));
+    const historicalIds = new Set(timelineFilteredGraph.nodes.map(n => n.id));
+
+    // Forward ghosts: exist now but not at scrubber time (added since)
+    const added = graph.nodes.filter(n => !historicalIds.has(n.id));
+    // Backward ghosts: existed at scrubber time but not now (removed since)
+    const removed = timelineFilteredGraph.nodes.filter(n => !currentIds.has(n.id));
+    // Modified: exist at both times but may have changed
+    const modified = graph.nodes.filter(n => {
+      if (!historicalIds.has(n.id)) return false;
+      const hist = timelineFilteredGraph.nodes.find(h => h.id === n.id);
+      if (!hist) return false;
+      return n.last_modified_sha !== hist.last_modified_sha;
+    });
+
+    // By type breakdown
+    const byType = {};
+    for (const n of added) { byType[n.node_type ?? 'unknown'] = (byType[n.node_type ?? 'unknown'] ?? 0) + 1; }
+
+    return { added: added.length, removed: removed.length, modified: modified.length, byType };
+  });
+
+  // Compute ghost overlays for historical time travel (system-explorer.md §6)
+  // Forward ghosts (green): nodes that exist now but didn't at scrubber time
+  // Backward ghosts (red): nodes that existed at scrubber time but have been removed
+  // Modified (yellow): nodes that exist at both times but changed
+  let timelineGhostOverlays = $derived.by(() => {
+    if (!timelineScrubActive || !timelineFilteredGraph || !graph?.nodes?.length) return [];
+    const currentIds = new Set(graph.nodes.map(n => n.id));
+    const historicalIds = new Set(timelineFilteredGraph.nodes.map(n => n.id));
+    const overlays = [];
+
+    // Forward ghosts: added since scrubber time (green dotted)
+    for (const n of graph.nodes) {
+      if (!historicalIds.has(n.id)) {
+        overlays.push({
+          id: n.id,
+          name: n.name ?? n.qualified_name ?? n.id,
+          type: n.node_type ?? 'type',
+          action: 'add',
+          confidence: 'confirmed',
+          reason: 'Added after this point in time',
+        });
+      }
+    }
+
+    // Backward ghosts: removed since scrubber time (red strikethrough)
+    for (const n of timelineFilteredGraph.nodes) {
+      if (!currentIds.has(n.id)) {
+        overlays.push({
+          id: n.id,
+          name: n.name ?? n.qualified_name ?? n.id,
+          type: n.node_type ?? 'type',
+          action: 'remove',
+          confidence: 'confirmed',
+          reason: 'Removed after this point in time',
+        });
+      }
+    }
+
+    // Modified highlights (yellow)
+    for (const n of graph.nodes) {
+      if (!historicalIds.has(n.id)) continue;
+      const hist = timelineFilteredGraph.nodes.find(h => h.id === n.id);
+      if (!hist) continue;
+      if (n.last_modified_sha !== hist.last_modified_sha) {
+        overlays.push({
+          id: n.id,
+          name: n.name ?? n.qualified_name ?? n.id,
+          type: n.node_type ?? 'type',
+          action: 'change',
+          confidence: 'confirmed',
+          reason: 'Modified after this point in time',
+        });
+      }
+    }
+
+    return overlays;
+  });
+
+  // Merged ghost overlays: spec-edit prediction ghosts + timeline ghosts
+  let mergedGhostOverlays = $derived(
+    timelineScrubActive && timelineGhostOverlays.length > 0
+      ? timelineGhostOverlays
+      : ghostOverlays
+  );
+
   // Reset insights on repo change; lazy-load when panel expanded (Vision Principle 2:
   // "Right Context, Not More Context" — don't fetch data the user hasn't asked to see)
   $effect(() => {
@@ -1145,6 +1235,14 @@
               <span class="stat-val">{effectiveGraph.edges?.length ?? 0}</span>
               <span class="stat-label">{$t('explorer_canvas.edges')}</span>
             </span>
+            {#if timelineScrubActive && timelineDeltaStats}
+              <span class="stat-sep">·</span>
+              <span class="stat timeline-delta-summary" title="Between then and now">
+                {#if timelineDeltaStats.added > 0}<span class="delta-add">+{timelineDeltaStats.added}</span>{/if}
+                {#if timelineDeltaStats.removed > 0}<span class="delta-remove">-{timelineDeltaStats.removed}</span>{/if}
+                {#if timelineDeltaStats.modified > 0}<span class="delta-modify">{'\u0394'}{timelineDeltaStats.modified}</span>{/if}
+              </span>
+            {/if}
           </div>
         {/if}
 
@@ -1296,12 +1394,23 @@
                   }
                 }}
                 onInteractiveQuery={(q) => { activeViewQuery = q; }}
-                {ghostOverlays}
+                ghostOverlays={mergedGhostOverlays}
                 {traceData}
                 queryResult={viewQueryResult}
                 assertionResults={specAssertionResults}
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
                 {highlightedSpanId}
+                timeline={graphTimeline ?? []}
+                timelineActive={timelineScrubActive}
+                timelineScrubIndex={timelineScrubIndex}
+                onTimelineToggle={() => {
+                  timelineScrubActive = !timelineScrubActive;
+                  if (!timelineScrubActive) timelineScrubIndex = -1;
+                  else if (graphTimeline?.length) timelineScrubIndex = graphTimeline.length - 1;
+                }}
+                onTimelineScrub={(idx) => { timelineScrubIndex = idx; }}
+                onTimelineMarkerClick={(_delta) => {}}
+                {timelineDeltaStats}
               />
               <!-- Architecture Insights — collapsible panel inside canvas area -->
               {#if selectedRepoId && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
@@ -2048,6 +2157,14 @@
   .stat-sep {
     color: var(--color-text-muted);
   }
+
+  .timeline-delta-summary {
+    display: inline-flex; gap: 6px; font-size: var(--text-xs);
+    font-family: var(--font-mono);
+  }
+  .delta-add { color: #4ade80; font-weight: 600; }
+  .delta-remove { color: #f87171; font-weight: 600; }
+  .delta-modify { color: #fbbf24; font-weight: 600; }
 
   /* ── Back to repos button (workspace scope) ───────────────────────── */
   .back-to-repos-btn {

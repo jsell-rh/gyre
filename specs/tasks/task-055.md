@@ -2,7 +2,7 @@
 
 **Spec reference:** `system-explorer.md` §6 (Architectural Timeline)  
 **Depends on:** TASK-029 (lens toggle, complete), TASK-031 (drill-down, complete)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -103,4 +103,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(explorer): add architectural timeline scrubber (TASK-055)`
