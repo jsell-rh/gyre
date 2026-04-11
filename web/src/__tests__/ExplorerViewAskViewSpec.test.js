@@ -55,6 +55,38 @@ const REPO_SCOPE = { type: 'repo', workspaceId: 'ws-1', repoId: 'r1' };
 describe('ExplorerView Ask view_spec integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Mock matchMedia for the chatCollapsed viewport sync $effect
+    global.window.matchMedia = vi.fn(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    // Mock globals needed by ExplorerCanvas when graph loads
+    global.ResizeObserver = class ResizeObserver {
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    };
+    global.requestAnimationFrame = vi.fn(cb => { cb(); return 1; });
+    global.cancelAnimationFrame = vi.fn();
+    HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
+      clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(),
+      beginPath: vi.fn(), closePath: vi.fn(), arc: vi.fn(), fill: vi.fn(),
+      stroke: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), quadraticCurveTo: vi.fn(),
+      fillText: vi.fn(), measureText: vi.fn(() => ({ width: 40 })),
+      scale: vi.fn(), setTransform: vi.fn(), save: vi.fn(), restore: vi.fn(),
+      translate: vi.fn(), rotate: vi.fn(),
+      fillStyle: '', strokeStyle: '', lineWidth: 0, globalAlpha: 1,
+      font: '', textAlign: '', textBaseline: '', shadowColor: '', shadowBlur: 0,
+      setLineDash: vi.fn(), getLineDash: vi.fn(() => []),
+    }));
+    global.WebSocket = class MockWebSocket {
+      constructor() {
+        this.readyState = 1;
+        this.send = vi.fn();
+        this.close = vi.fn();
+      }
+    };
   });
 
   it('displays the explanation text from the complete event', async () => {

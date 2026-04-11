@@ -614,6 +614,18 @@
   let insightsCollapsed = $state(true);
   let chatCollapsed = $state(false);
 
+  // Reset chatCollapsed when viewport widens past the medium breakpoint,
+  // preventing stranded UI state where chat is hidden with no toggle visible.
+  $effect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mql = window.matchMedia('(min-width: 1025px)');
+    const handler = (e) => { if (e.matches) chatCollapsed = false; };
+    mql.addEventListener('change', handler);
+    // Also reset on mount if already wide
+    if (mql.matches) chatCollapsed = false;
+    return () => mql.removeEventListener('change', handler);
+  });
+
   // Manual view query editor state
   let queryEditorOpen = $state(false);
   let queryEditorText = $state('');

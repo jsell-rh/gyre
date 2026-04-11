@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, waitFor } from '@testing-library/svelte';
 
 vi.mock('../lib/api.js', () => ({
@@ -16,6 +16,45 @@ vi.mock('../lib/api.js', () => ({
 vi.mock('../lib/toast.svelte.js', () => ({ toast: vi.fn() }));
 
 import ExplorerView from '../components/ExplorerView.svelte';
+
+beforeEach(() => {
+  // Mock matchMedia for the chatCollapsed viewport sync $effect
+  global.window.matchMedia = vi.fn(() => ({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+  // Mock globals needed by ExplorerCanvas when graph loads
+  global.ResizeObserver = class ResizeObserver {
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+  };
+  global.requestAnimationFrame = vi.fn(cb => { cb(); return 1; });
+  global.cancelAnimationFrame = vi.fn();
+  HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
+    clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(),
+    beginPath: vi.fn(), closePath: vi.fn(), arc: vi.fn(), fill: vi.fn(),
+    stroke: vi.fn(), moveTo: vi.fn(), lineTo: vi.fn(), quadraticCurveTo: vi.fn(),
+    fillText: vi.fn(), measureText: vi.fn(() => ({ width: 40 })),
+    scale: vi.fn(), setTransform: vi.fn(), save: vi.fn(), restore: vi.fn(),
+    translate: vi.fn(), rotate: vi.fn(),
+    fillStyle: '', strokeStyle: '', lineWidth: 0, globalAlpha: 1,
+    font: '', textAlign: '', textBaseline: '', shadowColor: '', shadowBlur: 0,
+    setLineDash: vi.fn(), getLineDash: vi.fn(() => []),
+  }));
+  global.WebSocket = class MockWebSocket {
+    constructor() {
+      this.readyState = 1;
+      this.send = vi.fn();
+      this.close = vi.fn();
+    }
+  };
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('ExplorerView scope branching', () => {
   it('renders without throwing with no props', () => {
