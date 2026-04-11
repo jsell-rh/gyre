@@ -18,6 +18,7 @@
   import { renderMarkdown } from './markdown.js';
   import CopyableId from './CopyableId.svelte';
   import ProvenanceChain from '../components/ProvenanceChain.svelte';
+  import ImpactAnalysisModal from '../components/ImpactAnalysisModal.svelte';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -50,6 +51,7 @@
   let interrogationLoading = $state(false);
   let interrogationAgentId = $state(null);
   let enqueueing = $state(false);
+  let impactModalOpen = $state(false);
   let conversationData = $state(null);
   let conversationLoading = $state(false);
 
@@ -2008,6 +2010,10 @@
                     {enqueueing ? 'Enqueuing...' : 'Enqueue'}
                   </button>
                 {/if}
+                <button class="mr-quick-btn mr-quick-impact" onclick={() => { impactModalOpen = true; }} title="View blast radius and breaking change impact" data-testid="check-impact-btn">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/><circle cx="12" cy="12" r="11" stroke-dasharray="1 3"/></svg>
+                  Check Impact
+                </button>
               </div>
               <!-- Prominent status journey block — click steps to see details -->
               {#if mr._statusStory?.length > 0}
@@ -5101,6 +5107,15 @@
     </div>
   {/if}
 </div>
+
+{#if entity?.type === 'mr'}
+  {@const mrData = mrDetail ?? entity.data ?? {}}
+  <ImpactAnalysisModal
+    bind:open={impactModalOpen}
+    repoId={mrData.repository_id ?? mrData.repo_id ?? null}
+    repoName={entityName('repo', mrData.repository_id ?? mrData.repo_id ?? '')}
+  />
+{/if}
 
 <style>
   /* Full-page entity detail mode — takes up the entire content area */
@@ -8532,6 +8547,16 @@
   .mr-quick-enqueue:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  .mr-quick-impact {
+    border-color: color-mix(in srgb, var(--color-danger) 40%, var(--color-border));
+    color: var(--color-danger);
+  }
+
+  .mr-quick-impact:hover {
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border-color: var(--color-danger);
   }
 
   .mr-status-journey {

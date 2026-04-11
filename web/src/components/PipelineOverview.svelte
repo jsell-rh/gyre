@@ -30,6 +30,9 @@
     onEnqueueMr = undefined,
     onStageClick = undefined,
     onNavigateSpec = undefined,
+    // Breaking change impact
+    breakingCount = 0,
+    onImpactAnalysis = undefined,
   } = $props();
 
   function handleStageClick(stageId) {
@@ -148,6 +151,18 @@
         {/if}
       </button>
     {/each}
+    {#if breakingCount > 0}
+      <button
+        class="pipeline-breaking"
+        onclick={() => onImpactAnalysis?.()}
+        title="{breakingCount} breaking change{breakingCount !== 1 ? 's' : ''} — click for impact analysis"
+        data-testid="pipeline-impact-btn"
+      >
+        <span class="breaking-icon-mini">⚠</span>
+        <span class="breaking-count">{breakingCount}</span>
+        <span class="breaking-label">Breaking</span>
+      </button>
+    {/if}
     {#if budget?.config?.monthly_limit_usd}
       {@const pct = budget.usage?.total_cost_usd ? Math.round((budget.usage.total_cost_usd / budget.config.monthly_limit_usd) * 100) : 0}
       <span class="pipeline-budget" title="Budget: ${budget.usage?.total_cost_usd?.toFixed(2) ?? '0'} / ${budget.config.monthly_limit_usd} ({pct}% used)">
@@ -253,6 +268,45 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
+  }
+
+  .pipeline-breaking {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border));
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: var(--font-body);
+    flex-shrink: 0;
+    transition: background var(--transition-fast);
+  }
+
+  .pipeline-breaking:hover {
+    background: color-mix(in srgb, var(--color-danger) 14%, transparent);
+  }
+
+  .pipeline-breaking:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .breaking-icon-mini {
+    font-size: var(--text-xs);
+  }
+
+  .breaking-count {
+    font-size: var(--text-sm);
+    font-weight: 700;
+    color: var(--color-danger);
+  }
+
+  .breaking-label {
+    font-size: var(--text-xs);
+    color: var(--color-danger);
+    font-weight: 500;
   }
 
   .pipeline-budget {

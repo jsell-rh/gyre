@@ -499,6 +499,9 @@ export const api = {
   repoBlastRadius: (id) => request(`/repos/${id}/blast-radius`),
   staleDependencies: (wsId) => request(`/dependencies/stale${wsId ? '?workspace_id=' + encodeURIComponent(wsId) : ''}`),
   breakingChanges: () => request('/dependencies/breaking'),
+  acknowledgeBreakingChange: (id) =>
+    request(`/dependencies/breaking/${id}/acknowledge`, { method: 'POST' }),
+  workspaceDependencyPolicy: (wsId) => request(`/workspaces/${wsId}/dependency-policy`),
   // User profile (M22.5)
   me: () => request('/users/me'),
   updateMe: (data) =>

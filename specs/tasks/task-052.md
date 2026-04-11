@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §UI (line 232), §Impact Analysis  
 **Depends on:** TASK-020 (breaking change detection + endpoints), TASK-022 (cascade testing)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
