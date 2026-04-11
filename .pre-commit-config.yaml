@@ -300,6 +300,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: unnamed-tuple-carriers
+        name: unnamed tuple carrier lint
+        description: Detect unnamed tuples with 4+ elements that should be named structs
+        entry: scripts/check-unnamed-tuple-carriers.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
