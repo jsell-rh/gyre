@@ -2,7 +2,8 @@
 
 **Spec reference:** `merge-dependencies.md` §Merge Queue Integration > Visualization
 **Depends on:** None (backend endpoint `GET /api/v1/merge-queue/graph` already exists)
-**Progress:** `ready-for-review`
+**Progress:** `complete`
+**Review:** [`specs/reviews/task-049.md`](../reviews/task-049.md)
 
 ## Spec Excerpt
 
