@@ -2,7 +2,7 @@
 
 **Spec reference:** `system-explorer.md` §6 (Architectural Timeline)  
 **Depends on:** TASK-029 (lens toggle, complete), TASK-031 (drill-down, complete)  
-**Progress:** `needs-revision`  
+**Progress:** `ready-for-review`  
 **Review:** [`specs/reviews/task-055.md`](../reviews/task-055.md) — R2, 1 finding (4 R1 resolved)
 
 ## Spec Excerpt
@@ -106,3 +106,4 @@ When working on this task:
 
 - `feat(explorer): add architectural timeline scrubber (TASK-055)`
 - `fix(explorer): address R1 findings for timeline scrubber (TASK-055)`
+- `fix(explorer): exclude transient nodes from backward ghosts (TASK-055)`

@@ -138,8 +138,10 @@ describe('extractRemovedNodesFromDeltas', () => {
     expect(removed[0].qualified_name).toBe('crate::OldTrait');
   });
 
-  it('excludes nodes added AND removed after scrubber that are re-added in current graph', () => {
-    // Node added in d2 and removed in d3, but also in current graph = not a backward ghost
+  it('excludes transient nodes added and removed after scrubber (never existed at scrubber time)', () => {
+    // Transient was added in d2t (after scrubber) and removed in d3t (after scrubber).
+    // It never existed at the scrubber time → NOT a backward ghost (spec §6).
+    // Only OldTrait (added in d0, before scrubber) is a valid backward ghost.
     const timelineTransient = [
       ...TIMELINE.slice(0, 2),
       {
@@ -160,18 +162,10 @@ describe('extractRemovedNodesFromDeltas', () => {
       },
     ];
     const removed = extractRemovedNodesFromDeltas(timelineTransient, 1, currentQualifiedNames);
-    // OldTrait removed and not in current graph → backward ghost
-    // Transient was added after scrubber and removed after scrubber and NOT in current graph
-    // addedAfter has 'crate::Transient', currentQualifiedNames does NOT → so it's NOT excluded
-    // Wait, the logic is: skip if addedAfter.has(qn) && currentQualifiedNames.has(qn)
-    // Transient: addedAfter=true, currentQualifiedNames=false → NOT skipped by first check
-    // Then: currentQualifiedNames.has('crate::Transient') = false → NOT skipped by second check
-    // So Transient IS included. But Transient was added after scrubber → it never existed at scrubber time.
-    // This is a valid backward ghost from a data perspective: it was transiently present then removed.
-    // However, it didn't exist at the scrubber time, so arguably it shouldn't be a backward ghost.
-    expect(removed.length).toBe(2);
-    expect(removed.map(r => r.qualified_name)).toContain('crate::OldTrait');
-    expect(removed.map(r => r.qualified_name)).toContain('crate::Transient');
+    // OldTrait: added at d0 (before scrubber), removed at d2t (after scrubber) → backward ghost
+    // Transient: added at d2t (after scrubber), removed at d3t (after scrubber) → excluded
+    expect(removed.length).toBe(1);
+    expect(removed[0].qualified_name).toBe('crate::OldTrait');
   });
 
   it('returns empty array when scrubber is at the last position', () => {

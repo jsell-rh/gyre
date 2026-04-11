@@ -50,6 +50,18 @@ export function extractRemovedNodesFromDeltas(timeline, scrubIndex, currentQuali
     }
   }
 
+  // Build set of nodes added at or before the scrubber position (existed at scrubber time)
+  const addedAtOrBefore = new Set();
+  for (let i = 0; i <= scrubIndex && i < timeline.length; i++) {
+    const parsed = parseDeltaJson(timeline[i].delta_json);
+    if (parsed.nodes_added) {
+      for (const entry of parsed.nodes_added) {
+        const qn = typeof entry === 'string' ? entry : entry.qualified_name;
+        if (qn) addedAtOrBefore.add(qn);
+      }
+    }
+  }
+
   // Collect qualified_names from nodes_removed in deltas AFTER the scrubber position
   const removedAfter = new Set();
   const addedAfter = new Set();
@@ -68,11 +80,12 @@ export function extractRemovedNodesFromDeltas(timeline, scrubIndex, currentQuali
     }
   }
 
-  // Backward ghosts = removed after scrubber, NOT re-added after scrubber, NOT in current graph
+  // Backward ghosts = removed after scrubber AND existed at scrubber time AND NOT in current graph
   const result = [];
   for (const qn of removedAfter) {
-    if (addedAfter.has(qn) && currentQualifiedNames.has(qn)) continue; // re-added and exists now
     if (currentQualifiedNames.has(qn)) continue; // still exists in current graph
+    // Transient node: added after scrubber but never added at or before → never existed at scrubber time
+    if (addedAfter.has(qn) && !addedAtOrBefore.has(qn)) continue;
     const info = nodeInfoLookup.get(qn) ?? { name: qn.split('::').pop() ?? qn, node_type: 'unknown' };
     result.push({ qualified_name: qn, name: info.name, node_type: info.node_type });
   }
