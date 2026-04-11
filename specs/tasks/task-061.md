@@ -2,7 +2,8 @@
 
 **Spec reference:** `authorization-provenance.md` §7.2
 
-**Progress:** `ready-for-review`
+**Progress:** `needs-revision`
+**Review:** [`specs/reviews/task-061.md`](../reviews/task-061.md)
 
 **Git commits:**
 - `07a1f928` feat(abac): populate attestation-chain subject attributes (TASK-061)
