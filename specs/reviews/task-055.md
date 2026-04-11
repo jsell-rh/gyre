@@ -26,7 +26,7 @@
 
 ## R2 Findings
 
-- [ ] **F5 (LOW): Transient nodes incorrectly included as backward ghosts — test asserts wrong behavior**
+- [-] [process-revision-complete] **F5 (LOW): Transient nodes incorrectly included as backward ghosts — test asserts wrong behavior**
 
   `extractRemovedNodesFromDeltas` (`timeline-utils.js:53-79`) collects ALL `nodes_removed` from deltas after the scrubber position, then filters out nodes that still exist in the current graph. But it does not filter out nodes that were first **added** after the scrubber — nodes that never existed at the scrubber time.
 
