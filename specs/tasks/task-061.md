@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §7.2
 
-**Progress:** `ready-for-review`
+**Progress:** `complete`
 **Review:** [`specs/reviews/task-061.md`](../reviews/task-061.md)
 
 **Git commits:**
