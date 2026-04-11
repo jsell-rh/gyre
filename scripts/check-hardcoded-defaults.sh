@@ -187,6 +187,76 @@ if [ -n "$EMPTY_DEFAULT_HITS" ]; then
     FAIL=1
 fi
 
+# ── Check 5: Hardcoded policy/level return values ────────────────────────
+# When a function's purpose is to look up or derive a configurable value
+# (e.g., required attestation level, trust threshold, policy tier) from
+# stored data, but it always returns the same hardcoded constant (e.g.,
+# `Some(2)`, `Some(1)`, `Ok(3)`), it silently caps the value range and
+# prevents higher (or lower) tiers from ever being expressed.
+#
+# Detection: functions named `get_*_level` or `get_*_required_*` whose
+# bodies contain `Some(<integer>)` as a return without reading a level
+# value from the data source.
+#
+# See: specs/reviews/task-059.md R1 F2
+#
+# Exempt: test functions, cfg(test) modules, and lines with // hardcoded-default:ok
+
+# Strategy: find function definitions matching the pattern, extract their
+# bodies (up to the closing brace), and check for hardcoded Some(N) returns
+# — but only in non-test code.
+POLICY_RETURN_HITS=""
+while IFS= read -r fn_hit; do
+    fn_file=$(echo "$fn_hit" | cut -d: -f1)
+    fn_line=$(echo "$fn_hit" | cut -d: -f2)
+
+    # Check if the function is inside a #[cfg(test)] module.
+    # Find the last `mod tests {` line in the file; any function definition
+    # after that line is test code.
+    test_mod_line=$(grep -n 'mod tests' "$fn_file" | tail -1 | cut -d: -f1 || true)
+    if [ -n "$test_mod_line" ] && [ "$fn_line" -gt "$test_mod_line" ]; then
+        continue
+    fi
+
+    # Look for hardcoded Some(N) in the function body (next 20 lines).
+    body_hit=$(sed -n "$((fn_line+1)),$((fn_line+20))p" "$fn_file" \
+        | grep -n 'Some([0-9]\+)' \
+        | grep -v '// hardcoded-default:ok' \
+        || true)
+
+    if [ -n "$body_hit" ]; then
+        while IFS= read -r bline; do
+            bline_num=$(echo "$bline" | cut -d: -f1)
+            actual_line=$((fn_line + bline_num))
+            POLICY_RETURN_HITS="${POLICY_RETURN_HITS}  ${fn_file}:${actual_line}: $(sed -n "${actual_line}p" "$fn_file")
+"
+        done <<< "$body_hit"
+    fi
+done < <(grep -rn 'fn get_.*\(level\|required\|policy\|threshold\)' "$SERVER_SRC" \
+    --include='*.rs' | grep -v 'fn test_' || true)
+
+if [ -n "$POLICY_RETURN_HITS" ]; then
+    echo ""
+    echo "HARDCODED POLICY/LEVEL RETURN VALUE found:"
+    echo "$POLICY_RETURN_HITS" | while IFS= read -r line; do
+        echo "  $line"
+    done
+    echo ""
+    echo "  A function whose purpose is to look up or derive a configurable value"
+    echo "  (attestation level, trust threshold, policy tier) should read the value"
+    echo "  from stored data — not return a hardcoded constant."
+    echo "  e.g., if the spec defines Level 2 AND Level 3, returning Some(2) always"
+    echo "  means Level 3 can never be expressed."
+    echo ""
+    echo "  Fix: Store a structured policy value (e.g., {\"required_level\": 3}) and"
+    echo "  parse the level from it, or add // hardcoded-default:ok if genuinely"
+    echo "  intentional (e.g., a fixed minimum floor that cannot vary)."
+    echo ""
+    echo "  See: specs/reviews/task-059.md R1 F2 (hardcoded attestation level)"
+    echo ""
+    FAIL=1
+fi
+
 # ── Result ──────────────────────────────────────────────────────────────
 
 if [ "$FAIL" -eq 0 ]; then

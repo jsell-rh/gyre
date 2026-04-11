@@ -336,6 +336,99 @@ for file in $(find "$CRATE_SRC" -name '*.rs' -print 2>/dev/null | sort); do
     ' "$file" >> "$HITS_FILE" 2>/dev/null || true
 done
 
+# --- Check 4: Evaluation-verb test names without evaluation calls ---
+# A test named *_evaluates_*, *_evaluation_*, or *_eval_against_* claims
+# to verify runtime evaluation of constraints/expressions/rules. But if
+# the test body only inspects generated text via .contains() / .find()
+# without ever calling an actual evaluation function (evaluate_all,
+# evaluate, build_cel_context, eval), it tests GENERATION, not evaluation.
+# The name is a false coverage claim for evaluation behavior.
+#
+# See: specs/reviews/task-059.md R1 F1
+for file in $(find "$CRATE_SRC" -name '*.rs' -print 2>/dev/null | sort); do
+    [ -f "$file" ] || continue
+
+    awk -v file="$file" -v exempted="$EXEMPTED_TESTS" '
+    /^[[:space:]]*(#\[test\]|#\[tokio::test)/ {
+        in_test_attr = 1
+        next
+    }
+
+    in_test_attr && /^[[:space:]]*(pub[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)/ {
+        in_test_attr = 0
+        match($0, /fn[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)/, m)
+        test_name = m[1]
+
+        # Only check tests with evaluation-implying names
+        if (test_name ~ /(evaluat|eval_against|evaluates_against)/) {
+            in_test = 1
+            brace_depth = 0
+            has_exemption = 0
+            has_contains = 0
+            has_eval_call = 0
+            body_count = 0
+            test_start_line = NR
+            # Count braces on the fn declaration line
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "{") brace_depth++
+                if (c == "}") brace_depth--
+            }
+        }
+        next
+    }
+
+    in_test_attr && !/^[[:space:]]*$/ && !/^[[:space:]]*\/\// {
+        in_test_attr = 0
+    }
+
+    in_test {
+        for (i = 1; i <= length($0); i++) {
+            c = substr($0, i, 1)
+            if (c == "{") brace_depth++
+            if (c == "}") brace_depth--
+        }
+        body_count++
+
+        if ($0 ~ /aspirational-name:ok/) {
+            has_exemption = 1
+        }
+
+        # Detect text-inspection assertions (.contains( on expression/constraint text)
+        if ($0 ~ /\.contains\(/) {
+            has_contains = 1
+        }
+
+        # Detect actual evaluation function calls (runtime execution, not text generation).
+        # Includes evaluate_all, evaluate_push_constraints, evaluate_merge_constraints,
+        # build_cel_context, and .eval( for CEL evaluation.
+        if ($0 ~ /evaluate_all|evaluate_push|evaluate_merge|evaluate_constraints|build_cel_context|\.eval\(/) {
+            has_eval_call = 1
+        }
+
+        if (brace_depth == 0 && body_count > 1) {
+            if (exempted != "" && test_name ~ ("^(" exempted ")$")) {
+                in_test = 0
+                next
+            }
+
+            if (has_exemption) {
+                in_test = 0
+                next
+            }
+
+            # Finding: test name says "evaluates" but body only has .contains()
+            # with no actual evaluation call.
+            if (has_contains && !has_eval_call) {
+                printf "VIOLATION [Check 4]: %s:%d — test `%s` has an evaluation-implying name but only inspects generated text via .contains() without calling an evaluation function (evaluate_all, evaluate, build_cel_context).\n  A test named \"evaluates\" must actually evaluate constraints against a context — not just check generated constraint text.\n  Fix: either rename the test to describe what it actually tests (e.g., `*_constraints_generated_correctly`), or extend it to build an AgentContext and call evaluate_all() to verify pass/fail outcomes.\n  Exempt with: // aspirational-name:ok — <reason>\n\n", file, test_start_line, test_name
+            }
+
+            in_test = 0
+        }
+    }
+    ' "$file" >> "$HITS_FILE" 2>/dev/null || true
+done
+
 if [ -s "$HITS_FILE" ]; then
     cat "$HITS_FILE"
     VIOLATIONS=$(grep -c "^VIOLATION" "$HITS_FILE" || true)
