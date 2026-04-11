@@ -72,4 +72,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `798a0647` feat(ui): add spec links impact analysis view (TASK-051)
