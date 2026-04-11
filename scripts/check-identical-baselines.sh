@@ -17,14 +17,15 @@
 #
 # Detection:
 #   Find all .png files in Playwright screenshot baseline directories.
-#   Group by MD5 hash. If any group has 3+ files with distinct test
-#   names, flag it — that many distinct tests shouldn't produce the
-#   same pixel-identical image.
+#   Group by MD5 hash. If any group has 2+ files with distinct test
+#   names, flag it — distinct tests shouldn't produce the same
+#   pixel-identical image.
 #
 # Exempt with: # identical-baseline:ok in a file named
 #   identical-baseline-exemptions.txt
 #
 # See: specs/reviews/task-057.md F1 (8 of 15 baselines byte-identical)
+# See: specs/reviews/task-057.md R2-F1 (2 baselines byte-identical, slipped >=3 threshold)
 #
 # Run by pre-commit and CI.
 
@@ -95,11 +96,11 @@ if [ ! -s "$HASH_FILE" ]; then
     exit 0
 fi
 
-# Group by hash and find duplicates with 3+ files
+# Group by hash and find duplicates with 2+ files
 VIOLATIONS=0
 while IFS= read -r hash; do
     count=$(grep -c "^$hash " "$HASH_FILE")
-    if [ "$count" -ge 3 ]; then
+    if [ "$count" -ge 2 ]; then
         files=$(grep "^$hash " "$HASH_FILE" | awk '{print $2}')
         echo "" >> "$HITS_FILE"
         echo "  Hash $hash shared by $count baselines:" >> "$HITS_FILE"
@@ -115,9 +116,9 @@ if [ -s "$HITS_FILE" ]; then
     echo "IDENTICAL BASELINES — screenshot baselines that are byte-identical:"
     cat "$HITS_FILE"
     echo ""
-    echo "  When 3+ visual regression test screenshots are pixel-identical,"
-    echo "  the tests are capturing the same default state — not the claimed"
-    echo "  scenario. This provides zero visual regression coverage."
+    echo "  When 2+ visual regression test screenshots are pixel-identical,"
+    echo "  at least one test is capturing the same default state — not the"
+    echo "  claimed scenario. This provides zero incremental visual coverage."
     echo ""
     echo "  Common causes:"
     echo "    - Route override registered AFTER page navigation (override never fires)"
