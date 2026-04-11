@@ -2,7 +2,7 @@
 
 **Spec reference:** `authorization-provenance.md` §3.2 (strategy-implied constraint from attestation level policy)  
 **Depends on:** TASK-008 (enforcement — complete), TASK-003 (domain types — complete)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 

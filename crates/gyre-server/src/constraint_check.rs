@@ -1,12 +1,15 @@
 //! Push-time and merge-time constraint evaluation.
 //!
-//! Phase 2 (audit-only): Derives strategy-implied constraints from
+//! Audit-only path (`evaluate_*`): Derives strategy-implied constraints from
 //! `InputContent`, evaluates against the actual diff, logs results, and emits
 //! `ConstraintViolation` events. Does NOT reject pushes or merges.
 //!
-//! Phase 3 (enforcement): Same evaluation pipeline, but returns `Err` to
-//! reject pushes/merges when the attestation chain is invalid or constraints
+//! Enforcement path (`enforce_*`): Same evaluation pipeline, but returns `Err`
+//! to reject pushes/merges when the attestation chain is invalid or constraints
 //! fail. Enforced by `builtin:require-signed-authorization` ABAC policy.
+//!
+//! Agent attestation levels are derived from workload attestation data
+//! (supply-chain.md §2) and evaluated against repo stack policy requirements.
 
 use gyre_common::attestation::OutputConstraint;
 use gyre_common::message::{Destination, MessageKind};
@@ -107,21 +110,14 @@ pub async fn evaluate_push_constraints(
         .as_ref()
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
-    // Derive strategy-implied constraints.
-    let mut strategy_constraints = constraint_evaluator::derive_strategy_constraints(
+    // Derive strategy-implied constraints, including repo attestation level policy.
+    let required_attestation_level =
+        get_repo_required_attestation_level(state, repo_id).await;
+    let strategy_constraints = constraint_evaluator::derive_strategy_constraints(
         &signed_input.content,
         trust_level.as_deref(),
-        None, // attestation level policy not yet available at push time
+        required_attestation_level,
     );
-
-    // Phase 2 guard: remove attestation-level constraints when the agent's
-    // attestation level is unknown (0 = default). Without this guard, the
-    // supervised workspace constraint `agent.attestation_level >= 2` always
-    // fails (0 < 2), producing false violations and blocking downstream
-    // constraint evaluation via §3.4 fail-closed short-circuit.
-    if agent_ctx.attestation_level == 0 {
-        strategy_constraints.retain(|c| !c.expression.contains("agent.attestation_level"));
-    }
 
     // Collect all constraints: explicit + strategy-implied + gate.
     let gate_constraints: Vec<gyre_common::attestation::GateConstraint> = attestations
@@ -348,17 +344,14 @@ pub async fn enforce_push_constraints(
         .as_ref()
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
-    // Derive strategy-implied constraints.
-    let mut strategy_constraints = constraint_evaluator::derive_strategy_constraints(
+    // Derive strategy-implied constraints, including repo attestation level policy.
+    let required_attestation_level =
+        get_repo_required_attestation_level(state, repo_id).await;
+    let strategy_constraints = constraint_evaluator::derive_strategy_constraints(
         &signed_input.content,
         trust_level.as_deref(),
-        None,
+        required_attestation_level,
     );
-
-    // Guard: remove attestation-level constraints when the agent's level is unknown.
-    if agent_ctx.attestation_level == 0 {
-        strategy_constraints.retain(|c| !c.expression.contains("agent.attestation_level"));
-    }
 
     // Collect all constraints from the full chain (§4.3 additive accumulation).
     let (_root, explicit_from_chain, gate_from_chain) =
@@ -580,15 +573,13 @@ pub async fn enforce_merge_constraints(
         .as_ref()
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
-    let mut strategy_constraints = constraint_evaluator::derive_strategy_constraints(
+    let required_attestation_level =
+        get_repo_required_attestation_level(state, repo_id).await;
+    let strategy_constraints = constraint_evaluator::derive_strategy_constraints(
         &signed_input.content,
         trust_level.as_deref(),
-        None,
+        required_attestation_level,
     );
-
-    if agent_ctx.attestation_level == 0 {
-        strategy_constraints.retain(|c| !c.expression.contains("agent.attestation_level"));
-    }
 
     // Collect all constraints from the full chain (§4.3 additive accumulation).
     let (_root, explicit_from_chain, gate_from_chain) =
@@ -801,18 +792,14 @@ pub async fn evaluate_merge_constraints(
         .as_ref()
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
-    // Derive strategy-implied constraints.
-    let mut strategy_constraints = constraint_evaluator::derive_strategy_constraints(
+    // Derive strategy-implied constraints, including repo attestation level policy.
+    let required_attestation_level =
+        get_repo_required_attestation_level(state, repo_id).await;
+    let strategy_constraints = constraint_evaluator::derive_strategy_constraints(
         &signed_input.content,
         trust_level.as_deref(),
-        None,
+        required_attestation_level,
     );
-
-    // Phase 2 guard: remove attestation-level constraints when the agent's
-    // attestation level is unknown (0 = default). See push-time guard comment.
-    if agent_ctx.attestation_level == 0 {
-        strategy_constraints.retain(|c| !c.expression.contains("agent.attestation_level"));
-    }
 
     // Collect gate constraints from attestation chain.
     let gate_constraints: Vec<gyre_common::attestation::GateConstraint> = attestations
@@ -909,13 +896,60 @@ pub async fn evaluate_merge_constraints(
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+/// Derive the agent's attestation level from workload attestation data.
+///
+/// Levels (supply-chain.md §2):
+///   - 0: No workload attestation record exists
+///   - 1: Workload attestation exists but no stack fingerprint (raw push)
+///   - 2: Stack fingerprint present — self-reported via CLI
+///   - 3: Stack fingerprint + container_id + image_hash — Gyre-managed runtime
+fn derive_attestation_level(
+    workload: Option<&crate::workload_attestation::WorkloadAttestation>,
+) -> i64 {
+    let Some(att) = workload else {
+        return 0;
+    };
+    if att.stack_fingerprint.is_empty() {
+        return 1;
+    }
+    let has_container = att.container_id.as_deref().is_some_and(|c| !c.is_empty());
+    let has_image = att.image_hash.as_deref().is_some_and(|h| !h.is_empty());
+    if has_container && has_image {
+        3
+    } else {
+        2
+    }
+}
+
+/// Look up the repo's required minimum attestation level from its stack policy.
+///
+/// If the repo has a `repo_stack_policies` entry (a required fingerprint), the
+/// repo requires at minimum Level 2 (stack-attested). Returns `None` when no
+/// stack policy is configured (supply-chain.md §2, Policy per Level).
+pub(crate) async fn get_repo_required_attestation_level(
+    state: &AppState,
+    repo_id: &str,
+) -> Option<i64> {
+    let has_policy = state
+        .kv_store
+        .kv_get("repo_stack_policies", repo_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if has_policy {
+        Some(2)
+    } else {
+        None
+    }
+}
+
 /// Build an `AgentContext` from the agent record, JWT claims, workspace
 /// meta-spec set, and workload attestation data.
 ///
 /// Populates `meta_spec_set_sha` from the workspace's current meta-spec set
-/// (SHA256 of the serialized JSON). For `attestation_level`, workload
-/// attestation data is not yet available in Phase 2 — the field remains 0
-/// and callers must guard against generating constraints that reference it.
+/// (SHA256 of the serialized JSON). Derives `attestation_level` from the
+/// agent's workload attestation record (supply-chain.md §2).
 pub(crate) async fn build_agent_context(
     state: &AppState,
     agent_id: &str,
@@ -959,6 +993,8 @@ pub(crate) async fn build_agent_context(
             serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json).ok()
         });
 
+    let attestation_level = derive_attestation_level(workload.as_ref());
+
     let (stack_hash, container_id, image_hash) = match &workload {
         Some(att) => (
             att.stack_fingerprint.clone(),
@@ -972,7 +1008,7 @@ pub(crate) async fn build_agent_context(
         id: agent_id.to_string(),
         persona,
         stack_hash,
-        attestation_level: 0, // empty-default:ok — Phase 2: attestation level derivation not yet implemented; callers guard constraint generation
+        attestation_level,
         meta_spec_set_sha,
         spawned_by: agent
             .as_ref()
@@ -2081,12 +2117,182 @@ mod tests {
         assert_eq!(ctx.stack_hash, "sha256:stack-abc");
         assert_eq!(ctx.container_id, "container-xyz");
         assert_eq!(ctx.image_hash, "sha256:img-def");
+        // Level 3: stack + container + image.
+        assert_eq!(ctx.attestation_level, 3);
+    }
+
+    #[test]
+    fn derive_attestation_level_no_workload() {
+        // No workload attestation record → Level 0.
+        assert_eq!(derive_attestation_level(None), 0);
+    }
+
+    #[test]
+    fn derive_attestation_level_empty_stack() {
+        // Workload attestation exists but no stack fingerprint → Level 1 (raw push).
+        let att = crate::workload_attestation::WorkloadAttestation {
+            agent_id: "agent-1".to_string(),
+            pid: Some(100),
+            hostname: "host".to_string(),
+            compute_target: "local".to_string(),
+            stack_fingerprint: String::new(),
+            attested_at: 1_700_000_000,
+            alive: true,
+            last_verified_at: 1_700_000_000,
+            container_id: None,
+            image_hash: None,
+        };
+        assert_eq!(derive_attestation_level(Some(&att)), 1);
+    }
+
+    #[test]
+    fn derive_attestation_level_stack_only() {
+        // Stack fingerprint present, no container → Level 2 (CLI self-reported).
+        let att = crate::workload_attestation::WorkloadAttestation {
+            agent_id: "agent-2".to_string(),
+            pid: Some(200),
+            hostname: "host".to_string(),
+            compute_target: "local".to_string(),
+            stack_fingerprint: "sha256:stack-abc".to_string(),
+            attested_at: 1_700_000_000,
+            alive: true,
+            last_verified_at: 1_700_000_000,
+            container_id: None,
+            image_hash: None,
+        };
+        assert_eq!(derive_attestation_level(Some(&att)), 2);
+    }
+
+    #[test]
+    fn derive_attestation_level_full_container() {
+        // Stack + container_id + image_hash → Level 3 (Gyre-managed runtime).
+        let att = crate::workload_attestation::WorkloadAttestation {
+            agent_id: "agent-3".to_string(),
+            pid: Some(300),
+            hostname: "host".to_string(),
+            compute_target: "container".to_string(),
+            stack_fingerprint: "sha256:stack-xyz".to_string(),
+            attested_at: 1_700_000_000,
+            alive: true,
+            last_verified_at: 1_700_000_000,
+            container_id: Some("ctr-123".to_string()),
+            image_hash: Some("sha256:img-456".to_string()),
+        };
+        assert_eq!(derive_attestation_level(Some(&att)), 3);
+    }
+
+    #[test]
+    fn derive_attestation_level_stack_with_empty_container() {
+        // Stack present, container_id is Some("") and image_hash is Some("") →
+        // Level 2 (empty strings don't count as container attestation).
+        let att = crate::workload_attestation::WorkloadAttestation {
+            agent_id: "agent-4".to_string(),
+            pid: Some(400),
+            hostname: "host".to_string(),
+            compute_target: "local".to_string(),
+            stack_fingerprint: "sha256:stack-def".to_string(),
+            attested_at: 1_700_000_000,
+            alive: true,
+            last_verified_at: 1_700_000_000,
+            container_id: Some(String::new()),
+            image_hash: Some(String::new()),
+        };
+        assert_eq!(derive_attestation_level(Some(&att)), 2);
     }
 
     #[tokio::test]
-    async fn attestation_level_guard_removes_attestation_constraints() {
-        // Verify that when attestation_level is 0 (default), attestation-level
-        // constraints are filtered out to prevent false violations.
+    async fn get_repo_required_attestation_level_no_policy() {
+        // Repo with no stack policy → None.
+        let state = crate::mem::test_state();
+        let level = get_repo_required_attestation_level(&state, "repo-no-policy").await;
+        assert_eq!(level, None);
+    }
+
+    #[tokio::test]
+    async fn get_repo_required_attestation_level_with_policy() {
+        // Repo with stack policy → Some(2).
+        let state = crate::mem::test_state();
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-with-policy",
+                "sha256:required-fingerprint".to_string(),
+            )
+            .await
+            .unwrap();
+        let level = get_repo_required_attestation_level(&state, "repo-with-policy").await;
+        assert_eq!(level, Some(2));
+    }
+
+    #[tokio::test]
+    async fn build_agent_context_derives_attestation_level_from_workload() {
+        // Verify build_agent_context derives attestation_level from workload data.
+        let state = crate::mem::test_state();
+        let ws_id = Id::new("ws-att-level");
+
+        // No workload → Level 0.
+        let ctx = build_agent_context(&state, "agent-no-wl", "TASK-1", &ws_id).await;
+        assert_eq!(ctx.attestation_level, 0);
+
+        // Level 2: stack hash, no container.
+        let att2 = crate::workload_attestation::WorkloadAttestation {
+            agent_id: "agent-level2".to_string(),
+            pid: Some(100),
+            hostname: "host".to_string(),
+            compute_target: "local".to_string(),
+            stack_fingerprint: "sha256:stack-for-level2".to_string(),
+            attested_at: 1_700_000_000,
+            alive: true,
+            last_verified_at: 1_700_000_000,
+            container_id: None,
+            image_hash: None,
+        };
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                "agent-level2",
+                serde_json::to_string(&att2).unwrap(),
+            )
+            .await
+            .unwrap();
+        let ctx2 = build_agent_context(&state, "agent-level2", "TASK-2", &ws_id).await;
+        assert_eq!(ctx2.attestation_level, 2);
+
+        // Level 3: stack + container + image.
+        let att3 = crate::workload_attestation::WorkloadAttestation {
+            agent_id: "agent-level3".to_string(),
+            pid: Some(200),
+            hostname: "host".to_string(),
+            compute_target: "container".to_string(),
+            stack_fingerprint: "sha256:stack-for-level3".to_string(),
+            attested_at: 1_700_000_000,
+            alive: true,
+            last_verified_at: 1_700_000_000,
+            container_id: Some("ctr-abc".to_string()),
+            image_hash: Some("sha256:img-xyz".to_string()),
+        };
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                "agent-level3",
+                serde_json::to_string(&att3).unwrap(),
+            )
+            .await
+            .unwrap();
+        let ctx3 = build_agent_context(&state, "agent-level3", "TASK-3", &ws_id).await;
+        assert_eq!(ctx3.attestation_level, 3);
+    }
+
+    #[test]
+    fn attestation_level_constraint_evaluates_against_real_level() {
+        // Level 0 agent with Level 3 repo policy → constraint fails.
+        // Level 3 agent with Level 3 repo policy → constraint passes.
+        // Level 2 agent with no repo policy → no attestation constraint generated.
+        use gyre_domain::constraint_evaluator;
+
         let content = InputContent {
             spec_path: "specs/system/payments.md".to_string(),
             spec_sha: "abc123".to_string(),
@@ -2100,39 +2306,47 @@ mod tests {
             },
         };
 
-        // Derive constraints for a supervised workspace (produces attestation check).
-        let mut strategy = constraint_evaluator::derive_strategy_constraints(
-            &content,
-            Some("supervised"),
-            Some(3),
+        // Case 1: Repo requires Level 3, supervised workspace.
+        let strategy_with_policy =
+            constraint_evaluator::derive_strategy_constraints(&content, Some("supervised"), Some(3));
+        assert!(
+            strategy_with_policy
+                .iter()
+                .any(|c| c.expression.contains("agent.attestation_level >= 3")),
+            "should produce attestation level >= 3 constraint"
+        );
+        // Also has supervised constraint (level >= 2).
+        assert!(
+            strategy_with_policy
+                .iter()
+                .any(|c| c.expression.contains("agent.attestation_level >= 2")),
+            "supervised workspace should produce level >= 2 constraint"
         );
 
-        // Before guard: should have attestation constraints.
+        // Case 2: No repo policy, autonomous workspace.
+        let strategy_no_policy =
+            constraint_evaluator::derive_strategy_constraints(&content, Some("autonomous"), None);
         assert!(
-            strategy
+            !strategy_no_policy
                 .iter()
                 .any(|c| c.expression.contains("agent.attestation_level")),
-            "should have attestation constraints before guard"
+            "should not produce attestation constraint when no policy and autonomous"
         );
 
-        // Apply the Phase 2 guard (same logic as evaluate_push/merge_constraints).
-        let agent_attestation_level = 0;
-        if agent_attestation_level == 0 {
-            strategy.retain(|c| !c.expression.contains("agent.attestation_level"));
-        }
-
-        // After guard: no attestation constraints.
+        // Case 3: No repo policy, supervised workspace → still produces supervised level >= 2.
+        let strategy_supervised_only =
+            constraint_evaluator::derive_strategy_constraints(&content, Some("supervised"), None);
         assert!(
-            !strategy
+            strategy_supervised_only
                 .iter()
-                .any(|c| c.expression.contains("agent.attestation_level")),
-            "attestation constraints should be filtered when level is 0"
+                .any(|c| c.expression.contains("agent.attestation_level >= 2")),
+            "supervised workspace should produce level >= 2 even without repo policy"
         );
-
-        // Non-attestation constraints should survive the guard.
         assert!(
-            strategy.iter().any(|c| c.name.contains("meta-spec")),
-            "meta-spec constraint should survive the guard"
+            !strategy_supervised_only
+                .iter()
+                .any(|c| c.expression.contains("agent.attestation_level >= 3")),
+            "should not produce level >= 3 when repo has no policy"
         );
     }
 

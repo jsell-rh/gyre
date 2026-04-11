@@ -217,11 +217,13 @@ pub async fn get_verification(
         .as_ref()
         .map(|ws| format!("{:?}", ws.trust_level).to_lowercase());
 
-    let mut strategy_constraints = if let Some(si) = signed_input {
+    let required_attestation_level =
+        crate::constraint_check::get_repo_required_attestation_level(&state, &repo_id).await;
+    let strategy_constraints = if let Some(si) = signed_input {
         gyre_domain::constraint_evaluator::derive_strategy_constraints(
             &si.content,
             trust_level.as_deref(),
-            None,
+            required_attestation_level,
         )
     } else {
         vec![]
@@ -236,11 +238,6 @@ pub async fn get_verification(
         &Id::new(&attestation.metadata.workspace_id),
     )
     .await;
-
-    // Guard: remove attestation-level constraints when the agent's level is unknown.
-    if agent_ctx.attestation_level == 0 {
-        strategy_constraints.retain(|c| !c.expression.contains("agent.attestation_level"));
-    }
 
     // Collect all constraints.
     let all_constraints = gyre_domain::constraint_evaluator::collect_all_constraints(
