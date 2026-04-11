@@ -2,7 +2,8 @@
 
 **Spec reference:** `authorization-provenance.md` §2.2 (`InputContent.meta_spec_set_sha`), §3.2 (strategy-implied constraint: `agent.meta_spec_set_sha == input.meta_spec_set_sha`)  
 **Depends on:** TASK-006 (key binding + signed input — complete)  
-**Progress:** `ready-for-review`
+**Progress:** `complete`
+**Review:** `specs/reviews/task-058.md`
 
 ## Spec Excerpt
 
