@@ -1635,4 +1635,533 @@ serde = "1.0"
 "#;
         assert_eq!(crate::git_http::extract_dep_version(toml, "tokio"), None);
     }
+
+    // ── TASK-048: Package manager parser tests ────────────────────────
+
+    #[test]
+    fn test_detect_package_json_file_ref() {
+        let json = r#"{
+            "name": "my-app",
+            "dependencies": {
+                "lodash": "^4.17.0",
+                "local-lib": "file:../local-lib",
+                "other-pkg": "file:../other-pkg"
+            },
+            "devDependencies": {
+                "jest": "^29.0.0",
+                "test-utils": "file:../test-utils"
+            }
+        }"#;
+        let deps = crate::git_http::detect_package_json_deps(json);
+        assert_eq!(deps.len(), 3);
+        assert_eq!(deps[0].0, "../local-lib");
+        assert!(deps[0].1.is_none());
+        assert_eq!(deps[1].0, "../other-pkg");
+        assert_eq!(deps[2].0, "../test-utils");
+    }
+
+    #[test]
+    fn test_detect_package_json_workspace_ref() {
+        let json = r#"{
+            "dependencies": {
+                "shared-utils": "workspace:*",
+                "common-types": "workspace:^2.0.0"
+            }
+        }"#;
+        let deps = crate::git_http::detect_package_json_deps(json);
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].0, "common-types");
+        assert_eq!(deps[0].1, Some("^2.0.0".to_string()));
+        assert_eq!(deps[1].0, "shared-utils");
+        assert!(deps[1].1.is_none()); // workspace:* has no version
+    }
+
+    #[test]
+    fn test_detect_package_json_no_local_deps() {
+        let json = r#"{
+            "dependencies": {
+                "express": "^4.18.0",
+                "react": "^18.0.0"
+            }
+        }"#;
+        let deps = crate::git_http::detect_package_json_deps(json);
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_detect_package_json_invalid_json() {
+        let deps = crate::git_http::detect_package_json_deps("not valid json {{{");
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_detect_go_mod_single_replace() {
+        let content = r#"
+module example.com/my-service
+
+go 1.21
+
+require (
+    github.com/gin-gonic/gin v1.9.0
+)
+
+replace example.com/shared-lib v1.0.0 => ../shared-lib
+"#;
+        let deps = crate::git_http::detect_go_mod_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, "example.com/shared-lib");
+        assert_eq!(deps[0].1, Some("v1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_detect_go_mod_block_replace() {
+        let content = r#"
+module example.com/my-service
+
+go 1.21
+
+replace (
+    example.com/lib-a v1.2.0 => ../lib-a
+    example.com/lib-b => ./vendor/lib-b
+)
+"#;
+        let deps = crate::git_http::detect_go_mod_deps(content);
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].0, "example.com/lib-a");
+        assert_eq!(deps[0].1, Some("v1.2.0".to_string()));
+        assert_eq!(deps[1].0, "example.com/lib-b");
+        assert!(deps[1].1.is_none());
+    }
+
+    #[test]
+    fn test_detect_go_mod_no_local_replace() {
+        let content = r#"
+module example.com/my-service
+
+go 1.21
+
+replace example.com/foo v1.0.0 => example.com/bar v1.1.0
+"#;
+        let deps = crate::git_http::detect_go_mod_deps(content);
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_detect_pyproject_poetry_path() {
+        let content = r#"
+[tool.poetry]
+name = "my-project"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+shared-lib = { path = "../shared-lib" }
+requests = "^2.28"
+"#;
+        let deps = crate::git_http::detect_pyproject_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, "../shared-lib");
+        assert_eq!(deps[0].1, Some("shared-lib".to_string()));
+    }
+
+    #[test]
+    fn test_detect_pyproject_pep621_file_ref() {
+        let content = r#"
+[project]
+name = "my-app"
+
+[project.dependencies]
+    "local-pkg @ file:../local-pkg",
+    "numpy>=1.24",
+"#;
+        let deps = crate::git_http::detect_pyproject_deps(content);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, "../local-pkg");
+        assert_eq!(deps[0].1, Some("local-pkg".to_string()));
+    }
+
+    #[test]
+    fn test_detect_pyproject_no_path_deps() {
+        let content = r#"
+[tool.poetry.dependencies]
+python = "^3.10"
+requests = "^2.28"
+flask = "^2.3"
+"#;
+        let deps = crate::git_http::detect_pyproject_deps(content);
+        assert!(deps.is_empty());
+    }
+
+    // ── Spec manifest link tests ──────────────────────────────────────
+
+    #[test]
+    fn test_detect_manifest_spec_links_cross_repo() {
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/my-spec.md
+    title: My Spec
+    owner: user:alice
+    links:
+      - type: depends_on
+        target: "@platform-core/other-repo/system/contract.md"
+        reason: "Needs contract"
+      - type: implements
+        target: "system/local-spec.md"
+"#;
+        let links = crate::git_http::detect_manifest_spec_links(yaml);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].0, "other-repo");
+        assert_eq!(links[0].1, "@platform-core/other-repo/system/contract.md");
+        assert_eq!(links[0].2, "depends_on");
+    }
+
+    #[test]
+    fn test_detect_manifest_spec_links_multiple() {
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/a.md
+    title: Spec A
+    owner: user:bob
+    links:
+      - type: extends
+        target: "@ws/repo-x/system/base.md"
+      - type: depends_on
+        target: "@ws/repo-y/system/lib.md"
+  - path: system/b.md
+    title: Spec B
+    owner: user:carol
+    links:
+      - type: depends_on
+        target: "@ws/repo-x/system/api.md"
+"#;
+        let links = crate::git_http::detect_manifest_spec_links(yaml);
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].0, "repo-x");
+        assert_eq!(links[1].0, "repo-y");
+        assert_eq!(links[2].0, "repo-x");
+    }
+
+    #[test]
+    fn test_detect_manifest_no_cross_repo_links() {
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/spec.md
+    title: Local Spec
+    owner: user:alice
+    links:
+      - type: implements
+        target: "system/other.md"
+"#;
+        let links = crate::git_http::detect_manifest_spec_links(yaml);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn test_detect_manifest_invalid_yaml() {
+        let links = crate::git_http::detect_manifest_spec_links("not: valid: yaml: ][");
+        assert!(links.is_empty());
+    }
+
+    // ── API contract detection tests ──────────────────────────────────
+
+    #[test]
+    fn test_detect_openapi_refs() {
+        let content = r#"
+openapi: "3.0.0"
+info:
+  title: My API
+servers:
+  - url: https://payment-service.internal/api/v1
+paths:
+  /orders:
+    get:
+      description: Calls payment-service for billing
+"#;
+        let repos = vec!["payment-service", "user-service", "auth-service"];
+        let refs = crate::git_http::detect_openapi_refs(content, &repos);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0], "payment-service");
+    }
+
+    #[test]
+    fn test_detect_openapi_no_match() {
+        let content = r#"
+openapi: "3.0.0"
+info:
+  title: Standalone API
+"#;
+        let repos = vec!["payment-service"];
+        let refs = crate::git_http::detect_openapi_refs(content, &repos);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_detect_proto_imports() {
+        let content = r#"
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+import "auth-service/v1/types.proto";
+import "payment-service/v1/orders.proto";
+"#;
+        let repos = vec!["auth-service", "payment-service", "user-service"];
+        let refs = crate::git_http::detect_proto_imports(content, &repos);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.contains(&"auth-service".to_string()));
+        assert!(refs.contains(&"payment-service".to_string()));
+    }
+
+    #[test]
+    fn test_detect_proto_imports_no_match() {
+        let content = r#"
+syntax = "proto3";
+import "google/protobuf/empty.proto";
+"#;
+        let repos = vec!["auth-service"];
+        let refs = crate::git_http::detect_proto_imports(content, &repos);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_detect_mcp_refs() {
+        let content = r#"{
+            "tools": [
+                {"name": "search", "server": "https://search-service.internal/mcp"},
+                {"name": "auth", "server": "https://auth-service.internal/mcp"}
+            ]
+        }"#;
+        let repos = vec!["search-service", "auth-service", "billing-service"];
+        let refs = crate::git_http::detect_mcp_refs(content, &repos);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.contains(&"auth-service".to_string()));
+        assert!(refs.contains(&"search-service".to_string()));
+    }
+
+    // ── Reconciliation tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_reconcile_creates_new_edges() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+
+        let detected = vec![(
+            repo_b.to_string(),
+            "Cargo.toml".to_string(),
+            DependencyType::Code,
+            gyre_domain::DetectionMethod::CargoToml,
+            Some("1.0.0".to_string()),
+        )];
+
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target_repo_id, repo_b);
+        assert_eq!(edges[0].source_artifact, "Cargo.toml");
+        assert_eq!(edges[0].version_pinned, Some("1.0.0".to_string()));
+        assert_eq!(edges[0].status, DependencyStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_marks_orphaned() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+
+        // Create an existing edge.
+        let edge = DependencyEdge::new(
+            Id::new("edge-1"),
+            repo_a.clone(),
+            repo_b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "repo-b",
+            gyre_domain::DetectionMethod::CargoToml,
+            100,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Reconcile with empty detection (dep no longer found).
+        let detected: Vec<(
+            String,
+            String,
+            DependencyType,
+            gyre_domain::DetectionMethod,
+            Option<String>,
+        )> = Vec::new();
+
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].status, DependencyStatus::Orphaned);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_updates_version() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+
+        // Create an existing edge with version 1.0.0.
+        let mut edge = DependencyEdge::new(
+            Id::new("edge-1"),
+            repo_a.clone(),
+            repo_b.clone(),
+            DependencyType::Code,
+            "Cargo.toml",
+            "repo-b",
+            gyre_domain::DetectionMethod::CargoToml,
+            100,
+        );
+        edge.version_pinned = Some("1.0.0".to_string());
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Reconcile with updated version.
+        let detected = vec![(
+            repo_b.to_string(),
+            "Cargo.toml".to_string(),
+            DependencyType::Code,
+            gyre_domain::DetectionMethod::CargoToml,
+            Some("2.0.0".to_string()),
+        )];
+
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].version_pinned, Some("2.0.0".to_string()));
+        assert_eq!(edges[0].status, DependencyStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_does_not_touch_manual_edges() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+
+        // Create a manually declared edge.
+        let edge = DependencyEdge::new(
+            Id::new("edge-manual"),
+            repo_a.clone(),
+            repo_b.clone(),
+            DependencyType::Manual,
+            "manual",
+            "repo-b",
+            gyre_domain::DetectionMethod::Manual,
+            100,
+        );
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Reconcile with no detected edges — Manual edge should NOT be orphaned.
+        let detected: Vec<(
+            String,
+            String,
+            DependencyType,
+            gyre_domain::DetectionMethod,
+            Option<String>,
+        )> = Vec::new();
+
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].status, DependencyStatus::Active);
+        assert_eq!(
+            edges[0].detection_method,
+            gyre_domain::DetectionMethod::Manual
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_lifecycle_create_then_orphan() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+        let repo_c = create_repo(&state, "repo-c").await;
+
+        // First push: detect B and C.
+        let detected_1 = vec![
+            (
+                repo_b.to_string(),
+                "package.json".to_string(),
+                DependencyType::Code,
+                gyre_domain::DetectionMethod::PackageJson,
+                None,
+            ),
+            (
+                repo_c.to_string(),
+                "package.json".to_string(),
+                DependencyType::Code,
+                gyre_domain::DetectionMethod::PackageJson,
+                Some("^1.0.0".to_string()),
+            ),
+        ];
+
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_1).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().all(|e| e.status == DependencyStatus::Active));
+
+        // Second push: only B detected (C removed from package.json).
+        let detected_2 = vec![(
+            repo_b.to_string(),
+            "package.json".to_string(),
+            DependencyType::Code,
+            gyre_domain::DetectionMethod::PackageJson,
+            None,
+        )];
+
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected_2).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 2);
+
+        let b_edge = edges.iter().find(|e| e.target_repo_id == repo_b).unwrap();
+        assert_eq!(b_edge.status, DependencyStatus::Active);
+
+        let c_edge = edges.iter().find(|e| e.target_repo_id == repo_c).unwrap();
+        assert_eq!(c_edge.status, DependencyStatus::Orphaned);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_un_orphans_redetected_edge() {
+        let state = setup();
+        let repo_a = create_repo(&state, "repo-a").await;
+        let repo_b = create_repo(&state, "repo-b").await;
+
+        // Create an orphaned edge.
+        let mut edge = DependencyEdge::new(
+            Id::new("edge-1"),
+            repo_a.clone(),
+            repo_b.clone(),
+            DependencyType::Code,
+            "go.mod",
+            "repo-b",
+            gyre_domain::DetectionMethod::GoMod,
+            100,
+        );
+        edge.status = DependencyStatus::Orphaned;
+        state.dependencies.save(&edge).await.unwrap();
+
+        // Re-detect the same edge.
+        let detected = vec![(
+            repo_b.to_string(),
+            "go.mod".to_string(),
+            DependencyType::Code,
+            gyre_domain::DetectionMethod::GoMod,
+            Some("v1.5.0".to_string()),
+        )];
+
+        crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected).await;
+
+        let edges = state.dependencies.list_by_repo(&repo_a).await.unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].status, DependencyStatus::Active);
+        assert_eq!(edges[0].version_pinned, Some("v1.5.0".to_string()));
+    }
 }

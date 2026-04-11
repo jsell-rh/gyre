@@ -84,6 +84,7 @@ pub enum DetectionMethod {
     CargoToml,
     PackageJson,
     GoMod,
+    PyprojectToml,
     ManifestLink,
     OpenApiRef,
     ProtoImport,
