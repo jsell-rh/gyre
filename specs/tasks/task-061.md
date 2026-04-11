@@ -5,7 +5,7 @@
 **Progress:** `ready-for-review`
 
 **Git commits:**
-_(will be added after commit)_
+- `07a1f928` feat(abac): populate attestation-chain subject attributes (TASK-061)
 
 ---
 
