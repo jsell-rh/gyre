@@ -276,10 +276,12 @@ describe('DetailPanel', () => {
           { path: 'system/core.md', title: 'Core', approval_status: 'approved' },
           { path: 'system/auth.md', title: 'Auth', approval_status: 'pending' },
           { path: 'system/billing.md', title: 'Billing', approval_status: 'approved' },
+          { path: 'system/deep.md', title: 'Deep', approval_status: 'pending' },
         ],
         edges: [
           { source: 'system/auth.md', target: 'system/core.md', link_type: 'depends_on', status: 'active' },
           { source: 'system/billing.md', target: 'system/core.md', link_type: 'implements', status: 'active' },
+          { source: 'system/deep.md', target: 'system/auth.md', link_type: 'extends', status: 'active' },
         ],
       };
 
@@ -334,10 +336,12 @@ describe('DetailPanel', () => {
       const { container } = render(DetailPanel, { props: { entity: specEntityWithRepo } });
       await openLinksAndClickAnalyze(container);
 
-      // Header should show correct counts
+      // Header should show correct counts:
+      // 3 specs total (auth, billing direct + deep transitive)
+      // 2 repos (repo-auth, repo-billing — deep.md has null repo_id, excluded from count)
       const header = container.querySelector('[data-testid="impact-tree-header"]');
       expect(header).toBeTruthy();
-      expect(header.textContent).toContain('2 specs');
+      expect(header.textContent).toContain('3 specs');
       expect(header.textContent).toContain('2 repos');
       expect(header.textContent).toContain('would need review');
     });
@@ -347,18 +351,31 @@ describe('DetailPanel', () => {
       const { container } = render(DetailPanel, { props: { entity: specEntityWithRepo } });
       await openLinksAndClickAnalyze(container);
 
-      // Each item should show link type badge, approval status badge, and depth
+      // 3 items: auth (direct), billing (direct), deep (transitive depth 2)
       const items = container.querySelectorAll('.impact-tree-item');
-      expect(items.length).toBe(2);
+      expect(items.length).toBe(3);
 
-      // Both are direct (depth 1)
-      items.forEach(item => {
-        expect(item.querySelector('.impact-tree-depth').textContent).toBe('direct');
-      });
+      // Direct deps (auth, billing) show "direct", transitive dep (deep) shows "depth 2"
+      const authItem = container.querySelector('[data-testid="impact-tree-item-system/auth.md"]');
+      expect(authItem).toBeTruthy();
+      expect(authItem.querySelector('.impact-tree-depth').textContent).toBe('direct');
 
-      // Repo groups should show repo IDs as headers
+      const billingItem = container.querySelector('[data-testid="impact-tree-item-system/billing.md"]');
+      expect(billingItem).toBeTruthy();
+      expect(billingItem.querySelector('.impact-tree-depth').textContent).toBe('direct');
+
+      const deepItem = container.querySelector('[data-testid="impact-tree-item-system/deep.md"]');
+      expect(deepItem).toBeTruthy();
+      expect(deepItem.querySelector('.impact-tree-depth').textContent).toBe('depth 2');
+
+      // Repo groups: repo-auth, repo-billing, and unknown (for deep.md with null repo_id)
       const repoGroups = container.querySelectorAll('.impact-tree-repo');
-      expect(repoGroups.length).toBe(2);
+      expect(repoGroups.length).toBe(3);
+
+      // The "unknown" group contains the transitive dep with null repo_id
+      const unknownGroup = container.querySelector('[data-testid="impact-tree-repo-unknown"]');
+      expect(unknownGroup).toBeTruthy();
+      expect(unknownGroup.querySelector('[data-testid="impact-tree-item-system/deep.md"]')).toBeTruthy();
     });
   });
 

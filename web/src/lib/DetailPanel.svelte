@@ -1224,7 +1224,7 @@
 
       impactData = {
         total: deps.length,
-        repoCount: groups.size,
+        repoCount: new Set(deps.map(d => d.repo_id).filter(Boolean)).size,
         byRepo: Array.from(groups.entries()).map(([repo, items]) => ({ repo, items })),
       };
     } catch (e) {
