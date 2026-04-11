@@ -2,7 +2,8 @@
 
 **Spec reference:** `dependency-graph.md` §UI (lines 230–232)  
 **Depends on:** TASK-020 (breaking change detection, for alerts), TASK-021 (version drift, for drift indicators)  
-**Progress:** `ready-for-review`
+**Progress:** `complete`  
+**Review:** [`specs/reviews/task-050.md`](../reviews/task-050.md)
 
 ## Spec Excerpt
 
