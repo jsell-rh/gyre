@@ -22,6 +22,7 @@
   import Inbox from './Inbox.svelte';
   import ExplorerCodeTab from './ExplorerCodeTab.svelte';
   import RepoSettings from './RepoSettings.svelte';
+  import RepoDependencies from './RepoDependencies.svelte';
   import AgentCardPanel from './AgentCardPanel.svelte';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -41,6 +42,7 @@
     { id: 'mrs',          labelKey: 'repo_mode.tabs.mrs' },
     { id: 'agents',       labelKey: 'repo_mode.tabs.agents' },
     { id: 'architecture', labelKey: 'repo_mode.tabs.architecture' },
+    { id: 'dependencies', labelKey: 'repo_mode.tabs.dependencies' },
     { id: 'decisions',    labelKey: 'repo_mode.tabs.decisions' },
     { id: 'code',         labelKey: 'repo_mode.tabs.code' },
     { id: 'settings',     labelKey: 'repo_mode.tabs.settings', titleKey: 'repo_mode.settings_title' },
@@ -117,6 +119,30 @@
 
   // Reset when repo changes
   $effect(() => { if (repo?.id) allAgentsLoaded = false; });
+
+  // ── Dependency counts for tab badge ──────────────────────────────────
+  let depCount = $state(0);
+  let deptCount = $state(0);
+  let depsCountLoaded = $state(false);
+
+  $effect(() => {
+    const id = repo?.id;
+    if (!id || depsCountLoaded) return;
+    let aborted = false;
+    Promise.all([
+      api.repoDependencies(id),
+      api.repoDependents(id),
+    ]).then(([deps, depts]) => {
+      if (aborted) return;
+      depCount = Array.isArray(deps) ? deps.length : 0;
+      deptCount = Array.isArray(depts) ? depts.length : 0;
+      depsCountLoaded = true;
+    }).catch(() => {});
+    return () => { aborted = true; };
+  });
+
+  // Reset when repo changes
+  $effect(() => { if (repo?.id) depsCountLoaded = false; });
 
   // ── Tasks for this repo ──────────────────────────────────────────────
   let repoTasks = $state([]);
@@ -531,7 +557,7 @@
         onclick={() => onTabChange?.(tab.id)}
         title={tab.titleKey ? $t(tab.titleKey) : $t(tab.labelKey)}
       >
-        {$t(tab.labelKey)}{#if tab.id === 'decisions' && decisionsCount > 0}<span class="tab-badge">{decisionsCount > 99 ? '99+' : decisionsCount}</span>{:else if tab.id === 'agents' && activeAgents.length > 0}<span class="tab-badge tab-badge-info">{activeAgents.length}</span>{:else if tab.id === 'tasks' && repoTasks.length > 0}<span class="tab-count">{repoTasks.length}</span>{:else if tab.id === 'mrs' && repoMrs.length > 0}<span class="tab-count">{repoMrs.length}</span>{/if}
+        {$t(tab.labelKey)}{#if tab.id === 'decisions' && decisionsCount > 0}<span class="tab-badge">{decisionsCount > 99 ? '99+' : decisionsCount}</span>{:else if tab.id === 'agents' && activeAgents.length > 0}<span class="tab-badge tab-badge-info">{activeAgents.length}</span>{:else if tab.id === 'tasks' && repoTasks.length > 0}<span class="tab-count">{repoTasks.length}</span>{:else if tab.id === 'mrs' && repoMrs.length > 0}<span class="tab-count">{repoMrs.length}</span>{:else if tab.id === 'dependencies' && (depCount + deptCount) > 0}<span class="tab-count">{depCount + deptCount}</span>{/if}
       </button>
     {/each}
   </div>
@@ -870,6 +896,8 @@
         scope={{ type: 'repo', workspaceId: workspace?.id, repoId: repo?.id }}
         workspaceName={workspace?.name ?? null}
       />
+    {:else if activeTab === 'dependencies'}
+      <RepoDependencies repoId={repo?.id} {workspace} />
     {:else if activeTab === 'decisions'}
       <!-- repoId scopes Inbox to this repo's notifications only (§3 Decisions tab) -->
       <Inbox workspaceId={workspace?.id} repoId={repo?.id} scope="repo" />

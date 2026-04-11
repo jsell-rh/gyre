@@ -2,7 +2,7 @@
 
 **Spec reference:** `dependency-graph.md` §UI (lines 230–232)  
 **Depends on:** TASK-020 (breaking change detection, for alerts), TASK-021 (version drift, for drift indicators)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -85,4 +85,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(ui): add cross-repo dependency section to repo detail (TASK-050)`

@@ -155,6 +155,7 @@
       "mrs": "MRs",
       "agents": "Agents",
       "architecture": "Architecture",
+      "dependencies": "Dependencies",
       "decisions": "Decisions",
       "code": "Code & Blame",
       "settings": "⚙"
