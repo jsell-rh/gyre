@@ -1,66 +1,41 @@
 # Review: TASK-055 — Explorer Architectural Timeline
 
 **Reviewer:** Verifier  
-**Round:** R1  
-**Verdict:** `needs-revision` (4 findings)
+**Round:** R2  
+**Verdict:** `needs-revision` (1 finding; 4 R1 resolved)
 
 ---
 
 ## R1 Findings
 
-- [-] [process-revision-complete] **F1 (HIGH): Backward ghosts structurally impossible — `removed` always returns `[]`**
+- [-] [process-revision-complete] **F1 (resolved R2): Backward ghosts structurally impossible — `removed` always returns `[]`**
 
-  `timelineFilteredGraph` is derived by filtering `graph.nodes` on `first_seen_at <= cutoff` (ExplorerView.svelte:984-989). Since `timelineFilteredGraph.nodes` is a strict subset of `graph.nodes`, every node in the historical graph is also in the current graph by construction.
+  Resolved: `extractRemovedNodesFromDeltas` in `timeline-utils.js` now consults `nodes_removed` from `delta_json` records after the scrubber position, rather than using set subtraction from `graph.nodes`. The core backward ghost detection (e.g., OldTrait removed in delta d2) works correctly. Regression test at `timeline-utils.test.js:296-306` confirms backward ghosts are no longer always empty.
 
-  The backward ghost computation at ExplorerView.svelte:1052 does:
-  ```js
-  for (const n of timelineFilteredGraph.nodes) {
-    if (!currentIds.has(n.id)) { /* push remove overlay */ }
-  }
-  ```
-  Since `timelineFilteredGraph.nodes ⊆ graph.nodes` and `currentIds = Set(graph.nodes.map(n => n.id))`, the condition `!currentIds.has(n.id)` is NEVER true. `removed` is always `[]`. Backward ghosts can never appear.
+- [-] [process-revision-complete] **F2 (resolved R2): Delta summary shows only aggregate counts — missing per-type breakdown**
 
-  The same issue affects `timelineDeltaStats.removed` at line 1011.
+  Resolved: `computeTimelineDeltaStats` now returns `addedByType`, `removedByType`, `modifiedByType` objects. Both ExplorerView header (lines 1185-1193) and TimelineScrubber (lines 209-217) render per-type breakdown with category labels (e.g., "+3 types", "-1 trait", "2 types modified").
 
-  **Violates:**
-  - Acceptance criterion: "Backward ghosts (red strikethrough) show nodes removed since the scrubber time"
-  - Spec §6: "Ghost outlines show elements that... will be removed (backward ghosts)"
+- [-] [process-revision-complete] **F3 (resolved R2): "Preview Mode" banner shows "predicted changes" for confirmed historical diffs**
 
-  **Fix direction:** To detect removed nodes, the implementation must consult the `ArchitecturalDelta` records (specifically `nodes_added` arrays in `delta_json` from deltas AFTER the scrubber position). Nodes that appear in `nodes_added` of deltas between the scrubber time and now but are NOT in the current graph were added then removed. Alternatively, if the current graph's nodes include `deleted_at` or a removal marker, filtering on that would work. The current approach of filtering the current graph by `first_seen_at` can only identify forward ghosts (added since) and modified nodes — never removed nodes, because removed nodes are absent from `graph.nodes`.
+  Resolved: ExplorerCanvas (line 5058-5059) now differentiates: "Time Travel Mode" / "N historical changes" when `timelineActive` is true, "Preview Mode" / "N predicted changes" otherwise. Confidence chips are correctly suppressed when `timelineActive` (line 5071).
 
-- [-] [process-revision-complete] **F2 (MED): Delta summary shows only aggregate counts — missing per-type breakdown**
+- [-] [process-revision-complete] **F4 (resolved R2): Compound acceptance criterion partially satisfied — no ghost overlay or delta computation test**
 
-  Spec §6 says: *"The sidebar shows the delta: 'Between then and now: +12 types, -3 types, +2 traits, 8 types modified'"* — the delta is categorized by node type.
+  Resolved: 22 new tests in `timeline-utils.test.js` cover `parseDeltaJson`, `extractRemovedNodesFromDeltas`, `computeTimelineDeltaStats`, and `computeTimelineGhostOverlays`. All three sub-items of the compound criterion (scrubber rendering, ghost overlay, delta summary) now have test coverage.
 
-  Acceptance criterion: *"Delta summary panel shows '+N types, -M types' counts"* — note the type category labels.
+## R2 Findings
 
-  Both display sites show only aggregate counts without type categories:
-  - ExplorerView header (line 1241): `+{timelineDeltaStats.added}`, `-{timelineDeltaStats.removed}`, `Δ{timelineDeltaStats.modified}`
-  - TimelineScrubber delta stats (line 210): `+{deltaStats.added}`, `-{deltaStats.removed}`, `Δ{deltaStats.modified}`
+- [ ] **F5 (LOW): Transient nodes incorrectly included as backward ghosts — test asserts wrong behavior**
 
-  Additionally, `byType` in `timelineDeltaStats` (ExplorerView.svelte:1021-1022) is computed for added nodes only — not for removed or modified — and is never rendered anywhere in the UI.
+  `extractRemovedNodesFromDeltas` (`timeline-utils.js:53-79`) collects ALL `nodes_removed` from deltas after the scrubber position, then filters out nodes that still exist in the current graph. But it does not filter out nodes that were first **added** after the scrubber — nodes that never existed at the scrubber time.
 
-  **Violates:** Acceptance criterion "Delta summary panel shows '+N types, -M types' counts"; spec §6 per-type breakdown format.
+  Scenario: scrubber at index 1. Delta d2t (after scrubber) adds `crate::Transient`. Delta d3t (after scrubber) removes `crate::Transient`. `Transient` is not in the current graph. The function includes `Transient` as a backward ghost, even though it never existed at the scrubber time — it was transiently present only between the scrubber time and now.
 
-- [-] [process-revision-complete] **F3 (MED): "Preview Mode" banner shows "predicted changes" for confirmed historical diffs**
+  The task definition (line 63) is unambiguous: *"Backward ghosts (red strikethrough): nodes that **existed at the scrubber time** but have since been removed."* A node added after the scrubber did not "exist at the scrubber time."
 
-  When timeline ghosts are active, ExplorerCanvas renders its existing "Preview Mode" bar (line 5055) with text "N predicted changes" (line 5059). Timeline ghost overlays are confirmed historical diffs (`confidence: 'confirmed'`), not predictions.
+  The test at `timeline-utils.test.js:141-175` explicitly acknowledges this issue in comments (lines 169-171: *"it didn't exist at the scrubber time, so arguably it shouldn't be a backward ghost"*) but then asserts the incorrect behavior (`expect(removed.length).toBe(2)` including `crate::Transient`). The assertion should be `expect(removed.length).toBe(1)` (only `crate::OldTrait`).
 
-  The `timelineActive` prop is available in ExplorerCanvas (line 32) but is not used to differentiate the banner text. The user sees contradictory UI: "Preview Mode" + "predicted changes" displayed simultaneously with the timeline's "Time Travel" toggle and historical date label.
+  The filter logic at line 74 checks `addedAfter.has(qn) && currentQualifiedNames.has(qn)` — this only skips if re-added AND still in the current graph. A transient node (added after, removed after, absent from current graph) passes both checks. The fix: if `addedAfter.has(qn)` and the node does NOT appear in any `nodes_added` at or before the scrubber index, it was never present at the scrubber time and should be excluded.
 
-  **Violates:** Spec §6 ghost semantics — "Ghost outlines show elements that have been added since (forward ghosts) or will be removed (backward ghosts)" describes confirmed historical facts, not predictions. The banner's "predicted" language is factually incorrect for this context.
-
-  **Fix direction:** When `timelineActive` is true and `hasGhosts` is true, the banner should display time-travel-appropriate text (e.g., "Time Travel Mode" / "N historical changes") instead of "Preview Mode" / "predicted changes."
-
-- [-] [process-revision-complete] **F4 (MED): Compound acceptance criterion partially satisfied — no ghost overlay or delta computation test**
-
-  Acceptance criterion: *"Component test for scrubber rendering, ghost overlay, and delta summary"*
-
-  This compound criterion has 3 sub-items:
-  1. **Scrubber rendering** — 21 tests in `TimelineScrubber.test.js` cover this adequately.
-  2. **Ghost overlay** — ghost overlay computation (`timelineGhostOverlays` in ExplorerView.svelte:1031-1083) has zero test coverage. No test verifies forward/backward/modified ghost generation.
-  3. **Delta summary** — delta stats display is tested via props in TimelineScrubber.test.js, but the computation logic (`timelineDeltaStats` in ExplorerView.svelte:1003-1025) has zero test coverage.
-
-  A test for backward ghosts would have immediately revealed F1 (backward ghosts always empty).
-
-  **Violates:** Acceptance criterion — 2 of 3 sub-items have zero computation-level test coverage.
+  **Violates:** Task definition line 63; spec §6 ghost semantics ("elements that... will be removed" presupposes existence at the viewed time).
