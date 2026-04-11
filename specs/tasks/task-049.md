@@ -2,7 +2,7 @@
 
 **Spec reference:** `merge-dependencies.md` §Merge Queue Integration > Visualization
 **Depends on:** None (backend endpoint `GET /api/v1/merge-queue/graph` already exists)
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -96,4 +96,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `feat(ui): add merge queue DAG visualization (TASK-049)`

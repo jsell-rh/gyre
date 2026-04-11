@@ -19,6 +19,7 @@
   import RepoCard from './RepoCard.svelte';
   import DependencyHealthCard from './DependencyHealthCard.svelte';
   import DependencyGraph from './DependencyGraph.svelte';
+  import MergeQueueGraph from './MergeQueueGraph.svelte';
   import Modal from '../lib/Modal.svelte';
   import Icon from '../lib/Icon.svelte';
   import CopyableId from '../lib/CopyableId.svelte';
@@ -699,6 +700,8 @@
   // ── Merge Queue state ───────────────────────────────────────────────────
   let mergeQueueLoading = $state(true);
   let mergeQueueItems = $state([]);
+  let mergeQueueGraphNodes = $state([]);
+  let mergeQueueView = $state('list');
 
   async function loadMergeQueue() {
     mergeQueueLoading = true;
@@ -708,6 +711,7 @@
         api.mergeQueueGraph().catch(() => ({ nodes: [], edges: [] })),
       ]);
       const allItems = Array.isArray(all) ? all : [];
+      mergeQueueGraphNodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
       // Enrich queue items with MR details
       const mrIds = allItems.map(e => e.merge_request_id ?? e.mr_id).filter(Boolean);
       const mrDetails = {};
@@ -748,6 +752,7 @@
         .sort((a, b) => (a.position ?? a.priority ?? 0) - (b.position ?? b.priority ?? 0));
     } catch {
       mergeQueueItems = [];
+      mergeQueueGraphNodes = [];
     } finally {
       mergeQueueLoading = false;
     }
@@ -1416,15 +1421,42 @@
           <!-- Merge Queue -->
           {#if !mergeQueueLoading && mergeQueueItems.length > 0}
             <div class="sidebar-widget" data-testid="section-merge-queue">
-              <h3 class="sidebar-widget-title">Merge Queue <span class="sidebar-count">{mergeQueueItems.length}</span></h3>
-              {#each mergeQueueItems.slice(0, 5) as item, i (item.merge_request_id ?? item.mr_id ?? i)}
-                {@const mrId = item.merge_request_id ?? item.mr_id}
-                {@const mr = item._mr ?? {}}
-                <button class="sidebar-queue-item" onclick={() => nav('mr', mrId, { repo_id: mr.repository_id ?? mr.repo_id, title: item._title })}>
-                  <span class="sidebar-queue-pos">#{i + 1}</span>
-                  <span class="sidebar-queue-title">{item._title}</span>
-                </button>
-              {/each}
+              <div class="sidebar-widget-header">
+                <h3 class="sidebar-widget-title">Merge Queue <span class="sidebar-count">{mergeQueueItems.length}</span></h3>
+                <div class="mq-view-toggle" data-testid="mq-view-toggle">
+                  <button
+                    class="mq-toggle-btn"
+                    class:active={mergeQueueView === 'list'}
+                    onclick={() => { mergeQueueView = 'list'; }}
+                    title="List view"
+                    data-testid="mq-toggle-list"
+                  >List</button>
+                  <button
+                    class="mq-toggle-btn"
+                    class:active={mergeQueueView === 'dag'}
+                    onclick={() => { mergeQueueView = 'dag'; }}
+                    title="DAG view"
+                    data-testid="mq-toggle-dag"
+                  >DAG</button>
+                </div>
+              </div>
+              {#if mergeQueueView === 'dag'}
+                <div class="mq-dag-wrapper" data-testid="mq-dag-wrapper">
+                  <MergeQueueGraph
+                    nodes={mergeQueueGraphNodes}
+                    onNodeClick={(node) => nav('mr', node.mr_id, { title: node.title })}
+                  />
+                </div>
+              {:else}
+                {#each mergeQueueItems.slice(0, 5) as item, i (item.merge_request_id ?? item.mr_id ?? i)}
+                  {@const mrId = item.merge_request_id ?? item.mr_id}
+                  {@const mr = item._mr ?? {}}
+                  <button class="sidebar-queue-item" onclick={() => nav('mr', mrId, { repo_id: mr.repository_id ?? mr.repo_id, title: item._title })}>
+                    <span class="sidebar-queue-pos">#{i + 1}</span>
+                    <span class="sidebar-queue-title">{item._title}</span>
+                  </button>
+                {/each}
+              {/if}
             </div>
           {/if}
 
@@ -1867,6 +1899,53 @@
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
     font-size: 10px;
+  }
+
+  .sidebar-widget-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .mq-view-toggle {
+    display: flex;
+    gap: 2px;
+  }
+
+  .mq-toggle-btn {
+    padding: 2px 8px;
+    font-size: 10px;
+    font-family: var(--font-body);
+    color: var(--color-text-muted);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .mq-toggle-btn:first-child {
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  }
+
+  .mq-toggle-btn:last-child {
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  }
+
+  .mq-toggle-btn:hover {
+    color: var(--color-text);
+    border-color: var(--color-border-hover, #444);
+  }
+
+  .mq-toggle-btn.active {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+    border-color: #60a5fa;
+  }
+
+  .mq-dag-wrapper {
+    height: 320px;
+    margin-top: var(--space-2);
   }
 
   /* Sidebar: agents */
