@@ -316,6 +316,13 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: conditional-test-guards
+        name: conditional test guard lint
+        description: Detect if (element) guards that make test assertions silently skippable
+        entry: scripts/check-conditional-test-guards.sh
+        language: script
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

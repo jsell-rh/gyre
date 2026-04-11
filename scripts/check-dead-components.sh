@@ -9,8 +9,13 @@
 # satisfied even though the component exists.
 #
 # Detection: for each .svelte file, check if its component name appears in
-# any other file's import statements. A component that is never imported
-# anywhere is unreferenced.
+# any other file's import statements or as a Svelte component tag.
+# A component that is only mentioned in comments (e.g., "// see
+# PipelineOverview.svelte") is still dead code — comment references
+# do NOT count as live references.
+#
+# See: specs/reviews/task-052.md F4 (PipelineOverview dead code passed
+# the old grep-based check because it was mentioned in comments)
 #
 # Exempt with a comment in the component file: <!-- dead-component:ok -->
 # (e.g., for storybook-only components or test fixtures)
@@ -49,21 +54,54 @@ for component in $(find "$WEB_SRC" -name '*.svelte' -type f | sort); do
         continue
     fi
 
-    # Check if any other file imports this component
-    # Patterns checked:
-    #   import X from '...ComponentName.svelte'
-    #   import X from "...ComponentName.svelte"
-    #   import { X } from '...ComponentName...'
-    #   <ComponentName (used as a Svelte component tag)
-    IMPORT_COUNT=$(grep -rl "$name_no_ext" "$WEB_SRC" --include='*.svelte' --include='*.ts' --include='*.js' 2>/dev/null \
-        | grep -v "^${component}$" \
-        | head -1 \
-        | wc -l || true)
+    # Check if any other file imports or uses this component as a tag.
+    #
+    # IMPORTANT: plain text matches (e.g., component name in a comment like
+    # "// see PipelineOverview.svelte") do NOT count as valid references.
+    # A component referenced only in comments is still dead code.
+    #
+    # Patterns that count as LIVE references:
+    #   import X from '...ComponentName.svelte'  (ES import)
+    #   import X from "...ComponentName.svelte"   (ES import)
+    #   import { X } from '...ComponentName...'   (named import)
+    #   <ComponentName                            (Svelte component tag)
+    #   <ComponentName>                           (Svelte component tag)
+    #   svelte:component this={ComponentName}     (dynamic component)
+    #
+    # Patterns that do NOT count:
+    #   // see ComponentName.svelte               (comment)
+    #   /* ComponentName is used for ... */        (comment)
+    #   <!-- ComponentName -->                    (HTML comment)
 
-    if [ "$IMPORT_COUNT" -eq 0 ]; then
+    LIVE_REF_COUNT=0
+    for ref_file in $(find "$WEB_SRC" -type f \( -name '*.svelte' -o -name '*.ts' -o -name '*.js' \) ! -path '*/node_modules/*' 2>/dev/null); do
+        [ "$ref_file" = "$component" ] && continue
+
+        # Check for import statements referencing this component
+        if grep -qE "import\s.*['\"].*${name_no_ext}" "$ref_file" 2>/dev/null; then
+            LIVE_REF_COUNT=1
+            break
+        fi
+
+        # Check for Svelte component tag usage: <ComponentName or <ComponentName>
+        if grep -qE "<${name_no_ext}[\s/>]" "$ref_file" 2>/dev/null; then
+            LIVE_REF_COUNT=1
+            break
+        fi
+
+        # Check for dynamic component usage: svelte:component this={ComponentName}
+        if grep -qE "svelte:component.*${name_no_ext}" "$ref_file" 2>/dev/null; then
+            LIVE_REF_COUNT=1
+            break
+        fi
+    done
+
+    if [ "$LIVE_REF_COUNT" -eq 0 ]; then
         echo ""
         echo "DEAD COMPONENT: $component"
-        echo "  Component '$name_no_ext' is not imported or referenced by any other file."
+        echo "  Component '$name_no_ext' is not imported or used as a tag by any other file."
+        echo "  References in comments do NOT count — a component mentioned only in"
+        echo "  comments is still dead code."
         echo "  Either wire it into a parent component, or remove it."
         echo "  A component that exists but is never rendered is dead code —"
         echo "  acceptance criteria requiring the feature to be visible are NOT satisfied."

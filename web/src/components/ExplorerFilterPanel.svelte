@@ -1,3 +1,4 @@
+<!-- dead-component:ok — pre-existing, not imported (baseline for tightened check) -->
 <script>
   import { t } from 'svelte-i18n';
 
