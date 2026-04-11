@@ -2,8 +2,8 @@
 
 **Spec reference:** `system-explorer.md` §6 (Architectural Timeline)  
 **Depends on:** TASK-029 (lens toggle, complete), TASK-031 (drill-down, complete)  
-**Progress:** `ready-for-review`  
-**Review:** [`specs/reviews/task-055.md`](../reviews/task-055.md) — R2, 1 finding (4 R1 resolved)
+**Progress:** `complete`  
+**Review:** [`specs/reviews/task-055.md`](../reviews/task-055.md) — R3, complete (0 findings; 5 total resolved)
 
 ## Spec Excerpt
 

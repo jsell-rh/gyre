@@ -1,8 +1,8 @@
 # Review: TASK-055 — Explorer Architectural Timeline
 
 **Reviewer:** Verifier  
-**Round:** R2  
-**Verdict:** `needs-revision` (1 finding; 4 R1 resolved)
+**Round:** R3  
+**Verdict:** `complete` (0 findings; 1 R2 resolved, 4 R1 resolved)
 
 ---
 
@@ -26,16 +26,6 @@
 
 ## R2 Findings
 
-- [-] [process-revision-complete] **F5 (LOW): Transient nodes incorrectly included as backward ghosts — test asserts wrong behavior**
+- [-] [process-revision-complete] **F5 (resolved R3): Transient nodes incorrectly included as backward ghosts — test asserts wrong behavior**
 
-  `extractRemovedNodesFromDeltas` (`timeline-utils.js:53-79`) collects ALL `nodes_removed` from deltas after the scrubber position, then filters out nodes that still exist in the current graph. But it does not filter out nodes that were first **added** after the scrubber — nodes that never existed at the scrubber time.
-
-  Scenario: scrubber at index 1. Delta d2t (after scrubber) adds `crate::Transient`. Delta d3t (after scrubber) removes `crate::Transient`. `Transient` is not in the current graph. The function includes `Transient` as a backward ghost, even though it never existed at the scrubber time — it was transiently present only between the scrubber time and now.
-
-  The task definition (line 63) is unambiguous: *"Backward ghosts (red strikethrough): nodes that **existed at the scrubber time** but have since been removed."* A node added after the scrubber did not "exist at the scrubber time."
-
-  The test at `timeline-utils.test.js:141-175` explicitly acknowledges this issue in comments (lines 169-171: *"it didn't exist at the scrubber time, so arguably it shouldn't be a backward ghost"*) but then asserts the incorrect behavior (`expect(removed.length).toBe(2)` including `crate::Transient`). The assertion should be `expect(removed.length).toBe(1)` (only `crate::OldTrait`).
-
-  The filter logic at line 74 checks `addedAfter.has(qn) && currentQualifiedNames.has(qn)` — this only skips if re-added AND still in the current graph. A transient node (added after, removed after, absent from current graph) passes both checks. The fix: if `addedAfter.has(qn)` and the node does NOT appear in any `nodes_added` at or before the scrubber index, it was never present at the scrubber time and should be excluded.
-
-  **Violates:** Task definition line 63; spec §6 ghost semantics ("elements that... will be removed" presupposes existence at the viewed time).
+  Resolved: `extractRemovedNodesFromDeltas` (`timeline-utils.js:53-63`) now builds `addedAtOrBefore` set from nodes added in deltas at or before the scrubber position. The filter at line 88 correctly excludes transient nodes (`addedAfter.has(qn) && !addedAtOrBefore.has(qn)`). Test at `timeline-utils.test.js:141-168` now correctly asserts `removed.length === 1` (only `crate::OldTrait`), excluding `crate::Transient`.
