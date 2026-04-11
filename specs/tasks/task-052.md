@@ -97,4 +97,4 @@ When working on this task:
 
 ## Git Commits
 
-_(none yet)_
+- `3cd4d3e9` feat(ui): add breaking change impact analysis modal (TASK-052)
