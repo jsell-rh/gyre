@@ -48,7 +48,7 @@ All three R1 findings have been properly addressed:
 
 ## Findings
 
-- [x] [process-revision-complete] **F4: Proto detection scans only CHANGED `.proto` files, but `ran_methods` marks `ProtoImport` as having run — causing false orphaning of ProtoImport edges from unchanged `.proto` files.**
+- [-] [process-revision-complete] **F4 (resolved R3): Proto detection scans only CHANGED `.proto` files, but `ran_methods` marks `ProtoImport` as having run — causing false orphaning of ProtoImport edges from unchanged `.proto` files.**
   In `git_http.rs:2442–2469`, when any `.proto` file changes, `DetectionMethod::ProtoImport` is inserted into `ran_methods`, but only the **changed** `.proto` files are scanned. Every other detection method (CargoToml, PackageJson, GoMod, PyprojectToml, ManifestLink, OpenApiRef, McpToolRef) reads the **full** current-state file when triggered — producing a complete edge set for that method. Proto is the only method that scans a subset of its source files (only changed `.proto` files) while claiming the entire method ran.
   **Scenario:**
   1. Repo has `a.proto` (imports `auth-service`) and `b.proto` (imports `payment-service`). Both edges exist as `ProtoImport` edges.
@@ -58,3 +58,26 @@ All three R1 findings have been properly addressed:
   5. Next push that changes `b.proto`: the edge is re-detected and un-orphaned. But between pushes, the edge is falsely orphaned — downstream systems (blast radius, version drift, breaking change detection) lose visibility of this dependency.
   **Consequence:** Any push touching `.proto` files causes all ProtoImport edges from **untouched** proto files to be falsely orphaned. In a repo with many proto files, most pushes touch only one or two, so most ProtoImport edges oscillate between Active and Orphaned on every push.
   **Fix:** When `has_proto` is true, list ALL `.proto` files in the repo at `new_sha` (e.g., via `git ls-tree -r --name-only <sha>` filtered to `.proto` extensions) and scan all of them — not just the changed ones. This matches the pattern used by all other detection methods: when the method runs, it produces a complete edge set for its file type. Alternatively, the reconciler could track `ran_source_artifacts` per method and only orphan edges whose `source_artifact` was actually scanned, but the simpler "scan all proto files" approach is consistent with how single-file methods work.
+
+---
+
+# TASK-048 Review — R3
+
+**Reviewer:** Verifier
+**Date:** 2026-04-10
+**Commit under review:** `7bb6e99d`
+**Verdict:** `needs-revision` (1 finding)
+
+## R2 Resolution Assessment
+
+F4 has been properly addressed:
+- **F4:** Added `list_files_by_extension()` helper (`git_http.rs:2185–2211`) that uses `git ls-tree -r --name-only <sha>` to enumerate all files in the repo and filters by extension. The proto detection block (`git_http.rs:2476–2507`) now calls `list_files_by_extension(&git_bin, repo_path, new_sha, ".proto")` to enumerate ALL `.proto` files at the pushed commit — not just changed ones. Two regression tests confirm the fix: `test_reconcile_proto_all_files_required_for_complete_detection` (positive — both edges survive when all files scanned) and `test_reconcile_proto_incomplete_scan_orphans_missing_edges` (negative — confirms old buggy behavior would orphan edges).
+
+## Findings
+
+- [ ] **F5: Missing `emit_event()` for new dependency detection — spec §4 says "log activity event" but code only uses `tracing::info!`.**
+  The spec's §4 Reconcile says: "New dependency detected → create edge, **log activity event**." The `reconcile_dependencies` function creates the edge (`git_http.rs:2152–2162`) and logs a `tracing::info!` (`git_http.rs:2166–2173`), but does not call `state.emit_event()`.
+  In this codebase, "activity event" has a specific meaning: the `emit_event()` system on `AppState`, which stores events and broadcasts them via the unified message bus to WebSocket-connected consumers (orchestrators, dashboard UI). `tracing::info!` is infrastructure-level structured logging — it is not surfaced in the activity feed or delivered to workspace subscribers.
+  The same file demonstrates the correct pattern: the breaking change detection function (`git_http.rs:2828–2835`) calls `state.emit_event()` with `MessageKind::Custom("breaking_change_detected")` after detecting a breaking change. The dependency detection path should follow the same pattern — e.g., `MessageKind::Custom("dependency_detected")` — with a payload including `source_repo_id`, `target_repo_id`, `source_artifact`, `target_artifact`, `detection_method`, and `dependency_type`.
+  **Consequence:** Workspace orchestrators that subscribe to the event bus are not notified when new cross-repo dependencies are detected. The dashboard activity feed shows no record of dependency detection. The only observable trace is in server logs, which are not user-facing.
+  **Fix:** After the new-edge `state.dependencies.save(&edge)` succeeds (`git_http.rs:2163`), call `state.emit_event()` with the workspace destination resolved from the source repo (the `source_workspace_id` resolution pattern already exists in the same function at line 2544–2547, but it runs after reconciliation — the workspace ID can be resolved from `all_repos` which is already available). Use `MessageKind::Custom("dependency_detected")` following the breaking-change detection pattern.
