@@ -2,7 +2,7 @@
 
 **Spec reference:** `explorer-implementation.md` §Migration Plan > Phase 4: Polish  
 **Depends on:** TASK-029 (lens toggle, complete), TASK-031 (drill-down, complete), TASK-036 (streaming, complete), TASK-038 (keyboard shortcuts, complete)  
-**Progress:** `needs-revision`
+**Progress:** `ready-for-review`
 **Review:** [`specs/reviews/task-053.md`](../reviews/task-053.md)
 
 ## Spec Excerpt

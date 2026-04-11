@@ -299,30 +299,40 @@ describe('ExplorerCanvas — semantic zoom via component rendering', () => {
   // These tests render ExplorerCanvas at different zoom levels and verify
   // the component's actual draw call behavior — not local function copies.
 
-  it('at low zoom, fillText calls are reduced (LOD skips text labels)', () => {
-    // Small graph so we can reason about expected behavior.
-    // At default zoom (1.0), text labels should render for visible nodes.
-    // Component skips text when `sw > 30 && sh > 14 && cam.zoom >= 0.5` is false.
-    const nodes = [
+  it('large graph has fewer fillText calls per node than small graph (LOD text reduction)', () => {
+    // The component's LOD rule skips text when `sw > 30 && sh > 14 && cam.zoom >= 0.5`
+    // is false. For a small graph, auto-fit zoom is high → nodes are large on screen
+    // → text renders. For a large graph, auto-fit zoom is low → nodes are tiny on
+    // screen → text is skipped for most nodes.
+    const smallNodes = [
       { id: 'pkg1', node_type: 'package', name: 'pkg1', qualified_name: 'pkg1', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
       { id: 'mod1', node_type: 'module', name: 'mod1', qualified_name: 'pkg1.mod1', file_path: 'mod1.py', line_start: 1, line_end: 100, visibility: 'public', spec_confidence: 'none', test_node: false },
       { id: 'fn1', node_type: 'function', name: 'func_a', qualified_name: 'pkg1.mod1.func_a', file_path: 'mod1.py', line_start: 1, line_end: 10, visibility: 'public', spec_confidence: 'none', test_node: false },
     ];
-    const edges = [
+    const smallEdges = [
       { id: 'e1', source_id: 'pkg1', target_id: 'mod1', edge_type: 'contains' },
       { id: 'e2', source_id: 'mod1', target_id: 'fn1', edge_type: 'contains' },
     ];
 
-    // Render at default zoom — some fillText calls expected for visible nodes
-    render(ExplorerCanvas, { props: { nodes, edges } });
-    const defaultZoomTextCalls = mockCtx.fillText.mock.calls.length;
+    // Render the small graph — auto-fit zoom will be high, text should render
+    render(ExplorerCanvas, { props: { nodes: smallNodes, edges: smallEdges } });
+    const smallTextCalls = mockCtx.fillText.mock.calls.length;
+    const smallTextPerNode = smallTextCalls / smallNodes.length;
 
-    // Reset and render with a large graph where semantic zoom kicks in.
-    // At the component's default camera zoom (1.0), leaf node types like
-    // 'function' are visible. The semantic zoom LOD rules are tested
-    // implicitly by verifying the 10k graph has fewer text calls per node
-    // than a small graph.
-    expect(defaultZoomTextCalls).toBeGreaterThan(0);
+    // Reset mocks and render a large graph — auto-fit zoom will be much lower,
+    // LOD should skip text for most nodes
+    mockCtx.fillText.mockClear();
+    mockCtx.fillRect.mockClear();
+    const { nodes: largeNodes, edges: largeEdges } = generateLargeGraph(10000, 20000);
+    render(ExplorerCanvas, { props: { nodes: largeNodes, edges: largeEdges } });
+    const largeTextCalls = mockCtx.fillText.mock.calls.length;
+    const largeTextPerNode = largeTextCalls / largeNodes.length;
+
+    // Small graph should have text rendered (baseline)
+    expect(smallTextCalls).toBeGreaterThan(0);
+    // Large graph should have far fewer text calls per node than the small graph,
+    // demonstrating LOD text reduction at lower effective zoom
+    expect(largeTextPerNode).toBeLessThan(smallTextPerNode);
   });
 
   it('at default zoom with 10k nodes, text calls are far fewer than node count', () => {
@@ -355,31 +365,22 @@ describe('ExplorerCanvas — viewport culling via component rendering', () => {
     expect(fillRectCalls).toBeGreaterThan(0);
   });
 
-  it('small graph with all nodes near origin draws more per-node than spread-out graph', () => {
-    // When all nodes are near the camera, more are visible.
-    // This exercises the component's culling decision by comparing draw behavior
-    // between a concentrated vs spread-out graph.
-    const concentrated = [];
-    const spreadOut = [];
-    for (let i = 0; i < 100; i++) {
-      const base = {
-        id: `n${i}`, node_type: 'function', name: `fn_${i}`,
-        qualified_name: `mod.fn_${i}`, file_path: 'mod.py',
-        line_start: i, line_end: i + 10, visibility: 'public',
-        spec_confidence: 'none', test_node: false,
-      };
-      concentrated.push(base);
-      spreadOut.push(base);
-    }
-    // Concentrated graph: no edges (simple)
+  it('100-node graph produces draw calls for visible nodes', () => {
+    // With 100 nodes near the origin, the layout engine positions them
+    // close together. At the auto-fit zoom, most should be visible and drawn.
+    const nodes = Array.from({ length: 100 }, (_, i) => ({
+      id: `n${i}`, node_type: 'function', name: `fn_${i}`,
+      qualified_name: `mod.fn_${i}`, file_path: 'mod.py',
+      line_start: i, line_end: i + 10, visibility: 'public',
+      spec_confidence: 'none', test_node: false,
+    }));
     mockCtx.fillRect.mockClear();
     mockCtx.fillText.mockClear();
-    render(ExplorerCanvas, { props: { nodes: concentrated, edges: [] } });
-    const concentratedFillRects = mockCtx.fillRect.mock.calls.length;
+    render(ExplorerCanvas, { props: { nodes, edges: [] } });
+    const fillRectCalls = mockCtx.fillRect.mock.calls.length;
 
-    // With nodes positioned by the layout engine (ELK/default), all 100 nodes
-    // should be somewhat near the origin, so most should be drawn.
-    expect(concentratedFillRects).toBeGreaterThan(0);
+    // With nodes positioned by the layout engine, visible nodes should be drawn.
+    expect(fillRectCalls).toBeGreaterThan(0);
   });
 });
 
@@ -400,20 +401,26 @@ describe('ExplorerCanvas — edge culling via component rendering', () => {
 
   it('small graph edges are individually drawn (not bundled)', () => {
     // With <5000 edges, individual edge rendering is used.
+    // Edge drawing uses moveTo/lineTo/quadraticCurveTo, not fillRect (which is nodes).
     const nodes = [
       { id: 'a', node_type: 'function', name: 'a', qualified_name: 'a', file_path: 'a.py', line_start: 1, line_end: 10, visibility: 'public', spec_confidence: 'none', test_node: false },
       { id: 'b', node_type: 'function', name: 'b', qualified_name: 'b', file_path: 'b.py', line_start: 1, line_end: 10, visibility: 'public', spec_confidence: 'none', test_node: false },
+      { id: 'c', node_type: 'function', name: 'c', qualified_name: 'c', file_path: 'c.py', line_start: 1, line_end: 10, visibility: 'public', spec_confidence: 'none', test_node: false },
     ];
     const edges = [
       { id: 'e1', source_id: 'a', target_id: 'b', edge_type: 'calls' },
+      { id: 'e2', source_id: 'b', target_id: 'c', edge_type: 'calls' },
     ];
 
     render(ExplorerCanvas, { props: { nodes, edges } });
 
-    // For a 2-node, 1-edge graph, edge drawing should occur if both nodes are visible.
-    // moveTo is called for each drawn edge's path.
-    // At minimum, the component should not throw and should produce draw calls.
-    expect(mockCtx.fillRect.mock.calls.length).toBeGreaterThan(0);
+    // Edge paths use moveTo to start each edge. With 2 edges individually drawn,
+    // moveTo count should be at least proportional to edge count (not collapsed
+    // into a single group-to-group arrow as bundled mode would).
+    const moveToCount = mockCtx.moveTo.mock.calls.length;
+    expect(moveToCount).toBeGreaterThan(0);
+    // With individual edge rendering, we expect at least 1 moveTo per edge
+    expect(moveToCount).toBeGreaterThanOrEqual(edges.length);
   });
 });
 
