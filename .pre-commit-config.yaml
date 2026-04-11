@@ -323,6 +323,20 @@ repos:
         language: script
         pass_filenames: false
 
+      - id: mirrored-logic-tests-js
+        name: mirrored-logic test lint (JS/TS)
+        description: Detect JS/TS test files that define local logic-mirror functions instead of testing the component
+        entry: scripts/check-mirrored-logic-tests-js.sh
+        language: script
+        pass_filenames: false
+
+      - id: tautological-assertions-js
+        name: tautological assertion lint (JS/TS)
+        description: Detect JS/TS test functions with only tautological assertions like expect(container).toBeTruthy()
+        entry: scripts/check-tautological-assertions-js.sh
+        language: script
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
