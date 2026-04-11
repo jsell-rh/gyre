@@ -37,3 +37,4 @@ crates/gyre-server/repos/
 snapshots/
 crates/gyre-server/snapshots/
 scripts/node_modules/
+node_modules/
