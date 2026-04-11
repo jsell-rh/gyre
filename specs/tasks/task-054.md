@@ -2,7 +2,8 @@
 
 **Spec reference:** `human-system-interface.md` §5 (Conversation-to-Code Provenance)  
 **Depends on:** None (handler and route already implemented)  
-**Progress:** `ready-for-review`
+**Progress:** `complete`
+**Review:** [`specs/reviews/task-054.md`](../reviews/task-054.md)
 
 ## Spec Excerpt
 
