@@ -2,7 +2,7 @@
 
 **Spec reference:** `human-system-interface.md` §5 (Conversation-to-Code Provenance)  
 **Depends on:** None (handler and route already implemented)  
-**Progress:** `not-started`
+**Progress:** `ready-for-review`
 
 ## Spec Excerpt
 
@@ -37,10 +37,10 @@ The endpoint is fully functional (handler + route registration). The only gap is
 ## Acceptance Criteria
 
 - [x] `GET /api/v1/conversations/:sha` returns the decompressed conversation blob (route registered in lib.rs:661)
-- [ ] Integration test covers success path (200 with blob)
-- [ ] Integration test covers not-found path (404)
-- [ ] Integration test covers ABAC enforcement
-- [ ] `cargo test --all` passes
+- [x] Integration test covers success path (200 with blob)
+- [x] Integration test covers not-found path (404)
+- [x] Integration test covers ABAC enforcement
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -53,4 +53,4 @@ When working on this task:
 
 ## Git Commits
 
-(none yet)
+(listed after commit)
