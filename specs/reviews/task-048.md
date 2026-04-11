@@ -75,9 +75,42 @@ F4 has been properly addressed:
 
 ## Findings
 
-- [-] [process-revision-complete] **F5: Missing `emit_event()` for new dependency detection — spec §4 says "log activity event" but code only uses `tracing::info!`.**
+- [-] [process-revision-complete] **F5 (resolved R4): Missing `emit_event()` for new dependency detection — spec §4 says "log activity event" but code only uses `tracing::info!`.**
   The spec's §4 Reconcile says: "New dependency detected → create edge, **log activity event**." The `reconcile_dependencies` function creates the edge (`git_http.rs:2152–2162`) and logs a `tracing::info!` (`git_http.rs:2166–2173`), but does not call `state.emit_event()`.
   In this codebase, "activity event" has a specific meaning: the `emit_event()` system on `AppState`, which stores events and broadcasts them via the unified message bus to WebSocket-connected consumers (orchestrators, dashboard UI). `tracing::info!` is infrastructure-level structured logging — it is not surfaced in the activity feed or delivered to workspace subscribers.
   The same file demonstrates the correct pattern: the breaking change detection function (`git_http.rs:2828–2835`) calls `state.emit_event()` with `MessageKind::Custom("breaking_change_detected")` after detecting a breaking change. The dependency detection path should follow the same pattern — e.g., `MessageKind::Custom("dependency_detected")` — with a payload including `source_repo_id`, `target_repo_id`, `source_artifact`, `target_artifact`, `detection_method`, and `dependency_type`.
   **Consequence:** Workspace orchestrators that subscribe to the event bus are not notified when new cross-repo dependencies are detected. The dashboard activity feed shows no record of dependency detection. The only observable trace is in server logs, which are not user-facing.
   **Fix:** After the new-edge `state.dependencies.save(&edge)` succeeds (`git_http.rs:2163`), call `state.emit_event()` with the workspace destination resolved from the source repo (the `source_workspace_id` resolution pattern already exists in the same function at line 2544–2547, but it runs after reconciliation — the workspace ID can be resolved from `all_repos` which is already available). Use `MessageKind::Custom("dependency_detected")` following the breaking-change detection pattern.
+
+---
+
+# TASK-048 Review — R4
+
+**Reviewer:** Verifier
+**Date:** 2026-04-10
+**Commit under review:** `99cbfe0c`
+**Verdict:** `complete` (0 findings — all 5 prior findings resolved)
+
+## R3 Resolution Assessment
+
+F5 has been properly addressed:
+- **F5:** Added `emit_event()` call in `reconcile_dependencies` (`git_http.rs:2185–2209`) that fires for each new dependency edge created. Uses `MessageKind::Custom("dependency_detected")` following the breaking-change detection pattern. Workspace ID is resolved from `state.repos.find_by_id()` at the start of reconciliation (`git_http.rs:2072–2078`). Payload includes all required fields: `source_repo_id`, `target_repo_id`, `source_artifact`, `target_artifact`, `detection_method`, `dependency_type`. Three comprehensive tests added:
+  - `test_reconcile_emits_domain_event_for_new_edge` — positive: verifies event kind, workspace_id, and all payload fields for a new edge.
+  - `test_reconcile_no_event_for_existing_edge` — negative: verifies no event emitted when an existing edge is re-detected with no changes.
+  - `test_reconcile_emits_event_per_new_edge` — multi-edge: verifies each new edge in a batch emits its own event with correct payload.
+
+## Verification Summary
+
+All acceptance criteria satisfied:
+- Package manager parsers (Cargo.toml, package.json, go.mod, pyproject.toml) correctly detect cross-repo dependencies
+- go.mod parser correctly uses `require` directives (spec §1) as the primary path, with `replace` as supplementary (F3 fix)
+- Spec manifest cross-repo links create `Spec` type edges with `ManifestLink` detection method
+- API contract detection (OpenAPI, proto, MCP) matches repo names in file content
+- Reconciliation correctly creates new edges, marks orphaned edges, updates versions, and leaves Manual edges untouched
+- `ran_methods` scoping prevents false orphaning when only a subset of dependency files changed (F2 fix)
+- `DetectedEdge` named struct prevents positional field confusion (F1 fix)
+- Proto detection scans ALL `.proto` files when triggered, preventing intra-method false orphaning (F4 fix)
+- Domain events emitted for new dependency detection via `emit_event()` (F5 fix)
+- 41 unit/integration tests covering all parser functions, reconciliation lifecycle, and domain event emission
+- `cargo test --all` passes (2,091 tests, 0 failures)
+- All automated check scripts pass (check-missing-domain-events, check-event-emission-coverage, check-assertionless-tests, check-arch, check-aspirational-test-names, check-self-confirming-tests, check-early-return-side-effects, check-stale-stub-markers)
