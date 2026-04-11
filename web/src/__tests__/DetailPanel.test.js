@@ -486,4 +486,19 @@ describe('DetailPanel', () => {
       });
     });
   });
+
+  describe('Impact Analysis trigger (TASK-052)', () => {
+    it('renders Check Impact button for MR entities', () => {
+      const { container } = render(DetailPanel, { props: { entity: mrEntity } });
+      const impactBtn = container.querySelector('[data-testid="check-impact-btn"]');
+      expect(impactBtn).toBeTruthy();
+      expect(impactBtn.textContent).toContain('Check Impact');
+    });
+
+    it('does not render Check Impact button for non-MR entities', () => {
+      const { container } = render(DetailPanel, { props: { entity: agentEntity } });
+      const impactBtn = container.querySelector('[data-testid="check-impact-btn"]');
+      expect(impactBtn).toBeFalsy();
+    });
+  });
 });

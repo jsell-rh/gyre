@@ -5114,6 +5114,7 @@
     bind:open={impactModalOpen}
     repoId={mrData.repository_id ?? mrData.repo_id ?? null}
     repoName={entityName('repo', mrData.repository_id ?? mrData.repo_id ?? '')}
+    workspaceId={mrData.workspace_id ?? entity.data?.workspace_id ?? null}
   />
 {/if}
 

@@ -20,6 +20,8 @@
   import DependencyHealthCard from './DependencyHealthCard.svelte';
   import DependencyGraph from './DependencyGraph.svelte';
   import MergeQueueGraph from './MergeQueueGraph.svelte';
+  import PipelineOverview from './PipelineOverview.svelte';
+  import ImpactAnalysisModal from './ImpactAnalysisModal.svelte';
   import Modal from '../lib/Modal.svelte';
   import Icon from '../lib/Icon.svelte';
   import CopyableId from '../lib/CopyableId.svelte';
@@ -382,6 +384,7 @@
   // ── Dependency health: state + load ─────────────────────────────────────
   let depHealthLoading = $state(true);
   let depHealthData = $state({ totalWithDeps: 0, staleCount: 0, breakingCount: 0 });
+  let wsBreakingChanges = $state([]);
   let depGraphOpen = $state(false);
   let depGraphScope = $state('workspace');
   let depGraphNodes = $state([]);
@@ -409,13 +412,16 @@
       // returns all breaking changes, but the dashboard should only show those
       // affecting repos in the current workspace (checklist item 97).
       const wsRepoIds = new Set((graphData.nodes ?? []).map(n => n.repo_id));
+      const filteredBreaking = (breakingList ?? []).filter(b => !b.acknowledged && wsRepoIds.has(b.source_repo_id));
+      wsBreakingChanges = filteredBreaking;
       depHealthData = {
         totalWithDeps: nodesWithEdges.size,
         staleCount: staleRepos.size,
-        breakingCount: (breakingList ?? []).filter(b => !b.acknowledged && wsRepoIds.has(b.source_repo_id)).length,
+        breakingCount: filteredBreaking.length,
       };
     } catch {
       depHealthData = { totalWithDeps: 0, staleCount: 0, breakingCount: 0 };
+      wsBreakingChanges = [];
       depGraphNodes = [];
       depGraphEdges = [];
     } finally {
@@ -639,6 +645,24 @@
     merged: wsMrs.filter(m => m.status === 'merged').length,
     failed_gates: wsMrs.filter(m => m._gates?.failed > 0).length,
   });
+
+  // ── Impact analysis modal state ──────────────────────────────────────
+  let impactModalOpen = $state(false);
+  let impactRepoId = $state(null);
+  let impactRepoName = $state('');
+
+  function openImpactAnalysis() {
+    // When triggered from the pipeline, pick the first repo with breaking changes
+    const bc = wsBreakingChanges.length > 0 ? wsBreakingChanges[0] : null;
+    if (bc) {
+      impactRepoId = bc.source_repo_id;
+      impactRepoName = entityName('repo', bc.source_repo_id);
+    } else if (repos.length > 0) {
+      impactRepoId = repos[0].id;
+      impactRepoName = repos[0].name;
+    }
+    impactModalOpen = true;
+  }
 
   // ── Activity pagination ──────────────────────────────────────
   let activityLimit = $state(5);  // show enough activity to be useful
@@ -1112,6 +1136,18 @@
               <span class="pipeline-stage-label">Merged</span>
             </span>
           {/if}
+          {#if depHealthData.breakingCount > 0}
+            <button
+              class="pipeline-breaking-btn"
+              onclick={openImpactAnalysis}
+              title="{depHealthData.breakingCount} breaking change{depHealthData.breakingCount !== 1 ? 's' : ''} — click for impact analysis"
+              data-testid="pipeline-impact-btn"
+            >
+              <span class="pipeline-breaking-icon">⚠</span>
+              <span class="pipeline-breaking-count">{depHealthData.breakingCount}</span>
+              <span class="pipeline-breaking-label">Breaking</span>
+            </button>
+          {/if}
         </nav>
       {/if}
 
@@ -1570,6 +1606,14 @@
     </div>
   </div>
 </Modal>
+
+<!-- Impact Analysis Modal (merge queue trigger) -->
+<ImpactAnalysisModal
+  bind:open={impactModalOpen}
+  repoId={impactRepoId}
+  repoName={impactRepoName}
+  workspaceId={workspace?.id ?? null}
+/>
 
 <style>
   /* ── Section headings ──────────────────────────────────────── */
@@ -2807,6 +2851,27 @@
     flex-shrink: 0;
     opacity: 0.5;
   }
+
+  .pipeline-breaking-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 3px var(--space-2);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border));
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    flex-shrink: 0;
+    transition: background var(--transition-fast);
+    margin-left: auto;
+  }
+  .pipeline-breaking-btn:hover { background: color-mix(in srgb, var(--color-danger) 14%, transparent); }
+  .pipeline-breaking-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .pipeline-breaking-icon { font-size: var(--text-xs); }
+  .pipeline-breaking-count { font-weight: 700; color: var(--color-danger); font-family: var(--font-mono); }
+  .pipeline-breaking-label { font-weight: 500; color: var(--color-danger); }
 
   /* ── Workspace overview tabs ────────────────────────────────── */
   .ws-overview-section {

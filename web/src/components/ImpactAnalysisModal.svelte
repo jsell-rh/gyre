@@ -16,15 +16,20 @@
     open = $bindable(false),
     repoId = null,
     repoName = '',
+    workspaceId = null,
   } = $props();
 
   // ── Data state ──────────────────────────────────────────────────────
   let blastRadius = $state(null);
   let breakingChanges = $state([]);
   let dependencyPolicy = $state(null);
+  let dependentEdges = $state([]);
+  let cascadeTestResults = $state(null);
   let loading = $state(false);
   let error = $state(null);
   let acknowledging = $state({});
+  let triggeringCascade = $state(false);
+  let resolvedWorkspaceId = $state(null);
 
   // ── Derived ─────────────────────────────────────────────────────────
   const directCount = $derived(blastRadius?.direct_dependents?.length ?? 0);
@@ -38,6 +43,15 @@
     repoBreakingChanges.length > 0 && repoBreakingChanges.every(bc => bc.acknowledged)
   );
 
+  // ── Map dependency_edge_id → dependent repo (source_repo_id) ────────
+  const edgeToDependent = $derived.by(() => {
+    const map = new Map();
+    for (const edge of dependentEdges) {
+      map.set(edge.id, edge.source_repo_id);
+    }
+    return map;
+  });
+
   // ── Build per-repo health table data ────────────────────────────────
   const healthData = $derived.by(() => {
     if (!blastRadius) return [];
@@ -45,17 +59,32 @@
       ...(blastRadius.direct_dependents ?? []).map(id => ({ id, direct: true })),
       ...(blastRadius.transitive_dependents ?? []).map(id => ({ id, direct: false })),
     ];
+    // Build a map from dependent repo ID → edge data for version info
+    const edgeByDependent = new Map();
+    for (const edge of dependentEdges) {
+      edgeByDependent.set(edge.source_repo_id, edge);
+    }
     return allDeps.map(dep => {
-      const bc = repoBreakingChanges.find(b => b.dependency_edge_id && b.source_repo_id === repoId);
+      // Find breaking change that affects this specific dependent via its edge
+      const bc = repoBreakingChanges.find(b => {
+        if (!b.dependency_edge_id) return false;
+        const depRepoId = edgeToDependent.get(b.dependency_edge_id);
+        return depRepoId === dep.id;
+      });
+      const edge = edgeByDependent.get(dep.id);
+      // Cascade test result for this dependent, if available
+      const cascadeResult = cascadeTestResults
+        ? cascadeTestResults.find(r => r.repo_id === dep.id)
+        : null;
       return {
         repoId: dep.id,
         name: entityName('repo', dep.id),
         direct: dep.direct,
-        versionPinned: '--',
-        versionCurrent: '--',
-        drift: null,
+        versionPinned: edge?.version_pinned ?? '--',
+        versionCurrent: edge?.target_version_current ?? '--',
+        drift: edge?.version_drift ?? null,
         testStatus: '--',
-        cascadeResult: '--',
+        cascadeResult: cascadeResult?.status ?? '--',
         breakingChange: bc ?? null,
       };
     });
@@ -70,6 +99,9 @@
       blastRadius = null;
       breakingChanges = [];
       dependencyPolicy = null;
+      dependentEdges = [];
+      cascadeTestResults = null;
+      resolvedWorkspaceId = null;
       error = null;
     }
   });
@@ -78,14 +110,30 @@
     loading = true;
     error = null;
     try {
-      const [blast, bcs, policy] = await Promise.allSettled([
+      // Resolve workspace ID: prefer prop, fall back to repo lookup
+      let wsId = workspaceId;
+      if (!wsId && repoId) {
+        try {
+          const repoData = await api.repo(repoId);
+          wsId = repoData?.workspace_id ?? null;
+        } catch {
+          // Non-critical — policy fetch will gracefully degrade
+        }
+      }
+      resolvedWorkspaceId = wsId;
+
+      const [blast, bcs, edges, policy, cascade] = await Promise.allSettled([
         api.repoBlastRadius(repoId),
         api.breakingChanges(),
-        api.workspaceDependencyPolicy?.('default'),
+        api.repoDependents(repoId),
+        wsId ? api.workspaceDependencyPolicy(wsId) : Promise.resolve(null),
+        api.cascadeTestResults?.(repoId) ?? Promise.resolve(null),
       ]);
       blastRadius = blast.status === 'fulfilled' ? blast.value : null;
       breakingChanges = bcs.status === 'fulfilled' ? (Array.isArray(bcs.value) ? bcs.value : []) : [];
+      dependentEdges = edges.status === 'fulfilled' ? (Array.isArray(edges.value) ? edges.value : []) : [];
       dependencyPolicy = policy.status === 'fulfilled' ? policy.value : null;
+      cascadeTestResults = cascade.status === 'fulfilled' && Array.isArray(cascade.value) ? cascade.value : null;
       if (blast.status === 'rejected') {
         error = 'Failed to load blast radius data';
       }
@@ -108,6 +156,20 @@
       // Silently handle — user can retry
     } finally {
       acknowledging = { ...acknowledging, [bcId]: false };
+    }
+  }
+
+  // ── Trigger cascade tests ───────────────────────────────────────────
+  async function triggerCascadeTests() {
+    triggeringCascade = true;
+    try {
+      await api.triggerCascadeTests?.(repoId);
+      // Reload data to pick up new cascade test status
+      await loadData();
+    } catch {
+      // Graceful degradation — cascade tests may not be configured
+    } finally {
+      triggeringCascade = false;
     }
   }
 
@@ -268,9 +330,30 @@
     <!-- Cascade Test Status -->
     <div class="cascade-section" data-testid="cascade-section">
       <h4 class="section-heading">Cascade Tests</h4>
-      <p class="cascade-status" data-testid="cascade-status">Cascade tests: not configured</p>
-      <button class="cascade-trigger-btn" disabled data-testid="trigger-cascade-btn">
-        Trigger Cascade Tests
+      {#if cascadeTestResults && cascadeTestResults.length > 0}
+        <div class="cascade-results" data-testid="cascade-results">
+          {#each cascadeTestResults as result}
+            <div class="cascade-result-row" data-testid="cascade-result">
+              <span class="cascade-repo">{entityName('repo', result.repo_id)}</span>
+              <Badge
+                value={result.status === 'passed' ? 'Pass' : result.status === 'failed' ? 'Fail' : result.status}
+                variant={result.status === 'passed' ? 'success' : result.status === 'failed' ? 'danger' : 'muted'}
+              />
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <p class="cascade-status" data-testid="cascade-status">
+          {cascadeTestResults ? 'No cascade test results yet' : 'Cascade tests: not configured'}
+        </p>
+      {/if}
+      <button
+        class="cascade-trigger-btn"
+        disabled={triggeringCascade}
+        onclick={triggerCascadeTests}
+        data-testid="trigger-cascade-btn"
+      >
+        {triggeringCascade ? 'Triggering...' : 'Trigger Cascade Tests'}
       </button>
     </div>
   {:else}
@@ -493,6 +576,28 @@
     font-size: var(--text-sm);
     color: var(--color-text-muted);
     margin: 0 0 var(--space-3) 0;
+  }
+
+  .cascade-results {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+  }
+
+  .cascade-result-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+  }
+
+  .cascade-repo {
+    color: var(--color-text);
+    font-weight: 500;
   }
 
   .cascade-trigger-btn, .ack-btn {
