@@ -11,9 +11,9 @@
 | 3 | 1. Application Shell | 2 | verified | - | App.svelte: topbar + status bar + no-sidebar layout |
 | 4 | Top Bar (always visible, all modes) | 3 | implemented | - | Partial — repo-mode decisions badge shows workspace-wide count, not repo-scoped (backend /count endpoint lacks repo_id filter). All other features present. |
 | 5 | Status Bar (bottom, always visible) | 3 | verified | - | App.svelte: WebSocket status (connected/offline/connecting), trust level, budget % with color-coded bar, PresenceAvatars with real-time WS updates |
-| 6 | 2. Workspace Home | 2 | implemented | - | WorkspaceHome.svelte |
-| 7 | Sections | 3 | implemented | - | Decisions, Repos, Briefing, Specs, Agent Rules sections |
-| 8 | Workspace Settings | 3 | implemented | - | WorkspaceSettings.svelte via gear icon |
+| 6 | 2. Workspace Home | 2 | verified | - | WorkspaceHome.svelte: dashboard landing page with real data loading for decisions, repos, specs, tasks, MRs, agents, budget |
+| 7 | Sections | 3 | implemented | - | Partial — Decisions (inline actions, trust filtering) and Repos (cards, health, New/Import) genuine. Missing: Specs cross-repo list, Briefing (removed from template), Agent Rules section. Architecture partial (DependencyGraph only). |
+| 8 | Workspace Settings | 3 | verified | - | WorkspaceSettings.svelte: 6 tabs (General, Trust & Policies, Teams, Budget, Compute, Audit) + gear icon access + back arrow |
 | 9 | 3. Repo Mode | 2 | implemented | - | RepoMode.svelte with horizontal tabs |
 | 10 | Repo Header | 3 | implemented | - | RepoMode header with agent count, budget, clone URL |
 | 11 | Tab: Specs (default, landing tab) | 3 | implemented | - | SpecDashboard.svelte |
