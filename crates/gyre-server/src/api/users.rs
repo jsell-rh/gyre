@@ -247,6 +247,7 @@ pub struct NotificationParams {
     pub workspace_id: Option<String>,
     pub min_priority: Option<u8>,
     pub max_priority: Option<u8>,
+    pub notification_type: Option<String>,
     pub limit: Option<u32>,
     pub offset: Option<u32>,
 }
@@ -303,6 +304,7 @@ pub async fn get_my_notifications(
             workspace_id.as_ref(),
             params.min_priority,
             params.max_priority,
+            params.notification_type.as_deref(),
             limit,
             offset,
         )
@@ -1023,5 +1025,46 @@ mod tests {
             types.contains(&"AgentEscalation"),
             "AgentEscalation must be present: {types:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn notification_type_filter_returns_only_matching() {
+        let state = test_state();
+        seed_notification(&state, NotificationType::GateFailure, "Gate failed").await;
+        seed_notification(
+            &state,
+            NotificationType::ConflictingInterpretations,
+            "Divergence alert",
+        )
+        .await;
+        seed_notification(
+            &state,
+            NotificationType::SpecPendingApproval,
+            "Approve spec",
+        )
+        .await;
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v1/users/me/notifications?notification_type=ConflictingInterpretations",
+                    )
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(
+            notifs.len(),
+            1,
+            "should return only ConflictingInterpretations: got {notifs:?}"
+        );
+        assert_eq!(notifs[0]["notification_type"], "ConflictingInterpretations");
     }
 }

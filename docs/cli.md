@@ -60,6 +60,34 @@ gyre mr create --title "Fix bug" --repo-id <repo-uuid> \
 
 ---
 
+## Spec Operations
+
+```bash
+# Get LLM-suggested edits for a spec file
+gyre spec assist system/vision.md "Add a section on observability"
+gyre spec assist system/vision.md "Simplify principle 3" --repo myrepo --workspace myws
+
+# Show all links (outbound and inbound) for a spec
+gyre spec links system/identity-security.md
+
+# Show specs that depend on a given spec (impact analysis)
+gyre spec dependents system/source-control.md
+
+# Full tenant-wide spec dependency graph (text summary)
+gyre spec graph
+
+# Spec graph in Graphviz DOT format (pipe to dot for PNG)
+gyre spec graph --format dot | dot -Tpng -o graph.png
+
+# List all stale spec links across the tenant
+gyre spec stale-links
+
+# List all active conflicts (specs with conflicts_with where both are approved)
+gyre spec conflicts
+```
+
+---
+
 ## Connection / Diagnostics
 
 ```bash

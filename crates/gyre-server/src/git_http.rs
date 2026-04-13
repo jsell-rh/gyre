@@ -331,11 +331,124 @@ pub async fn git_receive_pack(
         }
     }
 
-    info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
-
-    // M13.2: Resolve agent context (task_id, parent_agent_id, spawned_by) for provenance.
+    // Phase 3 (TASK-008): Enforcement — reject pushes with invalid/missing
+    // attestation chains or constraint violations. Must run synchronously before
+    // returning the response so we can undo refs on failure.
+    //
+    // Resolve agent context first so we have the task_id for chain lookup.
     let (task_id, parent_agent_id, spawned_by_user_id) =
         resolve_agent_context(&state, &auth.agent_id).await;
+
+    if !ref_updates.is_empty() {
+        if let Some(ref tid) = task_id {
+            let constraint_ref_updates: Vec<(String, String, String)> = ref_updates
+                .iter()
+                .map(|u| (u.old_sha.clone(), u.new_sha.clone(), u.refname.clone()))
+                .collect();
+            if let Err(rejection) = crate::constraint_check::enforce_push_constraints(
+                &state,
+                tid,
+                &repo_id,
+                &repo_path,
+                &auth.agent_id,
+                &repo_workspace_id,
+                &constraint_ref_updates,
+                &default_branch,
+            )
+            .await
+            {
+                undo_ref_updates(&repo_path, &ref_updates).await;
+                // Emit PushRejected event.
+                state
+                    .emit_event(
+                        Some(repo_workspace_id.clone()),
+                        gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                        gyre_common::message::MessageKind::PushRejected,
+                        Some(serde_json::json!({
+                            "repo_id": repo_id,
+                            "branch": ref_updates.first().map(|u| u.refname.clone()).unwrap_or_default(),
+                            "agent_id": auth.agent_id,
+                            "reason": rejection,
+                        })),
+                    )
+                    .await;
+                return (StatusCode::FORBIDDEN, rejection).into_response();
+            }
+        }
+    }
+
+    // TASK-017: Manifest enforcement — reject pushes with unregistered spec files.
+    // spec-registry.md §Manifest Rules rule 1 + §Ledger Sync on Push step 4.
+    // Only check pushes that update the default branch.
+    {
+        let default_ref = format!("refs/heads/{default_branch}");
+        for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
+            // Read manifest to build the set of registered spec paths.
+            let manifest_paths =
+                crate::spec_registry::read_manifest_paths(&repo_path, &update.new_sha).await;
+            // Check spec policy for this repo.
+            let enforce = state
+                .spec_policies
+                .get_for_repo(&repo_id)
+                .await
+                .map(|p| p.enforce_manifest)
+                .unwrap_or(false);
+            if let Err(rejection) = crate::spec_registry::check_manifest_coverage(
+                &repo_path,
+                &update.new_sha,
+                &manifest_paths,
+                enforce,
+            )
+            .await
+            {
+                undo_ref_updates(&repo_path, &ref_updates).await;
+                state
+                    .emit_event(
+                        Some(repo_workspace_id.clone()),
+                        gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                        gyre_common::message::MessageKind::PushRejected,
+                        Some(serde_json::json!({
+                            "repo_id": repo_id,
+                            "branch": default_branch,
+                            "agent_id": auth.agent_id,
+                            "reason": rejection,
+                        })),
+                    )
+                    .await;
+                return (StatusCode::FORBIDDEN, rejection).into_response();
+            }
+        }
+    }
+
+    // TASK-019: Cycle detection — reject pushes that create cycles in spec links.
+    // spec-links.md §Cycle Detection: "The forge rejects manifest changes that
+    // would create cycles in the spec graph."
+    {
+        let default_ref = format!("refs/heads/{default_branch}");
+        for update in ref_updates.iter().filter(|u| u.refname == default_ref) {
+            if let Err(rejection) =
+                crate::spec_registry::check_spec_link_cycles(&repo_path, &update.new_sha).await
+            {
+                undo_ref_updates(&repo_path, &ref_updates).await;
+                state
+                    .emit_event(
+                        Some(repo_workspace_id.clone()),
+                        gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                        gyre_common::message::MessageKind::PushRejected,
+                        Some(serde_json::json!({
+                            "repo_id": repo_id,
+                            "branch": default_branch,
+                            "agent_id": auth.agent_id,
+                            "reason": rejection,
+                        })),
+                    )
+                    .await;
+                return (StatusCode::FORBIDDEN, rejection).into_response();
+            }
+        }
+    }
+
+    info!(%repo_path, updates = ref_updates.len(), "served git-receive-pack");
 
     // M13.3: Build X-Gyre-Push-Result JSON header value.
     let branch = ref_updates
@@ -442,6 +555,114 @@ pub async fn git_receive_pack(
                 })),
             )
             .await;
+
+        // TASK-006 (Phase 1) + TASK-007 (Phase 2): Audit-only attestation chain
+        // verification AND strategy-implied constraint evaluation.
+        // Phase 1 verifies the chain structure; Phase 2 derives and evaluates
+        // strategy-implied constraints against the actual diff.
+        // Both are audit-only — results are logged and violations emitted, but
+        // pushes are NEVER rejected.
+        if let Some(ref tid) = task_id_clone {
+            // Phase 1: chain structure verification.
+            match state_clone.chain_attestations.find_by_task(tid).await {
+                Ok(attestations) if !attestations.is_empty() => {
+                    for att in &attestations {
+                        let result = verify_attestation_audit_only(att);
+                        if result.valid {
+                            tracing::info!(
+                                attestation_id = %att.id,
+                                task_id = %tid,
+                                repo_id = %repo_id_clone,
+                                label = %result.label,
+                                "attestation.verified: chain valid"
+                            );
+                        } else {
+                            tracing::warn!(
+                                attestation_id = %att.id,
+                                task_id = %tid,
+                                repo_id = %repo_id_clone,
+                                label = %result.label,
+                                message = %result.message,
+                                "attestation.chain_invalid: verification failed"
+                            );
+                        }
+                    }
+
+                    // TASK-061 (§7.2): Populate attestation chain ABAC subject
+                    // attributes and evaluate policies with action=push,
+                    // resource_type=attestation. Audit-only — logged but not enforced.
+                    if let Some(leaf) = attestations.iter().max_by_key(|a| a.metadata.chain_depth) {
+                        let chain = state_clone
+                            .chain_attestations
+                            .load_chain(&leaf.id)
+                            .await
+                            .unwrap_or_default();
+                        let chain_depth = leaf.metadata.chain_depth;
+                        let signer = gyre_domain::root_signer(&chain);
+                        let cc = gyre_domain::constraint_count(&chain) as i64;
+
+                        let mut ctx = crate::policy_engine::AttributeContext::default();
+                        ctx.set("subject.type", "agent");
+                        ctx.set("subject.id", &agent_id);
+                        ctx.set("subject.tenant_id", &push_tenant_id);
+                        ctx.set_number("subject.chain_depth", chain_depth as i64);
+                        ctx.set_number("subject.constraint_count", cc);
+                        if let Some(ref rs) = signer {
+                            ctx.set("subject.root_signer", rs);
+                        }
+                        ctx.set("resource.type", "attestation");
+                        ctx.set("resource.repo_id", &repo_id_clone);
+
+                        let policies = state_clone.policies.list().await.unwrap_or_default();
+                        let eval_result =
+                            crate::policy_engine::evaluate(policies, &ctx, "push", "attestation");
+
+                        tracing::info!(
+                            task_id = %tid,
+                            repo_id = %repo_id_clone,
+                            chain_depth = chain_depth,
+                            root_signer = ?signer,
+                            constraint_count = cc,
+                            decision = ?eval_result.effect,
+                            matched_policy = ?eval_result.matched_policy,
+                            "attestation ABAC evaluation for push (audit-only)" // enforcement-mode:ok
+                        );
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        task_id = %tid,
+                        repo_id = %repo_id_clone,
+                        "no attestation chain found for task (Phase 1, non-enforcing)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %tid,
+                        error = %e,
+                        "failed to query attestation chain (Phase 1, non-blocking)"
+                    );
+                }
+            }
+
+            // Phase 2: strategy-implied constraint evaluation (TASK-007).
+            let constraint_ref_updates: Vec<(String, String, String)> = ref_updates
+                .iter()
+                .map(|u| (u.old_sha.clone(), u.new_sha.clone(), u.refname.clone()))
+                .collect();
+            crate::constraint_check::evaluate_push_constraints(
+                &state_clone,
+                tid,
+                &repo_id_clone,
+                &repo_path_clone,
+                &agent_id,
+                &push_workspace_id,
+                &constraint_ref_updates,
+                &default_branch_clone,
+            )
+            .await;
+        }
+
         // Spec lifecycle: auto-create tasks for spec changes on the default branch.
         process_spec_lifecycle(
             &state_clone,
@@ -474,6 +695,7 @@ pub async fn git_receive_pack(
                 Some(&state_clone.workspaces),
                 Some(&state_clone.repos),
                 workspace_tenant_id.as_ref(),
+                Some(&state_clone.tasks),
             )
             .await;
             // Dependency graph: auto-detect Cargo.toml path deps (M22.4).
@@ -482,6 +704,17 @@ pub async fn git_receive_pack(
                 &repo_id_clone,
                 &repo_path_clone,
                 &update.new_sha,
+            )
+            .await;
+            // Breaking change detection (TASK-020).
+            detect_breaking_changes_on_push(
+                &state_clone,
+                &repo_id_clone,
+                &repo_path_clone,
+                &update.old_sha,
+                &update.new_sha,
+                &repo_workspace_id_str,
+                &push_tenant_id,
             )
             .await;
             // Knowledge graph: extract Rust symbols and architecture (M30b).
@@ -523,7 +756,7 @@ pub async fn git_receive_pack(
                 &repo_path_clone,
                 &repo_id_clone,
                 &update.new_sha,
-                state_clone.graph_store.as_ref(),
+                Arc::clone(&state_clone.graph_store),
                 &git_bin,
                 agent_push_ctx,
                 divergence_ports,
@@ -881,7 +1114,8 @@ async fn check_pre_accept_gates(
         .kv_get("repo_stack_policies", repo_id)
         .await
         .ok()
-        .flatten();
+        .flatten()
+        .map(|value| crate::api::stack_attest::parse_stack_policy(&value).fingerprint);
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -1480,10 +1714,585 @@ fn extract_path_value(line: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// Post-push auto-detection: scan Cargo.toml changes for path deps pointing to sibling repos.
+/// Extract the `version = "X.Y.Z"` value from a Cargo.toml [package] section.
+#[cfg(test)]
+pub(crate) fn extract_cargo_version(toml_content: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in toml_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("version") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let val = rest.trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the pinned version for a specific dependency from Cargo.toml.
 ///
-/// On pushes to the default branch, reads the Cargo.toml at the new SHA and creates
-/// DependencyEdge records for any path deps whose basename matches a known Gyre repo name.
+/// Handles both `crate = "1.2.3"` and `crate = { version = "1.2.3", ... }` formats.
+pub(crate) fn extract_dep_version(toml_content: &str, dep_name: &str) -> Option<String> {
+    let mut in_dependencies = false;
+
+    for line in toml_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_dependencies = trimmed == "[dependencies]"
+                || trimmed == "[dev-dependencies]"
+                || trimmed == "[build-dependencies]";
+            continue;
+        }
+        if !in_dependencies {
+            continue;
+        }
+        // Match the dependency name at the start of the line.
+        if let Some(rest) = trimmed.strip_prefix(dep_name) {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim();
+                // Simple form: dep = "1.2.3"
+                if rest.starts_with('"') || rest.starts_with('\'') {
+                    let val = rest.trim_matches('"').trim_matches('\'');
+                    if !val.is_empty() {
+                        return Some(val.to_string());
+                    }
+                }
+                // Inline table form: dep = { version = "1.2.3", ... }
+                if rest.starts_with('{') {
+                    if let Some(ver_idx) = rest.find("version") {
+                        let after = &rest[ver_idx + 7..];
+                        let after = after.trim_start();
+                        if let Some(after) = after.strip_prefix('=') {
+                            let after = after.trim();
+                            if after.starts_with('"') {
+                                if let Some(end) = after[1..].find('"') {
+                                    return Some(after[1..1 + end].to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse `package.json` for local path dependencies (`file:` or `workspace:` references).
+///
+/// Returns `(reference_value, version)` tuples. For `file:` references the reference
+/// is the local path (e.g. `"../other-repo"`). For `workspace:` the reference is the
+/// package name. Only local/workspace references are returned; npm registry deps are ignored.
+pub fn detect_package_json_deps(content: &str) -> Vec<(String, Option<String>)> {
+    let mut results = Vec::new();
+
+    let parsed: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(_) => return results,
+    };
+
+    for section in &["dependencies", "devDependencies"] {
+        if let Some(deps) = parsed.get(section).and_then(|v| v.as_object()) {
+            for (name, value) in deps {
+                if let Some(ver_str) = value.as_str() {
+                    if let Some(path) = ver_str.strip_prefix("file:") {
+                        results.push((path.to_string(), None));
+                    } else if let Some(ws_ver) = ver_str.strip_prefix("workspace:") {
+                        // workspace:* or workspace:^1.0.0 — the package name is the dep key.
+                        let version = if ws_ver == "*" {
+                            None
+                        } else {
+                            Some(ws_ver.to_string())
+                        };
+                        results.push((name.clone(), version));
+                    }
+                }
+            }
+        }
+    }
+
+    results
+}
+
+/// Parse `go.mod` for `require` directives referencing Gyre modules.
+///
+/// Per dependency-graph.md §1: "go.mod -> extract require directives referencing
+/// Gyre modules". The forge matches module paths against known repos in the tenant.
+///
+/// Also parses `replace` directives with local paths as a supplementary detection
+/// path (local `replace` directives indicate in-development cross-repo references).
+///
+/// Returns `(module_path, version)` tuples.
+pub fn detect_go_mod_deps(content: &str) -> Vec<(String, Option<String>)> {
+    let mut results = Vec::new();
+    let mut in_require_block = false;
+    let mut in_replace_block = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Skip comments and empty lines.
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+
+        // Handle block `require (` ... `)` syntax.
+        if trimmed == "require (" {
+            in_require_block = true;
+            continue;
+        }
+        // Handle block `replace (` ... `)` syntax.
+        if trimmed == "replace (" {
+            in_replace_block = true;
+            continue;
+        }
+        if (in_require_block || in_replace_block) && trimmed == ")" {
+            in_require_block = false;
+            in_replace_block = false;
+            continue;
+        }
+
+        // --- require directives ---
+        // Single-line: `require module/path v1.0.0`
+        // Block-line:  `module/path v1.0.0`
+        let require_line = if in_require_block {
+            Some(trimmed)
+        } else if let Some(rest) = trimmed.strip_prefix("require ") {
+            Some(rest.trim())
+        } else {
+            None
+        };
+
+        if let Some(rline) = require_line {
+            // Strip inline comments.
+            let rline = rline.split("//").next().unwrap_or(rline).trim();
+            let parts: Vec<&str> = rline.split_whitespace().collect();
+            if !parts.is_empty() {
+                let module_path = parts[0];
+                let version = parts.get(1).map(|v| v.to_string());
+                results.push((module_path.to_string(), version));
+            }
+            continue;
+        }
+
+        // --- replace directives (supplementary) ---
+        // Single-line: `replace module/path v1.0.0 => ../local-path`
+        // Block-line:  `module/path v1.0.0 => ../local-path`
+        let replace_line = if in_replace_block {
+            Some(trimmed)
+        } else if let Some(rest) = trimmed.strip_prefix("replace ") {
+            Some(rest.trim())
+        } else {
+            None
+        };
+
+        if let Some(rline) = replace_line {
+            if let Some(arrow_pos) = rline.find("=>") {
+                let replacement = rline[arrow_pos + 2..].trim();
+                // Only match local paths (starting with ./ or ../).
+                if replacement.starts_with("./") || replacement.starts_with("../") {
+                    // Extract the original module path (before any version).
+                    let original = rline[..arrow_pos].trim();
+                    let module_path = original.split_whitespace().next().unwrap_or(original);
+                    // Avoid duplicates — require block may already have this module.
+                    if !results.iter().any(|(m, _)| m == module_path) {
+                        let version = original.split_whitespace().nth(1).map(|v| v.to_string());
+                        results.push((module_path.to_string(), version));
+                    }
+                }
+            }
+        }
+    }
+
+    results
+}
+
+/// Parse `pyproject.toml` for path dependencies.
+///
+/// Supports two formats:
+/// - PEP 621 `[project.dependencies]` with `@ file:///path` references
+/// - Poetry `[tool.poetry.dependencies]` with `{path = "..."}` entries
+///
+/// Returns `(path_or_name, version)` tuples for local path dependencies only.
+pub fn detect_pyproject_deps(content: &str) -> Vec<(String, Option<String>)> {
+    let mut results = Vec::new();
+    let mut current_section = String::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Track section headers.
+        if trimmed.starts_with('[') {
+            current_section = trimmed
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string();
+            continue;
+        }
+
+        // Poetry: [tool.poetry.dependencies] or [tool.poetry.dev-dependencies]
+        if current_section == "tool.poetry.dependencies"
+            || current_section == "tool.poetry.dev-dependencies"
+        {
+            // Match: dep-name = { path = "../local-path" }
+            if let Some(path_val) = extract_path_value(trimmed) {
+                let dep_name = trimmed.split('=').next().unwrap_or("").trim().to_string();
+                results.push((path_val, Some(dep_name)));
+            }
+        }
+
+        // PEP 621: [project] dependencies = [...] with `pkg @ file:///path`
+        if current_section == "project" || current_section == "project.dependencies" {
+            // Match: "package-name @ file:../local-path" in a list
+            if let Some(at_pos) = trimmed.find(" @ file:") {
+                let pkg_name = trimmed
+                    .trim_start_matches(|c: char| c == '"' || c == '\'' || c == '-' || c == ' ')
+                    .split(|c: char| c == ' ' || c == '@')
+                    .next()
+                    .unwrap_or("");
+                let path = &trimmed[at_pos + 8..];
+                let path = path.trim_end_matches(|c: char| c == '"' || c == '\'' || c == ',');
+                if !pkg_name.is_empty() {
+                    results.push((path.to_string(), Some(pkg_name.to_string())));
+                }
+            }
+        }
+    }
+
+    results
+}
+
+/// Extract cross-repo spec links from a `specs/manifest.yaml` content string.
+///
+/// Returns `(repo_name, spec_path, link_type)` tuples for links whose target
+/// starts with `@` (cross-repo or cross-workspace references).
+pub fn detect_manifest_spec_links(manifest_yaml: &str) -> Vec<(String, String, String)> {
+    let manifest: crate::spec_registry::SpecManifest = match serde_yaml::from_str(manifest_yaml) {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+
+    for spec in &manifest.specs {
+        for link in &spec.links {
+            if !link.target.starts_with('@') {
+                continue;
+            }
+
+            let parsed = crate::spec_registry::parse_cross_workspace_target(&link.target);
+            let repo_name = match &parsed {
+                crate::spec_registry::CrossWorkspaceTarget::CrossRepo { repo_name, .. } => {
+                    repo_name.clone()
+                }
+                crate::spec_registry::CrossWorkspaceTarget::CrossWorkspace {
+                    repo_name, ..
+                } => repo_name.clone(),
+                crate::spec_registry::CrossWorkspaceTarget::SameRepo { .. } => continue,
+            };
+
+            let link_type = format!("{}", link.link_type);
+            results.push((repo_name, link.target.clone(), link_type));
+        }
+    }
+
+    results
+}
+
+/// Detect API contract references in an OpenAPI/Swagger document.
+///
+/// Scans `servers[].url` and `$ref` values for patterns matching other Gyre repo names.
+/// Best-effort: many API contracts don't explicitly reference repo names.
+pub fn detect_openapi_refs(content: &str, known_repos: &[&str]) -> Vec<String> {
+    let mut results = Vec::new();
+
+    for repo_name in known_repos {
+        // Match repo names in server URLs, $ref paths, and other string values.
+        if content.contains(repo_name) {
+            results.push(repo_name.to_string());
+        }
+    }
+
+    results
+}
+
+/// Detect protobuf import paths that reference other Gyre repos.
+///
+/// Parses `import "repo-name/path/to/file.proto"` directives and matches the
+/// first path segment against known repo names.
+pub fn detect_proto_imports(content: &str, known_repos: &[&str]) -> Vec<String> {
+    let mut results = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("import ") {
+            // import "path/to/file.proto";
+            let path = rest
+                .trim()
+                .trim_start_matches('"')
+                .trim_end_matches(|c: char| c == '"' || c == ';');
+            // First path segment is typically the package/repo name.
+            if let Some(first_seg) = path.split('/').next() {
+                if known_repos.contains(&first_seg) {
+                    results.push(first_seg.to_string());
+                }
+            }
+        }
+    }
+
+    // Deduplicate (multiple imports from the same repo).
+    results.sort();
+    results.dedup();
+    results
+}
+
+/// Detect MCP tool references pointing to other Gyre repos.
+///
+/// Parses `mcp.json` for `server` or `url` fields matching known repo names.
+pub fn detect_mcp_refs(content: &str, known_repos: &[&str]) -> Vec<String> {
+    let mut results = Vec::new();
+
+    for repo_name in known_repos {
+        if content.contains(repo_name) {
+            results.push(repo_name.to_string());
+        }
+    }
+
+    results.sort();
+    results.dedup();
+    results
+}
+
+/// A single auto-detected dependency edge collected during push-time scanning.
+///
+/// Named struct replaces an unnamed 6-element tuple for clarity and to prevent
+/// positional field confusion (e.g., swapping source_artifact and target_artifact).
+#[derive(Clone, Debug)]
+pub(crate) struct DetectedEdge {
+    pub target_repo_id: String,
+    pub source_artifact: String,
+    pub target_artifact: String,
+    pub dep_type: gyre_domain::DependencyType,
+    pub method: gyre_domain::DetectionMethod,
+    pub version: Option<String>,
+}
+
+/// Reconcile detected dependency edges against existing edges for a repo.
+///
+/// - New edges (detected but not in existing set): created with `Active` status.
+/// - Orphaned edges (existing but no longer detected): marked `Orphaned`.
+/// - Version changes: updates `version_pinned` on existing edges.
+/// - `Manual` edges are never modified.
+/// - Only edges whose `detection_method` is in `ran_methods` are considered for
+///   orphaning — edges from detection methods that did not run in this push are
+///   left untouched (prevents false orphaning when only a subset of dependency
+///   files changed).
+pub(crate) async fn reconcile_dependencies(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    detected_edges: &[DetectedEdge],
+    ran_methods: &std::collections::HashSet<gyre_domain::DetectionMethod>,
+) {
+    use gyre_common::Id;
+    use gyre_domain::{DependencyStatus, DetectionMethod};
+
+    let source_id = Id::new(repo_id);
+
+    // Resolve the source repo's workspace_id for domain event emission (TASK-048 F5).
+    let source_workspace_id = state
+        .repos
+        .find_by_id(&source_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.workspace_id);
+
+    let existing = match state.dependencies.list_by_repo(&source_id).await {
+        Ok(edges) => edges,
+        Err(e) => {
+            warn!("reconcile-deps: failed to list existing edges: {e}");
+            return;
+        }
+    };
+
+    let now = crate::api::now_secs();
+
+    // Build a lookup key for detected edges: (target_repo_id, source_artifact, detection_method).
+    let detected_keys: std::collections::HashSet<(String, String, String)> = detected_edges
+        .iter()
+        .map(|de| {
+            (
+                de.target_repo_id.clone(),
+                de.source_artifact.clone(),
+                format!("{:?}", de.method),
+            )
+        })
+        .collect();
+
+    // Mark existing non-Manual edges as Orphaned if no longer detected.
+    // Only consider edges whose detection_method is in `ran_methods` — edges from
+    // detection methods that did not run in this push are left untouched.
+    for edge in &existing {
+        if edge.detection_method == DetectionMethod::Manual {
+            continue;
+        }
+
+        // Skip edges whose detection method did not run in this push.
+        if !ran_methods.contains(&edge.detection_method) {
+            continue;
+        }
+
+        let key = (
+            edge.target_repo_id.to_string(),
+            edge.source_artifact.clone(),
+            format!("{:?}", edge.detection_method),
+        );
+
+        if !detected_keys.contains(&key) && edge.status != DependencyStatus::Orphaned {
+            let mut updated = edge.clone();
+            updated.status = DependencyStatus::Orphaned;
+            updated.last_verified_at = now;
+            if let Err(e) = state.dependencies.save(&updated).await {
+                warn!("reconcile-deps: failed to mark edge orphaned: {e}");
+            } else {
+                tracing::info!(
+                    source = repo_id,
+                    target = %edge.target_repo_id,
+                    artifact = %edge.source_artifact,
+                    "dependency marked orphaned — no longer detected"
+                );
+            }
+        }
+    }
+
+    // Create or update detected edges.
+    for de in detected_edges {
+        // Check if an existing edge matches.
+        let existing_edge = existing.iter().find(|e| {
+            e.target_repo_id.as_str() == de.target_repo_id
+                && e.source_artifact == de.source_artifact
+                && format!("{:?}", e.detection_method) == format!("{:?}", de.method)
+        });
+
+        if let Some(edge) = existing_edge {
+            // Update version_pinned if changed, and un-orphan.
+            if edge.version_pinned != de.version || edge.status == DependencyStatus::Orphaned {
+                let mut updated = edge.clone();
+                updated.version_pinned = de.version.clone();
+                updated.last_verified_at = now;
+                if updated.status == DependencyStatus::Orphaned {
+                    updated.status = DependencyStatus::Active;
+                }
+                if let Err(e) = state.dependencies.save(&updated).await {
+                    warn!("reconcile-deps: failed to update edge: {e}");
+                }
+            }
+        } else {
+            // New edge — create it.
+            let mut edge = gyre_domain::DependencyEdge::new(
+                Id::new(uuid::Uuid::new_v4().to_string()),
+                source_id.clone(),
+                Id::new(&de.target_repo_id),
+                de.dep_type.clone(),
+                de.source_artifact.as_str(),
+                de.target_artifact.as_str(),
+                de.method.clone(),
+                now,
+            );
+            edge.version_pinned = de.version.clone();
+            if let Err(e) = state.dependencies.save(&edge).await {
+                warn!("reconcile-deps: failed to create new edge: {e}");
+            } else {
+                tracing::info!(
+                    source = repo_id,
+                    target = de.target_repo_id.as_str(),
+                    artifact = de.source_artifact.as_str(),
+                    target_artifact = de.target_artifact.as_str(),
+                    method = ?de.method,
+                    "new dependency edge detected"
+                );
+
+                // Emit domain event for new dependency detection (TASK-048 F5).
+                // The spec §4 says "New dependency detected → create edge, log activity event."
+                // emit_event() broadcasts via the unified message bus to WebSocket consumers
+                // (orchestrators, dashboard UI). tracing::info! alone is infrastructure logging.
+                if let Some(ws_id) = &source_workspace_id {
+                    let payload = serde_json::json!({
+                        "event": "dependency_detected",
+                        "source_repo_id": repo_id,
+                        "target_repo_id": de.target_repo_id,
+                        "source_artifact": de.source_artifact,
+                        "target_artifact": de.target_artifact,
+                        "detection_method": serde_json::to_value(&de.method).unwrap_or_default(),
+                        "dependency_type": serde_json::to_value(&de.dep_type).unwrap_or_default(),
+                    });
+
+                    state
+                        .emit_event(
+                            Some(ws_id.clone()),
+                            gyre_common::message::Destination::Workspace(ws_id.clone()),
+                            gyre_common::MessageKind::Custom("dependency_detected".to_string()),
+                            Some(payload),
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+}
+
+/// List all files in a repo at a given SHA that end with the specified extension.
+///
+/// Uses `git ls-tree -r --name-only <sha>` to enumerate all files, then filters
+/// by the given extension suffix (e.g., ".proto"). Used by multi-file detection
+/// methods that must scan ALL files of a type — not just changed ones — to produce
+/// a complete edge set for reconciliation (see TASK-048 F4).
+async fn list_files_by_extension(
+    git_bin: &str,
+    repo_path: &str,
+    sha: &str,
+    extension: &str,
+) -> Vec<String> {
+    let out = Command::new(git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("ls-tree")
+        .arg("-r")
+        .arg("--name-only")
+        .arg(sha)
+        .output()
+        .await;
+
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .filter(|line| line.ends_with(extension))
+        .map(|line| line.to_string())
+        .collect()
+}
+
+/// Post-push auto-detection: scan changed files for dependency declarations.
+///
+/// On pushes to the default branch, reads dependency files at the new SHA and creates
+/// DependencyEdge records for any dependencies pointing to known Gyre repos.
+/// Runs reconciliation after all detectors to mark orphaned edges.
+/// Also resolves target repo versions and computes version drift (TASK-021).
 pub(crate) async fn detect_dependencies_on_push(
     state: &Arc<AppState>,
     repo_id: &str,
@@ -1491,11 +2300,11 @@ pub(crate) async fn detect_dependencies_on_push(
     new_sha: &str,
 ) {
     use gyre_common::Id;
-    use gyre_domain::{DependencyEdge, DependencyType, DetectionMethod};
+    use gyre_domain::{DependencyType, DetectionMethod};
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
-    // Check whether Cargo.toml was changed in this commit.
+    // List all changed files in this push.
     let diff_out = match Command::new(&git_bin)
         .arg("-C")
         .arg(repo_path)
@@ -1512,31 +2321,45 @@ pub(crate) async fn detect_dependencies_on_push(
     };
 
     let changed_files = String::from_utf8_lossy(&diff_out);
-    let has_cargo_toml = changed_files
-        .lines()
-        .any(|f| f == "Cargo.toml" || f.ends_with("/Cargo.toml"));
+    let changed: Vec<&str> = changed_files.lines().collect();
 
-    if !has_cargo_toml {
-        return;
-    }
+    // Determine which dependency files were changed.
+    let has_cargo_toml = changed
+        .iter()
+        .any(|f| *f == "Cargo.toml" || f.ends_with("/Cargo.toml"));
+    let has_package_json = changed
+        .iter()
+        .any(|f| *f == "package.json" || f.ends_with("/package.json"));
+    let has_go_mod = changed
+        .iter()
+        .any(|f| *f == "go.mod" || f.ends_with("/go.mod"));
+    let has_pyproject = changed
+        .iter()
+        .any(|f| *f == "pyproject.toml" || f.ends_with("/pyproject.toml"));
+    let has_manifest = changed.iter().any(|f| *f == "specs/manifest.yaml");
+    let has_openapi = changed.iter().any(|f| {
+        *f == "openapi.yaml"
+            || *f == "openapi.yml"
+            || *f == "swagger.json"
+            || f.ends_with("/openapi.yaml")
+            || f.ends_with("/openapi.yml")
+            || f.ends_with("/swagger.json")
+    });
+    let has_proto = changed.iter().any(|f| f.ends_with(".proto"));
+    let has_mcp_json = changed
+        .iter()
+        .any(|f| *f == "mcp.json" || f.ends_with("/mcp.json"));
 
-    // Read Cargo.toml content from the new commit.
-    let toml_out = match Command::new(&git_bin)
-        .arg("-C")
-        .arg(repo_path)
-        .arg("show")
-        .arg(format!("{new_sha}:Cargo.toml"))
-        .output()
-        .await
+    // Early return if no dependency-related files changed.
+    if !has_cargo_toml
+        && !has_package_json
+        && !has_go_mod
+        && !has_pyproject
+        && !has_manifest
+        && !has_openapi
+        && !has_proto
+        && !has_mcp_json
     {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return,
-    };
-
-    let toml_content = String::from_utf8_lossy(&toml_out);
-    let path_deps = detect_cargo_path_deps(&toml_content);
-
-    if path_deps.is_empty() {
         return;
     }
 
@@ -1551,41 +2374,1016 @@ pub(crate) async fn detect_dependencies_on_push(
     let source_id = Id::new(repo_id);
     let now = crate::api::now_secs();
 
-    for path_dep in path_deps {
-        // Extract basename: "../other-repo" -> "other-repo"
-        let basename = std::path::Path::new(&path_dep)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&path_dep)
-            .to_string();
+    // Build list of known repo names for API contract matching.
+    let repo_names: Vec<&str> = all_repos
+        .iter()
+        .filter(|r| r.id.as_str() != repo_id)
+        .map(|r| r.name.as_str())
+        .collect();
 
-        if let Some(target_repo) = all_repos.iter().find(|r| r.name == basename) {
-            if target_repo.id.as_str() == repo_id {
-                continue;
-            }
+    // Collect all detected edges and track which detection methods ran.
+    let mut detected_edges: Vec<DetectedEdge> = Vec::new();
+    let mut ran_methods: std::collections::HashSet<DetectionMethod> =
+        std::collections::HashSet::new();
 
-            let edge = DependencyEdge::new(
-                Id::new(uuid::Uuid::new_v4().to_string()),
-                source_id.clone(),
-                target_repo.id.clone(),
-                DependencyType::Code,
-                "Cargo.toml",
-                basename.as_str(),
-                DetectionMethod::CargoToml,
-                now,
-            );
-
-            if let Err(e) = state.dependencies.save(&edge).await {
-                warn!("dep-detection: failed to save edge: {e}");
-            } else {
-                tracing::info!(
-                    source_repo = repo_id,
-                    target_repo = %target_repo.id,
-                    "auto-detected Cargo.toml path dependency"
-                );
+    // --- Cargo.toml ---
+    if has_cargo_toml {
+        ran_methods.insert(DetectionMethod::CargoToml);
+        if let Some(content) =
+            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "Cargo.toml").await
+        {
+            let path_deps = detect_cargo_path_deps(&content);
+            for path_dep in &path_deps {
+                let basename = std::path::Path::new(path_dep)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path_dep);
+                if let Some(target_repo) = all_repos.iter().find(|r| r.name == basename) {
+                    if target_repo.id.as_str() != repo_id {
+                        let version = extract_dep_version(&content, basename);
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "Cargo.toml".to_string(),
+                            target_artifact: basename.to_string(),
+                            dep_type: DependencyType::Code,
+                            method: DetectionMethod::CargoToml,
+                            version,
+                        });
+                    }
+                }
             }
         }
     }
+
+    // --- package.json ---
+    if has_package_json {
+        ran_methods.insert(DetectionMethod::PackageJson);
+        if let Some(content) =
+            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "package.json").await
+        {
+            let pkg_deps = detect_package_json_deps(&content);
+            for (ref_val, version) in &pkg_deps {
+                // For file: refs, extract basename as repo name candidate.
+                let candidate = std::path::Path::new(ref_val)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(ref_val);
+                if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
+                    if target_repo.id.as_str() != repo_id {
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "package.json".to_string(),
+                            target_artifact: candidate.to_string(),
+                            dep_type: DependencyType::Code,
+                            method: DetectionMethod::PackageJson,
+                            version: version.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // --- go.mod ---
+    if has_go_mod {
+        ran_methods.insert(DetectionMethod::GoMod);
+        if let Some(content) =
+            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "go.mod").await
+        {
+            let go_deps = detect_go_mod_deps(&content);
+            for (module_path, version) in &go_deps {
+                // Extract the last path segment as repo name candidate.
+                let candidate = module_path.rsplit('/').next().unwrap_or(module_path);
+                if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
+                    if target_repo.id.as_str() != repo_id {
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "go.mod".to_string(),
+                            target_artifact: module_path.to_string(),
+                            dep_type: DependencyType::Code,
+                            method: DetectionMethod::GoMod,
+                            version: version.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // --- pyproject.toml ---
+    if has_pyproject {
+        ran_methods.insert(DetectionMethod::PyprojectToml);
+        if let Some(content) =
+            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "pyproject.toml")
+                .await
+        {
+            let py_deps = detect_pyproject_deps(&content);
+            for (path_val, pkg_name) in &py_deps {
+                let candidate = std::path::Path::new(path_val)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path_val);
+                if let Some(target_repo) = all_repos.iter().find(|r| r.name == candidate) {
+                    if target_repo.id.as_str() != repo_id {
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "pyproject.toml".to_string(),
+                            target_artifact: pkg_name.as_deref().unwrap_or(candidate).to_string(),
+                            dep_type: DependencyType::Code,
+                            method: DetectionMethod::PyprojectToml,
+                            version: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // --- specs/manifest.yaml ---
+    if has_manifest {
+        ran_methods.insert(DetectionMethod::ManifestLink);
+        if let Some(content) =
+            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "specs/manifest.yaml")
+                .await
+        {
+            let spec_links = detect_manifest_spec_links(&content);
+            for (target_repo_name, target_path, _link_type) in &spec_links {
+                if let Some(target_repo) = all_repos.iter().find(|r| r.name == *target_repo_name) {
+                    if target_repo.id.as_str() != repo_id {
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "specs/manifest.yaml".to_string(),
+                            target_artifact: target_path.to_string(),
+                            dep_type: DependencyType::Spec,
+                            method: DetectionMethod::ManifestLink,
+                            version: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // --- OpenAPI / Swagger ---
+    if has_openapi {
+        ran_methods.insert(DetectionMethod::OpenApiRef);
+        for api_file in &["openapi.yaml", "openapi.yml", "swagger.json"] {
+            if let Some(content) =
+                crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, api_file).await
+            {
+                let refs = detect_openapi_refs(&content, &repo_names);
+                for ref_name in &refs {
+                    if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
+                        if target_repo.id.as_str() != repo_id {
+                            detected_edges.push(DetectedEdge {
+                                target_repo_id: target_repo.id.to_string(),
+                                source_artifact: api_file.to_string(),
+                                target_artifact: ref_name.to_string(),
+                                dep_type: DependencyType::Api,
+                                method: DetectionMethod::OpenApiRef,
+                                version: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Protobuf imports ---
+    // Proto is a multi-file detection method (many *.proto files per repo), so when
+    // triggered we must scan ALL .proto files — not just changed ones. Scanning only
+    // changed files while inserting ProtoImport into ran_methods would cause
+    // reconciliation to falsely orphan edges from unchanged .proto files (TASK-048 F4).
+    if has_proto {
+        ran_methods.insert(DetectionMethod::ProtoImport);
+        // Enumerate all .proto files in the repo at the pushed commit.
+        let all_proto_files = list_files_by_extension(&git_bin, repo_path, new_sha, ".proto").await;
+        for proto_file in &all_proto_files {
+            if let Some(content) =
+                crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, proto_file).await
+            {
+                let refs = detect_proto_imports(&content, &repo_names);
+                for ref_name in &refs {
+                    if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
+                        if target_repo.id.as_str() != repo_id {
+                            detected_edges.push(DetectedEdge {
+                                target_repo_id: target_repo.id.to_string(),
+                                source_artifact: proto_file.to_string(),
+                                target_artifact: ref_name.to_string(),
+                                dep_type: DependencyType::Schema,
+                                method: DetectionMethod::ProtoImport,
+                                version: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- mcp.json ---
+    if has_mcp_json {
+        ran_methods.insert(DetectionMethod::McpToolRef);
+        if let Some(content) =
+            crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "mcp.json").await
+        {
+            let refs = detect_mcp_refs(&content, &repo_names);
+            for ref_name in &refs {
+                if let Some(target_repo) = all_repos.iter().find(|r| r.name == *ref_name) {
+                    if target_repo.id.as_str() != repo_id {
+                        detected_edges.push(DetectedEdge {
+                            target_repo_id: target_repo.id.to_string(),
+                            source_artifact: "mcp.json".to_string(),
+                            target_artifact: ref_name.to_string(),
+                            dep_type: DependencyType::Api,
+                            method: DetectionMethod::McpToolRef,
+                            version: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // domain-event:ok — summary log; per-edge domain events emitted by reconcile_dependencies
+    tracing::info!(
+        repo = repo_id,
+        detected_count = detected_edges.len(),
+        "dependency auto-detection complete"
+    );
+
+    // Run reconciliation: create new edges, mark orphaned, update versions.
+    reconcile_dependencies(state, repo_id, &detected_edges, &ran_methods).await;
+
+    // Post-reconciliation: apply version drift and staleness checks for Cargo.toml edges.
+    // Look up the source repo's workspace_id for policy lookup (TASK-021 F1).
+    let source_workspace_id = all_repos
+        .iter()
+        .find(|r| r.id.as_str() == repo_id)
+        .map(|r| r.workspace_id.to_string());
+
+    let policy = if let Some(ws_id) = &source_workspace_id {
+        state
+            .dependency_policies
+            .get_for_workspace(&Id::new(ws_id))
+            .await
+            .unwrap_or_default()
+    } else {
+        gyre_domain::DependencyPolicy::default()
+    };
+
+    // Re-read edges after reconciliation to apply version drift.
+    let current_edges = match state.dependencies.list_by_repo(&source_id).await {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for edge in current_edges {
+        if edge.detection_method != DetectionMethod::CargoToml
+            || edge.status == gyre_domain::DependencyStatus::Orphaned
+        {
+            continue;
+        }
+
+        // Read Cargo.toml to extract pinned version.
+        let toml_content =
+            match crate::spec_registry::read_git_file(&git_bin, repo_path, new_sha, "Cargo.toml")
+                .await
+            {
+                Some(c) => c,
+                None => continue,
+            };
+
+        let target_name = edge.target_artifact.clone();
+        let version_pinned = extract_dep_version(&toml_content, &target_name);
+
+        // Look up target repo to resolve its current version.
+        let target_repo = all_repos.iter().find(|r| r.id == edge.target_repo_id);
+        let target_version = if let Some(tr) = target_repo {
+            crate::version_compute::latest_semver_tag(&tr.path).await
+        } else {
+            None
+        };
+
+        let version_drift = match (&version_pinned, &target_version) {
+            (Some(pinned), Some(current)) => {
+                crate::version_compute::compute_version_drift(pinned, current)
+            }
+            _ => None,
+        };
+
+        let needs_update = edge.version_pinned != version_pinned
+            || edge.target_version_current != target_version
+            || edge.version_drift != version_drift;
+
+        if needs_update {
+            let mut updated = edge.clone();
+            updated.version_pinned = version_pinned;
+            updated.target_version_current = target_version.clone();
+            updated.version_drift = version_drift;
+
+            // Push-time staleness (TASK-021 F1).
+            if policy.max_version_drift > 0 {
+                if let Some(d) = updated.version_drift {
+                    if d > policy.max_version_drift {
+                        updated.status = gyre_domain::DependencyStatus::Stale;
+                    }
+                }
+            }
+
+            if let Err(e) = state.dependencies.save(&updated).await {
+                warn!("dep-detection: failed to update edge version info: {e}");
+            }
+
+            // Create auto-task for stale dependency at push time (TASK-021 F1).
+            if updated.status == gyre_domain::DependencyStatus::Stale
+                && policy.auto_create_update_tasks
+            {
+                let source_name = all_repos
+                    .iter()
+                    .find(|r| r.id.as_str() == repo_id)
+                    .map(|r| r.name.as_str())
+                    .unwrap_or(repo_id);
+                let target_name_str = target_repo.map(|r| r.name.as_str()).unwrap_or("unknown");
+
+                let title = if let (Some(pinned), Some(current)) =
+                    (&updated.version_pinned, &target_version)
+                {
+                    format!("Update {target_name_str} dependency from {pinned} to {current}")
+                } else {
+                    format!("Update stale dependency on {target_name_str}")
+                };
+
+                let task_id = Id::new(uuid::Uuid::new_v4().to_string());
+                let mut task = gyre_domain::Task::new(task_id, &title, now);
+                task.priority = gyre_domain::TaskPriority::Medium;
+                task.labels = vec![
+                    "dependency-update".to_string(),
+                    "stale-dependency".to_string(),
+                    "auto-created".to_string(),
+                ];
+                task.description = Some(format!(
+                    "Dependency on '{target_name_str}' in repo '{}' is stale. \
+                     Pinned version: {}. Current version: {}. Drift: {} versions.",
+                    source_name,
+                    updated.version_pinned.as_deref().unwrap_or("unknown"),
+                    target_version.as_deref().unwrap_or("unknown"),
+                    updated
+                        .version_drift
+                        .map(|d| d.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                ));
+                if let Some(ws_id) = &source_workspace_id {
+                    task.workspace_id = Id::new(ws_id);
+                }
+                task.repo_id = source_id.clone();
+
+                if let Err(e) = state.tasks.create(&task).await {
+                    warn!("dep-detection: failed to create auto-task: {e}");
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Breaking change detection on push (TASK-020)
+// ---------------------------------------------------------------------------
+
+/// Check pushed commits for conventional commit breaking change markers.
+///
+/// Input is expected to be null-delimited records from
+/// `git log --format="%H%x00%B%x00"` — each record is `SHA\0FULL_MESSAGE\0`.
+/// Using the full message (`%B`) ensures `BREAKING CHANGE:` footers in the
+/// commit body are detected, not just the `!` marker in the subject line.
+///
+/// Returns a list of `(commit_sha, description)` tuples for each breaking commit.
+pub(crate) fn detect_breaking_commits(commit_log: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    // Split on null bytes. The format produces [SHA, MESSAGE, SHA, MESSAGE, ...].
+    let parts: Vec<&str> = commit_log.split('\0').collect();
+    // Process pairs: parts[0]=SHA, parts[1]=MESSAGE, parts[2]=SHA, parts[3]=MESSAGE, ...
+    let mut i = 0;
+    while i + 1 < parts.len() {
+        let sha = parts[i].trim();
+        let message = parts[i + 1].trim();
+        i += 2;
+        if sha.is_empty() || message.is_empty() {
+            continue;
+        }
+        if let Some(parsed) = crate::version_compute::parse_conventional(sha, message) {
+            if parsed.is_breaking {
+                results.push((sha.to_string(), parsed.description));
+            }
+        }
+    }
+    results
+}
+
+/// Process detected breaking commits: create BreakingChange records, update
+/// dependency edge status, and create high-priority tasks in dependent repos.
+///
+/// This is the core side-effect-producing logic extracted from
+/// `detect_breaking_changes_on_push` so it can be tested without a git repo.
+pub(crate) async fn process_breaking_changes(
+    state: &Arc<AppState>,
+    breaking_commits: &[(String, String)],
+    dependents: &[gyre_domain::DependencyEdge],
+    repo_id: &str,
+    repo_name: &str,
+    workspace_id: &str,
+    tenant_id: &str,
+    policy: &gyre_domain::DependencyPolicy,
+    now: u64,
+) {
+    use gyre_common::Id;
+    use gyre_domain::{BreakingChange, DependencyStatus, TaskPriority};
+
+    for (commit_sha, description) in breaking_commits {
+        for dep_edge in dependents {
+            // Resolve the dependent repo's workspace — the task and notifications
+            // belong to the dependent repo's workspace, not the pushed repo's.
+            let dep_workspace_id = state
+                .repos
+                .find_by_id(&dep_edge.source_repo_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.workspace_id.clone())
+                .unwrap_or_else(|| Id::new(workspace_id));
+
+            // Create a BreakingChange record.
+            let bc_id = Id::new(uuid::Uuid::new_v4().to_string());
+            let bc = BreakingChange::new(
+                bc_id,
+                dep_edge.id.clone(),
+                Id::new(repo_id),
+                commit_sha.as_str(),
+                description.as_str(),
+                now,
+            );
+
+            if let Err(e) = state.breaking_changes.create(&bc).await {
+                warn!("breaking-change: failed to create record: {e}");
+                continue;
+            }
+
+            // Update the dependency edge status to Breaking.
+            let mut updated_edge = dep_edge.clone();
+            updated_edge.status = DependencyStatus::Breaking;
+            updated_edge.last_verified_at = now;
+            if let Err(e) = state.dependencies.save(&updated_edge).await {
+                warn!("breaking-change: failed to update edge status: {e}");
+            }
+
+            // Create a high-priority task in the dependent repo (if policy allows).
+            if policy.auto_create_update_tasks {
+                let task_id = Id::new(uuid::Uuid::new_v4().to_string());
+                let mut task = gyre_domain::Task::new(
+                    task_id,
+                    format!("Breaking change in {repo_name}: {description}"),
+                    now,
+                );
+                task.priority = TaskPriority::High;
+                task.labels = vec![
+                    "dependency-update".to_string(),
+                    "breaking-change".to_string(),
+                    "auto-created".to_string(),
+                ];
+                task.description = Some(format!(
+                    "Repo '{repo_name}' pushed a breaking change (commit {commit_sha}): {description}. \
+                     Update this repo's dependency to accommodate the change."
+                ));
+                task.workspace_id = dep_workspace_id.clone();
+                task.repo_id = dep_edge.source_repo_id.clone();
+
+                if let Err(e) = state.tasks.create(&task).await {
+                    warn!("breaking-change: failed to create task: {e}");
+                }
+            }
+
+            // Notify workspace members of the DEPENDENT repo about the breaking change.
+            let members = state
+                .workspace_memberships
+                .list_by_workspace(&dep_workspace_id)
+                .await
+                .unwrap_or_default();
+
+            for member in &members {
+                let body_json = serde_json::json!({
+                    "source_repo": repo_name,
+                    "commit_sha": commit_sha,
+                    "description": description,
+                    "dependency_edge_id": dep_edge.id.as_str(),
+                })
+                .to_string();
+
+                crate::notifications::notify_rich(
+                    state,
+                    dep_workspace_id.clone(),
+                    member.user_id.clone(),
+                    gyre_common::NotificationType::CrossWorkspaceSpecChange,
+                    format!("Breaking change in {repo_name}: {description}"),
+                    tenant_id,
+                    Some(body_json),
+                    Some(dep_edge.source_repo_id.to_string()),
+                    Some(repo_id.to_string()),
+                )
+                .await;
+            }
+
+            // Broadcast to the dependent repo's workspace orchestrators.
+            let payload = serde_json::json!({
+                "event": "breaking_change_detected",
+                "source_repo_id": repo_id,
+                "source_repo_name": repo_name,
+                "descriptions": [description],
+                "dependent_repo_ids": [dep_edge.source_repo_id.as_str()],
+            });
+
+            state
+                .emit_event(
+                    Some(dep_workspace_id.clone()),
+                    gyre_common::message::Destination::Workspace(dep_workspace_id),
+                    gyre_common::MessageKind::Custom("breaking_change_detected".to_string()),
+                    Some(payload),
+                )
+                .await;
+        }
+
+        tracing::info!(
+            repo = repo_id,
+            commit = commit_sha,
+            dependents = dependents.len(),
+            "detected breaking change, notified {} dependents",
+            dependents.len(),
+        );
+    }
+}
+
+/// Detect breaking changes on push and propagate to dependent repos.
+///
+/// When a push to a repo contains conventional commit breaking change markers
+/// (`feat!:`, `BREAKING CHANGE:` footer), this function:
+/// 1. Identifies all repos that depend on the pushed repo
+/// 2. Creates BreakingChange records for each affected dependency edge
+/// 3. Updates dependency edge status to `Breaking`
+/// 4. Creates high-priority tasks in dependent repos (if policy allows)
+/// 5. Sends notifications to workspace members
+pub(crate) async fn detect_breaking_changes_on_push(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    repo_path: &str,
+    old_sha: &str,
+    new_sha: &str,
+    workspace_id: &str,
+    tenant_id: &str,
+) {
+    use gyre_common::Id;
+
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+
+    // Use the full push range old_sha..new_sha so that breaking change markers
+    // in interior commits of a multi-commit push are not missed.
+    let range = if old_sha.starts_with("00000000") {
+        new_sha.to_string()
+    } else {
+        format!("{old_sha}..{new_sha}")
+    };
+
+    // Get full commit messages from the push. Using %B (full message) ensures
+    // BREAKING CHANGE: footers in the commit body are detected.
+    let log_out = match Command::new(&git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("log")
+        .arg("--format=%H%x00%B%x00")
+        .arg(&range)
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+
+    let commit_log = String::from_utf8_lossy(&log_out);
+    let breaking_commits = detect_breaking_commits(&commit_log);
+
+    if breaking_commits.is_empty() {
+        return;
+    }
+
+    // Query the dependency graph: "What repos depend on this repo?"
+    let dependents = match state.dependencies.list_dependents(&Id::new(repo_id)).await {
+        Ok(deps) => deps,
+        Err(e) => {
+            warn!("breaking-change: failed to list dependents for {repo_id}: {e}");
+            return;
+        }
+    };
+
+    if dependents.is_empty() {
+        return;
+    }
+
+    let repo_name = state
+        .repos
+        .find_by_id(&Id::new(repo_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| repo_id.to_string());
+
+    let now = crate::api::now_secs();
+
+    // Get the workspace's dependency policy.
+    let policy = state
+        .dependency_policies
+        .get_for_workspace(&Id::new(workspace_id))
+        .await
+        .unwrap_or_default();
+
+    process_breaking_changes(
+        state,
+        &breaking_commits,
+        &dependents,
+        repo_id,
+        &repo_name,
+        workspace_id,
+        tenant_id,
+        &policy,
+        now,
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Audit-only attestation chain verification (TASK-006, Phase 1)
+// ---------------------------------------------------------------------------
+
+/// Verify an attestation chain in audit-only mode. Returns a VerificationResult
+/// tree describing what was checked. This does NOT reject pushes — results are
+/// only logged for observability.
+pub(crate) fn verify_attestation_audit_only(
+    attestation: &gyre_common::Attestation,
+) -> gyre_common::VerificationResult {
+    let mut children = Vec::new();
+
+    // Check 1: Attestation has a valid input.
+    let input_valid = match &attestation.input {
+        gyre_common::AttestationInput::Signed(signed) => {
+            // Verify the signed input has a non-empty spec_path and spec_sha.
+            let spec_ok =
+                !signed.content.spec_path.is_empty() && !signed.content.spec_sha.is_empty();
+            children.push(gyre_common::VerificationResult {
+                label: "signed_input.content".to_string(),
+                valid: spec_ok,
+                message: if spec_ok {
+                    format!(
+                        "spec {}@{}",
+                        signed.content.spec_path,
+                        &signed.content.spec_sha[..8.min(signed.content.spec_sha.len())]
+                    )
+                } else {
+                    "missing spec_path or spec_sha".to_string()
+                },
+                children: vec![],
+            });
+
+            // Cryptographic signature verification (§4.4 step 1, §6.1, §6.2):
+            // Verify Ed25519 signature over SHA256(content) against key_binding.public_key.
+            let sig_valid = {
+                use ring::digest;
+                use ring::signature::{self, UnparsedPublicKey};
+
+                let content_bytes = serde_json::to_vec(&signed.content).unwrap_or_default();
+                let content_hash = digest::digest(&digest::SHA256, &content_bytes);
+                let peer_public_key =
+                    UnparsedPublicKey::new(&signature::ED25519, &signed.key_binding.public_key);
+                peer_public_key
+                    .verify(content_hash.as_ref(), &signed.signature)
+                    .is_ok()
+            };
+            children.push(gyre_common::VerificationResult {
+                label: "signed_input.signature".to_string(),
+                valid: sig_valid,
+                message: if sig_valid {
+                    "Ed25519 signature verified against key_binding.public_key".to_string()
+                } else {
+                    "Ed25519 signature verification FAILED — signature does not match \
+                     key_binding.public_key over InputContent hash"
+                        .to_string()
+                },
+                children: vec![],
+            });
+
+            // Check key binding expiry.
+            let now = crate::api::now_secs();
+            let kb_valid = !signed.key_binding.is_expired(now);
+            if !kb_valid {
+                // §7.7: key_binding.expired audit event.
+                tracing::warn!(
+                    user_identity = %signed.key_binding.user_identity,
+                    expired_at = signed.key_binding.expires_at,
+                    category = "Identity",
+                    event = "key_binding.expired",
+                    "key_binding.expired: key binding for {} expired at {}",
+                    signed.key_binding.user_identity,
+                    signed.key_binding.expires_at
+                );
+            }
+            children.push(gyre_common::VerificationResult {
+                label: "key_binding.expiry".to_string(),
+                valid: kb_valid,
+                message: if kb_valid {
+                    format!("expires at {}", signed.key_binding.expires_at)
+                } else {
+                    format!("expired at {} (now={})", signed.key_binding.expires_at, now)
+                },
+                children: vec![],
+            });
+
+            // Check valid_until.
+            let time_valid = now < signed.valid_until;
+            children.push(gyre_common::VerificationResult {
+                label: "signed_input.valid_until".to_string(),
+                valid: time_valid,
+                message: if time_valid {
+                    format!("valid until {}", signed.valid_until)
+                } else {
+                    format!("expired at {} (now={})", signed.valid_until, now)
+                },
+                children: vec![],
+            });
+
+            spec_ok && sig_valid && kb_valid && time_valid
+        }
+        gyre_common::AttestationInput::Derived(derived) => {
+            let has_parent = !derived.parent_ref.is_empty();
+            children.push(gyre_common::VerificationResult {
+                label: "derived_input.parent_ref".to_string(),
+                valid: has_parent,
+                message: if has_parent {
+                    format!(
+                        "parent: {}",
+                        hex::encode(&derived.parent_ref[..8.min(derived.parent_ref.len())])
+                    )
+                } else {
+                    "missing parent_ref".to_string()
+                },
+                children: vec![],
+            });
+
+            // Cryptographic signature verification (§4.4 step 1):
+            // Verify Ed25519 signature over SHA256(derivation_content) against
+            // key_binding.public_key. Mirrors the Signed branch verification.
+            let sig_valid = {
+                use ring::digest;
+                use ring::signature::{self, UnparsedPublicKey};
+
+                let derivation_content = serde_json::json!({
+                    "parent_ref": hex::encode(&derived.parent_ref),
+                    "agent_id": attestation.metadata.agent_id,
+                    "task_id": attestation.metadata.task_id,
+                });
+                let derivation_bytes = serde_json::to_vec(&derivation_content).unwrap_or_default();
+                let content_hash = digest::digest(&digest::SHA256, &derivation_bytes);
+                let peer_public_key =
+                    UnparsedPublicKey::new(&signature::ED25519, &derived.key_binding.public_key);
+                peer_public_key
+                    .verify(content_hash.as_ref(), &derived.signature)
+                    .is_ok()
+            };
+            children.push(gyre_common::VerificationResult {
+                label: "derived_input.signature".to_string(),
+                valid: sig_valid,
+                message: if sig_valid {
+                    "Ed25519 signature verified against key_binding.public_key".to_string()
+                } else {
+                    "Ed25519 signature verification FAILED — signature does not match \
+                     key_binding.public_key over derivation content hash"
+                        .to_string()
+                },
+                children: vec![],
+            });
+
+            // Check key binding expiry (§4.4 step 2).
+            let now = crate::api::now_secs();
+            let kb_valid = !derived.key_binding.is_expired(now);
+            if !kb_valid {
+                tracing::warn!(
+                    user_identity = %derived.key_binding.user_identity,
+                    expired_at = derived.key_binding.expires_at,
+                    category = "Identity",
+                    event = "key_binding.expired",
+                    "key_binding.expired: key binding for {} expired at {}",
+                    derived.key_binding.user_identity,
+                    derived.key_binding.expires_at
+                );
+            }
+            children.push(gyre_common::VerificationResult {
+                label: "key_binding.expiry".to_string(),
+                valid: kb_valid,
+                message: if kb_valid {
+                    format!("expires at {}", derived.key_binding.expires_at)
+                } else {
+                    format!(
+                        "expired at {} (now={})",
+                        derived.key_binding.expires_at, now
+                    )
+                },
+                children: vec![],
+            });
+
+            has_parent && sig_valid && kb_valid
+        }
+    };
+
+    // Check 2: Chain depth is within limits.
+    let depth_valid = attestation.metadata.chain_depth <= 10;
+    children.push(gyre_common::VerificationResult {
+        label: "chain_depth".to_string(),
+        valid: depth_valid,
+        message: format!("depth={} (max=10)", attestation.metadata.chain_depth),
+        children: vec![],
+    });
+
+    let all_valid = input_valid && depth_valid;
+    gyre_common::VerificationResult {
+        label: "attestation_chain_verification".to_string(),
+        valid: all_valid,
+        message: if all_valid {
+            "all structural checks passed".to_string()
+        } else {
+            "one or more structural checks failed".to_string()
+        },
+        children,
+    }
+}
+
+/// Full chain verification: walk from leaf to root `SignedInput` (§4.4, §6.2).
+///
+/// Returns a `VerificationResult` tree covering:
+///   - Each node's structural verification (signature, key binding, expiry)
+///   - Chain depth limit check (configurable, hard limit 10)
+///   - Accumulated constraints from the entire chain
+///
+/// The `max_depth` parameter is workspace-configurable; the hard limit of 10
+/// applies regardless.
+pub(crate) fn verify_chain(
+    chain: &[gyre_common::Attestation],
+    max_depth: u32,
+) -> gyre_common::VerificationResult {
+    let effective_max = max_depth.min(10);
+    let mut children = Vec::new();
+
+    if chain.is_empty() {
+        return gyre_common::VerificationResult {
+            label: "chain_verification".to_string(),
+            valid: false,
+            message: "empty attestation chain".to_string(),
+            children: vec![],
+        };
+    }
+
+    // Verify each node in the chain (root first → leaf last).
+    let mut all_valid = true;
+    let mut found_root = false;
+
+    for (i, att) in chain.iter().enumerate() {
+        let node_result = verify_attestation_audit_only(att);
+        if !node_result.valid {
+            all_valid = false;
+        }
+
+        // Check depth against configurable max.
+        if att.metadata.chain_depth > effective_max {
+            children.push(gyre_common::VerificationResult {
+                label: format!("node[{}].depth_limit", i),
+                valid: false,
+                message: format!(
+                    "chain depth {} exceeds max {} (hard limit 10)",
+                    att.metadata.chain_depth, effective_max
+                ),
+                children: vec![],
+            });
+            all_valid = false;
+        }
+
+        // Verify chain linkage: DerivedInput must have a non-empty parent_ref
+        // and there must be a prior node at a lower chain_depth.
+        // The parent_ref is a content hash of the parent attestation, not its
+        // id field — so we verify structural consistency (non-empty, depth ordering)
+        // rather than trying to match content hashes to IDs.
+        if let gyre_common::AttestationInput::Derived(ref derived) = att.input {
+            let has_parent_ref = !derived.parent_ref.is_empty();
+            let has_parent_at_lower_depth = chain
+                .iter()
+                .any(|p| p.metadata.chain_depth < att.metadata.chain_depth);
+            let linkage_valid = has_parent_ref && has_parent_at_lower_depth;
+            children.push(gyre_common::VerificationResult {
+                label: format!("node[{}].parent_linkage", i),
+                valid: linkage_valid,
+                message: if linkage_valid {
+                    format!(
+                        "parent_ref present, parent at depth {} found",
+                        att.metadata.chain_depth.saturating_sub(1)
+                    )
+                } else if !has_parent_ref {
+                    "missing parent_ref".to_string()
+                } else {
+                    "no parent node at lower depth found in chain".to_string()
+                },
+                children: vec![],
+            });
+            if !linkage_valid {
+                all_valid = false;
+            }
+        }
+
+        if matches!(att.input, gyre_common::AttestationInput::Signed(_)) {
+            found_root = true;
+        }
+
+        children.push(node_result);
+    }
+
+    // The chain must have a root SignedInput.
+    if !found_root {
+        children.push(gyre_common::VerificationResult {
+            label: "root_signed_input".to_string(),
+            valid: false,
+            message: "no root SignedInput found in chain".to_string(),
+            children: vec![],
+        });
+        all_valid = false;
+    } else {
+        children.push(gyre_common::VerificationResult {
+            label: "root_signed_input".to_string(),
+            valid: true,
+            message: "root SignedInput found".to_string(),
+            children: vec![],
+        });
+    }
+
+    gyre_common::VerificationResult {
+        label: "chain_verification".to_string(),
+        valid: all_valid,
+        message: if all_valid {
+            format!(
+                "chain of {} node(s) verified (max depth {})",
+                chain.len(),
+                effective_max
+            )
+        } else {
+            "chain verification failed".to_string()
+        },
+        children,
+    }
+}
+
+/// Accumulate all constraints from a verified chain (§4.3, §6.2 Phase 2).
+///
+/// Walks the chain root→leaf, collecting:
+/// 1. Explicit constraints from the root SignedInput
+/// 2. Additional constraints from each DerivedInput (additive only)
+/// 3. Gate constraints from gate attestations on each node
+///
+/// Returns the full constraint set for evaluation.
+pub(crate) fn accumulate_chain_constraints(
+    chain: &[gyre_common::Attestation],
+) -> (
+    Option<gyre_common::attestation::SignedInput>,
+    Vec<gyre_common::attestation::OutputConstraint>,
+    Vec<gyre_common::attestation::GateConstraint>,
+) {
+    let mut explicit_constraints = Vec::new();
+    let mut gate_constraints = Vec::new();
+    let mut root_input = None;
+
+    for att in chain {
+        match &att.input {
+            gyre_common::AttestationInput::Signed(si) => {
+                root_input = Some(si.clone());
+                explicit_constraints.extend(si.output_constraints.iter().cloned());
+            }
+            gyre_common::AttestationInput::Derived(di) => {
+                // Additive only: append derived constraints.
+                explicit_constraints.extend(di.output_constraints.iter().cloned());
+            }
+        }
+
+        // Collect gate constraints from all nodes.
+        for gate_result in &att.output.gate_results {
+            if let Some(ref gc) = gate_result.constraint {
+                gate_constraints.push(gc.clone());
+            }
+        }
+    }
+
+    (root_input, explicit_constraints, gate_constraints)
 }
 
 // ---------------------------------------------------------------------------
@@ -2073,5 +3871,632 @@ mod tests {
     #[test]
     fn classify_spec_change_unknown_returns_none() {
         assert!(super::classify_spec_change('X', "specs/system/foo.md", None).is_none());
+    }
+
+    // ── Audit-only verification tests (TASK-006) ─────────────────────────
+
+    #[test]
+    fn verify_attestation_audit_only_valid_signed_input() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        // Generate a real Ed25519 keypair and sign the content.
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let content = gyre_common::InputContent {
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: "abc12345".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: "def456".to_string(),
+            scope: gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+
+        let content_bytes = serde_json::to_vec(&content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &content_bytes);
+        let signature = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
+        let kb = gyre_common::KeyBinding {
+            public_key: key_pair.public_key().as_ref().to_vec(),
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://keycloak.example.com".to_string(),
+            trust_anchor_id: "tenant-keycloak".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX, // far in the future
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+
+        let att = gyre_common::Attestation {
+            id: "att-1".to_string(),
+            input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
+                content,
+                output_constraints: vec![],
+                valid_until: u64::MAX,
+                expected_generation: None,
+                signature,
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![40],
+                commit_sha: "sha-abc".to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_700_000_000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: "TASK-007".to_string(),
+                agent_id: "agent-1".to_string(),
+                chain_depth: 0,
+            },
+        };
+
+        let result = super::verify_attestation_audit_only(&att);
+        assert!(result.valid, "result should be valid: {:?}", result);
+        assert_eq!(result.label, "attestation_chain_verification");
+        // Verify the signature child reports valid.
+        let sig_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "signed_input.signature")
+            .expect("should have signed_input.signature child");
+        assert!(
+            sig_child.valid,
+            "signature should be valid: {:?}",
+            sig_child
+        );
+    }
+
+    #[test]
+    fn verify_attestation_audit_only_forged_signature() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        // Generate a real keypair but use a forged (wrong) signature.
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let content = gyre_common::InputContent {
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: "abc12345".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: "def456".to_string(),
+            scope: gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+
+        let kb = gyre_common::KeyBinding {
+            public_key: key_pair.public_key().as_ref().to_vec(),
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://keycloak.example.com".to_string(),
+            trust_anchor_id: "tenant-keycloak".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+
+        let att = gyre_common::Attestation {
+            id: "att-forged".to_string(),
+            input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
+                content,
+                output_constraints: vec![],
+                valid_until: u64::MAX,
+                expected_generation: None,
+                signature: vec![0xDE; 64], // forged signature bytes (64 bytes for Ed25519)
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![40],
+                commit_sha: "sha-abc".to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_700_000_000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: "TASK-007".to_string(),
+                agent_id: "agent-1".to_string(),
+                chain_depth: 0,
+            },
+        };
+
+        let result = super::verify_attestation_audit_only(&att);
+        // Overall should be invalid because signature is forged.
+        assert!(
+            !result.valid,
+            "result should be invalid for forged sig: {:?}",
+            result
+        );
+        // Signature child specifically should report invalid.
+        let sig_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "signed_input.signature")
+            .expect("should have signed_input.signature child");
+        assert!(!sig_child.valid, "forged signature should be invalid");
+        assert!(
+            sig_child.message.contains("FAILED"),
+            "message should indicate failure: {}",
+            sig_child.message
+        );
+    }
+
+    #[test]
+    fn verify_attestation_audit_only_expired_key_binding() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let content = gyre_common::InputContent {
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: "abc12345".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: String::new(),
+            scope: gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+
+        let content_bytes = serde_json::to_vec(&content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &content_bytes);
+        let signature = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
+        let kb = gyre_common::KeyBinding {
+            public_key: key_pair.public_key().as_ref().to_vec(),
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://keycloak.example.com".to_string(),
+            trust_anchor_id: "tenant-keycloak".to_string(),
+            issued_at: 1_000_000_000,
+            expires_at: 1_000_000_001, // expired long ago
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+
+        let att = gyre_common::Attestation {
+            id: "att-2".to_string(),
+            input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
+                content,
+                output_constraints: vec![],
+                valid_until: u64::MAX,
+                expected_generation: None,
+                signature,
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![40],
+                commit_sha: String::new(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_000_000_000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: "TASK-008".to_string(),
+                agent_id: "agent-2".to_string(),
+                chain_depth: 0,
+            },
+        };
+
+        let result = super::verify_attestation_audit_only(&att);
+        assert!(!result.valid, "result should be invalid: {:?}", result);
+        // Signature should still be cryptographically valid.
+        let sig_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "signed_input.signature")
+            .expect("should have signed_input.signature child");
+        assert!(
+            sig_child.valid,
+            "signature should be valid even though key is expired"
+        );
+        // Check that the key_binding.expiry child reports invalid.
+        let kb_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "key_binding.expiry")
+            .expect("should have key_binding.expiry child");
+        assert!(!kb_child.valid);
+    }
+
+    #[test]
+    fn verify_attestation_audit_only_excessive_chain_depth() {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let content = gyre_common::InputContent {
+            spec_path: "specs/system/x.md".to_string(),
+            spec_sha: "1234567890abcdef".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: String::new(),
+            scope: gyre_common::ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+
+        let content_bytes = serde_json::to_vec(&content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &content_bytes);
+        let signature = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
+        let kb = gyre_common::KeyBinding {
+            public_key: key_pair.public_key().as_ref().to_vec(),
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://example.com".to_string(),
+            trust_anchor_id: "test".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![],
+            platform_countersign: vec![],
+        };
+
+        let att = gyre_common::Attestation {
+            id: "att-deep".to_string(),
+            input: gyre_common::AttestationInput::Signed(gyre_common::SignedInput {
+                content,
+                output_constraints: vec![],
+                valid_until: u64::MAX,
+                expected_generation: None,
+                signature,
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![],
+                commit_sha: String::new(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_700_000_000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: "T".to_string(),
+                agent_id: "A".to_string(),
+                chain_depth: 11, // exceeds limit of 10
+            },
+        };
+
+        let result = super::verify_attestation_audit_only(&att);
+        assert!(!result.valid);
+        // Signature should be cryptographically valid.
+        let sig_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "signed_input.signature")
+            .expect("should have signed_input.signature child");
+        assert!(
+            sig_child.valid,
+            "signature should be valid even though chain depth is excessive"
+        );
+        let depth_child = result
+            .children
+            .iter()
+            .find(|c| c.label == "chain_depth")
+            .expect("should have chain_depth child");
+        assert!(!depth_child.valid);
+    }
+
+    // ── Full chain verification (TASK-009, §4.4, §6.2) ───────────────
+
+    fn make_signed_chain_attestation(
+        task_id: &str,
+        key_pair: &ring::signature::Ed25519KeyPair,
+    ) -> gyre_common::Attestation {
+        use ring::signature::KeyPair;
+
+        let content = gyre_common::attestation::InputContent {
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: "abc12345".to_string(),
+            workspace_id: "ws-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            persona_constraints: vec![gyre_common::attestation::PersonaRef {
+                name: "security".to_string(),
+            }],
+            meta_spec_set_sha: "def456".to_string(),
+            scope: gyre_common::attestation::ScopeConstraint {
+                allowed_paths: vec!["src/**".to_string()],
+                forbidden_paths: vec![],
+            },
+        };
+
+        let content_bytes = serde_json::to_vec(&content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &content_bytes);
+        let signature = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
+        let kb = gyre_common::KeyBinding {
+            public_key: key_pair.public_key().as_ref().to_vec(),
+            user_identity: "user:jsell".to_string(),
+            issuer: "https://keycloak.example.com".to_string(),
+            trust_anchor_id: "tenant-keycloak".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![10],
+            platform_countersign: vec![20],
+        };
+
+        gyre_common::Attestation {
+            id: "root-att-1".to_string(),
+            input: gyre_common::AttestationInput::Signed(gyre_common::attestation::SignedInput {
+                content,
+                output_constraints: vec![gyre_common::attestation::OutputConstraint {
+                    name: "scope to src".to_string(),
+                    expression: r#"output.changed_files.all(f, f.startsWith("src/"))"#.to_string(),
+                }],
+                valid_until: u64::MAX,
+                expected_generation: None,
+                signature,
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![],
+                commit_sha: "sha-root".to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_700_000_000,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: task_id.to_string(),
+                agent_id: "orchestrator-1".to_string(),
+                chain_depth: 0,
+            },
+        }
+    }
+
+    fn make_derived_chain_attestation(
+        parent: &gyre_common::Attestation,
+        task_id: &str,
+        agent_id: &str,
+        depth: u32,
+    ) -> gyre_common::Attestation {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        use ring::signature::KeyPair;
+
+        // Compute parent_ref as content hash of parent attestation.
+        let parent_bytes = serde_json::to_vec(parent).unwrap();
+        let parent_hash = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&parent_bytes);
+            hasher.finalize().to_vec()
+        };
+
+        let derivation_content = serde_json::json!({
+            "parent_ref": hex::encode(&parent_hash),
+            "agent_id": agent_id,
+            "task_id": task_id,
+        });
+        let derivation_bytes = serde_json::to_vec(&derivation_content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &derivation_bytes);
+        let sig = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
+        let kb = gyre_common::KeyBinding {
+            public_key: key_pair.public_key().as_ref().to_vec(),
+            user_identity: format!("agent:{agent_id}"),
+            issuer: "https://gyre.example.com".to_string(),
+            trust_anchor_id: "gyre-oidc".to_string(),
+            issued_at: 1_700_000_000,
+            expires_at: u64::MAX,
+            user_signature: vec![],
+            platform_countersign: vec![],
+        };
+
+        gyre_common::Attestation {
+            id: format!("derived-att-{}", agent_id),
+            input: gyre_common::AttestationInput::Derived(gyre_common::DerivedInput {
+                parent_ref: parent_hash,
+                preconditions: vec![],
+                update: format!("agent:{agent_id} spawned for task:{task_id}"),
+                output_constraints: vec![],
+                signature: sig,
+                key_binding: kb,
+            }),
+            output: gyre_common::AttestationOutput {
+                content_hash: vec![],
+                commit_sha: format!("sha-{agent_id}"),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::AttestationMetadata {
+                created_at: 1_700_000_100,
+                workspace_id: "ws-1".to_string(),
+                repo_id: "repo-1".to_string(),
+                task_id: task_id.to_string(),
+                agent_id: agent_id.to_string(),
+                chain_depth: depth,
+            },
+        }
+    }
+
+    #[test]
+    fn verify_chain_single_signed_input() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let root = make_signed_chain_attestation("TASK-CHAIN-1", &key_pair);
+        let chain = vec![root];
+
+        let result = verify_chain(&chain, 10);
+        assert!(
+            result.valid,
+            "single signed input chain should be valid: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn verify_chain_human_orchestrator_agent() {
+        // Full chain: human → orchestrator → agent (depth 0, 1, 2).
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let root = make_signed_chain_attestation("TASK-CHAIN-2", &key_pair);
+        let orch = make_derived_chain_attestation(&root, "TASK-CHAIN-2", "orchestrator-1", 1);
+        let agent = make_derived_chain_attestation(&orch, "TASK-CHAIN-2", "worker-1", 2);
+
+        let chain = vec![root, orch, agent];
+        let result = verify_chain(&chain, 10);
+        assert!(
+            result.valid,
+            "human→orchestrator→agent chain should be valid: {}",
+            result.message
+        );
+
+        // Verify root SignedInput was found.
+        let root_found = result
+            .children
+            .iter()
+            .any(|c| c.label == "root_signed_input" && c.valid);
+        assert!(root_found, "should find root SignedInput");
+    }
+
+    #[test]
+    fn verify_chain_exceeds_depth_limit() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let root = make_signed_chain_attestation("TASK-DEEP", &key_pair);
+        let derived = make_derived_chain_attestation(&root, "TASK-DEEP", "deep-agent", 5);
+
+        let chain = vec![root, derived];
+
+        // With max_depth=3, depth=5 should fail.
+        let result = verify_chain(&chain, 3);
+        assert!(!result.valid, "should fail when depth exceeds limit");
+        let depth_failed = result
+            .children
+            .iter()
+            .any(|c| c.label.contains("depth_limit") && !c.valid);
+        assert!(depth_failed, "should have depth limit failure");
+    }
+
+    #[test]
+    fn verify_chain_empty_is_invalid() {
+        let result = verify_chain(&[], 10);
+        assert!(!result.valid, "empty chain should be invalid");
+        assert!(result.message.contains("empty"));
+    }
+
+    #[test]
+    fn verify_chain_no_root_signed_input_is_invalid() {
+        // Chain with only derived inputs (no root).
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let root = make_signed_chain_attestation("TASK-NOROOT", &key_pair);
+        let derived = make_derived_chain_attestation(&root, "TASK-NOROOT", "agent-1", 1);
+
+        // Only include the derived, not the root.
+        let chain = vec![derived];
+        let result = verify_chain(&chain, 10);
+        assert!(!result.valid, "chain without root should be invalid");
+    }
+
+    #[test]
+    fn accumulate_chain_constraints_additive() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let root = make_signed_chain_attestation("TASK-ACC", &key_pair);
+
+        // Create a derived with additional constraints.
+        let mut derived = make_derived_chain_attestation(&root, "TASK-ACC", "agent-1", 1);
+        if let gyre_common::AttestationInput::Derived(ref mut di) = derived.input {
+            di.output_constraints
+                .push(gyre_common::attestation::OutputConstraint {
+                    name: "agent-scope".to_string(),
+                    expression: r#"output.changed_files.all(f, f.startsWith("src/payments/"))"#
+                        .to_string(),
+                });
+        }
+
+        let chain = vec![root, derived];
+        let (root_si, explicit, gate) = accumulate_chain_constraints(&chain);
+
+        assert!(root_si.is_some(), "should find root signed input");
+        // Root has 1 constraint + derived has 1 = 2 total.
+        assert_eq!(
+            explicit.len(),
+            2,
+            "should accumulate constraints additively"
+        );
+        assert!(gate.is_empty(), "should have no gate constraints");
+    }
+
+    #[test]
+    fn accumulate_chain_constraints_includes_gate_constraints() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+
+        let mut root = make_signed_chain_attestation("TASK-GATE", &key_pair);
+        // Add a gate attestation with a constraint.
+        root.output
+            .gate_results
+            .push(gyre_common::attestation::GateAttestation {
+                gate_id: "gate-review".to_string(),
+                gate_name: "Code Review".to_string(),
+                gate_type: gyre_common::GateType::AgentReview,
+                status: gyre_common::GateStatus::Passed,
+                output_hash: vec![1, 2, 3],
+                constraint: Some(gyre_common::attestation::GateConstraint {
+                    gate_id: "gate-review".to_string(),
+                    gate_name: "Code Review".to_string(),
+                    constraint: gyre_common::attestation::OutputConstraint {
+                        name: "review constraint".to_string(),
+                        expression: "true".to_string(),
+                    },
+                    signed_by: vec![4, 5, 6],
+                }),
+                signature: vec![7, 8, 9],
+                key_binding: gyre_common::KeyBinding {
+                    public_key: vec![1; 32],
+                    user_identity: "gate-agent:review".to_string(),
+                    issuer: "https://gyre.example.com".to_string(),
+                    trust_anchor_id: "gyre-platform".to_string(),
+                    issued_at: 1_700_000_000,
+                    expires_at: u64::MAX,
+                    user_signature: vec![],
+                    platform_countersign: vec![],
+                },
+            });
+
+        let chain = vec![root];
+        let (_root_si, explicit, gate) = accumulate_chain_constraints(&chain);
+
+        assert_eq!(explicit.len(), 1, "should have 1 explicit constraint");
+        assert_eq!(gate.len(), 1, "should have 1 gate constraint");
+        assert_eq!(gate[0].gate_name, "Code Review");
     }
 }

@@ -13,6 +13,7 @@ pub mod agent_commit;
 pub mod analytics;
 pub mod attestation;
 pub mod audit;
+pub mod authorization_provenance;
 pub mod budget;
 pub mod compute_target;
 pub mod container_audit;

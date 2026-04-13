@@ -25,6 +25,42 @@ pub struct DiffStats {
     pub deletions: usize,
 }
 
+/// How a dependency was established.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencySource {
+    /// Declared at MR creation or set explicitly by an orchestrator/human.
+    Explicit,
+    /// Auto-detected from git branch lineage (source branch is descendant of dep branch).
+    BranchLineage,
+    /// Declared at runtime by an agent that discovered the dependency.
+    AgentDeclared,
+}
+
+/// Per-dependency metadata: which MR, how it was established, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeRequestDependency {
+    pub target_mr_id: Id,
+    pub source: DependencySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl MergeRequestDependency {
+    pub fn new(target_mr_id: Id, source: DependencySource) -> Self {
+        Self {
+            target_mr_id,
+            source,
+            reason: None,
+        }
+    }
+
+    pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
+        self.reason = Some(reason.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergeRequest {
     pub id: Id,
@@ -39,8 +75,8 @@ pub struct MergeRequest {
     pub has_conflicts: Option<bool>,
     /// Optional spec reference "path/to/spec.md@<40-char-sha>" for cryptographic binding.
     pub spec_ref: Option<String>,
-    /// MR IDs that must be merged before this MR can be processed.
-    pub depends_on: Vec<Id>,
+    /// Dependencies that must be merged before this MR can be processed.
+    pub depends_on: Vec<MergeRequestDependency>,
     /// Atomic group identifier — all members of the group must merge together.
     pub atomic_group: Option<String>,
     pub created_at: u64,
@@ -107,6 +143,11 @@ impl MergeRequest {
                 to: new_status,
             })
         }
+    }
+
+    /// Return the target MR IDs for all dependencies (convenience for iteration).
+    pub fn dep_target_ids(&self) -> Vec<&Id> {
+        self.depends_on.iter().map(|d| &d.target_mr_id).collect()
     }
 
     /// Mark this MR as reverted via the recovery protocol.
@@ -189,5 +230,48 @@ mod tests {
         assert!(mr.spec_ref.is_none());
         mr.spec_ref = Some("specs/system/agent-gates.md@abc1234".to_string());
         assert!(mr.spec_ref.is_some());
+    }
+
+    #[test]
+    fn test_dependency_source_serialization() {
+        let dep = MergeRequestDependency::new(Id::new("mr1"), DependencySource::BranchLineage);
+        let json = serde_json::to_string(&dep).unwrap();
+        assert!(json.contains("\"branch-lineage\""));
+        assert!(json.contains("\"target_mr_id\""));
+
+        let dep2 = MergeRequestDependency::new(Id::new("mr2"), DependencySource::AgentDeclared)
+            .with_reason("needs trait from mr2");
+        let json2 = serde_json::to_string(&dep2).unwrap();
+        assert!(json2.contains("\"agent-declared\""));
+        assert!(json2.contains("needs trait from mr2"));
+    }
+
+    #[test]
+    fn test_dependency_deserialization_backward_compat() {
+        // New format with metadata.
+        let json = r#"{"target_mr_id":"mr1","source":"explicit"}"#;
+        let dep: MergeRequestDependency = serde_json::from_str(json).unwrap();
+        assert_eq!(dep.target_mr_id, Id::new("mr1"));
+        assert_eq!(dep.source, DependencySource::Explicit);
+        assert!(dep.reason.is_none());
+
+        // With reason.
+        let json2 = r#"{"target_mr_id":"mr2","source":"agent-declared","reason":"needs schema"}"#;
+        let dep2: MergeRequestDependency = serde_json::from_str(json2).unwrap();
+        assert_eq!(dep2.source, DependencySource::AgentDeclared);
+        assert_eq!(dep2.reason.as_deref(), Some("needs schema"));
+    }
+
+    #[test]
+    fn test_dep_target_ids() {
+        let mut mr = make_mr();
+        mr.depends_on = vec![
+            MergeRequestDependency::new(Id::new("dep1"), DependencySource::Explicit),
+            MergeRequestDependency::new(Id::new("dep2"), DependencySource::BranchLineage),
+        ];
+        let ids = mr.dep_target_ids();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], &Id::new("dep1"));
+        assert_eq!(ids[1], &Id::new("dep2"));
     }
 }

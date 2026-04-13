@@ -1,0 +1,63 @@
+# Coverage: Human-System Interface
+
+**Spec:** [`system/human-system-interface.md`](../../system/human-system-interface.md)
+**Last audited:** 2026-04-13 (§1 verified this cycle; §2+ classified prior cycle)
+**Coverage:** 4/37
+
+| # | Section | Depth | Status | Task | Notes |
+|---|---------|-------|--------|------|-------|
+| 1 | The Novel Problem | 2 | n/a | - | Context/rationale — no implementable requirement. |
+| 2 | 1. Navigation Model | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 3 | Stable Sidebar, Adaptive Content | 3 | task-assigned | task-082 | No desktop sidebar exists (App.svelte:1032 "no sidebar"). Mobile drawer only with 5 items. Spec requires permanent 6-item sidebar. |
+| 4 | Scope Indicator (Breadcrumb) | 3 | implemented | - | Partial — breadcrumb exists in repo/settings modes (App.svelte:1056-1139) but: (1) no tenant segment shown (only workspace > repo, spec requires tenant > workspace > repo), (2) not always present (missing from workspace home, profile, cross-workspace home), (3) repo segment not always clickable (static span when no entity detail open). Consider splitting into separate task. |
+| 5 | What Each Nav Item Shows at Each Scope | 3 | task-assigned | task-083 | No sidebar nav items exist. Content uses modes/tabs/sections instead of spec's 6-item × 3-scope matrix. |
+| 6 | Workspace Attribution on Items | 3 | implemented | - | Partial — workspace name badges exist (CrossWorkspaceHome.svelte:938) but NOT clickable (spec requires link to workspace view; decision badges ARE clickable at :675). Status bar fully implemented (App.svelte:1565-1619: trust, budget, WS status, presence). Presence backend complete (ws.rs:182-295: session_id, 5-cap eviction, PresenceEvicted). Frontend presence sending NOT implemented: no client-side UserPresence messages, no session_id generation, no debounce, no view-change triggers. beforeunload handler exists but doesn't send disconnect message. Consider splitting UI badges vs presence mechanics. |
+| 7 | Deep Links | 3 | implemented | - | Partial — Backend solid: user_workspace_state table (migration 000027), last_seen_at middleware (middleware.rs:104-175, 60s debounce, async upsert), briefing time dropdown (Briefing.svelte:25-56, all 5 options). URL routing partial: routes exist but patterns differ from spec (/workspaces/:slug/r/:repo/... vs spec's /repos/:id/...), missing /inbox and /workspaces/:id/inbox routes, no query param support for explorer filters/lens or specs path. Entrypoint diverges: goes to workspace home, not explorer→inbox flow per spec. |
+| 8 | Keyboard Navigation | 3 | implemented | - | Partial — 4/10 shortcuts match spec: Cmd+K (App.svelte:380), Esc (:388), / (:400), ? (:408). Cmd+1-6 for global nav (Inbox/Briefing/Explorer/Specs/Meta-specs/Admin) NOT implemented. Instead uses g-key sequences (:417-470) for repo tab switching (different purpose). SearchBar.svelte:16-24 defines nav items with numeric icons 1-6 but no keyboard binding. |
+| 9 | 2. Trust Gradient | 2 | task-assigned | task-077 | |
+| 10 | The Problem | 3 | task-assigned | task-077 | |
+| 11 | Trust Levels | 3 | task-assigned | task-077 | |
+| 12 | What Each Level Controls | 3 | task-assigned | task-077 | |
+| 13 | Mechanical Implementation | 3 | task-assigned | task-077 | |
+| 14 | 2a. Policies ↔ Trust Level Integration | 3 | task-assigned | task-084 | Depends on task-077 |
+| 15 | Trust Suggestions | 3 | task-assigned | task-085 | Depends on task-077; notification infrastructure exists |
+| 16 | 3. The Explorer: Progressive Architecture Discovery | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 17 | The Zero-Knowledge Problem | 3 | n/a | - | Context/rationale — no implementable requirement. |
+| 18 | Design Principle: The Built Software Is Always Alive | 3 | task-assigned | task-086 | Two layers of liveness: SDLC activity + test-time traces |
+| 19 | Test-Time Trace Capture | 3 | task-assigned | task-087 | OTLP receiver, TraceCapture gate, span-to-graph linkage |
+| 20 | Default Views (Automatic, No LLM) | 3 | task-assigned | task-088 | Boundary, Spec Realization, Change, System Trace views |
+| 21 | Saved Views (Curated, Shared) | 3 | not-started | - | View spec grammar, ownership, built-in views. Overlap with explorer-implementation.md §Saved Views (verified). |
+| 22 | Generated Views (LLM-Powered, On-Demand) | 3 | task-assigned | task-089 | LLM query translation + flow layout |
+| 23 | Three Lenses | 3 | task-assigned | task-090 | Structural (default), Evaluative, Observable (future) |
+| 24 | 4. Agent Communication | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 25 | The Problem | 3 | n/a | - | Context/rationale — no implementable requirement. |
+| 26 | Scoped Inline Chat | 3 | task-assigned | task-091 | Chat scoped to agent/orchestrator/briefing/MR contexts |
+| 27 | Hard Interrupt | 3 | task-assigned | task-091 | Pause/Stop/Message buttons on agent detail panel |
+| 28 | Agent Completion Summaries | 3 | not-started | - | Extends agent.complete with summary; AgentCompleted MessageKind |
+| 29 | Interrogation Agents | 3 | not-started | - | "Ask why" spawns restricted interrogation agent with ABAC |
+| 30 | 5. Conversation-to-Code Provenance | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 31 | The Problem | 3 | n/a | - | Context/rationale — no implementable requirement. |
+| 32 | Design | 3 | not-started | - | ConversationRepository, TurnCommitLink, conversation.upload MCP tool |
+| 33 | 6. Cross-Workspace Spec Dependencies | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 34 | The Problem | 3 | n/a | - | Context/rationale — no implementable requirement. |
+| 35 | Design | 3 | not-started | - | @workspace_slug/repo_name/spec_path format, resolution |
+| 36 | What the System Does With Cross-Workspace Links | 3 | not-started | - | Notifications, briefing integration, explorer visualization, orchestrator awareness |
+| 37 | Cross-Workspace Change Notification | 3 | not-started | - | Spec link watcher, SpecChanged events, dependent workspace notifications |
+| 38 | 7. Multi-Human Collaboration | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 39 | Presence Awareness | 3 | not-started | - | UserPresence WsMessage, presence map, GET /workspaces/:id/presence |
+| 40 | Conflict Prevention | 3 | not-started | - | Concurrent spec edit warning, optimistic concurrency |
+| 41 | Shared Views | 3 | not-started | - | Explorer views shared across workspace members |
+| 42 | 8. Inbox Detail | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 43 | Action Types (Priority Order) | 3 | not-started | - | 10 notification action types with inline actions; notification infrastructure exists |
+| 44 | 9. Briefing Detail | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 45 | Structure | 3 | not-started | - | Briefing response schema: completed, in_progress, cross_workspace, exceptions, metrics |
+| 46 | Data Sources | 3 | not-started | - | Data source mapping per briefing section |
+| 47 | Briefing Q&A | 3 | not-started | - | POST /workspaces/:id/briefing/ask endpoint exists; need spec compliance |
+| 48 | 10. Observable Lens (Future-Proofing) | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 49 | Design Constraints | 3 | not-started | - | Architectural constraints for future Observable lens |
+| 50 | 11. CLI/MCP Parity Constraint | 2 | not-started | - | CLI commands: gyre briefing, gyre inbox, gyre explore, gyre trace, gyre spec assist |
+| 51 | 12. User Profile | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 52 | The Problem | 3 | n/a | - | Context/rationale — no implementable requirement. |
+| 53 | What the Profile Is | 3 | not-started | - | /profile page: Identity, Notification Prefs, Memberships, Judgment Ledger |
+| 54 | What the Profile Is NOT | 3 | n/a | - | Anti-requirements/guidelines — no implementable requirement. |
+| 55 | Relationship to Existing Specs | 2 | n/a | - | Cross-reference section — no implementable requirement. |

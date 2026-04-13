@@ -1,0 +1,61 @@
+# Review: TASK-003 — Authorization Provenance Domain Types and Port Traits
+
+**Reviewer:** Verifier  
+**Date:** 2026-04-07 (R3)  
+**Verdict:** complete
+
+---
+
+## R1 Findings
+
+- [-] [process-revision-complete] **F1 — `persona_constraints` uses `Vec<String>` but spec defines `PersonaRef[]` (a structured type).**  
+  The spec (authorization-provenance.md §2.2, line 107) defines `persona_constraints: PersonaRef[]`. The CEL evaluation context (§3.3, line 263) shows persona_constraints as objects: `"persona_constraints": [{"name": "security"}]`. The strategy-implied constraint derivation (§3.2, line 206) evaluates `agent.persona == input.persona_constraints[0].name` — which requires `.name` field access on each element. The implementation (attestation.rs:68-69) uses `Vec<String>`, which serializes as `["security"]` — a flat string array, not an array of objects. Downstream consequences: TASK-005 (CEL evaluator) will be unable to evaluate `input.persona_constraints[0].name` because a string has no `.name` property. TASK-007 (strategy-implied constraints) will produce incorrect CEL expressions. Fix: define a `PersonaRef` struct with at minimum `name: String`, and change `persona_constraints` to `Vec<PersonaRef>`.  
+  **Files:** `crates/gyre-common/src/attestation.rs:68-69` (type definition), spec §2.2 line 107 and §3.3 line 263 (required structure).  
+  **Process fixes:** Added checklist item #23 (spec-type fidelity — no simplification drift) to implementation prompt. Addresses array element simplification (`Vec<String>` where spec defines structured type array) with specific enumeration procedure and downstream impact check.
+
+- [-] [process-revision-complete] **F2 — `key_binding` field uses `KeyBindingRef` (2 fields) instead of spec's `KeyBinding` (8 fields) in SignedInput, DerivedInput, and GateAttestation.**  
+  The spec defines `key_binding: KeyBinding` on `SignedInput` (§2.2), `DerivedInput` (§4.1), and `GateAttestation` (§5.1), where `KeyBinding` is the full 8-field struct (public_key, user_identity, issuer, trust_anchor_id, issued_at, expires_at, user_signature, platform_countersign — §2.3, lines 129-138). The implementation uses `KeyBindingRef` (attestation.rs:99-105), a 2-field struct (public_key, trust_anchor_id). The spec's verification algorithm (§4.4, line 375) calls `verify_key_binding(attestation.input.key_binding)` — which requires the full `KeyBinding` to verify user_identity, issuer, timestamps, user_signature, and platform_countersign. With only `KeyBindingRef`, none of this is verifiable from the attestation alone. The offline verification bundle (§6.3, lines 631-639) is designed to be self-contained — but with `KeyBindingRef`, the verifier must perform a separate lookup to the `KeyBindingRepository` to reconstruct the full binding, defeating the self-containment property. Fix: embed the full `KeyBinding` struct (from `key_binding.rs`) instead of `KeyBindingRef` in `SignedInput`, `DerivedInput`, and `GateAttestation`. `KeyBindingRef` can be retained as a lookup key type for the `KeyBindingRepository`, but the attestation chain must carry the full binding for verification independence.  
+  **Files:** `crates/gyre-common/src/attestation.rs:92,157,223` (`key_binding: KeyBindingRef` in three structs), `crates/gyre-common/src/key_binding.rs:18-37` (full `KeyBinding` struct), spec §2.2-2.3 lines 93-149, §4.1 line 335, §5.1 line 481.  
+  **Process fixes:** Same as F1 — checklist item #23 addresses reference type vs full embedded type with specific guidance on checking spec's verification algorithms and offline verification sections for self-containment requirements.
+
+## R2 Findings
+
+- [x] **F1 (resolved R2).** `PersonaRef` struct now exists and `persona_constraints` uses `Vec<PersonaRef>`. Serializes as `[{"name": "security"}]` per spec §3.3. Test `persona_constraints_serialize_as_object_array` confirms. Fixed in commit `c917b5b0`.
+
+- [x] **F2 (resolved R2).** `key_binding` now embeds full `KeyBinding` (8 fields) instead of `KeyBindingRef` in `SignedInput`, `DerivedInput`, and `GateAttestation`. Doc comments explain the self-containment rationale. Fixed in commit `c917b5b0`.
+
+- [-] [process-revision-complete] **F3 — `GateAttestation.gate_type` and `GateAttestation.status` use `String` but spec defines `GateType` and `GateStatus` (existing enum types).**  
+  The spec (authorization-provenance.md §5.1) defines `GateAttestation` with `gate_type: GateType` and `status: GateStatus`. Both `GateType` and `GateStatus` exist as proper Rust enums in `gyre-domain/src/quality_gate.rs` — `GateType` has variants `TestCommand`, `LintCommand`, `RequiredApprovals`, `AgentReview`, `AgentValidation`; `GateStatus` has `Pending`, `Running`, `Passed`, `Failed`. Both derive `Serialize, Deserialize` with `#[serde(rename_all = "snake_case")]`. The implementation (attestation.rs:215-216) uses `pub gate_type: String` and `pub status: String`. This is a spec-type simplification drift — there is no compile-time or parse-time validation that `gate_type` contains a valid gate type value. Code that constructs a `GateAttestation` with `gate_type: "agent_review"` and code that checks for `"AgentReview"` will silently mismatch. The enums currently live in `gyre-domain`, which `gyre-common` cannot import (hexagonal boundary). The fix is to move `GateType` and `GateStatus` to `gyre-common` (they are pure value enums with no domain logic — same pattern as `MessageKind`, `NodeType`, `NotificationType`, etc. which are already in gyre-common) and update `gyre-domain/src/quality_gate.rs` to re-export from gyre-common.  
+  **Files:** `crates/gyre-common/src/attestation.rs:215-216` (`String` types), `crates/gyre-domain/src/quality_gate.rs:35-45,55-60` (existing enum definitions).  
+  **Process fixes:** Created `scripts/check-type-simplification.sh` — mechanically detects `String` fields in gyre-common types whose names match existing enum types elsewhere in the codebase (with context-qualified lookup, e.g., `status` in `GateAttestation` → `GateStatus`). Added to pre-commit hooks. Added "Cross-crate enum substitution" sub-item to implementation checklist item #23 and verifier prompt's "Spec-type simplification drift" target. Updated enumeration procedure to explicitly prompt for `String` → enum type checks.
+
+## R3 Findings
+
+- [x] **F3 (resolved R3).** `GateAttestation.gate_type` now uses `GateType` enum, `.status` uses `GateStatus` enum. Both enums moved to `gyre-common::gate` (pure value enums, no domain logic — same layer as `MessageKind`, `NodeType`). `gyre-domain::quality_gate` re-exports for backward compatibility. Test `gate_attestation_enum_fields_serialize_snake_case` confirms snake_case serialization (`"test_command"`, `"passed"`). Fixed in commit `e165b558`.
+
+**R3 Verdict: PASS — no new findings.**
+
+All types verified field-by-field against authorization-provenance.md §1–§5:
+- `TrustAnchor` (§1.1): 5 fields ✅
+- `KeyBinding` (§2.3): 8 fields ✅
+- `InputContent` (§2.2): 7 fields, `PersonaRef` structured type ✅
+- `SignedInput` (§2.1-2.2): 6 fields, full `KeyBinding` embedded ✅
+- `ScopeConstraint` (§2.2): 2 fields ✅
+- `OutputConstraint` (§3.1): 2 fields ✅
+- `GateConstraint` (§3.2): 4 fields ✅
+- `DerivedInput` (§4.1): 6 fields, full `KeyBinding` embedded ✅
+- `Attestation` (§5.1): 4 fields, `AttestationInput` tagged enum ✅
+- `AttestationOutput` (§5.1): 4 fields ✅
+- `AttestationMetadata` (§5.1): 6 fields ✅
+- `GateAttestation` (§5.1): 8 fields, `GateType`/`GateStatus` enums ✅
+- `VerificationResult` (§6.4): 4 fields, recursive tree ✅
+- `ConstraintViolation` MessageKind variant (§7.5): Event tier, server_only ✅
+
+Port traits:
+- `ChainAttestationRepository` (§5.4): 6 methods matching spec ✅
+- `TrustAnchorRepository`: CRUD, tenant-scoped ✅
+- `KeyBindingRepository`: store/find/invalidate ✅
+
+Hexagonal boundary: `gyre-common` has no infrastructure imports ✅
+Tests: 88 pass in gyre-common, 315 in gyre-domain ✅
+Compilation: full `cargo check --all` clean ✅

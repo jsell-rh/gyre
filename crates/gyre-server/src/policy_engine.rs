@@ -566,4 +566,88 @@ mod tests {
             gyre_domain::ConditionValue::String("gyre-system-token".to_string())
         );
     }
+
+    // --- TASK-061: Attestation chain attribute evaluation ---
+
+    #[test]
+    fn chain_depth_greater_than_denies_deep_chains() {
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "agent");
+        ctx.set_number("subject.chain_depth", 7);
+
+        let cond = Condition {
+            attribute: "subject.chain_depth".to_string(),
+            operator: ConditionOp::GreaterThan,
+            value: ConditionValue::Number(5),
+        };
+        let mut p = deny_policy(100, vec![cond]);
+        p.actions = vec!["push".to_string()];
+        p.resource_types = vec!["attestation".to_string()];
+
+        let result = evaluate(vec![p], &ctx, "push", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        assert!(result.matched_policy.is_some());
+    }
+
+    #[test]
+    fn chain_depth_not_greater_than_allows_shallow_chains() {
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "agent");
+        ctx.set_number("subject.chain_depth", 3);
+
+        let cond = Condition {
+            attribute: "subject.chain_depth".to_string(),
+            operator: ConditionOp::GreaterThan,
+            value: ConditionValue::Number(5),
+        };
+        let mut deny = deny_policy(100, vec![cond]);
+        deny.actions = vec!["push".to_string()];
+        deny.resource_types = vec!["attestation".to_string()];
+
+        let mut allow = allow_policy(10, vec![]);
+        allow.actions = vec!["push".to_string()];
+        allow.resource_types = vec!["attestation".to_string()];
+
+        let result = evaluate(vec![deny, allow], &ctx, "push", "attestation");
+        // chain_depth=3 does NOT match >5, so deny policy doesn't fire; allow matches.
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    #[test]
+    fn root_signer_equals_condition_evaluates() {
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "agent");
+        ctx.set("subject.root_signer", "user:jsell");
+
+        let cond = Condition {
+            attribute: "subject.root_signer".to_string(),
+            operator: ConditionOp::Equals,
+            value: ConditionValue::String("user:jsell".to_string()),
+        };
+        let mut p = allow_policy(50, vec![cond]);
+        p.actions = vec!["merge".to_string()];
+        p.resource_types = vec!["attestation".to_string()];
+
+        let result = evaluate(vec![p], &ctx, "merge", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    #[test]
+    fn constraint_count_less_than_condition_evaluates() {
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "agent");
+        ctx.set_number("subject.constraint_count", 3);
+
+        let cond = Condition {
+            attribute: "subject.constraint_count".to_string(),
+            operator: ConditionOp::LessThan,
+            value: ConditionValue::Number(10),
+        };
+        let mut p = allow_policy(50, vec![cond]);
+        p.actions = vec!["push".to_string()];
+        p.resource_types = vec!["attestation".to_string()];
+
+        let result = evaluate(vec![p], &ctx, "push", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
 }

@@ -7,7 +7,9 @@
 //! - Methods (`def` inside a class body)
 //! - Endpoints (decorated with Flask/FastAPI route decorators)
 
-use crate::extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
+use crate::extractor::{
+    shallow_scan_for_marker, ExtractionError, ExtractionResult, LanguageExtractor,
+};
 use crate::tree_sitter_utils::parse_source;
 use gyre_common::{
     graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility},
@@ -31,8 +33,16 @@ const ROUTE_METHODS: &[&str] = &[
 /// Python language extractor.
 ///
 /// Detects repositories with `pyproject.toml`, `setup.py`, or `requirements.txt`
-/// at the root and walks all `.py` files to extract architectural knowledge.
+/// at the root (or in an immediate subdirectory for monorepo layouts) and walks
+/// all `.py` files to extract architectural knowledge.
 pub struct PythonExtractor;
+
+/// Check for Python project markers at the given path.
+fn has_python_markers(dir: &Path) -> bool {
+    dir.join("pyproject.toml").is_file()
+        || dir.join("setup.py").is_file()
+        || dir.join("requirements.txt").is_file()
+}
 
 impl LanguageExtractor for PythonExtractor {
     fn name(&self) -> &str {
@@ -40,9 +50,7 @@ impl LanguageExtractor for PythonExtractor {
     }
 
     fn detect(&self, repo_root: &Path) -> bool {
-        repo_root.join("pyproject.toml").is_file()
-            || repo_root.join("setup.py").is_file()
-            || repo_root.join("requirements.txt").is_file()
+        has_python_markers(repo_root) || shallow_scan_for_marker(repo_root, has_python_markers)
     }
 
     fn extract(&self, repo_root: &Path, commit_sha: &str) -> ExtractionResult {
@@ -122,6 +130,7 @@ impl ExtractionContext {
             visibility,
             doc_comment: None,
             spec_path: None,
+            spec_paths: vec![],
             spec_confidence: SpecConfidence::None,
             last_modified_sha: self.commit_sha.clone(),
             last_modified_by: None,
@@ -135,6 +144,8 @@ impl ExtractionContext {
             last_seen_at: 0,
             deleted_at: None,
             test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
         }
     }
 
@@ -185,7 +196,13 @@ impl ExtractionContext {
 
     fn extract_py_file(&mut self, path: &Path) -> Result<(), String> {
         let content = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
+        // Skip binary files
+        if content.contains('\0') {
+            return Ok(());
+        }
         let source = content.as_bytes();
+        // Extract spec governance comments (# spec: <path>)
+        let spec_refs = crate::tree_sitter_utils::extract_spec_comments(&content);
 
         let rel_path = path
             .strip_prefix(&self.repo_root)
@@ -259,6 +276,29 @@ impl ExtractionContext {
                 }
                 _ => {}
             }
+        }
+
+        // GovernedBy edges from spec comments
+        for spec_path in &spec_refs {
+            let spec_id = self.name_to_id.get(spec_path).cloned().unwrap_or_else(|| {
+                let mut spec_node = self.make_node(
+                    NodeType::Module,
+                    spec_path,
+                    spec_path,
+                    spec_path,
+                    0,
+                    0,
+                    Visibility::Public,
+                );
+                spec_node.spec_path = Some(spec_path.clone());
+                spec_node.spec_confidence = SpecConfidence::High;
+                let id = spec_node.id.clone();
+                self.nodes.push(spec_node);
+                self.name_to_id.insert(spec_path.clone(), id.clone());
+                id
+            });
+            let edge = self.make_edge(EdgeType::GovernedBy, module_id.clone(), spec_id);
+            self.edges.push(edge);
         }
 
         Ok(())

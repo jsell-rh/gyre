@@ -32,6 +32,348 @@ repos:
         types_or: [rust, toml, yaml, markdown]
         pass_filenames: true
 
+      - id: cli-spec-parity
+        name: CLI spec parity
+        description: Detect CLI-spec signature drift, silent param drops, wrong endpoints
+        entry: scripts/check-cli-spec-parity.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: tenant-filter
+        name: tenant filter lint
+        description: Verify Diesel read queries filter by tenant_id
+        entry: scripts/check-tenant-filter.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: type-simplification
+        name: type simplification
+        description: Detect String fields in gyre-common where named enum/struct types exist
+        entry: scripts/check-type-simplification.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: api-auth
+        name: API auth enforcement
+        description: Verify ABAC middleware chain on api router and per-handler auth on non-ABAC routes
+        entry: scripts/check-api-auth.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: path-scope-binding
+        name: path scope binding
+        description: Verify API handlers bind Path tenant_id/workspace_id to auth context
+        entry: scripts/check-path-scope-binding.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: message-delivery
+        name: message delivery parity
+        description: Verify dispatch_tx sends are paired with broadcast_tx sends
+        entry: scripts/check-message-delivery.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: response-consumption
+        name: response consumption lint
+        description: Detect CLI display functions that silently drop fields from server response structs
+        entry: scripts/check-response-consumption.sh
+        language: script
+        pass_filenames: false
+
+      - id: crypto-verify
+        name: crypto verify lint
+        description: Verify handlers that decode crypto input also perform cryptographic verification
+        entry: scripts/check-crypto-verify.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: hardcoded-defaults
+        name: hardcoded defaults lint
+        description: Detect hardcoded string defaults where runtime values should be used
+        entry: scripts/check-hardcoded-defaults.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: event-payload
+        name: event payload lint
+        description: Verify event payloads include all spec-required fields
+        entry: scripts/check-event-payload.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: notification-priority
+        name: notification priority lint
+        description: Verify notification priorities match spec-defined values
+        entry: scripts/check-notification-priority.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: stub-evaluation
+        name: stub evaluation lint
+        description: Detect client-side stubs that should be server-side evaluations
+        entry: scripts/check-stub-evaluation.sh
+        language: script
+        pass_filenames: false
+
+      - id: test-coverage-depth
+        name: test coverage depth lint
+        description: Detect integration tests with early-exit illusion or tautological assertions
+        entry: scripts/check-test-coverage-depth.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: verification-completeness
+        name: verification completeness lint
+        description: Detect verification endpoints that only perform structural checks
+        entry: scripts/check-verification-completeness.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: placeholder-stubs
+        name: placeholder stub lint
+        description: Detect placeholder/stub values with TODO comments in production code
+        entry: scripts/check-placeholder-stubs.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: dead-components
+        name: dead Svelte components lint
+        description: Detect Svelte components not imported by any other file
+        entry: scripts/check-dead-components.sh
+        language: script
+        pass_filenames: false
+
+      - id: stale-enforcement-mode
+        name: stale enforcement mode lint
+        description: Detect audit-only messaging in production verification code
+        entry: scripts/check-stale-enforcement-mode.sh
+        language: script
+        pass_filenames: false
+
+      - id: early-return-side-effects
+        name: early return side effects lint
+        description: Detect early returns that skip independent operations like key generation
+        entry: scripts/check-early-return-side-effects.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: mcp-wrapper-parity
+        name: MCP wrapper parity lint
+        description: Detect MCP handlers that reimplement REST logic instead of delegating
+        entry: scripts/check-mcp-wrapper-parity.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: stale-stub-markers
+        name: stale stub markers
+        description: Detect (stubbed) markers in doc comments of implemented functions
+        entry: scripts/check-stale-stub-markers.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: llm-endpoint-hygiene
+        name: LLM endpoint hygiene lint
+        description: Verify LLM endpoints track budget (CostEntry) and forward max_tokens
+        entry: scripts/check-llm-endpoint-hygiene.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: template-substitution
+        name: template substitution lint
+        description: Verify prompt template consumers substitute all declared variables
+        entry: scripts/check-template-substitution.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: type-discriminator-values
+        name: type discriminator values lint
+        description: Verify string discriminator field values match spec-defined values
+        entry: scripts/check-type-discriminator-values.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: wildcard-exclusion
+        name: wildcard exclusion
+        description: Detect wildcard catch-all match arms on spec-enforced enums
+        entry: scripts/check-wildcard-exclusion.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: assertionless-tests
+        name: assertionless test lint
+        description: Detect test functions with zero assertion macros
+        entry: scripts/check-assertionless-tests.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: self-confirming-tests
+        name: self-confirming test lint
+        description: Detect tests that manually construct expected outcomes instead of calling production code
+        entry: scripts/check-self-confirming-tests.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: mirrored-logic-tests
+        name: mirrored-logic test lint
+        description: Detect tests that duplicate production branching logic instead of calling the production function
+        entry: scripts/check-mirrored-logic-tests.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: pipeline-data-flow
+        name: pipeline data flow lint
+        description: Detect git log format strings that strip data the parser needs
+        entry: scripts/check-pipeline-data-flow.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: push-commit-range
+        name: push commit range lint
+        description: Detect push handlers that only process the tip commit via git log -1
+        entry: scripts/check-push-commit-range.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: dependent-scope-resolution
+        name: dependent scope resolution lint
+        description: Detect functions that use caller workspace_id for dependent entities instead of resolving each entity's own scope
+        entry: scripts/check-dependent-scope-resolution.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: aspirational-test-names
+        name: aspirational test name lint
+        description: Detect tests whose names claim behavior their bodies admit they don't exercise
+        entry: scripts/check-aspirational-test-names.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: transactional-side-effects
+        name: transactional side effects lint
+        description: Detect irretractable side effects (notifications, analytics) inside rollback-capable loops
+        entry: scripts/check-transactional-side-effects.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: notification-audience
+        name: notification audience lint
+        description: Detect notification recipient sets expanded beyond spec-defined audience
+        entry: scripts/check-notification-audience.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: notification-test-coverage
+        name: notification test coverage lint
+        description: Detect tests that call production functions with notify_*() but never query state.notifications
+        entry: scripts/check-notification-test-coverage.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: unnamed-tuple-carriers
+        name: unnamed tuple carrier lint
+        description: Detect unnamed tuples with 4+ elements that should be named structs
+        entry: scripts/check-unnamed-tuple-carriers.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: missing-domain-events
+        name: missing domain event lint
+        description: Detect functions that save domain objects and log with tracing but skip emit_event
+        entry: scripts/check-missing-domain-events.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: conditional-test-guards
+        name: conditional test guard lint
+        description: Detect if (element) guards that make test assertions silently skippable
+        entry: scripts/check-conditional-test-guards.sh
+        language: script
+        pass_filenames: false
+
+      - id: mirrored-logic-tests-js
+        name: mirrored-logic test lint (JS/TS)
+        description: Detect JS/TS test files that define local logic-mirror functions instead of testing the component
+        entry: scripts/check-mirrored-logic-tests-js.sh
+        language: script
+        pass_filenames: false
+
+      - id: tautological-assertions-js
+        name: tautological assertion lint (JS/TS)
+        description: Detect JS/TS test functions with only tautological assertions like expect(container).toBeTruthy()
+        entry: scripts/check-tautological-assertions-js.sh
+        language: script
+        pass_filenames: false
+
+      - id: comparative-test-claims-js
+        name: comparative test claim lint (JS/TS)
+        description: Detect JS/TS test names with comparative claims but no meaningful comparison in the body
+        entry: scripts/check-comparative-test-claims-js.sh
+        language: script
+        pass_filenames: false
+
+      - id: dead-test-variables-js
+        name: dead test variable lint (JS/TS)
+        description: Detect JS/TS test blocks with array variables populated but never consumed
+        entry: scripts/check-dead-test-variables-js.sh
+        language: script
+        pass_filenames: false
+
+      - id: self-contradicting-test-comments-js
+        name: self-contradicting test comment lint (JS/TS)
+        description: Detect JS/TS test comments that acknowledge incorrect behavior while asserting it
+        entry: scripts/check-self-contradicting-test-comments-js.sh
+        language: script
+        pass_filenames: false
+
+      - id: abac-context-parity
+        name: ABAC context parity lint
+        description: Detect ABAC AttributeContext construction sites missing baseline attributes
+        entry: scripts/check-abac-context-parity.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: positional-collection-access
+        name: positional collection access lint
+        description: Detect .last()/.first() on attestation collections where max_by_key should be used
+        entry: scripts/check-positional-collection-access.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

@@ -22,6 +22,7 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import Button from '../lib/Button.svelte';
   import Modal from '../lib/Modal.svelte';
+  import SpecGraphDAG from './SpecGraphDAG.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
   import { specStatusTooltip } from '../lib/statusTooltips.js';
 
@@ -56,6 +57,11 @@
   let viewMode = $state('list');
   let specGraph = $state(null);
   let specGraphLoading = $state(false);
+  let graphScope = $state('workspace');
+
+  // Impact analysis state
+  let impactMode = $state(false);
+  let impactPath = $state(null);
 
   async function loadSpecGraph() {
     specGraphLoading = true;
@@ -67,6 +73,112 @@
       specGraphLoading = false;
     }
   }
+
+  // Filter graph data to workspace scope (only specs in current workspace repos)
+  const graphNodes = $derived.by(() => {
+    if (!specGraph?.nodes) return [];
+    if (graphScope === 'tenant') return specGraph.nodes;
+    // Workspace scope: only include nodes whose path matches a loaded spec in this workspace
+    const specPaths = new Set(specs.map(s => s.path));
+    return specGraph.nodes.filter(n => specPaths.has(n.path));
+  });
+
+  const graphEdges = $derived.by(() => {
+    if (!specGraph?.edges) return [];
+    if (graphScope === 'tenant') return specGraph.edges;
+    // Only include edges where both endpoints are in the workspace-filtered nodes
+    const nodePaths = new Set(graphNodes.map(n => n.path));
+    return specGraph.edges.filter(e => nodePaths.has(e.source) && nodePaths.has(e.target));
+  });
+
+  function handleGraphNodeClick(node) {
+    const path = node.path;
+    const specData = specs.find(s => s.path === path);
+    const data = { path, repo_id: specData?.repo_id ?? repoId };
+    if (goToEntityDetail) {
+      goToEntityDetail('spec', path, data);
+    } else if (openDetailPanel) {
+      openDetailPanel({ type: 'spec', id: path, data });
+    }
+  }
+
+  // ── Impact analysis ──────────────────────────────────────────────────────
+  function handleImpactSelect(node) {
+    if (impactPath === node.path) {
+      // Deselect
+      impactPath = null;
+    } else {
+      impactPath = node.path;
+    }
+  }
+
+  function exitImpactMode() {
+    impactMode = false;
+    impactPath = null;
+  }
+
+  // Compute transitive dependents from graph edges for the summary panel
+  const IMPACT_LINK_TYPES = new Set(['dependson', 'depends_on', 'implements', 'extends']);
+
+  const impactDependentsList = $derived.by(() => {
+    if (!impactPath || !specGraph) return [];
+
+    // Use the currently-displayed edges (workspace or tenant scope)
+    const currentEdges = graphEdges;
+
+    // Build reverse adjacency
+    const reverseAdj = new Map();
+    for (const e of currentEdges) {
+      const lt = (e.link_type ?? '').toLowerCase();
+      if (!IMPACT_LINK_TYPES.has(lt)) continue;
+      if (!reverseAdj.has(e.target)) reverseAdj.set(e.target, []);
+      reverseAdj.get(e.target).push({ source: e.source, link_type: e.link_type });
+    }
+
+    // BFS to find transitive dependents and their link types
+    const visited = new Map(); // path → { link_type, depth }
+    const queue = [{ path: impactPath, depth: 0 }];
+    while (queue.length > 0) {
+      const { path: current, depth } = queue.shift();
+      const sources = reverseAdj.get(current) ?? [];
+      for (const { source, link_type } of sources) {
+        if (!visited.has(source)) {
+          visited.set(source, { link_type, depth: depth + 1 });
+          queue.push({ path: source, depth: depth + 1 });
+        }
+      }
+    }
+
+    // Build list with node info
+    return Array.from(visited.entries()).map(([path, { link_type, depth }]) => {
+      const node = graphNodes.find(n => n.path === path);
+      const specData = specs.find(s => s.path === path);
+      return {
+        path,
+        link_type,
+        depth,
+        approval_status: node?.approval_status ?? 'unknown',
+        repo_id: specData?.repo_id ?? null,
+        repo_name: specData?.repo_name ?? specData?.repo_id ?? null,
+      };
+    }).sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path));
+  });
+
+  const impactRepoCount = $derived.by(() => {
+    if (!impactDependentsList.length) return 0;
+    return new Set(impactDependentsList.map(d => d.repo_id).filter(Boolean)).size;
+  });
+
+  const impactByRepo = $derived.by(() => {
+    if (!impactDependentsList.length) return [];
+    const groups = new Map();
+    for (const dep of impactDependentsList) {
+      const key = dep.repo_name ?? dep.repo_id ?? 'unknown';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(dep);
+    }
+    return Array.from(groups.entries()).map(([repo, deps]) => ({ repo, deps }));
+  });
 
   // ── Spec approval quick actions ──────────────────────────────────────────────
   let approvingSpec = $state(null);
@@ -403,7 +515,7 @@
     />
   </div>
 
-  <!-- ── Spec Relationship Graph ──────────────────────────────────────────── -->
+  <!-- ── Spec Relationship Graph (DAG) ─────────────────────────────────────── -->
   {#if viewMode === 'graph'}
     <div class="spec-graph-view" data-testid="spec-graph-view">
       {#if specGraphLoading}
@@ -411,42 +523,91 @@
           {#each Array(4) as _}<Skeleton width="100%" height="2.5rem" />{/each}
         </div>
       {:else if specGraph}
-        {@const nodes = specGraph.nodes ?? []}
-        {@const edges = specGraph.edges ?? []}
-        {#if nodes.length === 0}
-          <EmptyState title="No spec relationships" description="Spec relationships appear when specs reference each other via manifest links (implements, conflicts, extends)." />
-        {:else}
+        <div class="graph-toolbar">
           <div class="spec-graph-info">
-            <span class="graph-stat">{nodes.length} spec{nodes.length !== 1 ? 's' : ''}</span>
-            <span class="graph-stat">{edges.length} relationship{edges.length !== 1 ? 's' : ''}</span>
+            <span class="graph-stat">{graphNodes.length} spec{graphNodes.length !== 1 ? 's' : ''}</span>
+            <span class="graph-stat">{graphEdges.length} relationship{graphEdges.length !== 1 ? 's' : ''}</span>
           </div>
-          <div class="spec-graph-grid">
-            {#each nodes as node}
-              {@const nodeEdges = edges.filter(e => e.source === node.id || e.from === node.id || e.target === node.id || e.to === node.id)}
-              {@const specData = specs.find(s => s.path === node.id || s.path === node.path)}
-              <button class="spec-graph-card" onclick={() => { const path = node.id ?? node.path; const d = { path, repo_id: specData?.repo_id ?? repoId }; goToEntityDetail ? goToEntityDetail('spec', path, d) : openDetailPanel?.({ type: 'spec', id: path, data: d }); }}>
-                <div class="sgc-header">
-                  <span class="sgc-name">{(node.label ?? node.id ?? '').split('/').pop()}</span>
-                  {#if specData?.approval_status}
-                    <Badge value={specData.approval_status} variant={specData.approval_status === 'approved' ? 'success' : specData.approval_status === 'pending' ? 'warning' : specData.approval_status === 'rejected' ? 'danger' : 'muted'} />
-                  {/if}
-                </div>
-                {#if nodeEdges.length > 0}
-                  <div class="sgc-links">
-                    {#each nodeEdges as edge}
-                      {@const isSource = edge.source === node.id || edge.from === node.id}
-                      {@const otherNode = isSource ? (edge.target ?? edge.to) : (edge.source ?? edge.from)}
-                      {@const linkType = edge.label ?? edge.link_type ?? edge.type ?? 'related'}
-                      <span class="sgc-link-tag sgc-link-{linkType}">
-                        {isSource ? '' : '← '}{linkType}{isSource ? ' →' : ''} {(otherNode ?? '').split('/').pop()}
-                      </span>
+          <div class="graph-toolbar-actions">
+            {#if impactMode}
+              <button
+                class="pill active impact-exit-btn"
+                onclick={exitImpactMode}
+                data-testid="exit-impact-mode"
+                title="Exit impact analysis mode"
+              >Exit Impact Analysis</button>
+            {:else}
+              <button
+                class="pill impact-btn"
+                onclick={() => { impactMode = true; }}
+                data-testid="analyze-impact-btn"
+                title="Analyze impact — click a spec to see all transitive dependents"
+              >Analyze Impact</button>
+            {/if}
+            <div class="graph-scope-toggle" role="group" aria-label="Graph scope">
+              <button
+                class="pill"
+                class:active={graphScope === 'workspace'}
+                onclick={() => { graphScope = 'workspace'; }}
+                aria-pressed={graphScope === 'workspace'}
+                data-testid="scope-workspace"
+              >Workspace</button>
+              <button
+                class="pill"
+                class:active={graphScope === 'tenant'}
+                onclick={() => { graphScope = 'tenant'; }}
+                aria-pressed={graphScope === 'tenant'}
+                data-testid="scope-tenant"
+              >Tenant</button>
+            </div>
+          </div>
+        </div>
+        <!-- Impact analysis prompt -->
+        {#if impactMode && !impactPath}
+          <div class="impact-prompt" data-testid="impact-prompt">
+            Click a spec node to analyze its impact
+          </div>
+        {/if}
+        <!-- Impact analysis summary panel -->
+        {#if impactPath}
+          <div class="impact-summary" data-testid="impact-summary">
+            <div class="impact-summary-header">
+              <span class="impact-summary-title" data-testid="impact-summary-title">
+                {impactDependentsList.length} spec{impactDependentsList.length !== 1 ? 's' : ''} across {impactRepoCount} repo{impactRepoCount !== 1 ? 's' : ''} need review
+              </span>
+              <button class="impact-clear-btn" onclick={() => { impactPath = null; }} title="Clear selection" data-testid="impact-clear">Clear</button>
+            </div>
+            {#if impactDependentsList.length > 0}
+              <div class="impact-details" data-testid="impact-details">
+                {#each impactByRepo as { repo, deps }}
+                  <div class="impact-repo-group">
+                    <span class="impact-repo-name">{repo}</span>
+                    {#each deps as dep}
+                      <div class="impact-dep-item" data-testid="impact-dep-{dep.path}">
+                        <span class="impact-dep-path mono">{dep.path.split('/').pop()?.replace(/\.md$/, '')}</span>
+                        <Badge value={dep.link_type?.replace(/_/g, ' ') ?? 'related'} variant="info" />
+                        <Badge value={dep.approval_status} variant={statusColor(dep.approval_status)} />
+                      </div>
                     {/each}
                   </div>
-                {/if}
-                <span class="sgc-path mono">{node.id ?? node.path}</span>
-              </button>
-            {/each}
+                {/each}
+              </div>
+            {:else}
+              <p class="impact-empty">No specs depend on this spec.</p>
+            {/if}
           </div>
+        {/if}
+        {#if graphNodes.length === 0}
+          <EmptyState title="No spec relationships" description="Spec relationships appear when specs reference each other via manifest links (implements, conflicts, extends)." />
+        {:else}
+          <SpecGraphDAG
+            nodes={graphNodes}
+            edges={graphEdges}
+            onNodeClick={handleGraphNodeClick}
+            {impactMode}
+            {impactPath}
+            onImpactSelect={handleImpactSelect}
+          />
         {/if}
       {:else}
         <EmptyState title="Load spec graph" description="Click the Graph button to visualize spec relationships." />
@@ -1266,43 +1427,107 @@
   .hidden-view { display: none !important; }
 
   /* ── Spec graph ───────────────────────────────────────────────────── */
-  .spec-graph-view { flex: 1; overflow-y: auto; padding: var(--space-4); }
-  .spec-graph-info { display: flex; gap: var(--space-4); margin-bottom: var(--space-4); }
-  .graph-stat { font-size: var(--text-sm); color: var(--color-text-secondary); font-weight: 600; }
-  .spec-graph-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: var(--space-3);
+  .spec-graph-view { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .graph-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-2) 0;
+    flex-shrink: 0;
   }
-  .spec-graph-card {
-    background: var(--color-surface);
+  .spec-graph-info { display: flex; gap: var(--space-4); }
+  .graph-stat { font-size: var(--text-sm); color: var(--color-text-secondary); font-weight: 600; }
+  .graph-toolbar-actions { display: flex; gap: var(--space-2); align-items: center; }
+  .graph-scope-toggle { display: flex; gap: var(--space-1); }
+
+  /* ── Impact analysis ────────────────────────────────────────────── */
+  .impact-btn {
+    background: color-mix(in srgb, #f59e0b 12%, transparent) !important;
+    border-color: #f59e0b !important;
+    color: #f59e0b !important;
+  }
+  .impact-btn:hover { background: color-mix(in srgb, #f59e0b 20%, transparent) !important; }
+  .impact-exit-btn {
+    background: color-mix(in srgb, #f59e0b 20%, transparent) !important;
+    border-color: #f59e0b !important;
+    color: #f59e0b !important;
+  }
+  .impact-prompt {
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, #f59e0b 8%, transparent);
+    border: 1px solid color-mix(in srgb, #f59e0b 30%, transparent);
+    border-radius: var(--radius);
+    color: #f59e0b;
+    font-size: var(--text-sm);
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .impact-summary {
+    padding: var(--space-3);
+    background: var(--color-surface-elevated);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
-    padding: var(--space-3);
-    cursor: pointer;
-    text-align: left;
-    font: inherit;
+    flex-shrink: 0;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .impact-summary-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+  .impact-summary-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
     color: var(--color-text);
-    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  }
+  .impact-clear-btn {
+    padding: var(--space-1) var(--space-2);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    font-family: var(--font-body);
+  }
+  .impact-clear-btn:hover { color: var(--color-text); border-color: var(--color-text-muted); }
+  .impact-details {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
   }
-  .spec-graph-card:hover { border-color: var(--color-primary); box-shadow: 0 0 0 1px var(--color-primary); }
-  .spec-graph-card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
-  .sgc-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
-  .sgc-name { font-weight: 600; font-size: var(--text-sm); }
-  .sgc-links { display: flex; flex-wrap: wrap; gap: 4px; }
-  .sgc-link-tag {
-    font-size: 10px;
-    padding: 1px var(--space-2);
-    border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--color-info) 10%, transparent);
-    color: var(--color-info);
-    white-space: nowrap;
+  .impact-repo-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
   }
-  .sgc-link-implements { background: color-mix(in srgb, var(--color-success) 10%, transparent); color: var(--color-success); }
-  .sgc-link-conflicts { background: color-mix(in srgb, var(--color-danger) 10%, transparent); color: var(--color-danger); }
-  .sgc-link-extends { background: color-mix(in srgb, var(--color-warning) 10%, transparent); color: var(--color-warning); }
-  .sgc-path { font-size: var(--text-xs); color: var(--color-text-muted); }
+  .impact-repo-name {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding-bottom: var(--space-1);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .impact-dep-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+  }
+  .impact-dep-path {
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    flex: 1;
+  }
+  .impact-empty {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin: 0;
+  }
 </style>

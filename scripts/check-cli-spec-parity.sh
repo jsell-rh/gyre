@@ -1,0 +1,583 @@
+#!/usr/bin/env bash
+# CLI Spec Parity Lint: detect common CLI-spec signature drift.
+#
+# Checks:
+# 1. CLI commands whose spec signature shows optional params ([--param])
+#    but whose clap struct declares them as required (non-Option<T>).
+# 2. CLI commands that require a subcommand for their primary action
+#    when the spec defines a flat command.
+# 3. CLI parameters that accept raw IDs where the spec says <name>/<slug>.
+#
+# This script reads spec excerpts from task files and cross-references
+# the clap struct in crates/gyre-cli/src/main.rs.
+#
+# Run during pre-commit and CI. Not exhaustive — supplements the
+# implementation checklist item #18.
+
+set -euo pipefail
+
+CLI_MAIN="crates/gyre-cli/src/main.rs"
+
+if [ ! -f "$CLI_MAIN" ]; then
+    echo "SKIP: $CLI_MAIN not found"
+    exit 0
+fi
+
+FAIL=0
+
+# --- Check 1: Required fields that should be Option<T> ---
+# These are fields whose spec signature uses [brackets] (optional)
+# but the clap struct declares as bare String (required).
+#
+# Pattern: look for struct fields of type `String` (not Option<String>)
+# in command variants where the help text says "Workspace slug" or similar,
+# cross-referencing spec-optional params.
+
+# Find non-Option workspace params in CLI command structs.
+# The spec universally marks --workspace as optional ([--workspace <slug>]).
+# Any `workspace: String` (not Option<String>) in a command variant is a violation.
+WORKSPACE_REQUIRED=$(grep -n 'workspace: String' "$CLI_MAIN" 2>/dev/null | grep -v 'Option<String>' | grep -v '//' || true)
+if [ -n "$WORKSPACE_REQUIRED" ]; then
+    while IFS= read -r line; do
+        echo "CLI-SPEC PARITY: --workspace is declared required but spec marks it optional [--workspace <slug>]"
+        echo "  $CLI_MAIN:$line"
+        echo "  Fix: Change 'workspace: String' to 'workspace: Option<String>'"
+        echo ""
+        FAIL=1
+    done <<< "$WORKSPACE_REQUIRED"
+fi
+
+# --- Check 2: Subcommand-required commands that should be flat ---
+# Look for commands where a `command: XxxCommands` field exists but the
+# spec defines a flat command (no subcommand needed for primary action).
+# We check specifically for Inbox since the spec defines `gyre inbox [--flags]`
+# as a flat command. The pattern `command: InboxCommands` without a
+# `default_subcommand` or `Option<InboxCommands>` forces a subcommand.
+INBOX_SUBCOMMAND_REQUIRED=$(grep -n 'command: InboxCommands' "$CLI_MAIN" 2>/dev/null | head -1 || true)
+if [ -n "$INBOX_SUBCOMMAND_REQUIRED" ]; then
+    # Check if it's wrapped in Option (allowing bare invocation)
+    if ! grep -q 'command: Option<InboxCommands>' "$CLI_MAIN" 2>/dev/null; then
+        echo "CLI-SPEC PARITY: 'gyre inbox' requires a subcommand but spec defines flat command"
+        echo "  $CLI_MAIN:$INBOX_SUBCOMMAND_REQUIRED"
+        echo "  Spec: gyre inbox [--workspace <slug>] [--priority <min>-<max>]"
+        echo "  Fix: Make subcommand optional or set default_subcommand to 'list'"
+        echo ""
+        FAIL=1
+    fi
+fi
+
+# --- Check 3: Help text saying "ID" where spec says name/slug ---
+# Catch help strings like "Repository ID" for flags the spec defines as <name>.
+REPO_ID_HELP=$(grep -n '"Repository ID"' "$CLI_MAIN" 2>/dev/null || true)
+if [ -n "$REPO_ID_HELP" ]; then
+    # Check if this is on a --repo flag (where spec says <name>)
+    # vs a --repo-id flag (which is explicit about wanting an ID)
+    while IFS= read -r line; do
+        LINENUM=$(echo "$line" | cut -d: -f1)
+        # Check the field name on the next line — if it's `repo:` not `repo_id:`, it's a violation
+        FIELD=$(sed -n "$((LINENUM + 1))p" "$CLI_MAIN" 2>/dev/null || true)
+        if echo "$FIELD" | grep -q 'repo:' 2>/dev/null && ! echo "$FIELD" | grep -q 'repo_id:' 2>/dev/null; then
+            echo "CLI-SPEC PARITY: --repo help says 'Repository ID' but spec says '--repo <name>'"
+            echo "  $CLI_MAIN:$line"
+            echo "  Fix: Accept a human-readable repo name and resolve to ID (like resolve_workspace_slug)"
+            echo ""
+            FAIL=1
+        fi
+    done <<< "$REPO_ID_HELP"
+fi
+
+# --- Check 4: --repo-id as required arg where spec doesn't include it ---
+# The spec defines `gyre spec assist <path> "<instruction>"` — no --repo-id.
+# A mandatory repo_id flag not in the spec is an invented parameter.
+SPEC_ASSIST_REPO_ID=$(grep -n 'repo_id: String' "$CLI_MAIN" 2>/dev/null | grep -v 'Option<String>' || true)
+if [ -n "$SPEC_ASSIST_REPO_ID" ]; then
+    # Only flag if this is inside the SpecCommands/Assist context
+    while IFS= read -r line; do
+        LINENUM=$(echo "$line" | cut -d: -f1)
+        # Check surrounding context for Assist variant
+        CONTEXT=$(sed -n "$((LINENUM - 10)),$((LINENUM))p" "$CLI_MAIN" 2>/dev/null || true)
+        if echo "$CONTEXT" | grep -q 'Assist' 2>/dev/null; then
+            echo "CLI-SPEC PARITY: 'gyre spec assist' has required --repo-id not in spec signature"
+            echo "  $CLI_MAIN:$line"
+            echo "  Spec: gyre spec assist <path> \"<instruction>\""
+            echo "  Fix: Infer repo from context or make --repo-id optional"
+            echo ""
+            FAIL=1
+        fi
+    done <<< "$SPEC_ASSIST_REPO_ID"
+fi
+
+# --- Check 5: Invented parameter dependencies ---
+# Look for bail!/anyhow::bail! messages that say "--X requires --Y" or similar.
+# These indicate invented constraints between optional parameters.
+# Flag them for manual spec review.
+INVENTED_DEPS=$(grep -n 'bail!.*--.*requires' "$CLI_MAIN" 2>/dev/null || true)
+if [ -n "$INVENTED_DEPS" ]; then
+    while IFS= read -r line; do
+        echo "CLI-SPEC PARITY: Possible invented parameter dependency — verify against spec"
+        echo "  $CLI_MAIN:$line"
+        echo "  If spec defines both parameters as independently optional, this is a violation."
+        echo "  Fix: Infer missing context (git remote, config, global search) instead of requiring another flag."
+        echo ""
+        FAIL=1
+    done <<< "$INVENTED_DEPS"
+fi
+
+# --- Check 6: Client query params not in server Query extractor structs ---
+# Detect query parameter names sent by client.rs that do not appear in any
+# query extractor struct in the server API. We target structs whose names
+# match *Params or *Query (both naming conventions are used for Axum
+# Query<T> extractors), excluding *Response and *Request structs.
+# A param that exists in a response struct but not an extractor struct
+# is still silently dropped.
+CLI_CLIENT="crates/gyre-cli/src/client.rs"
+SERVER_API_DIR="crates/gyre-server/src/api"
+
+if [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
+    # Extract query param names from client.rs: .query(&[("param_name", ...)])
+    CLIENT_PARAMS=$(grep -oP '\.query\(&\[\("(\K[^"]+)' "$CLI_CLIENT" 2>/dev/null | sort -u || true)
+
+    if [ -n "$CLIENT_PARAMS" ]; then
+        # Extract field names from *Params and *Query structs.
+        # Strategy: find "struct Xxx(Params|Query)" blocks, then extract pub field
+        # names within the next ~20 lines (until closing brace).
+        PARAMS_FIELDS=""
+        while IFS= read -r params_line; do
+            PARAMS_FILE=$(echo "$params_line" | cut -d: -f1)
+            PARAMS_LINENUM=$(echo "$params_line" | cut -d: -f2)
+            # Extract pub field names from the struct body — stop at closing brace.
+            FIELDS=$(sed -n "${PARAMS_LINENUM},\$p" "$PARAMS_FILE" 2>/dev/null | \
+                sed '/^}/q' | \
+                grep -oP 'pub\s+\K\w+(?=\s*:)' || true)
+            if [ -n "$FIELDS" ]; then
+                PARAMS_FIELDS="${PARAMS_FIELDS}${FIELDS}"$'\n'
+            fi
+        done < <(grep -rn 'struct \w*\(Params\|Query\)\b' "$SERVER_API_DIR"/*.rs 2>/dev/null | \
+            grep -v 'Request\|Response' || true)
+
+        PARAMS_FIELDS=$(echo "$PARAMS_FIELDS" | sort -u)
+
+        while IFS= read -r param; do
+            [ -z "$param" ] && continue
+            if ! echo "$PARAMS_FIELDS" | grep -qx "$param" 2>/dev/null; then
+                echo "CLI-SPEC PARITY: Client sends query param '$param' but no server Query extractor struct has this field"
+                echo "  $CLI_CLIENT: .query(&[(\"$param\", ...)])"
+                echo "  The server will silently ignore this parameter — results will be wrong/unfiltered."
+                echo "  Fix: Add '$param' field to the appropriate server Query/Params struct."
+                echo ""
+                FAIL=1
+            fi
+        done <<< "$CLIENT_PARAMS"
+    fi
+fi
+
+# --- Check 7: CLI endpoint URL vs server route registration ---
+# Detect endpoint URLs in client.rs that don't match any route in mod.rs.
+SERVER_MOD="crates/gyre-server/src/api/mod.rs"
+if [ -f "$CLI_CLIENT" ] && [ -f "$SERVER_MOD" ]; then
+    # Extract URL path patterns from client.rs (after base_url):
+    # e.g., /api/v1/merge-requests/{mr_id}/timeline
+    CLIENT_ENDPOINTS=$(grep -oP '"\{\}/api/v1/\K[^"]+' "$CLI_CLIENT" 2>/dev/null | \
+        sed 's/{[^}]*}/:param/g' | sort -u || true)
+
+    if [ -n "$CLIENT_ENDPOINTS" ]; then
+        # Extract registered routes from mod.rs
+        SERVER_ROUTES=$(grep -oP '"/api/v1/\K[^"]+' "$SERVER_MOD" 2>/dev/null | \
+            sed 's/:[^/]*/:param/g' | sort -u || true)
+
+        while IFS= read -r endpoint; do
+            [ -z "$endpoint" ] && continue
+            if ! echo "$SERVER_ROUTES" | grep -qxF "$endpoint" 2>/dev/null; then
+                # Get the original line for context
+                ORIG=$(grep -n "api/v1/$endpoint" "$CLI_CLIENT" 2>/dev/null | head -1 || true)
+                # Undo param substitution for display
+                echo "CLI-SPEC PARITY: Client calls endpoint path that doesn't match any server route"
+                echo "  $CLI_CLIENT: /api/v1/$endpoint"
+                echo "  No matching route found in $SERVER_MOD"
+                echo "  Fix: Verify the endpoint URL against the spec and server route registration."
+                echo ""
+                FAIL=1
+            fi
+        done <<< "$CLIENT_ENDPOINTS"
+    fi
+fi
+
+# --- Check 8: POST/PUT/PATCH without JSON body when server expects Json<T> ---
+# Detect client POST/PUT/PATCH calls that never chain .json(...) but whose
+# server handler expects a Json<T> extractor.  A POST without a body to a
+# handler with Json<T> fails at runtime every invocation (400/415).
+if [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
+    # Strategy:
+    #  1. Find POST/PUT/PATCH blocks in client.rs (between .post/.put/.patch and .send()).
+    #  2. For each block, extract the endpoint path.
+    #  3. Check if the block includes .json( — if not, look up the server handler.
+    #  4. If the handler has Json<T> in its signature, flag it.
+
+    # Extract method+endpoint pairs for POST/PUT/PATCH calls that lack .json(
+    # We look for sequences like:
+    #   .post(format!("{}/api/v1/...", ...))
+    #   ...
+    #   .send()
+    # where no .json( appears between the HTTP method and .send().
+
+    # Use awk to find POST/PUT/PATCH blocks without .json(
+    # Handles multi-line format!() blocks where the endpoint path is on a
+    # different line than the .post() call.
+    BODYLESS_POSTS=$(awk '
+        /\.(post|put|patch)\(/ {
+            method_line = NR
+            in_block = 1
+            has_json = 0
+            endpoint = ""
+            collecting_ep = 1
+        }
+        in_block && collecting_ep {
+            if (match($0, /api\/v1\/[^"]+/)) {
+                endpoint = substr($0, RSTART, RLENGTH)
+                collecting_ep = 0
+            }
+        }
+        in_block && /\.json\(/ { has_json = 1 }
+        in_block && /\.send\(/ {
+            if (!has_json && endpoint != "") {
+                print method_line ":" endpoint
+            }
+            in_block = 0
+            endpoint = ""
+            collecting_ep = 0
+        }
+    ' "$CLI_CLIENT" 2>/dev/null || true)
+
+    if [ -n "$BODYLESS_POSTS" ]; then
+        while IFS= read -r entry; do
+            [ -z "$entry" ] && continue
+            LINE=$(echo "$entry" | cut -d: -f1)
+            EP=$(echo "$entry" | cut -d: -f2-)
+
+            # Derive the handler function name from the route.
+            # Normalize the client endpoint to match the server route format:
+            #   client: api/v1/notifications/{id}/resolve
+            #   server: /api/v1/notifications/:id/resolve
+            ROUTE_PATTERN=$(echo "$EP" | sed 's|{[^}]*}|:[^/]*|g')
+
+            # Search server API files for a handler with Json< in its signature
+            # that matches this endpoint path.
+            # Look for the route in mod.rs first to find the handler name.
+            # Find the line number of the matching route, then look at the next
+            # line for the handler name (Axum style: .route("path", post(handler))).
+            ROUTE_LINENUM=$(grep -n "$ROUTE_PATTERN" "$SERVER_MOD" 2>/dev/null | head -1 | cut -d: -f1 || true)
+            HANDLER=""
+            if [ -n "$ROUTE_LINENUM" ]; then
+                # Handler may be on the same line or the next line
+                HANDLER=$(sed -n "${ROUTE_LINENUM},$((ROUTE_LINENUM + 2))p" "$SERVER_MOD" 2>/dev/null | \
+                    grep -oP '(post|put|patch|delete|get)\(\K\w+' | head -1 || true)
+            fi
+
+            if [ -n "$HANDLER" ]; then
+                # Check if the handler function signature includes Json<
+                HAS_JSON_EXTRACTOR=$(grep -A 5 "fn $HANDLER" "$SERVER_API_DIR"/*.rs 2>/dev/null | grep 'Json<' || true)
+                if [ -n "$HAS_JSON_EXTRACTOR" ]; then
+                    echo "CLI-SPEC PARITY: Client POST/PUT/PATCH sends no JSON body but server handler expects Json<T>"
+                    echo "  $CLI_CLIENT:$LINE: /$EP"
+                    echo "  Server handler '$HANDLER' requires a Json<T> extractor — request will fail at runtime (400/415)."
+                    echo "  Fix: Add .json(&serde_json::json!({})) or .json(&payload) to the request builder."
+                    echo ""
+                    FAIL=1
+                fi
+            fi
+        done <<< "$BODYLESS_POSTS"
+    fi
+fi
+
+# --- Check 9: Stale doc comments on client functions ---
+# Detect doc comments on client.rs functions that reference response shapes
+# or terms not found in the function body.  This catches the pattern where a
+# fix changes the data shape but leaves the doc comment describing the old one
+# (e.g., "DiffOps" after the function was changed to return {"text": "..."}).
+#
+# Strategy: for each `/// ...` + `pub async fn` pair in client.rs, extract
+# key domain nouns from the doc comment, then verify each appears somewhere
+# in the function body (until the next `pub async fn` or EOF).
+if [ -f "$CLI_CLIENT" ]; then
+    # Extract function blocks: doc comment line(s) + function name + body
+    # We look for specific high-signal terms in doc comments that name
+    # response shapes, data structures, or endpoint-specific nouns.
+    # These terms are more likely to go stale after fixes.
+    SHAPE_TERMS="DiffOp\|GateTrace\|timeline\|BriefingItem\|NotificationResponse"
+
+    # Find doc comment lines containing shape terms
+    DOC_HITS=$(grep -n "/// .*\($SHAPE_TERMS\)" "$CLI_CLIENT" 2>/dev/null || true)
+    if [ -n "$DOC_HITS" ]; then
+        while IFS= read -r hit; do
+            [ -z "$hit" ] && continue
+            DOC_LINE=$(echo "$hit" | cut -d: -f1)
+            DOC_TEXT=$(echo "$hit" | cut -d: -f2-)
+            # Extract the matched term(s)
+            for term in DiffOp GateTrace timeline BriefingItem NotificationResponse; do
+                if echo "$DOC_TEXT" | grep -qi "$term" 2>/dev/null; then
+                    # Find the function this doc comment belongs to (next pub fn line)
+                    FN_LINE=$(sed -n "$((DOC_LINE + 1)),\$p" "$CLI_CLIENT" 2>/dev/null | \
+                        grep -n 'pub async fn\|pub fn' | head -1 || true)
+                    if [ -n "$FN_LINE" ]; then
+                        FN_LINENUM=$((DOC_LINE + $(echo "$FN_LINE" | cut -d: -f1)))
+                        FN_NAME=$(echo "$FN_LINE" | grep -oP 'fn \K\w+' || true)
+                        # Find the end of this function (next pub fn or EOF)
+                        FN_END=$(sed -n "$((FN_LINENUM + 1)),\$p" "$CLI_CLIENT" 2>/dev/null | \
+                            grep -n 'pub async fn\|pub fn' | head -1 | cut -d: -f1 || true)
+                        if [ -z "$FN_END" ]; then
+                            FN_END=$(wc -l < "$CLI_CLIENT")
+                        else
+                            FN_END=$((FN_LINENUM + FN_END - 1))
+                        fi
+                        # Check if the term appears in the function body
+                        BODY=$(sed -n "${FN_LINENUM},${FN_END}p" "$CLI_CLIENT" 2>/dev/null || true)
+                        if ! echo "$BODY" | grep -qi "$term" 2>/dev/null; then
+                            echo "CLI-SPEC PARITY: Doc comment references '$term' but term not found in function body"
+                            echo "  $CLI_CLIENT:$DOC_LINE: $DOC_TEXT"
+                            echo "  Function: $FN_NAME (line $FN_LINENUM)"
+                            echo "  The doc comment may be stale after a prior fix changed the response shape."
+                            echo "  Fix: Update the doc comment to describe the current behavior."
+                            echo ""
+                            FAIL=1
+                        fi
+                    fi
+                fi
+            done
+        done <<< "$DOC_HITS"
+    fi
+fi
+
+# --- Check 10: SSE complete-event field access vs server response shape ---
+# When a CLI display function accesses fields from SSE "complete" event data
+# using op["field"] or value["field"], verify the field name exists in the
+# server handler's SSE complete-event data construction for the same endpoint.
+#
+# A response format change (e.g., from {text: full_text} to {diff, explanation})
+# that doesn't propagate to CLI display code causes silent data loss: the CLI
+# reads op["text"] which returns Null on the new {diff, explanation} shape,
+# and the user sees empty output with no error.
+#
+# Detection: for each CLI function that consumes SSE complete-event data from
+# a client function, extract all ["field"] accesses on the event values. Then
+# find the server handler that produces the SSE stream and extract the field
+# names from the event("complete").data(...) construction. Flag any CLI field
+# access where the field doesn't appear in the server's complete-event data.
+#
+# Origin: specs/reviews/task-012.md R2 F6 — CLI spec_assist display accessed
+#         op["text"] but server now sends {diff, explanation} in complete events.
+
+CLI_CLIENT="crates/gyre-cli/src/client.rs"
+SERVER_API_DIR="crates/gyre-server/src/api"
+
+if [ -f "$CLI_MAIN" ] && [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
+    # Strategy: find CLI client functions that parse SSE streams (contain
+    # 'event: complete' or 'current_event == "complete"' patterns), then:
+    # (1) Extract the server endpoint URL from the client function
+    # (2) Find the server handler for that endpoint
+    # (3) Extract field names from event("complete").data(...) construction
+    # (4) Find CLI display code that consumes the parsed data and check
+    #     its ["field"] accesses against the server fields
+
+    # Find SSE-consuming client functions
+    SSE_FN_LINES=$(grep -n '"complete"' "$CLI_CLIENT" 2>/dev/null | head -20 || true)
+
+    if [ -n "$SSE_FN_LINES" ]; then
+        while IFS= read -r sse_line; do
+            [ -z "$sse_line" ] && continue
+            SSE_LINENO=$(echo "$sse_line" | cut -d: -f1)
+
+            # Find the enclosing function
+            FN_START=$(head -n "$SSE_LINENO" "$CLI_CLIENT" \
+                | grep -n 'pub async fn\|pub fn\|async fn' \
+                | tail -1 \
+                | cut -d: -f1 || echo "1")
+
+            fn_name=$(sed -n "${FN_START}p" "$CLI_CLIENT" \
+                | grep -oP '(pub async fn|async fn|pub fn) \K[a-z_]+' || echo "unknown")
+
+            # Find function end
+            FN_END_SEARCH=$(tail -n +"$((SSE_LINENO + 1))" "$CLI_CLIENT" \
+                | grep -n 'pub async fn\|pub fn' \
+                | head -1 \
+                | cut -d: -f1 || echo "200")
+            FN_END=$((SSE_LINENO + FN_END_SEARCH))
+
+            # Extract the endpoint URL from the function body
+            FN_BODY=$(sed -n "${FN_START},${FN_END}p" "$CLI_CLIENT")
+            ENDPOINT=$(echo "$FN_BODY" | grep -oP 'api/v1/[^"]+' | head -1 || true)
+            [ -z "$ENDPOINT" ] && continue
+
+            # Normalize the endpoint path for matching
+            ENDPOINT_NORM=$(echo "$ENDPOINT" | sed 's/{[^}]*}/:param/g')
+
+            # Find the server handler file that registers this route
+            for rs_file in "$SERVER_API_DIR"/*.rs; do
+                [ -f "$rs_file" ] || continue
+
+                # Check if this file contains an event("complete") construction
+                COMPLETE_EVENTS=$(grep -n 'event("complete")' "$rs_file" 2>/dev/null || true)
+                [ -z "$COMPLETE_EVENTS" ] && continue
+
+                # Also verify the file is related to this endpoint
+                BASE_NAME=$(basename "$rs_file" .rs)
+                ENDPOINT_BASE=$(echo "$ENDPOINT_NORM" | grep -oP '[a-z_]+' | tail -1 || true)
+
+                # Extract field names from event("complete").data(...) construction.
+                # Look for json!({ "field": ... }) or serde_json::to_string(&json!({...}))
+                # within 10 lines after event("complete")
+                while IFS= read -r complete_line; do
+                    [ -z "$complete_line" ] && continue
+                    CE_LINENO=$(echo "$complete_line" | cut -d: -f1)
+                    CE_WINDOW_END=$((CE_LINENO + 20))
+                    SERVER_FIELDS=$(sed -n "${CE_LINENO},${CE_WINDOW_END}p" "$rs_file" \
+                        | grep -oP '"[a-z_]+":\s' \
+                        | sed 's/"//g; s/:.*//; s/ //' \
+                        | sort -u || true)
+
+                    [ -z "$SERVER_FIELDS" ] && continue
+
+                    # Now find the CLI display function that consumes fn_name's return value.
+                    # Search main.rs for calls to api.<fn_name> and extract ["field"] accesses
+                    # on the return value (within 30 lines after the call).
+                    CALL_SITES=$(grep -n "${fn_name}" "$CLI_MAIN" 2>/dev/null | grep -v '//' | head -5 || true)
+
+                    while IFS= read -r call_site; do
+                        [ -z "$call_site" ] && continue
+                        CS_LINENO=$(echo "$call_site" | cut -d: -f1)
+                        CS_WINDOW_END=$((CS_LINENO + 30))
+
+                        # Extract all ["field"] accesses in the display window
+                        CLI_FIELDS=$(sed -n "${CS_LINENO},${CS_WINDOW_END}p" "$CLI_MAIN" \
+                            | grep -oP '\["([a-z_]+)"\]' \
+                            | sed 's/\["\|"\]//g' \
+                            | sort -u || true)
+
+                        for cli_field in $CLI_FIELDS; do
+                            [ -z "$cli_field" ] && continue
+                            if ! echo "$SERVER_FIELDS" | grep -qx "$cli_field" 2>/dev/null; then
+                                echo "CLI-SPEC PARITY: CLI accesses [\"$cli_field\"] on SSE complete-event data but server's complete event does not contain this field"
+                                echo "  Client: $CLI_CLIENT fn $fn_name (endpoint: $ENDPOINT)"
+                                echo "  Server: $rs_file:$CE_LINENO — complete event contains fields: $SERVER_FIELDS"
+                                echo "  Display: $CLI_MAIN:$CS_LINENO — accesses [\"$cli_field\"] which does not exist in the server response."
+                                echo "  This field may be from a prior response format. The CLI will get Null and display empty output."
+                                echo "  Fix: Update the CLI display code to access the current response fields."
+                                echo ""
+                                FAIL=1
+                            fi
+                        done
+                    done <<< "$CALL_SITES"
+                done <<< "$COMPLETE_EVENTS"
+            done
+        done <<< "$SSE_FN_LINES"
+    fi
+fi
+
+# --- Check 11: SSE event type exhaustiveness ---
+# When a server SSE endpoint sends multiple event types (e.g., partial,
+# complete, error), the CLI client parser must handle ALL of them.
+# An unhandled event type (especially "error") causes silent data loss:
+# the parser ignores the event, returns empty results, and the display
+# code shows a misleading fallback message instead of the actual error.
+#
+# Detection: for each SSE-consuming client function, find the corresponding
+# server handler and extract all event("...") types. Then verify the client
+# parser has a branch for each event type.
+#
+# Origin: specs/reviews/task-012.md R3 F7 — CLI parser didn't handle
+#         event: error, causing misleading "No suggestions returned."
+
+if [ -f "$CLI_CLIENT" ] && [ -d "$SERVER_API_DIR" ]; then
+    # Find SSE-consuming client functions (those that check for event types)
+    SSE_FUNCS=$(awk '
+        /pub async fn [a-z_]+/ {
+            fn_name = ""
+            match($0, /pub async fn ([a-z_]+)/, m)
+            if (m[1] != "") fn_name = m[1]
+            fn_start = NR
+            has_sse = 0
+            endpoint = ""
+        }
+        fn_name != "" && /current_event/ { has_sse = 1 }
+        fn_name != "" && /api\/v1\/[^"]+/ {
+            if (endpoint == "") {
+                match($0, /api\/v1\/[^"]+/)
+                endpoint = substr($0, RSTART, RLENGTH)
+            }
+        }
+        fn_name != "" && has_sse && /^[[:space:]]*\}$/ && NR > fn_start + 5 {
+            if (endpoint != "") print fn_name "|" endpoint "|" fn_start
+            fn_name = ""
+        }
+    ' "$CLI_CLIENT" 2>/dev/null || true)
+
+    if [ -n "$SSE_FUNCS" ]; then
+        while IFS= read -r sse_func; do
+            [ -z "$sse_func" ] && continue
+            FN_NAME=$(echo "$sse_func" | cut -d'|' -f1)
+            ENDPOINT=$(echo "$sse_func" | cut -d'|' -f2)
+            FN_START=$(echo "$sse_func" | cut -d'|' -f3)
+
+            # Find the client function body to extract handled event types
+            FN_END=$(tail -n +"$((FN_START + 1))" "$CLI_CLIENT" \
+                | grep -n '^pub async fn\|^pub fn\|^}$' \
+                | head -1 \
+                | cut -d: -f1 || echo "200")
+            FN_END=$((FN_START + FN_END))
+
+            CLIENT_EVENTS=$(sed -n "${FN_START},${FN_END}p" "$CLI_CLIENT" \
+                | grep -oP 'current_event\s*==\s*"([^"]+)"' \
+                | grep -oP '"[^"]+' \
+                | sed 's/"//g' \
+                | sort -u || true)
+
+            # Find the server handler that produces this SSE stream
+            # by matching the endpoint path to server files
+            for rs_file in "$SERVER_API_DIR"/*.rs; do
+                [ -f "$rs_file" ] || continue
+
+                # Check if this file has event() calls (SSE producer)
+                SERVER_EVENTS=$(grep -oP 'event\("\K[^"]+(?="\))' "$rs_file" 2>/dev/null \
+                    | sort -u || true)
+
+                [ -z "$SERVER_EVENTS" ] && continue
+
+                # Verify the file is related to this endpoint by checking
+                # if the endpoint base name matches the file name
+                ENDPOINT_SEGMENTS=$(echo "$ENDPOINT" | tr '/' '\n' | grep -v 'api\|v1\|{.*}' || true)
+                FILE_BASE=$(basename "$rs_file" .rs)
+                MATCH=0
+                for seg in $ENDPOINT_SEGMENTS; do
+                    if echo "$FILE_BASE" | grep -qi "$(echo "$seg" | sed 's/s$//' | sed 's/-/_/g')" 2>/dev/null; then
+                        MATCH=1
+                        break
+                    fi
+                done
+                [ "$MATCH" -eq 0 ] && continue
+
+                # Check each server event type against client handling
+                for server_event in $SERVER_EVENTS; do
+                    [ -z "$server_event" ] && continue
+                    if ! echo "$CLIENT_EVENTS" | grep -qx "$server_event" 2>/dev/null; then
+                        echo "CLI-SPEC PARITY: SSE client parser does not handle event type '$server_event'"
+                        echo "  Client: $CLI_CLIENT fn $FN_NAME (endpoint: $ENDPOINT)"
+                        echo "  Server: $rs_file sends event(\"$server_event\") but client has no 'current_event == \"$server_event\"' branch"
+                        echo "  Server event types: $SERVER_EVENTS"
+                        echo "  Client handles: ${CLIENT_EVENTS:-<none>}"
+                        if [ "$server_event" = "error" ]; then
+                            echo "  ERROR events must be surfaced to the user — silent ignoring causes misleading fallback messages."
+                        fi
+                        echo "  Fix: Add an 'else if current_event == \"$server_event\"' branch to the SSE parser."
+                        echo ""
+                        FAIL=1
+                    fi
+                done
+            done
+        done <<< "$SSE_FUNCS"
+    fi
+fi
+
+if [ "$FAIL" -eq 0 ]; then
+    echo "CLI-spec parity lint passed."
+fi
+
+exit "$FAIL"

@@ -155,6 +155,7 @@
       "mrs": "MRs",
       "agents": "Agents",
       "architecture": "Architecture",
+      "dependencies": "Dependencies",
       "decisions": "Decisions",
       "code": "Code & Blame",
       "settings": "⚙"
@@ -993,7 +994,16 @@
     "concept_search_failed": "Concept search failed: {error}",
     "explore_repo": "Explore {name} repository",
     "toggle_filters": "Toggle filter panel",
-    "clear_search": "Clear search"
+    "clear_search": "Clear search",
+    "edit_spec": "Edit Spec",
+    "spec_editor_title": "Spec Editor",
+    "spec_editor_loading": "Loading spec content\u2026",
+    "spec_editor_error": "Failed to load spec: {error}",
+    "spec_editor_preview": "Preview Impact",
+    "spec_editor_cancel": "Cancel",
+    "spec_editor_predicting": "Predicting graph impact\u2026",
+    "spec_editor_predict_error": "Prediction failed: {error}",
+    "spec_editor_no_changes": "No structural changes predicted."
   },
   "detail_panel": {
     "title": "Detail panel",
@@ -1201,6 +1211,30 @@
     "highlight_node": "Highlight node {name} on canvas",
     "spec_detail_label": "Spec detail for {name}",
     "context_menu_label": "Node context menu"
+  },
+  "explorer_chat": {
+    "title": "Explorer",
+    "saved_views": "Saved Views",
+    "welcome_title": "Ask about your codebase",
+    "welcome_desc": "Ask questions and I'll visualize the answer on the canvas.",
+    "input_placeholder": "Ask a question about this codebase...",
+    "thinking": "Thinking...",
+    "refining": "Refining query...",
+    "connecting": "Connecting...",
+    "disconnected": "Disconnected",
+    "error": "Connection error",
+    "save_view": "Save this view",
+    "send": "Send",
+    "view_applied": "View applied.",
+    "invalid_view_query": "The generated view query is invalid:"
+  },
+  "explorer_treemap": {
+    "filter_presets": "Filter presets",
+    "lens_toggle": "Lens toggle",
+    "canvas_label": "Architecture explorer canvas",
+    "empty_title": "No graph data",
+    "empty_desc": "Push code or sync a mirror to extract the knowledge graph.",
+    "empty_filtered": "No nodes match the current filter."
   },
   "explorer_filter": {
     "title": "Filters",

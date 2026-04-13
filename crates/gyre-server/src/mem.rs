@@ -113,6 +113,179 @@ impl GitOpsPort for NoopGitOps {
     async fn fetch_mirror(&self, _path: &str) -> Result<()> {
         Ok(())
     }
+
+    async fn branch_exists(&self, _repo_path: &str, _branch_name: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn create_branch(
+        &self,
+        _repo_path: &str,
+        _branch_name: &str,
+        _from_ref: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write_file(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _file_path: &str,
+        _content: &[u8],
+        _message: &str,
+    ) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
+    }
+
+    async fn reset_branch(&self, _repo_path: &str, _branch: &str, _target_sha: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+}
+
+/// Configurable git operations adapter for tests that need to control
+/// `can_merge` results per branch. Branches in the `conflict_branches` set
+/// return `Ok(false)` from `can_merge`; all others return `Ok(true)`.
+/// All other operations delegate to `NoopGitOps` behavior.
+#[cfg(test)]
+pub struct ConfigurableGitOps {
+    pub conflict_branches: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+#[cfg(test)]
+impl ConfigurableGitOps {
+    pub fn with_conflicts(branches: Vec<&str>) -> Self {
+        let set: std::collections::HashSet<String> =
+            branches.into_iter().map(|s| s.to_string()).collect();
+        Self {
+            conflict_branches: Arc::new(std::sync::Mutex::new(set)),
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl GitOpsPort for ConfigurableGitOps {
+    async fn init_bare(&self, _path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_branches(&self, _repo_path: &str) -> Result<Vec<BranchInfo>> {
+        Ok(vec![])
+    }
+
+    async fn commit_log(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _limit: usize,
+    ) -> Result<Vec<CommitInfo>> {
+        Ok(vec![])
+    }
+
+    async fn diff(&self, _repo_path: &str, _from: &str, _to: &str) -> Result<DiffResult> {
+        Ok(DiffResult {
+            files_changed: 0,
+            insertions: 0,
+            deletions: 0,
+            patches: vec![],
+        })
+    }
+
+    async fn is_repo(&self, _path: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn can_merge(&self, _repo_path: &str, source: &str, _target: &str) -> Result<bool> {
+        let conflicts = self.conflict_branches.lock().unwrap();
+        Ok(!conflicts.contains(source))
+    }
+
+    async fn merge_branches(
+        &self,
+        _repo_path: &str,
+        _source: &str,
+        _target: &str,
+    ) -> Result<MergeResult> {
+        Ok(MergeResult::Success {
+            merge_commit_sha: "0000000000000000000000000000000000000000".to_string(),
+        })
+    }
+
+    async fn create_worktree(
+        &self,
+        _repo_path: &str,
+        _worktree_path: &str,
+        _branch: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    async fn create_initial_commit(&self, _repo_path: &str, _branch: &str) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
+    }
+
+    async fn clone_mirror(&self, _url: &str, _path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn fetch_mirror(&self, _path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn branch_exists(&self, _repo_path: &str, _branch_name: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn create_branch(
+        &self,
+        _repo_path: &str,
+        _branch_name: &str,
+        _from_ref: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write_file(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _file_path: &str,
+        _content: &[u8],
+        _message: &str,
+    ) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
+    }
+
+    async fn reset_branch(&self, _repo_path: &str, _branch: &str, _target_sha: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn read_file(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -570,7 +743,7 @@ impl MergeRequestRepository for MemMrRepository {
             .filter(|mr| {
                 mr.depends_on
                     .iter()
-                    .any(|dep| dep.as_str() == mr_id.as_str())
+                    .any(|dep| dep.target_mr_id.as_str() == mr_id.as_str())
             })
             .map(|mr| mr.id.clone())
             .collect();
@@ -1128,6 +1301,98 @@ impl DependencyRepository for MemDependencyRepository {
     }
 }
 
+/// In-memory breaking change repository.
+#[derive(Default)]
+pub struct MemBreakingChangeRepository {
+    store: Arc<Mutex<Vec<gyre_domain::BreakingChange>>>,
+}
+
+#[async_trait]
+impl gyre_ports::BreakingChangeRepository for MemBreakingChangeRepository {
+    async fn create(&self, bc: &gyre_domain::BreakingChange) -> Result<()> {
+        self.store.lock().await.push(bc.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<gyre_domain::BreakingChange>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|b| b.id.as_str() == id.as_str())
+            .cloned())
+    }
+
+    async fn list_unacknowledged(&self) -> Result<Vec<gyre_domain::BreakingChange>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|b| !b.acknowledged)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_by_source_repo(
+        &self,
+        source_repo_id: &Id,
+    ) -> Result<Vec<gyre_domain::BreakingChange>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|b| b.source_repo_id.as_str() == source_repo_id.as_str())
+            .cloned()
+            .collect())
+    }
+
+    async fn acknowledge(&self, id: &Id, acknowledged_by: &str, at: u64) -> Result<bool> {
+        let mut store = self.store.lock().await;
+        if let Some(bc) = store.iter_mut().find(|b| b.id.as_str() == id.as_str()) {
+            bc.acknowledged = true;
+            bc.acknowledged_by = Some(acknowledged_by.to_string());
+            bc.acknowledged_at = Some(at);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+/// In-memory dependency policy repository.
+#[derive(Default)]
+pub struct MemDependencyPolicyRepository {
+    store: Arc<Mutex<HashMap<String, gyre_domain::DependencyPolicy>>>,
+}
+
+#[async_trait]
+impl gyre_ports::DependencyPolicyRepository for MemDependencyPolicyRepository {
+    async fn get_for_workspace(&self, workspace_id: &Id) -> Result<gyre_domain::DependencyPolicy> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .get(workspace_id.as_str())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn set_for_workspace(
+        &self,
+        workspace_id: &Id,
+        policy: &gyre_domain::DependencyPolicy,
+    ) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(workspace_id.as_str().to_string(), policy.clone());
+        Ok(())
+    }
+}
+
 /// In-memory spawn log + revoked tokens store (M13.7).
 #[derive(Default)]
 pub struct MemSpawnLogRepository {
@@ -1643,6 +1908,7 @@ impl NotificationRepository for MemNotificationRepository {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
+        notification_type: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
@@ -1654,6 +1920,7 @@ impl NotificationRepository for MemNotificationRepository {
                     && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
                     && min_priority.is_none_or(|min| n.priority >= min)
                     && max_priority.is_none_or(|max| n.priority <= max)
+                    && notification_type.is_none_or(|nt| n.notification_type.as_str() == nt)
             })
             .cloned()
             .collect();
@@ -2800,6 +3067,8 @@ pub fn test_state() -> Arc<crate::AppState> {
         audit_broadcast_tx: broadcast::channel(64).0,
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
         dependencies: Arc::new(MemDependencyRepository::default()),
+        breaking_changes: Arc::new(MemBreakingChangeRepository::default()),
+        dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
         rate_limiter: crate::rate_limit::RateLimiter::new(1000),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),
@@ -2814,6 +3083,9 @@ pub fn test_state() -> Arc<crate::AppState> {
         spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
         spec_policies: Arc::new(MemSpecPolicyRepository::default()),
         attestation_store: Arc::new(MemAttestationRepository::default()),
+        chain_attestations: Arc::new(MemChainAttestationRepository::default()),
+        key_bindings: Arc::new(MemKeyBindingRepository::default()),
+        trust_anchors: Arc::new(MemTrustAnchorRepository::default()),
         trusted_issuers: vec![],
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
@@ -2834,6 +3106,7 @@ pub fn test_state() -> Arc<crate::AppState> {
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
+        saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
         wg_config: crate::WireGuardConfig::from_env(),
         meta_specs: Arc::new(MemMetaSpecRepository::default()),
         meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
@@ -2874,6 +3147,132 @@ pub fn test_state() -> Arc<crate::AppState> {
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
+        ws_tickets: crate::auth::WsTicketStore::new(),
+    })
+}
+
+/// Build an AppState with a custom GitOpsPort for tests that need to control
+/// git operation behavior (e.g., configurable `can_merge` results).
+#[cfg(test)]
+pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
+    use std::collections::HashMap;
+    use tokio::sync::{broadcast, Mutex};
+    Arc::new(crate::AppState {
+        auth_token: "test-token".to_string(),
+        base_url: "http://localhost:3000".to_string(),
+        repos: Arc::new(MemRepoRepository::default()),
+        agents: Arc::new(MemAgentRepository::default()),
+        tasks: Arc::new(MemTaskRepository::default()),
+        merge_requests: Arc::new(MemMrRepository::default()),
+        reviews: Arc::new(MemReviewRepository::default()),
+        merge_queue: Arc::new(MemMergeQueueRepository::default()),
+        git_ops,
+        jj_ops: Arc::new(NoopJjOps),
+        agent_commits: Arc::new(MemAgentCommitRepository::default()),
+        worktrees: Arc::new(MemWorktreeRepository::default()),
+        telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
+        message_broadcast_tx: broadcast::channel(16).0,
+        kv_store: Arc::new(MemKvStore::default()),
+        agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
+        agent_jwt_ttl_secs: 3600,
+        users: Arc::new(MemUserRepository::default()),
+        api_keys: Arc::new(MemApiKeyRepository::default()),
+        jwt_config: None,
+        http_client: reqwest::Client::new(),
+        metrics: Arc::new(crate::metrics::Metrics::new().expect("test metrics")),
+        started_at_secs: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        compose_sessions: Arc::new(Mutex::new(HashMap::new())),
+        retention_store: crate::retention::RetentionStore::new(),
+        job_registry: Arc::new(crate::jobs::JobRegistry::new()),
+        analytics: Arc::new(MemAnalyticsRepository::default()),
+        costs: Arc::new(MemCostRepository::default()),
+        audit: Arc::new(MemAuditRepository::default()),
+        siem_store: crate::siem::SiemStore::new(),
+        audit_broadcast_tx: broadcast::channel(64).0,
+        network_peers: Arc::new(MemNetworkPeerRepository::default()),
+        dependencies: Arc::new(MemDependencyRepository::default()),
+        breaking_changes: Arc::new(MemBreakingChangeRepository::default()),
+        dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
+        rate_limiter: crate::rate_limit::RateLimiter::new(1000),
+        process_registry: Arc::new(Mutex::new(HashMap::new())),
+        agent_logs: Arc::new(Mutex::new(HashMap::new())),
+        agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
+        quality_gates: Arc::new(MemQualityGateRepository::default()),
+        gate_results: Arc::new(MemGateResultRepository::default()),
+        push_gate_registry: Arc::new(crate::pre_accept::builtin_gates()),
+        repo_push_gates: Arc::new(MemPushGateRepository::default()),
+        speculative_results: Arc::new(Mutex::new(HashMap::new())),
+        spawn_log: Arc::new(MemSpawnLogRepository::default()),
+        db_storage: None,
+        spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
+        spec_policies: Arc::new(MemSpecPolicyRepository::default()),
+        attestation_store: Arc::new(MemAttestationRepository::default()),
+        chain_attestations: Arc::new(MemChainAttestationRepository::default()),
+        key_bindings: Arc::new(MemKeyBindingRepository::default()),
+        trust_anchors: Arc::new(MemTrustAnchorRepository::default()),
+        trusted_issuers: vec![],
+        remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
+        sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
+        tunnel_store: Arc::new(Mutex::new(HashMap::new())),
+        container_audits: Arc::new(MemContainerAuditRepository::default()),
+        spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
+        spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
+        spec_links_store: Arc::new(Mutex::new(Vec::new())),
+        budget_configs: Arc::new(MemBudgetConfigRepository::default()),
+        budget_usages: Arc::new(MemBudgetUsageRepository::default()),
+        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        tenants: Arc::new(MemTenantRepository::default()),
+        workspaces: Arc::new(MemWorkspaceRepository::default()),
+        personas: Arc::new(MemPersonaRepository::default()),
+        policies: Arc::new(MemPolicyRepository::default()),
+        workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
+        teams: Arc::new(MemTeamRepository::default()),
+        notifications: Arc::new(MemNotificationRepository::default()),
+        graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
+        saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
+        wg_config: crate::WireGuardConfig::from_env(),
+        meta_specs: Arc::new(MemMetaSpecRepository::default()),
+        meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
+        meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        messages: Arc::new(MemMessageRepository::default()),
+        message_dispatch_tx: {
+            let (tx, rx) = tokio::sync::mpsc::channel(256);
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while rx.recv().await.is_some() {}
+            });
+            tx
+        },
+        agent_inbox_max: 1000,
+        user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
+        last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        llm_configs: Arc::new(MemLlmConfigRepository::default()),
+        presence: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        ws_connections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        ws_connection_workspaces: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
+        traces: Arc::new(MemTraceRepository::default()),
+        otlp_config: crate::otlp_receiver::OtlpServerConfig {
+            enabled: false,
+            grpc_port: 4317,
+            max_spans_per_trace: 10_000,
+        },
+        conversations: Arc::new(MemConversationRepository::default()),
+        repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
+        prompt_templates: Arc::new(MemPromptRepository::default()),
+        compute_targets: Arc::new(MemComputeTargetRepository::default()),
+        llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
+        user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
+        user_tokens: Arc::new(MemUserTokenRepository::default()),
+        judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
+        ws_tickets: crate::auth::WsTicketStore::new(),
     })
 }
 
@@ -3395,5 +3794,221 @@ impl gyre_ports::MetaSpecBindingRepository for MemMetaSpecBindingRepository {
             .await
             .iter()
             .any(|b| &b.meta_spec_id == meta_spec_id))
+    }
+}
+
+// ── In-memory ChainAttestationRepository ────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemChainAttestationRepository {
+    store: Arc<Mutex<Vec<gyre_common::Attestation>>>,
+}
+
+#[async_trait]
+impl gyre_ports::ChainAttestationRepository for MemChainAttestationRepository {
+    async fn save(&self, attestation: &gyre_common::Attestation) -> Result<()> {
+        let mut store = self.store.lock().await;
+        store.retain(|a| a.id != attestation.id);
+        store.push(attestation.clone());
+        Ok(())
+    }
+
+    async fn find_by_id(&self, id: &str) -> Result<Option<gyre_common::Attestation>> {
+        Ok(self.store.lock().await.iter().find(|a| a.id == id).cloned())
+    }
+
+    async fn load_chain(&self, leaf_id: &str) -> Result<Vec<gyre_common::Attestation>> {
+        let store = self.store.lock().await;
+        let mut chain = Vec::new();
+        let mut current_id = Some(leaf_id.to_string());
+        while let Some(id) = current_id.take() {
+            if let Some(att) = store.iter().find(|a| a.id == id) {
+                current_id = match &att.input {
+                    gyre_common::AttestationInput::Derived(d) => Some(hex::encode(&d.parent_ref)),
+                    _ => None,
+                };
+                chain.push(att.clone());
+            }
+        }
+        chain.reverse(); // root to leaf
+        Ok(chain)
+    }
+
+    async fn find_by_task(&self, task_id: &str) -> Result<Vec<gyre_common::Attestation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|a| a.metadata.task_id == task_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_commit(&self, commit_sha: &str) -> Result<Option<gyre_common::Attestation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|a| a.output.commit_sha == commit_sha)
+            .cloned())
+    }
+
+    async fn find_by_repo(
+        &self,
+        repo_id: &str,
+        since: u64,
+        until: u64,
+    ) -> Result<Vec<gyre_common::Attestation>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|a| {
+                a.metadata.repo_id == repo_id
+                    && a.metadata.created_at >= since
+                    && a.metadata.created_at <= until
+            })
+            .cloned()
+            .collect())
+    }
+}
+
+// ── In-memory KeyBindingRepository ──────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemKeyBindingRepository {
+    store: Arc<Mutex<Vec<(String, gyre_common::KeyBinding, bool)>>>, // (tenant_id, binding, invalidated)
+}
+
+#[async_trait]
+impl gyre_ports::KeyBindingRepository for MemKeyBindingRepository {
+    async fn store(&self, tenant_id: &str, binding: &gyre_common::KeyBinding) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .push((tenant_id.to_string(), binding.clone(), false));
+        Ok(())
+    }
+
+    async fn find_by_public_key(
+        &self,
+        tenant_id: &str,
+        public_key: &[u8],
+    ) -> Result<Option<gyre_common::KeyBinding>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|(tid, kb, inv)| tid == tenant_id && kb.public_key == public_key && !inv)
+            .map(|(_, kb, _)| kb.clone()))
+    }
+
+    async fn find_active_by_identity(
+        &self,
+        tenant_id: &str,
+        user_identity: &str,
+    ) -> Result<Vec<gyre_common::KeyBinding>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|(tid, kb, inv)| {
+                tid == tenant_id && kb.user_identity == user_identity && !inv && !kb.is_expired(now)
+            })
+            .map(|(_, kb, _)| kb.clone())
+            .collect())
+    }
+
+    async fn invalidate(&self, tenant_id: &str, public_key: &[u8]) -> Result<()> {
+        for entry in self.store.lock().await.iter_mut() {
+            if entry.0 == tenant_id && entry.1.public_key == public_key {
+                entry.2 = true;
+            }
+        }
+        Ok(())
+    }
+
+    async fn invalidate_all_for_identity(
+        &self,
+        tenant_id: &str,
+        user_identity: &str,
+    ) -> Result<()> {
+        for entry in self.store.lock().await.iter_mut() {
+            if entry.0 == tenant_id && entry.1.user_identity == user_identity {
+                entry.2 = true;
+            }
+        }
+        Ok(())
+    }
+}
+
+// ── In-memory TrustAnchorRepository ─────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemTrustAnchorRepository {
+    store: Arc<Mutex<Vec<(String, gyre_common::TrustAnchor)>>>, // (tenant_id, anchor)
+}
+
+#[async_trait]
+impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
+    async fn create(&self, tenant_id: &str, anchor: &gyre_common::TrustAnchor) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .push((tenant_id.to_string(), anchor.clone()));
+        Ok(())
+    }
+
+    async fn find_by_id(
+        &self,
+        tenant_id: &str,
+        anchor_id: &str,
+    ) -> Result<Option<gyre_common::TrustAnchor>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|(tid, a)| tid == tenant_id && a.id == anchor_id)
+            .map(|(_, a)| a.clone()))
+    }
+
+    async fn list_by_tenant(&self, tenant_id: &str) -> Result<Vec<gyre_common::TrustAnchor>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|(tid, _)| tid == tenant_id)
+            .map(|(_, a)| a.clone())
+            .collect())
+    }
+
+    async fn update(&self, tenant_id: &str, anchor: &gyre_common::TrustAnchor) -> Result<()> {
+        let mut store = self.store.lock().await;
+        if let Some(entry) = store
+            .iter_mut()
+            .find(|(tid, a)| tid == tenant_id && a.id == anchor.id)
+        {
+            entry.1 = anchor.clone();
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, tenant_id: &str, anchor_id: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .retain(|(tid, a)| !(tid == tenant_id && a.id == anchor_id));
+        Ok(())
     }
 }

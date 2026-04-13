@@ -80,6 +80,6 @@ See [docs/server-config.md](docs/server-config.md) for all configuration options
 
 ## Milestone Status
 
-M0 through M32 are all **Done**. See [specs/index.md](specs/index.md) for the full milestone table.
+M0 through M35 and HSI are all **Done**. See [specs/index.md](specs/index.md) for the full milestone table.
 
-Current milestone: **M32** (Meta-Spec Reconciliation -- spec kind field, workspace meta-spec-set bindings, blast-radius endpoint).
+Current work: **Authorization Provenance** (`authorization-provenance.md`) -- cryptographic work authorization chain. See `specs/tasks/` for decomposed tasks.

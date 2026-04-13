@@ -1,0 +1,21 @@
+# Pre-existing conditional test guards (baseline).
+# Each line is a file:line pattern to exempt.
+# These should be fixed over time — do not add new entries.
+#
+# See: specs/reviews/task-052.md F5
+web/src/__tests__/AppShell.test.js:716
+web/src/__tests__/AppShell.test.js:733
+web/src/__tests__/AppShell.test.js:748
+web/src/__tests__/MetaSpecs.test.js:1196
+web/src/__tests__/RepoSettings.test.js:188
+web/src/__tests__/RepoSettings.test.js:230
+web/src/__tests__/RepoSettings.test.js:261
+web/src/__tests__/RepoSettings.test.js:273
+web/src/__tests__/RepoSettings.test.js:317
+web/src/__tests__/SearchBar.test.js:204
+web/src/__tests__/SearchBar.test.js:277
+web/src/__tests__/SearchBar.test.js:283
+web/src/__tests__/SearchBar.test.js:329
+web/src/__tests__/SpecDetailCanvas.test.js:194
+web/src/__tests__/WorkspaceSettings.test.js:259
+web/src/__tests__/WorkspaceSettings.test.js:434

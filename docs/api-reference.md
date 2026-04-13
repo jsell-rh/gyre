@@ -29,6 +29,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET/PUT/DELETE` | `/api/v1/projects/{id}` | Read / update / delete project |
 | `POST/GET` | `/api/v1/tenants` | Create / list tenants (**Admin only**); tenant is the top-level isolation boundary (M34) |
 | `GET/PUT/DELETE` | `/api/v1/tenants/{id}` | Read / update / delete tenant (**Admin only**) (M34) |
+| `POST/GET` | `/api/v1/tenants/{id}/trust-anchors` | Create (**Admin only**) / list trust anchors for a tenant; body: `{id, issuer, jwks_uri, anchor_type: "user"|"agent"|"addon", constraints?}`; trust anchors are identity issuers the verification algorithm trusts (TASK-006, authorization-provenance §1.1) |
+| `GET/PUT/DELETE` | `/api/v1/tenants/{id}/trust-anchors/{aid}` | Get / update / delete a specific trust anchor (**Admin only**); PUT body: `{issuer?, jwks_uri?, anchor_type?, constraints?}` — partial update (TASK-006) |
 | `POST/GET` | `/api/v1/workspaces` | Create (**Admin only**, H-15) / list workspaces (`?tenant_id=` filter); workspace groups repos under a shared budget and quota (M22.1) |
 | `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1) |
 | `POST/GET` | `/api/v1/workspaces/{id}/repos` | Add / list repos in a workspace (M22.1) |
@@ -61,16 +63,24 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/specs/drifted` | Specs with open drift-review tasks — `drift_status: Drifted` (M21.1) |
 | `GET` | `/api/v1/specs/index` | Auto-generated markdown index of all specs in manifest (M21.1) |
 | `GET` | `/api/v1/specs/{path}` | Get single spec ledger entry by URL-encoded path (M21.1) |
-| `POST` | `/api/v1/specs/{path}/approve` | Approve a specific spec version: `{sha}` — path-scoped; transitions ledger Pending → Approved; `sha` must be 40-char hex; **approver type (`agent`/`human`) derived server-side from token kind** (JWT bearer = agent, global token/API key = human; client must not supply); approval blocked (400) when an `implements` link exists and parent spec is not yet approved, or when a `conflicts_with` link exists and conflicting spec is already approved (M22.3); **Developer+ required** — ReadOnly callers receive 403 (M21.1, M21.1-B, M21.1-C) |
+| `POST` | `/api/v1/specs/{path}/approve` | Approve a specific spec version: `{sha, output_constraints?, scope?}` — path-scoped; transitions ledger Pending → Approved; `sha` must be 40-char hex; **approver type (`agent`/`human`) derived server-side from token kind** (JWT bearer = agent, global token/API key = human; client must not supply); approval blocked (400) when an `implements` link exists and parent spec is not yet approved, or when a `conflicts_with` link exists and conflicting spec is already approved (M22.3); **Developer+ required** — ReadOnly callers receive 403; when caller has an active `KeyBinding`, produces a `SignedInput` attestation (TASK-006 Phase 1, audit-only) (M21.1, M21.1-B, M21.1-C) |
 | `POST` | `/api/v1/specs/{path}/revoke` | Revoke approval for a specific spec: `{reason}` — path-scoped; caller must be original approver or Admin (M21.1) |
 | `POST` | `/api/v1/specs/{path}/reject` | Reject a spec: `{reason}` — transitions Pending → Rejected; caller must be Admin (M21.1) |
 | `GET` | `/api/v1/specs/{path}/progress` | Spec implementation progress — linked tasks and MRs with status: `{spec_path, tasks: [...], merge_requests: [...]}` (VISION-1) |
 | `GET` | `/api/v1/specs/{path}/history` | Approval event history for a specific spec — list of approval/revocation events with approver, SHA, timestamps, reason (M21.1) |
 | `GET` | `/api/v1/specs/{path}/links` | Outbound and inbound spec links for a specific spec — `{links: [{link_type, target_path, direction},...]}` (M22.3) |
+| `GET` | `/api/v1/specs/{path}/dependents` | Specs that depend on this one — inbound `depends_on` and `implements` links targeting this spec. Response: `[{id, source_path, link_type, target_path, status, ...}]` (TASK-019, spec-links.md §Querying the Graph) |
+| `GET` | `/api/v1/specs/{path}/dependencies` | Specs this spec depends on — outbound `depends_on` and `implements` links from this spec. Response: `[{id, source_path, link_type, target_path, status, ...}]` (TASK-019, spec-links.md §Querying the Graph) |
+| `GET` | `/api/v1/specs/stale-links` | All stale links across the tenant — links with `status = "stale"`. Response: `[{source_path, target_path, link_type, stale_since, ...}]` (TASK-019, spec-links.md §Querying the Graph) |
+| `GET` | `/api/v1/specs/conflicts` | All active `conflicts_with` links. Response: `[{source_path, target_path, link_type, status, ...}]` (TASK-019, spec-links.md §Querying the Graph) |
+| `POST` | `/api/v1/patrol/spec-links` | Accountability agent spec-graph patrol — runs 5 checks (stale links, orphaned supersessions, unresolved conflicts, dangling implementations, deep dependency chains). Body: `{stale_threshold_secs?: u64}` (default 7 days). Response: `{findings: [{type, severity, spec_path, detail, suggested_action}]}`. Error-severity findings create priority-3 notifications for Admin/Developer members. (TASK-023, spec-links.md §Accountability Agent Integration) |
 | `GET` | `/api/v1/specs/graph` | Full spec link graph — `{nodes: [{path, title, approval_status},...], edges: [{from, to, link_type},...]}` (M22.3) |
+| `POST` | `/api/v1/constraints/validate` | Validate CEL constraint expression syntax: `{constraints: [{name, expression},...], scope?: {allowed_paths?, forbidden_paths?}}` → `{valid: bool, results: [{name, valid, error?},...]}` — compiles each expression with the real CEL parser and validates scope glob-to-CEL conversion; syntax-only, does NOT evaluate against repo state (authorization-provenance §7.6, TASK-007) |
+| `POST` | `/api/v1/constraints/dry-run` | Evaluate constraints against repo state (§7.6 dry-run): `{constraints: [{name, expression},...], scope?: {allowed_paths?, forbidden_paths?}, repo_id: string, workspace_id: string}` → `{valid: bool, results: [{name, passed, error?},...]}` — builds a CEL evaluation context from the repo's latest commit diff and workspace config, then evaluates all constraints using the domain evaluator. Returns per-constraint pass/fail results (authorization-provenance §7.6, TASK-007) |
+| `GET` | `/api/v1/constraints/strategy` | Preview strategy-implied constraints: `?workspace_id=<id>` → `{constraints: [{name, expression},...]}` — returns the full set of strategy-implied constraints (persona, meta-spec, scope, trust level, attestation policy) that would apply for the given workspace context (authorization-provenance §7.6, TASK-007) |
 | `GET/PUT` | `/api/v1/repos/{id}/push-gates` | Get / set active pre-accept push gates for a repo (built-in: ConventionalCommit, TaskRef, NoEmDash); **PUT requires Admin role** (M13.1) |
-| `GET/PUT` | `/api/v1/repos/{id}/spec-policy` | Get / set per-repo spec enforcement policy: `{require_spec_ref: bool, require_approved_spec: bool, warn_stale_spec: bool, require_current_spec: bool}`. `warn_stale_spec` emits `StaleSpecWarning` domain event when MR spec_ref SHA differs from HEAD; `require_current_spec` blocks merge queue when stale. **PUT requires Admin role**. All fields default to `false` (backwards compatible). (M18) |
-| `POST` | `/api/v1/repos/{id}/specs/assist` | LLM-assisted spec editing — SSE stream of `DiffOp` events; body: `{spec_path, instruction, draft_content?}`; streams incremental diff operations (`insert`/`delete`/`replace`) to the caller (S3.3, HSI §11) |
+| `GET/PUT` | `/api/v1/repos/{id}/spec-policy` | Get / set per-repo spec enforcement policy: `{require_spec_ref: bool, require_approved_spec: bool, warn_stale_spec: bool, require_current_spec: bool, enforce_manifest: bool}`. `warn_stale_spec` emits `StaleSpecWarning` domain event when MR spec_ref SHA differs from HEAD; `require_current_spec` blocks merge queue when stale; `enforce_manifest` rejects pushes adding spec files under `specs/` without a `specs/manifest.yaml` entry (spec-registry.md §Manifest Rules). **PUT requires Admin role**. All fields default to `false` (backwards compatible). (M18, TASK-017) |
+| `POST` | `/api/v1/repos/{id}/specs/assist` | LLM-assisted spec editing — SSE stream; body: `{spec_path, instruction, draft_content?}`; streams `event: partial` (incremental explanation text), `event: complete` (final `{diff: [{op, path, content}], explanation}` JSON), and `event: error` (`{error, raw_response?}` on invalid LLM output); diff ops: `add`/`remove`/`replace` (S3.3, HSI §11) |
 | `POST` | `/api/v1/repos/{id}/specs/save` | Commit spec changes to a feature branch and open an MR; body: `{spec_path, content, message}`; returns `{branch, mr_id}` (S3.3) |
 | `POST` | `/api/v1/repos/{id}/prompts/save` | Commit a prompt/spec directly to the default branch; body: `{prompt_path, content, message}` (S3.3) |
 | `GET` | `/api/v1/repos/{id}/blame?path={file}` | Per-line agent attribution — which agent last touched each line (M13.4) |
@@ -82,6 +92,9 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `PUT` | `/api/v1/repos/{id}/stack-policy` | Set / clear required stack fingerprint (**Admin only**, M14.2) |
 | `GET` | `/api/v1/repos/{id}/abac-policy` | Get the ABAC policy list for a repo — array of `AbacPolicy` objects; each policy has `id`, `name`, `rules` (AND within), evaluated as OR across policies (G6) |
 | `PUT` | `/api/v1/repos/{id}/abac-policy` | Replace the ABAC policy list (**Admin only**); policies are matched against JWT claims on push and spawn; `rules` is a list of `{claim, operator, value}` match conditions combined with AND; multiple policies in the array are OR'd together (G6) |
+| `GET` | `/api/v1/repos/{id}/attestations/{commit_sha}/verification` | Full `VerificationResult` tree for the attestation chain associated with a commit; includes chain structure validation, signature verification, constraint evaluation status (TASK-008, §6.4) |
+| `GET` | `/api/v1/repos/{id}/attestations/{commit_sha}/bundle` | `VerificationBundle` for offline verification — contains attestation chain (root to leaf), trust anchors, git diff, and assembly timestamp; can be verified without connecting to the Gyre server (TASK-008, §6.3) |
+| `GET` | `/api/v1/repos/{id}/attestations/{commit_sha}/chain` | Attestation chain as directed graph for Explorer visualization — nodes with signer identity, constraint count, verification status; edges show derivation relationships; failed constraints highlighted (TASK-009, §7.6) |
 | `GET` | `/api/v1/repos/{id}/aibom` | AI Bill of Materials — per-commit agent attribution + attestation levels (`?from={ref}&to={ref}`); ref names validated to prevent git flag injection (M14.3) |
 | `GET` | `/api/v1/repos/{id}/dependencies` | Outgoing dependency edges (`DependencyType`: Code/Spec/Api/Schema/Manual; `DetectionMethod`: auto/manual) (M22.4) |
 | `GET` | `/api/v1/repos/{id}/dependents` | Incoming dependency edges (M22.4) |
@@ -89,6 +102,12 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `DELETE` | `/api/v1/repos/{id}/dependencies/{dep_id}` | Remove a manual dep edge; **Admin only** (H-13, M22.4) |
 | `GET` | `/api/v1/repos/{id}/blast-radius` | BFS transitive dependents -- repos affected if this one changes (M22.4) |
 | `GET` | `/api/v1/dependencies/graph` | Full tenant-wide dependency DAG: `{nodes, edges}` (M22.4) |
+| `GET` | `/api/v1/workspaces/{id}/dependency-graph` | Workspace-scoped dependency DAG: `{nodes, edges}` — includes edges where at least one endpoint is in the workspace (TASK-046) |
+| `GET` | `/api/v1/dependencies/stale` | Stale dependencies tenant-wide (optional `?workspace_id=` filter) — `[{id, source_repo_id, target_repo_id, dependency_type, source_artifact, target_artifact, version_pinned, target_version_current, version_drift, detection_method, status, detected_at, last_verified_at}]` (TASK-021) |
+| `GET` | `/api/v1/dependencies/breaking` | List unacknowledged breaking changes tenant-wide — `[{id, dependency_edge_id, source_repo_id, commit_sha, description, detected_at, acknowledged, acknowledged_by?, acknowledged_at?}]` (TASK-020) |
+| `POST` | `/api/v1/dependencies/breaking/{id}/acknowledge` | Acknowledge a breaking change, clearing any merge block; returns 204 No Content (TASK-020) |
+| `GET` | `/api/v1/workspaces/{id}/dependency-policy` | Per-workspace dependency enforcement policy — `{breaking_change_behavior: block\|warn\|notify, max_version_drift, stale_dependency_alert_days, auto_create_update_tasks}` (TASK-020) |
+| `PUT` | `/api/v1/workspaces/{id}/dependency-policy` | Update dependency policy (partial update) — same fields, all optional (TASK-020) |
 | `GET` | `/api/v1/repos/{id}/graph` | Full knowledge graph for a repo — `{repo_id, nodes, edges}`; `GraphNode` fields: `id`, `repo_id`, `node_type` (`Package`/`Module`/`Type`/`Interface`/`Function`/`Endpoint`/`Table`), `name`, `qualified_name`, `file_path`, `line_start`/`line_end`, `visibility`, `doc_comment`, `spec_path`, `spec_confidence` (`None`/`Low`/`Medium`/`High`), `last_modified_sha`, `last_modified_by`, `complexity`, `churn_count_30d` (M30) |
 | `GET` | `/api/v1/repos/{id}/graph/types` | Type nodes (structs, enums) with their edges (M30) |
 | `GET` | `/api/v1/repos/{id}/graph/modules` | Module nodes with containment edges (M30) |
@@ -118,7 +137,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST/GET` | `/api/v1/tasks` | Create / list (`?status=&assigned_to=&parent_task_id=&workspace_id=`); canonical `status` values (snake_case): `backlog`, `in_progress`, `review`, `done`, `blocked` |
 | `GET/PUT` | `/api/v1/tasks/{id}` | Read / update task |
 | `PUT` | `/api/v1/tasks/{id}/status` | Transition task status |
-| `POST/GET` | `/api/v1/merge-requests` | Create / list (`?status=&repository_id=&workspace_id=`) |
+| `POST/GET` | `/api/v1/merge-requests` | Create / list (`?status=&repository_id=&workspace_id=`). Create accepts optional `depends_on: [<mr-id>,...]` to set creation-time explicit dependencies (validated, cycle-checked, merged with auto-detected lineage deps). (TASK-028) |
 | `GET` | `/api/v1/merge-requests/{id}` | Get merge request |
 | `PUT` | `/api/v1/merge-requests/{id}/status` | Transition MR status |
 | `POST/GET` | `/api/v1/merge-requests/{id}/comments` | Add / list review comments |
@@ -130,7 +149,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/merge-requests/{id}/trace` | Gate-time execution trace for an MR — structured spans capturing gate execution, LLM calls, tool use; `{mr_id, spans: [{span_id, parent_span_id, name, start_ms, end_ms, attributes}]}` (S2.4, HSI §3a) |
 | `GET` | `/api/v1/trace-spans/{span_id}/payload` | Full payload for a single trace span — raw input/output data for a gate or LLM call (S2.4) |
 | `PUT` | `/api/v1/merge-requests/{id}/dependencies` | Set MR dependency list: `{depends_on: [<mr-uuid>,...], reason?}` — validates all dep IDs exist, rejects self-dependency and cycles (400); queue skips MRs with unmerged deps; **Developer+ required** — ReadOnly callers receive 403 (CISO P147-A, TASK-100). **Branch lineage auto-detection:** on MR creation, the server uses `git merge-base` to check if the source branch descends from another open MR's source branch and auto-populates `depends_on` (branch refs validated to prevent arg injection). |
-| `GET` | `/api/v1/merge-requests/{id}/dependencies` | Get MR dependencies and dependents: `{mr_id, depends_on: [...], dependents: [...]}` (TASK-100) |
+| `GET` | `/api/v1/merge-requests/{id}/dependencies` | Get MR dependencies and dependents: `{mr_id, depends_on: [{mr_id, source, reason?},...], dependents: [...]}`. Each dependency includes `source` (`explicit`, `branch-lineage`, `agent-declared`) and optional `reason` (TASK-028, TASK-100) |
 | `DELETE` | `/api/v1/merge-requests/{id}/dependencies/{dep_id}` | Remove a single dependency from an MR; 404 if dep_id not in depends_on; **Developer+ required** (CISO P147-A, TASK-100) |
 | `PUT` | `/api/v1/merge-requests/{id}/atomic-group` | Set atomic group membership: `{group: "<name>"}` (or `null` to clear) — all group members must be ready before any is dequeued; **Developer+ required** (CISO P147-A, TASK-100) |
 | `POST` | `/api/v1/merge-queue/enqueue` | Add approved MR to merge queue; triggers gate execution per repo gates (M12.1) |
@@ -147,6 +166,9 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/git/{workspace_slug}/{repo_name}/git-upload-pack` | Smart HTTP git clone / fetch data |
 | `POST` | `/git/{workspace_slug}/{repo_name}/git-receive-pack` | Smart HTTP git push data + post-receive hook; SHA values in ref-updates must be valid 40-char hex — non-hex SHAs rejected to prevent argument injection (M-8); pushes to the default branch trigger spec lifecycle task creation (M13.8); **pushes to the default branch trigger automatic polyglot knowledge graph extraction** — `git archive` → language-specific extractor dispatch → persists nodes/edges + records `ArchitecturalDelta` in background; supported languages: **Rust** (syn-based AST), **TypeScript/JavaScript** (tree-sitter), **Python** (tree-sitter, Flask/FastAPI endpoints), **Go** (tree-sitter, packages/structs/interfaces/HTTP handlers) (M30b); optional `X-Gyre-Model-Context` request header captures the agent's model/context for commit provenance (M13.2); JWT bearers are evaluated against the repo's ABAC policy — push rejected with 403 if no policy matches (G6); **auto-detects** `Cargo.toml` path dependencies and creates `DependencyEdge` records for Gyre-hosted repos (M22.4) |
 | `GET` | `/api/v1/auth/token-info` | Token introspection — returns token kind (`agent_jwt`, `uuid_token`, `api_key`, `global`) and decoded JWT claims including `task_id`, `spawned_by`, `exp` (M18) |
+| `POST` | `/api/v1/auth/key-binding` | Bind ephemeral Ed25519 public key to caller's identity; body: `{public_key: base64, user_signature: base64, ttl_secs?}`; server countersigns as timestamp witness; returns `KeyBindingResponse` with `platform_countersign`; TTL capped at 24h (TASK-006, authorization-provenance §2.3) |
+| `DELETE` | `/api/v1/auth/key-binding/:id` | Revoke a specific key binding; `:id` is the hex-encoded Ed25519 public key (64 hex chars); only the binding owner or a tenant admin can revoke; returns 204 on success, 404 if not found, 403 if not authorized; emits `key_binding.revoked` audit event (TASK-047, authorization-provenance §2.3, §7.7) |
+| `DELETE` | `/api/v1/auth/key-bindings` | Revoke all active key bindings for the authenticated user; useful for logout flow; returns 204; emits `key_binding.revoked` for each revoked binding (TASK-047, authorization-provenance §2.3, §7.7) |
 | `GET/PUT` | `/api/v1/users/me` | Current user profile (username, display_name, avatar_url, timezone, locale, global_role, `UserPreferences`); PUT updates fields (M22.8) |
 | `GET` | `/api/v1/users/me/agents` | Agents spawned by the current user (M22.8) |
 | `GET` | `/api/v1/users/me/tasks` | Tasks assigned to the current user (M22.8) |
@@ -392,6 +414,23 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_agent_complete` | Signal task completion (opens MR, cleans worktree) |
 | `gyre_search` | Full-text search across all entities (`q`, `entity_type`, `workspace_id`, `limit` params) (M22.7) |
 | `gyre_analytics_query` | Decision-support analytics (`query_type`: `usage`\|`compare`\|`top`); wraps the three M23 analytics endpoints (M23) |
+| `gyre_message_send` | Send a Directed or Custom message to an agent/workspace. Params: `to` (destination), `kind`, `payload`, `tier`. Derives workspace from agent JWT. |
+| `gyre_message_poll` | Poll own inbox for Directed messages. Params: `after_ts`, `after_id`, `limit`, `unacked_only`. Derives agent_id from JWT. |
+| `gyre_message_ack` | Acknowledge a received message. Params: `message_id`. Derives agent_id from JWT. |
+| `graph_concept` | Search knowledge graph by concept name. Params: `concept` (required), `repo_id` or `workspace_id` (one required), `depth` (optional, default 2). Returns matching nodes and edges. (HSI §11) |
+| `spec_assist` | LLM-assisted spec editing. Params: `repo_id`, `spec_path`, `instruction` (all required), `draft_content` (optional). Returns validated `{diff: [{op, path, content}], explanation}` JSON; diff ops: `add`/`remove`/`replace`. Rate limited: 10 req/60s per user/workspace. (HSI §11) |
+
+**Available resources** (from `resources/list`):
+
+| Resource | URI Template | Description |
+|---|---|---|
+| `spec://` | `spec://{path}` | Read spec markdown files |
+| `agents://` | `agents://{workspace_id}` | List active agents in a workspace |
+| `queue://` | `queue://{repo_id}` | Merge queue entries for a repository |
+| `conversation://context` | — | Interrogation agent conversation history (HSI §4) |
+| `briefing://` | `briefing://{workspace_id}` | Workspace briefing narrative: completed MRs, in-progress tasks, metrics (HSI §9). Optional `?since=<epoch>` query param. |
+| `notifications://` | `notifications://{workspace_id}` | Inbox notifications for authenticated user (HSI §11). Optional `?min_priority=&max_priority=` query params. |
+| `trace://` | `trace://{mr_id}` | SDLC system trace for a merge request: spans, root_spans (HSI §3a). |
 
 Example MCP `initialize` call:
 ```json

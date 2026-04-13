@@ -10,7 +10,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use gyre_common::Id;
+use gyre_common::{GateTrace, Id};
 use serde::Serialize;
 use std::sync::Arc;
 use tracing::instrument;
@@ -58,29 +58,9 @@ pub struct SpanPayloadResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-/// GET /api/v1/merge-requests/:id/trace
-///
-/// Returns the most recent GateTrace for an MR.
-/// ABAC: resource_type="merge_request", id_param="id", action="read" (middleware-enforced).
-/// 404 if no trace exists for this MR.
-#[instrument(skip(state), fields(mr_id = %id))]
-pub async fn get_trace_for_mr(
-    Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<GateTraceResponse>, ApiError> {
-    let mr_id = Id::new(&id);
-
-    let trace = state
-        .traces
-        .get_by_mr(&mr_id)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    let trace = match trace {
-        Some(t) => t,
-        None => return Err(ApiError::NotFound("no trace for this MR".to_string())),
-    };
-
+/// Core trace assembly logic shared by both REST and MCP handlers.
+/// Converts a domain `GateTrace` into the `GateTraceResponse` API shape.
+pub fn assemble_gate_trace(trace: GateTrace) -> GateTraceResponse {
     // Identify root spans (no parent, or parent not in this trace).
     let all_span_ids: std::collections::HashSet<&str> =
         trace.spans.iter().map(|s| s.span_id.as_str()).collect();
@@ -115,7 +95,7 @@ pub async fn get_trace_for_mr(
         })
         .collect();
 
-    Ok(Json(GateTraceResponse {
+    GateTraceResponse {
         id: trace.id.as_str().to_string(),
         mr_id: trace.mr_id.as_str().to_string(),
         gate_run_id: trace.gate_run_id.as_str().to_string(),
@@ -124,7 +104,33 @@ pub async fn get_trace_for_mr(
         span_count: spans.len(),
         spans,
         root_spans,
-    }))
+    }
+}
+
+/// GET /api/v1/merge-requests/:id/trace
+///
+/// Returns the most recent GateTrace for an MR.
+/// ABAC: resource_type="merge_request", id_param="id", action="read" (middleware-enforced).
+/// 404 if no trace exists for this MR.
+#[instrument(skip(state), fields(mr_id = %id))]
+pub async fn get_trace_for_mr(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<GateTraceResponse>, ApiError> {
+    let mr_id = Id::new(&id);
+
+    let trace = state
+        .traces
+        .get_by_mr(&mr_id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let trace = match trace {
+        Some(t) => t,
+        None => return Err(ApiError::NotFound("no trace for this MR".to_string())),
+    };
+
+    Ok(Json(assemble_gate_trace(trace)))
 }
 
 /// GET /api/v1/trace-spans/:span_id/payload

@@ -25,13 +25,19 @@ fn node_type_to_str(nt: &NodeType) -> &'static str {
         NodeType::Package => "package",
         NodeType::Module => "module",
         NodeType::Type => "type",
+        NodeType::Trait => "trait",
         NodeType::Interface => "interface",
         NodeType::Function => "function",
+        NodeType::Method => "method",
+        NodeType::Class => "class",
+        NodeType::Enum => "enum",
+        NodeType::EnumVariant => "enum_variant",
         NodeType::Endpoint => "endpoint",
         NodeType::Component => "component",
         NodeType::Table => "table",
         NodeType::Constant => "constant",
         NodeType::Field => "field",
+        NodeType::Spec => "spec",
     }
 }
 
@@ -40,13 +46,19 @@ fn str_to_node_type(s: &str) -> Result<NodeType> {
         "package" => Ok(NodeType::Package),
         "module" => Ok(NodeType::Module),
         "type" => Ok(NodeType::Type),
+        "trait" => Ok(NodeType::Trait),
         "interface" => Ok(NodeType::Interface),
         "function" => Ok(NodeType::Function),
+        "method" => Ok(NodeType::Method),
+        "class" => Ok(NodeType::Class),
+        "enum" => Ok(NodeType::Enum),
+        "enum_variant" => Ok(NodeType::EnumVariant),
         "endpoint" => Ok(NodeType::Endpoint),
         "component" => Ok(NodeType::Component),
         "table" => Ok(NodeType::Table),
         "constant" => Ok(NodeType::Constant),
         "field" => Ok(NodeType::Field),
+        "spec" => Ok(NodeType::Spec),
         other => Err(anyhow!("unknown node type: {other}")),
     }
 }
@@ -149,6 +161,7 @@ struct GraphNodeRow {
     first_seen_at: i64,
     last_seen_at: i64,
     deleted_at: Option<i64>,
+    test_node: bool,
 }
 
 impl GraphNodeRow {
@@ -165,6 +178,7 @@ impl GraphNodeRow {
             visibility: str_to_visibility(&self.visibility)?,
             doc_comment: self.doc_comment,
             spec_path: self.spec_path,
+            spec_paths: vec![],
             spec_confidence: str_to_spec_confidence(&self.spec_confidence)?,
             last_modified_sha: self.last_modified_sha,
             last_modified_by: self.last_modified_by.map(Id::new),
@@ -177,7 +191,9 @@ impl GraphNodeRow {
             first_seen_at: self.first_seen_at as u64,
             last_seen_at: self.last_seen_at as u64,
             deleted_at: self.deleted_at.map(|t| t as u64),
-            test_node: false,
+            test_node: self.test_node,
+            spec_approved_at: None,
+            milestone_completed_at: None,
         })
     }
 }
@@ -208,6 +224,7 @@ struct NewGraphNodeRow<'a> {
     first_seen_at: i64,
     last_seen_at: i64,
     deleted_at: Option<i64>,
+    test_node: bool,
 }
 
 #[derive(Queryable, Selectable)]
@@ -326,6 +343,7 @@ impl GraphPort for SqliteStorage {
                 first_seen_at: node.first_seen_at as i64,
                 last_seen_at: node.last_seen_at as i64,
                 deleted_at: node.deleted_at.map(|t| t as i64),
+                test_node: node.test_node,
             };
             diesel::insert_into(graph_nodes::table)
                 .values(&row)
@@ -352,6 +370,7 @@ impl GraphPort for SqliteStorage {
                     graph_nodes::last_seen_at.eq(row.last_seen_at),
                     // Clear deleted_at when a node reappears after removal.
                     graph_nodes::deleted_at.eq(row.deleted_at),
+                    graph_nodes::test_node.eq(row.test_node),
                 ))
                 .execute(&mut *conn)
                 .context("insert graph node")?;
@@ -673,6 +692,7 @@ mod tests {
             visibility: Visibility::Public,
             doc_comment: None,
             spec_path: None,
+            spec_paths: vec![],
             spec_confidence: SpecConfidence::None,
             last_modified_sha: "abc123".to_string(),
             last_modified_by: None,
@@ -686,6 +706,8 @@ mod tests {
             last_seen_at: 1000,
             deleted_at: None,
             test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
         }
     }
 
@@ -1008,6 +1030,7 @@ mod tests {
             visibility: Visibility::PubCrate,
             doc_comment: Some("A well-documented struct".to_string()),
             spec_path: Some("specs/types.md".to_string()),
+            spec_paths: vec![],
             spec_confidence: SpecConfidence::Medium,
             last_modified_sha: "cafebabe".to_string(),
             last_modified_by: Some(Id::new("agent-42")),
@@ -1021,6 +1044,8 @@ mod tests {
             last_seen_at: 9999,
             deleted_at: None,
             test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
         };
         GraphPort::create_node(&s, node.clone()).await.unwrap();
         let found = GraphPort::get_node(&s, &node.id).await.unwrap().unwrap();

@@ -21,6 +21,7 @@ use gyre_domain::{
 use gyre_ports::{GraphPort, NotificationRepository, WorkspaceMembershipRepository};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tracing::{info, warn};
@@ -73,7 +74,7 @@ pub async fn extract_and_store_graph(
     repo_path: &str,
     repo_id: &str,
     new_sha: &str,
-    graph_store: &dyn GraphPort,
+    graph_store: Arc<dyn GraphPort>,
     git_bin: &str,
     agent_ctx: Option<AgentPushContext>,
     divergence_ports: Option<DivergencePorts<'_>>,
@@ -97,7 +98,7 @@ async fn do_extract(
     repo_path: &str,
     repo_id: &str,
     new_sha: &str,
-    graph_store: &dyn GraphPort,
+    graph_store: Arc<dyn GraphPort>,
     git_bin: &str,
     agent_ctx: Option<AgentPushContext>,
     divergence_ports: Option<DivergencePorts<'_>>,
@@ -348,10 +349,78 @@ async fn do_extract(
         %new_sha,
         nodes = node_count,
         edges = edge_count,
-        "knowledge graph extraction complete"
+        "knowledge graph extraction (pass 1) complete"
     );
 
-    // --- Step 5: post-extraction divergence check (HSI §8 priority 5) ---------
+    // --- Step 6b: spec assertion checking (post-extraction) -------------------
+    // Scan spec/markdown files in the repo tree for `<!-- gyre:assert ... -->`
+    // comments, evaluate them against the fresh graph, and create inbox
+    // notifications for any failures.
+    {
+        let spec_edges: Vec<GraphEdge> = new_edge_map.values().cloned().collect();
+        if let Err(e) = check_spec_assertions_on_push(
+            tmp.path(),
+            &final_nodes,
+            &spec_edges,
+            &repo_id_parsed,
+            &agent_ctx,
+            divergence_ports.as_ref(),
+        )
+        .await
+        {
+            warn!(%repo_id, "spec assertion check failed (non-fatal): {e}");
+        }
+    }
+
+    // --- Step 7: Non-blocking Pass 2 (LSP) -----------------------------------
+    // Per lsp-call-graph.md, the graph is usable after Pass 1 with partial call data.
+    // Pass 2 runs in the background and merges additional edges when done.
+    // The temp directory is moved into the spawned task so it stays alive.
+    {
+        let pass2_nodes = final_nodes.clone();
+        let pass2_edges: Vec<GraphEdge> = new_edge_map.into_values().collect();
+        let pass2_repo_root = tmp.path().to_path_buf();
+        let pass2_repo_id = repo_id_parsed.clone();
+        let pass2_repo_id_log = repo_id_parsed.to_string();
+        let pass2_sha = new_sha.to_string();
+        let pass2_graph_store = Arc::clone(&graph_store);
+
+        // Fire-and-forget: spawn a background task so Pass 2 never blocks the
+        // push response.  The `_tmp` binding keeps the temp directory alive
+        // until the LSP analysis finishes.
+        tokio::spawn(async move {
+            let _tmp = tmp; // prevent TempDir drop until this task completes
+
+            let lsp_edges = match tokio::task::spawn_blocking(move || {
+                extract_lsp_edges(
+                    &pass2_repo_root,
+                    &pass2_nodes,
+                    &pass2_edges,
+                    &pass2_repo_id,
+                    &pass2_sha,
+                )
+            })
+            .await
+            {
+                Ok(edges) => edges,
+                Err(e) => {
+                    tracing::warn!(
+                        repo_id = %pass2_repo_id_log,
+                        error = %e,
+                        "LSP call graph extraction (Pass 2) failed — graph will be missing cross-module call edges"
+                    );
+                    Vec::new()
+                }
+            };
+
+            // Persist any new LSP-discovered edges.
+            for edge in lsp_edges {
+                let _ = pass2_graph_store.create_edge(edge).await;
+            }
+        });
+    }
+
+    // --- Step 8: post-extraction divergence check (HSI §8 priority 5) ---------
 
     if let (Some(ctx), Some(ports)) = (agent_ctx, divergence_ports) {
         if !ctx.spec_ref.is_empty() {
@@ -365,7 +434,7 @@ async fn do_extract(
                 &repo_id_parsed,
                 &scope,
                 &recorded_delta,
-                graph_store,
+                graph_store.as_ref(),
                 &ports,
             )
             .await
@@ -719,6 +788,204 @@ fn run_all_extractors(
     (all_nodes, all_edges)
 }
 
+/// Run Pass 2 (LSP) extraction and return additional edges.
+/// This is designed to run AFTER Pass 1 results are already persisted,
+/// so the graph is usable immediately and becomes complete when Pass 2 finishes.
+pub fn extract_lsp_edges(
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    existing_edges: &[GraphEdge],
+    repo_id: &Id,
+    commit_sha: &str,
+) -> Vec<GraphEdge> {
+    // Auto-detect language and use the appropriate LSP extractor.
+    // Supports Rust (rust-analyzer), Python (pyright), Go (gopls),
+    // and TypeScript (typescript-language-server).
+    let lang = gyre_domain::lsp_call_graph::detect_language(repo_root);
+    if lang == gyre_domain::lsp_call_graph::RepoLanguage::Unknown {
+        return vec![];
+    }
+
+    let lsp_result = gyre_domain::lsp_call_graph::extract_call_graph_auto(
+        repo_root,
+        nodes,
+        existing_edges,
+        repo_id,
+        commit_sha,
+    );
+
+    if !lsp_result.errors.is_empty() {
+        for err in &lsp_result.errors {
+            tracing::info!("LSP call graph: {err}");
+        }
+    }
+
+    if lsp_result.new_edges_found > 0 || lsp_result.incomplete {
+        tracing::info!(
+            definitions = lsp_result.definitions_queried,
+            total = lsp_result.total_definitions,
+            new_edges = lsp_result.new_edges_found,
+            incomplete = lsp_result.incomplete,
+            "LSP call graph extraction {}",
+            if lsp_result.incomplete {
+                format!(
+                    "incomplete ({}/{})",
+                    lsp_result.definitions_queried, lsp_result.total_definitions
+                )
+            } else {
+                "complete".to_string()
+            }
+        );
+    }
+
+    lsp_result.edges
+}
+
+/// Post-extraction spec assertion check.
+///
+/// Scans the extracted repo tree for markdown files containing
+/// `<!-- gyre:assert ... -->` comments, evaluates each assertion against the
+/// fresh graph data, and creates inbox notifications for failures.
+async fn check_spec_assertions_on_push(
+    repo_root: &Path,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    repo_id: &Id,
+    agent_ctx: &Option<AgentPushContext>,
+    divergence_ports: Option<&DivergencePorts<'_>>,
+) -> anyhow::Result<()> {
+    use gyre_domain::spec_assertions;
+
+    // Collect markdown files from specs/ directory (if it exists).
+    let specs_dir = repo_root.join("specs");
+    if !specs_dir.is_dir() {
+        return Ok(());
+    }
+
+    let mut failed_assertions: Vec<(String, spec_assertions::AssertionResult)> = Vec::new();
+
+    // Walk the specs directory for markdown files.
+    fn walk_md_files(dir: &Path, results: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk_md_files(&path, results);
+                } else if path
+                    .extension()
+                    .map_or(false, |ext| ext == "md" || ext == "markdown")
+                {
+                    results.push(path);
+                }
+            }
+        }
+    }
+
+    let mut md_files = Vec::new();
+    walk_md_files(&specs_dir, &mut md_files);
+
+    for md_path in &md_files {
+        let content = match std::fs::read_to_string(md_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        // Quick check: skip files without assertion comments.
+        if !content.contains("gyre:assert") {
+            continue;
+        }
+
+        let relative_path = md_path
+            .strip_prefix(repo_root)
+            .unwrap_or(md_path)
+            .to_string_lossy()
+            .to_string();
+
+        let parsed = spec_assertions::parse_assertions(&content);
+        if parsed.is_empty() {
+            continue;
+        }
+
+        let results = spec_assertions::evaluate_assertions(&parsed, nodes, edges);
+        for result in results {
+            if !result.passed {
+                failed_assertions.push((relative_path.clone(), result));
+            }
+        }
+    }
+
+    if failed_assertions.is_empty() {
+        return Ok(());
+    }
+
+    info!(
+        %repo_id,
+        failures = failed_assertions.len(),
+        "spec assertion failures detected on push"
+    );
+
+    // Create notifications for assertion failures (when agent context and
+    // divergence ports are available).
+    if let (Some(ctx), Some(ports)) = (agent_ctx, divergence_ports) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let body = serde_json::json!({
+            "repo_id": repo_id.as_str(),
+            "failures": failed_assertions.iter().map(|(path, r)| {
+                serde_json::json!({
+                    "spec_path": path,
+                    "line": r.line,
+                    "assertion": r.assertion_text,
+                    "explanation": r.explanation,
+                })
+            }).collect::<Vec<_>>(),
+        })
+        .to_string();
+
+        let title = format!(
+            "Spec assertion failures: {} assertion(s) failed",
+            failed_assertions.len()
+        );
+
+        let ws_id = Id::new(&ctx.workspace_id);
+        let members = ports.membership_repo.list_by_workspace(&ws_id).await?;
+
+        for member in members {
+            let should_notify = matches!(
+                member.role,
+                WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+            );
+            if !should_notify {
+                continue;
+            }
+
+            let mut notif = Notification::new(
+                Id::new(Uuid::new_v4().to_string()),
+                ws_id.clone(),
+                member.user_id.clone(),
+                NotificationType::SpecAssertionFailure,
+                &title,
+                &ctx.tenant_id,
+                now,
+            );
+            notif.body = Some(body.clone());
+            notif.repo_id = Some(repo_id.as_str().to_string());
+
+            if let Err(e) = ports.notification_repo.create(&notif).await {
+                warn!(
+                    user_id = %member.user_id,
+                    "failed to create spec assertion notification: {e}"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Parse `nodes_added` from a delta_json string.
 ///
 /// Returns an empty vec if the field is absent or malformed (backward-compatible
@@ -869,6 +1136,7 @@ mod tests {
             visibility: Visibility::Public,
             doc_comment: None,
             spec_path: None,
+            spec_paths: vec![],
             spec_confidence: SpecConfidence::None,
             last_modified_sha: "sha1".to_string(),
             last_modified_by: None,
@@ -882,6 +1150,8 @@ mod tests {
             last_seen_at: 1000,
             deleted_at: None,
             test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
         }
     }
 
