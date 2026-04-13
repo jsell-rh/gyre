@@ -1,41 +1,41 @@
 # Coverage: UI Navigation Model
 
 **Spec:** [`system/ui-navigation.md`](../../system/ui-navigation.md)
-**Last audited:** -
-**Coverage:** 0/33
+**Last audited:** 2026-04-13
+**Coverage:** 18/26
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
-| 1 | Why a New Navigation Model | 2 | not-started | - | |
-| 2 | Design Principles | 2 | not-started | - | |
-| 3 | 1. Application Shell | 2 | not-started | - | |
-| 4 | Top Bar (always visible, all modes) | 3 | not-started | - | |
-| 5 | Status Bar (bottom, always visible) | 3 | not-started | - | |
-| 6 | 2. Workspace Home | 2 | not-started | - | |
-| 7 | Sections | 3 | not-started | - | |
-| 8 | Workspace Settings | 3 | not-started | - | |
-| 9 | 3. Repo Mode | 2 | not-started | - | |
-| 10 | Repo Header | 3 | not-started | - | |
-| 11 | Tab: Specs (default, landing tab) | 3 | not-started | - | |
-| 12 | Tab: Architecture (Moldable Development Surface) | 3 | not-started | - | |
-| 13 | Tab: Decisions | 3 | not-started | - | |
-| 14 | Tab: Code | 3 | not-started | - | |
-| 15 | Tab: ⚙ (Settings) | 3 | not-started | - | |
-| 16 | 4. Meta-Spec Management | 2 | not-started | - | |
-| 17 | 5. Navigation Flows | 2 | not-started | - | |
-| 18 | First Visit | 3 | not-started | - | |
-| 19 | Daily Flow | 3 | not-started | - | |
-| 20 | Exception Flow | 3 | not-started | - | |
-| 21 | Meta-Spec Editing Flow | 3 | not-started | - | |
-| 22 | 6. Keyboard Shortcuts | 2 | not-started | - | |
-| 23 | 7. URL Structure | 2 | not-started | - | |
-| 24 | 8. Responsive Design | 2 | not-started | - | |
-| 25 | Desktop (≥1024px) | 3 | not-started | - | |
-| 26 | Tablet (768-1024px) | 3 | not-started | - | |
-| 27 | Mobile (<768px) | 3 | not-started | - | |
-| 28 | 9. What This Replaces | 2 | not-started | - | |
-| 29 | From HSI §1 (Navigation Model) | 3 | not-started | - | |
-| 30 | From ui-layout.md §1 (Application Shell) | 3 | not-started | - | |
-| 31 | Preserved (not changed by this spec) | 3 | not-started | - | |
-| 32 | 10. Cross-Workspace View | 2 | not-started | - | |
-| 33 | Relationship to Existing Specs | 2 | not-started | - | |
+| 1 | Why a New Navigation Model | 2 | n/a | - | Rationale — no implementation |
+| 2 | Design Principles | 2 | n/a | - | Rationale — no implementation |
+| 3 | 1. Application Shell | 2 | implemented | - | App.svelte: topbar + status bar + no-sidebar layout |
+| 4 | Top Bar (always visible, all modes) | 3 | implemented | - | App.svelte: workspace selector, search, decisions badge, user avatar |
+| 5 | Status Bar (bottom, always visible) | 3 | implemented | - | App.svelte: WebSocket, trust, budget, presence |
+| 6 | 2. Workspace Home | 2 | implemented | - | WorkspaceHome.svelte |
+| 7 | Sections | 3 | implemented | - | Decisions, Repos, Briefing, Specs, Agent Rules sections |
+| 8 | Workspace Settings | 3 | implemented | - | WorkspaceSettings.svelte via gear icon |
+| 9 | 3. Repo Mode | 2 | implemented | - | RepoMode.svelte with horizontal tabs |
+| 10 | Repo Header | 3 | implemented | - | RepoMode header with agent count, budget, clone URL |
+| 11 | Tab: Specs (default, landing tab) | 3 | implemented | - | SpecDashboard.svelte |
+| 12 | Tab: Architecture (Moldable Development Surface) | 3 | task-assigned | task-178 | ExplorerView exists; needs full moldable surface features |
+| 13 | Tab: Decisions | 3 | implemented | - | Inbox.svelte scoped to repo |
+| 14 | Tab: Code | 3 | implemented | - | ExplorerCodeTab.svelte |
+| 15 | Tab: ⚙ (Settings) | 3 | implemented | - | RepoSettings.svelte |
+| 16 | 4. Meta-Spec Management | 2 | implemented | - | MetaSpecs.svelte |
+| 17 | 5. Navigation Flows | 2 | implemented | - | App.svelte: onMount entrypoint + popstate |
+| 18 | First Visit | 3 | implemented | - | App.svelte: entrypoint flow with localStorage |
+| 19 | Daily Flow | 3 | implemented | - | App.svelte: workspace home first |
+| 20 | Exception Flow | 3 | implemented | - | App.svelte: decisions badge → scroll to section |
+| 21 | Meta-Spec Editing Flow | 3 | implemented | - | App.svelte: goToAgentRules |
+| 22 | 6. Keyboard Shortcuts | 2 | implemented | - | App.svelte: handleKeydown with g-key sequences |
+| 23 | 7. URL Structure | 2 | implemented | - | App.svelte: parseUrl + urlFor |
+| 24 | 8. Responsive Design | 2 | implemented | - | App.svelte: CSS media queries + mobile drawer |
+| 25 | Desktop (≥1024px) | 3 | implemented | - | Full layout |
+| 26 | Tablet (768-1024px) | 3 | implemented | - | Detail panels as overlays |
+| 27 | Mobile (<768px) | 3 | implemented | - | Hamburger drawer, scrollable tabs |
+| 28 | 9. What This Replaces | 2 | n/a | - | Documentation — no implementation |
+| 29 | From HSI §1 (Navigation Model) | 3 | n/a | - | Documentation |
+| 30 | From ui-layout.md §1 (Application Shell) | 3 | n/a | - | Documentation |
+| 31 | Preserved (not changed by this spec) | 3 | n/a | - | Documentation |
+| 32 | 10. Cross-Workspace View | 2 | implemented | - | CrossWorkspaceHome.svelte + TenantSettings.svelte |
+| 33 | Relationship to Existing Specs | 2 | n/a | - | Documentation — no implementation |
