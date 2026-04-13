@@ -14,11 +14,11 @@
 | 6 | Workspace Attribution on Items | 3 | implemented | - | Partial — workspace badges at tenant scope, status bar (trust, budget, WS, presence) implemented. Detailed presence mechanics (debounce, graceful disconnect, session cap, PresenceEvicted) not verified. Consider splitting. |
 | 7 | Deep Links | 3 | implemented | - | URL routing, user_workspace_state table, last_seen_at Axum middleware (middleware.rs:104), briefing time dropdown all exist. URL patterns differ from spec examples. |
 | 8 | Keyboard Navigation | 3 | implemented | - | Cmd+K, /, ?, Esc all match spec. Uses g-key sequences (g h, g s, g 1-8) instead of spec's Cmd+1-6. |
-| 9 | 2. Trust Gradient | 2 | not-started | - | |
-| 10 | The Problem | 3 | not-started | - | |
-| 11 | Trust Levels | 3 | not-started | - | |
-| 12 | What Each Level Controls | 3 | not-started | - | |
-| 13 | Mechanical Implementation | 3 | not-started | - | |
+| 9 | 2. Trust Gradient | 2 | task-assigned | task-077 | |
+| 10 | The Problem | 3 | task-assigned | task-077 | |
+| 11 | Trust Levels | 3 | task-assigned | task-077 | |
+| 12 | What Each Level Controls | 3 | task-assigned | task-077 | |
+| 13 | Mechanical Implementation | 3 | task-assigned | task-077 | |
 | 14 | 2a. Policies ↔ Trust Level Integration | 3 | not-started | - | |
 | 15 | Trust Suggestions | 3 | not-started | - | |
 | 16 | 3. The Explorer: Progressive Architecture Discovery | 2 | not-started | - | |

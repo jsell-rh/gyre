@@ -11,8 +11,8 @@
 | 3 | One Canvas, Three Lenses | 3 | task-assigned | task-065 | |
 | 4 | Lens Definitions | 3 | task-assigned | task-066 | |
 | 5 | Progressive Drill-Down | 3 | task-assigned | task-067 | |
-| 6 | Causal Flow Trace (Structural Lens Feature) | 3 | not-started | - | Depends on lsp-call-graph.md Calls edges |
-| 7 | Data Requirements Summary | 3 | not-started | - | Reference table; assign after Phase 1–2 |
+| 6 | Causal Flow Trace (Structural Lens Feature) | 3 | task-assigned | task-081 | Depends on task-072 (LSP call graph) |
+| 7 | Data Requirements Summary | 3 | n/a | - | Reference table — no implementable requirement |
 | 8 | Component Architecture | 3 | task-assigned | task-065 | |
-| 9 | Implementation Phases | 3 | not-started | - | Phased rollout tracking |
-| 10 | Relationship to Other Specs | 2 | not-started | - | |
+| 9 | Implementation Phases | 3 | n/a | - | Phased rollout tracking — no implementable requirement |
+| 10 | Relationship to Other Specs | 2 | n/a | - | Cross-reference section |
