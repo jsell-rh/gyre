@@ -21,7 +21,7 @@
 | 13 | Audit Integration | 2 | task-assigned | task-129 | |
 | 14 | API | 2 | task-assigned | task-129 | |
 | 15 | Dry-Run Evaluation | 3 | task-assigned | task-129 | |
-| 16 | CLI | 2 | not-started | - | |
-| 17 | UI | 2 | not-started | - | |
-| 18 | MCP Integration | 2 | not-started | - | |
+| 16 | CLI | 2 | task-assigned | task-131 | |
+| 17 | UI | 2 | task-assigned | task-132 | |
+| 18 | MCP Integration | 2 | task-assigned | task-133 | |
 | 19 | Relationship to Existing Specs | 2 | n/a | - | Cross-reference section — no implementable requirement. |

@@ -4,10 +4,10 @@
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
-| abac-policy-engine.md | 19 | 2 | 3 | 14 | 0 | 0 | 0% |
+| abac-policy-engine.md | 19 | 2 | 0 | 17 | 0 | 0 | 0% |
 | activity-dashboard.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
-| agent-gates.md | 25 | 0 | 25 | 0 | 0 | 0 | 0% |
+| agent-gates.md | 25 | 9 | 5 | 11 | 0 | 0 | 0% |
 | agent-runtime.md | 33 | 1 | 0 | 32 | 0 | 0 | 0% |
 | analytics.md | 12 | 0 | 12 | 0 | 0 | 0 | 0% |
 | authorization-provenance.md | 47 | 7 | 0 | 0 | 29 | 11 | 100% |
@@ -25,7 +25,7 @@
 | message-bus.md | 17 | 0 | 17 | 0 | 0 | 0 | 0% |
 | meta-spec-reconciliation.md | 18 | 0 | 18 | 0 | 0 | 0 | 0% |
 | observability.md | 9 | 0 | 0 | 3 | 6 | 0 | 66% |
-| platform-model.md | 56 | 3 | 1 | 24 | 27 | 1 | 52% |
+| platform-model.md | 56 | 3 | 0 | 25 | 27 | 1 | 52% |
 | ralph-loop.md | 27 | 27 | 0 | 0 | 0 | 0 | 0% |
 | realized-model.md | 12 | 0 | 12 | 0 | 0 | 0 | 0% |
 | repo-lifecycle.md | 20 | 0 | 20 | 0 | 0 | 0 | 0% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 0 | 14 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **82** | **415** | **180** | **108** | **17** | **17%** |
+| **TOTAL** | **802** | **91** | **391** | **195** | **108** | **17** | **17%** |
