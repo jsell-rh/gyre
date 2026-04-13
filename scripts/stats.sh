@@ -26,8 +26,8 @@ for f in "$TASKS_DIR"/task-*.md; do
     [[ -f "$f" ]] || continue
     total_tasks=$((total_tasks + 1))
     name=$(basename "$f" .md)
-    status=$(grep -oP '(?<=\*\*(Status|Progress):\*\* `)[^`]+' "$f" 2>/dev/null || echo "unknown")
-    title=$(head -1 "$f" | sed -E 's/^# (TASK-[0-9]+|Task [0-9]+): //')
+    status=$(bash "$REPO_ROOT/scripts/task-field.sh" "$f" progress 2>/dev/null || echo "unknown")
+    title=$(bash "$REPO_ROOT/scripts/task-field.sh" "$f" title 2>/dev/null || head -1 "$f" | sed -E 's/^# (TASK-[0-9]+|Task [0-9]+): //')
     # Replace em-dashes with plain dashes for consistent column width
     title="${title//—/-}"
     # Truncate to 28 chars with ellipsis in the middle
@@ -57,10 +57,14 @@ declare -A review_rounds=() review_findings=()
 for f in "$REVIEWS_DIR"/task-*.md; do
     [[ -f "$f" ]] || continue
     name=$(basename "$f" .md)
-    # Count review rounds: "## Round N" or "## Findings" (early format)
+    # Count review rounds across formats:
+    #   "## Round N"        (stego format)
+    #   "## RN Findings"    (gyre format, e.g. "## R1 Findings")
+    #   "## Findings"       (early format, counts as round 1)
     round_headers=$(grep -c '^## Round [0-9]' "$f" 2>/dev/null || true)
+    rn_headers=$(grep -c '^## R[0-9]' "$f" 2>/dev/null || true)
     findings_headers=$(grep -c '^## Findings' "$f" 2>/dev/null || true)
-    rounds=$((${round_headers:-0} + ${findings_headers:-0}))
+    rounds=$((${round_headers:-0} + ${rn_headers:-0} + ${findings_headers:-0}))
     # Count actual findings: lines with "[process-revision-complete]" tag
     findings=$(grep -c 'process-revision-complete' "$f" 2>/dev/null || true)
     findings=${findings:-0}
@@ -320,6 +324,30 @@ if [[ $total_findings -gt 0 && $complete -gt 0 ]]; then
         f=${review_findings[$name]:-0}
         [[ $r -gt 0 ]] && echo "    $r rounds, $f findings  $name"
     done | sort -rn | head -3
+    echo ""
+fi
+
+# Spec coverage
+if [ -f "$REPO_ROOT/specs/coverage/SUMMARY.md" ]; then
+    echo "${BOLD}Spec Coverage${RESET}"
+    total_line=$(grep 'TOTAL' "$REPO_ROOT/specs/coverage/SUMMARY.md" 2>/dev/null || true)
+    if [ -n "$total_line" ]; then
+        cov_pct=$(echo "$total_line" | grep -oP '\d+%' | tail -1 || echo "0%")
+        # Parse pipe-delimited fields, strip bold markers ** and whitespace
+        cov_total=$(echo "$total_line" | awk -F'|' '{v=$3; gsub(/[* ]/, "", v); print v}')
+        cov_ns=$(echo "$total_line" | awk -F'|' '{v=$5; gsub(/[* ]/, "", v); print v}')
+        echo "  Overall:           ${GREEN}${cov_pct}${RESET} (${cov_total} sections, ${cov_ns} not started)"
+    fi
+    echo "  ${DIM}Lowest coverage:${RESET}"
+    # Parse non-header, non-total rows; field 3=Total, field 9=Coverage%
+    grep '^|' "$REPO_ROOT/specs/coverage/SUMMARY.md" | grep -v 'TOTAL\|Spec\|---' | \
+        while IFS='|' read -r _ spec total _ _ _ _ _ cov _; do
+            spec=$(echo "$spec" | xargs)
+            total=$(echo "$total" | xargs)
+            cov=$(echo "$cov" | xargs)
+            [ "$total" = "0" ] && continue
+            printf "    %-6s %s\n" "$cov" "$spec"
+        done | sort -n | head -5
     echo ""
 fi
 
