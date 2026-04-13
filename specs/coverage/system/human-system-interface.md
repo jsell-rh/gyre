@@ -1,8 +1,8 @@
 # Coverage: Human-System Interface
 
 **Spec:** [`system/human-system-interface.md`](../../system/human-system-interface.md)
-**Last audited:** 2026-04-13 (§1 verified this cycle; §2+ classified prior cycle)
-**Coverage:** 4/37
+**Last audited:** 2026-04-13 (§1 verified prior cycle; §3 audited this cycle; §2,4-12 classified prior cycle)
+**Coverage:** 5/37
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -26,7 +26,7 @@
 | 18 | Design Principle: The Built Software Is Always Alive | 3 | task-assigned | task-086 | Two layers of liveness: SDLC activity + test-time traces |
 | 19 | Test-Time Trace Capture | 3 | task-assigned | task-087 | OTLP receiver, TraceCapture gate, span-to-graph linkage |
 | 20 | Default Views (Automatic, No LLM) | 3 | task-assigned | task-088 | Boundary, Spec Realization, Change, System Trace views |
-| 21 | Saved Views (Curated, Shared) | 3 | not-started | - | View spec grammar, ownership, built-in views. Overlap with explorer-implementation.md §Saved Views (verified). |
+| 21 | Saved Views (Curated, Shared) | 3 | implemented | - | Full CRUD at /workspaces/:id/explorer-views (explorer_views.rs), ViewSpec+ViewQuery grammar (view_spec.rs, view_query.rs), ownership checks (creator or Admin), ABAC resource_type "explorer_view", UUID view_id, SQLite with workspace+tenant scoping, lazy-seeded built-in views. Partial — built-in view names diverge from spec (6 impl vs 4 spec: has Architecture Overview/Test Coverage Gaps/Hot Paths/Blast Radius/Spec Coverage/Ungoverned Risk instead of API Surface/Domain Model/Security Boundary/Test Coverage). |
 | 22 | Generated Views (LLM-Powered, On-Demand) | 3 | task-assigned | task-089 | LLM query translation + flow layout |
 | 23 | Three Lenses | 3 | task-assigned | task-090 | Structural (default), Evaluative, Observable (future) |
 | 24 | 4. Agent Communication | 2 | n/a | - | Section heading only — no implementable requirement. |
