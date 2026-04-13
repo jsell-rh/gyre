@@ -1,19 +1,19 @@
 # Coverage: Human-System Interface
 
 **Spec:** [`system/human-system-interface.md`](../../system/human-system-interface.md)
-**Last audited:** -
-**Coverage:** 0/55
+**Last audited:** - (§1 The Novel Problem + §1 Navigation Model audited 2026-04-13)
+**Coverage:** 4/53
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
-| 1 | The Novel Problem | 2 | not-started | - | |
-| 2 | 1. Navigation Model | 2 | not-started | - | |
-| 3 | Stable Sidebar, Adaptive Content | 3 | not-started | - | |
-| 4 | Scope Indicator (Breadcrumb) | 3 | not-started | - | |
-| 5 | What Each Nav Item Shows at Each Scope | 3 | not-started | - | |
-| 6 | Workspace Attribution on Items | 3 | not-started | - | |
-| 7 | Deep Links | 3 | not-started | - | |
-| 8 | Keyboard Navigation | 3 | not-started | - | |
+| 1 | The Novel Problem | 2 | n/a | - | Context/rationale — no implementable requirement. |
+| 2 | 1. Navigation Model | 2 | n/a | - | Section heading only — no implementable requirement. |
+| 3 | Stable Sidebar, Adaptive Content | 3 | not-started | - | No desktop sidebar exists (App.svelte:1032 "no sidebar"). Mobile drawer only with 5 items. Spec requires permanent 6-item sidebar. |
+| 4 | Scope Indicator (Breadcrumb) | 3 | implemented | - | Persistent clickable breadcrumb in App.svelte topbar. Minor deviation: tenant shown as "All Workspaces" vs tenant name. |
+| 5 | What Each Nav Item Shows at Each Scope | 3 | not-started | - | No sidebar nav items exist. Content uses modes/tabs/sections instead of spec's 6-item × 3-scope matrix. |
+| 6 | Workspace Attribution on Items | 3 | implemented | - | Partial — workspace badges at tenant scope, status bar (trust, budget, WS, presence) implemented. Detailed presence mechanics (debounce, graceful disconnect, session cap, PresenceEvicted) not verified. Consider splitting. |
+| 7 | Deep Links | 3 | implemented | - | URL routing, user_workspace_state table, last_seen_at Axum middleware (middleware.rs:104), briefing time dropdown all exist. URL patterns differ from spec examples. |
+| 8 | Keyboard Navigation | 3 | implemented | - | Cmd+K, /, ?, Esc all match spec. Uses g-key sequences (g h, g s, g 1-8) instead of spec's Cmd+1-6. |
 | 9 | 2. Trust Gradient | 2 | not-started | - | |
 | 10 | The Problem | 3 | not-started | - | |
 | 11 | Trust Levels | 3 | not-started | - | |
