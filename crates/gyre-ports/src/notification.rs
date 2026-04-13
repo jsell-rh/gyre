@@ -22,6 +22,7 @@ pub trait NotificationRepository: Send + Sync {
         workspace_id: Option<&Id>,
         min_priority: Option<u8>,
         max_priority: Option<u8>,
+        notification_type: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>>;

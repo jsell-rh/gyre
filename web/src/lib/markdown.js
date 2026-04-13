@@ -22,8 +22,28 @@ function inlineMarkdown(line) {
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     // Italic
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    // Links
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Links — sanitize href to prevent javascript: XSS (including entity-encoded bypasses)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
+      // Decode HTML entities and percent-encoding to catch bypass attempts
+      // like &#x6a;avascript: or java%73cript:
+      let decoded = url;
+      try {
+        decoded = decodeURIComponent(url.replace(/&amp;/g, '&'));
+      } catch (e) { /* invalid encoding, use raw */ }
+      decoded = decoded.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+      decoded = decoded.replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)));
+      const trimmed = decoded.trim().toLowerCase().replace(/[\s\x00-\x1f]+/g, '');
+      if (trimmed.startsWith('javascript:') || trimmed.startsWith('data:') || trimmed.startsWith('vbscript:')) {
+        return text; // Strip dangerous links, show text only
+      }
+      // Whitelist safe protocols
+      if (!/^(https?:|mailto:|#|\/|\.)/.test(trimmed) && trimmed.includes(':')) {
+        return text; // Unknown protocol — strip
+      }
+      return `<a href="${url}" target="_blank" rel="noopener">${text}</a>`;
+    })
+    // Spec paths — make clickable with data attribute for event delegation
+    .replace(/\b(specs\/[\w\-\/]+\.md)\b/g, '<a href="#" class="md-spec-link" data-spec-path="$1" title="Open $1 in spec editor">$1</a>');
 }
 
 export function renderMarkdown(md) {

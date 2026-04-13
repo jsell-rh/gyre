@@ -11,7 +11,9 @@
 //! Example: module `github.com/org/myapp`, package `api`, type `Server`
 //! → `github.com/org/myapp/api.Server`
 
-use crate::extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
+use crate::extractor::{
+    shallow_scan_for_marker, ExtractionError, ExtractionResult, LanguageExtractor,
+};
 use crate::tree_sitter_utils::parse_source;
 use gyre_common::{
     graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility},
@@ -39,6 +41,7 @@ impl LanguageExtractor for GoExtractor {
 
     fn detect(&self, repo_root: &Path) -> bool {
         repo_root.join("go.mod").is_file()
+            || shallow_scan_for_marker(repo_root, |d| d.join("go.mod").is_file())
     }
 
     fn extract(&self, repo_root: &Path, commit_sha: &str) -> ExtractionResult {
@@ -123,6 +126,7 @@ impl GoExtractionContext {
             visibility,
             doc_comment: None,
             spec_path: None,
+            spec_paths: vec![],
             spec_confidence: SpecConfidence::None,
             last_modified_sha: self.commit_sha.clone(),
             last_modified_by: None,
@@ -136,6 +140,8 @@ impl GoExtractionContext {
             last_seen_at: self.now,
             deleted_at: None,
             test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
         }
     }
 
@@ -176,12 +182,20 @@ impl GoExtractionContext {
     fn extract_go_file(&mut self, path: &Path) -> Result<(), String> {
         let content = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
 
+        // Check for UTF-8 validity (skip binary files)
+        if content.contains('\0') {
+            return Ok(());
+        }
+
         let rel_path = path
             .strip_prefix(&self.repo_root)
             .ok()
             .and_then(|p| p.to_str())
             .unwrap_or("")
             .to_string();
+
+        // Extract spec governance comments (// spec: <path>)
+        let spec_refs = crate::tree_sitter_utils::extract_spec_comments(&content);
 
         let tree = parse_source(content.as_bytes(), tree_sitter_go::LANGUAGE.into())?;
         let root = tree.root_node();
@@ -236,6 +250,31 @@ impl GoExtractionContext {
 
         // --- Extract http.HandleFunc / mux.HandleFunc and gin/echo/chi routes ---
         self.extract_http_routes(&root, source, &rel_path, &pkg_qname, &pkg_id);
+
+        // --- GovernedBy edges from spec comments ---
+        for spec_path in &spec_refs {
+            // Create or look up spec node
+            let spec_id = self.name_to_id.get(spec_path).cloned().unwrap_or_else(|| {
+                let mut spec_node = self.make_node(
+                    NodeType::Module,
+                    spec_path,
+                    spec_path,
+                    spec_path,
+                    0,
+                    0,
+                    Visibility::Public,
+                );
+                spec_node.spec_path = Some(spec_path.clone());
+                spec_node.spec_confidence = SpecConfidence::High;
+                let id = spec_node.id.clone();
+                self.nodes.push(spec_node);
+                self.name_to_id.insert(spec_path.clone(), id.clone());
+                id
+            });
+            // GovernedBy: package → spec
+            let edge = self.make_edge(EdgeType::GovernedBy, pkg_id.clone(), spec_id);
+            self.edges.push(edge);
+        }
 
         Ok(())
     }
@@ -582,8 +621,19 @@ impl GoExtractionContext {
                 self.name_to_id.insert(qname, ep_id.clone());
                 self.nodes.push(ep_node);
 
-                let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), ep_id);
+                let edge = self.make_edge(EdgeType::Contains, pkg_id.clone(), ep_id.clone());
                 self.edges.push(edge);
+
+                // Extract handler function name and create RoutesTo edge.
+                if let Some(handler_name) = extract_handler_from_call(node, source) {
+                    // Look up handler by name in current package
+                    let handler_qname = format!("{pkg_qname}.{handler_name}");
+                    if let Some(handler_id) = self.name_to_id.get(&handler_qname) {
+                        let routes_edge =
+                            self.make_edge(EdgeType::RoutesTo, ep_id, handler_id.clone());
+                        self.edges.push(routes_edge);
+                    }
+                }
             }
         }
 
@@ -1052,6 +1102,31 @@ fn extract_http_route_call(
             if path.starts_with('/') {
                 let line = call_node.start_position().row as u32 + 1;
                 return Some((path, http_method, line));
+            }
+        }
+    }
+    None
+}
+
+/// Extract the handler function name from an HTTP route call's arguments.
+/// In `http.HandleFunc("/path", handlerFunc)`, returns `Some("handlerFunc")`.
+fn extract_handler_from_call(call_node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let args = find_child_by_kind(call_node, "argument_list")?;
+    // The handler is typically the 2nd (or later) argument that is an identifier.
+    let mut found_path = false;
+    for i in 0..args.child_count() {
+        let arg = args.child(i).unwrap();
+        if arg.kind() == "interpreted_string_literal" {
+            found_path = true;
+            continue;
+        }
+        if found_path && arg.kind() == "identifier" {
+            return Some(arg.utf8_text(source).ok()?.to_string());
+        }
+        // Also handle method references like `s.handleHealth`
+        if found_path && arg.kind() == "selector_expression" {
+            if let Some(field) = find_child_by_kind(&arg, "field_identifier") {
+                return Some(field.utf8_text(source).ok()?.to_string());
             }
         }
     }

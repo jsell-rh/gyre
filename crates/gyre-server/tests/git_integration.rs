@@ -773,7 +773,7 @@ async fn merge_queue_blocks_mr_with_pending_dependency() {
         .json()
         .await
         .unwrap();
-    assert_eq!(dep_resp["depends_on"][0], mr_a_id);
+    assert_eq!(dep_resp["depends_on"][0]["mr_id"], mr_a_id);
 
     // Enqueue MR-B (but NOT MR-A — so MR-A is still open and unmerged).
     let queue_b: serde_json::Value = client
@@ -826,11 +826,14 @@ async fn merge_queue_blocks_mr_with_pending_dependency() {
         "MR-B should still be in the queue graph"
     );
     let b_node = mr_b_node.unwrap();
+    let b_dep_mr_ids: Vec<&str> = b_node["depends_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["mr_id"].as_str())
+        .collect();
     assert!(
-        b_node["depends_on"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!(mr_a_id)),
+        b_dep_mr_ids.contains(&mr_a_id.as_str()),
         "MR-B dependency on MR-A should be visible in the graph"
     );
 }
@@ -1364,17 +1367,27 @@ async fn queue_graph_reflects_enqueued_mrs_and_deps() {
     // Verify deps appear in the graph.
     let b_node = nodes.iter().find(|n| n["mr_id"].as_str() == Some(&mr_b_id));
     assert!(b_node.is_some(), "MR-B should appear in graph");
-    let b_deps = b_node.unwrap()["depends_on"].as_array().unwrap();
+    let b_dep_mr_ids: Vec<&str> = b_node.unwrap()["depends_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["mr_id"].as_str())
+        .collect();
     assert!(
-        b_deps.contains(&serde_json::json!(mr_a_id)),
+        b_dep_mr_ids.contains(&mr_a_id.as_str()),
         "MR-B should list MR-A as dependency in graph"
     );
 
     let c_node = nodes.iter().find(|n| n["mr_id"].as_str() == Some(&mr_c_id));
     assert!(c_node.is_some(), "MR-C should appear in graph");
-    let c_deps = c_node.unwrap()["depends_on"].as_array().unwrap();
+    let c_dep_mr_ids: Vec<&str> = c_node.unwrap()["depends_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["mr_id"].as_str())
+        .collect();
     assert!(
-        c_deps.contains(&serde_json::json!(mr_b_id)),
+        c_dep_mr_ids.contains(&mr_b_id.as_str()),
         "MR-C should list MR-B as dependency in graph"
     );
 }

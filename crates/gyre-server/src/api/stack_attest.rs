@@ -97,6 +97,35 @@ impl AgentStack {
 }
 
 // ---------------------------------------------------------------------------
+// Repo stack policy type
+// ---------------------------------------------------------------------------
+
+/// Structured repo stack policy stored in KV (`repo_stack_policies`).
+///
+/// Contains both the required fingerprint and the minimum attestation level.
+/// Level 2 = stack-attested (fingerprint match), Level 3 = container-verified
+/// (supply-chain.md §2, Policy per Level).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RepoStackPolicy {
+    pub fingerprint: String,
+    pub required_level: i64,
+}
+
+/// Parse a `repo_stack_policies` KV entry value.
+///
+/// Handles both the structured JSON format (`{"fingerprint": "...", "required_level": N}`)
+/// and the legacy plain-string format (just a fingerprint string, defaulting to Level 2).
+pub fn parse_stack_policy(value: &str) -> RepoStackPolicy {
+    serde_json::from_str::<RepoStackPolicy>(value).unwrap_or_else(|_| {
+        // Backward compat: legacy entries store just the fingerprint string.
+        RepoStackPolicy {
+            fingerprint: value.to_string(),
+            required_level: 2,
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Request / Response types
 // ---------------------------------------------------------------------------
 
@@ -114,12 +143,17 @@ pub struct StackResponse {
 pub struct SetStackPolicyRequest {
     /// Required fingerprint (SHA-256 hex).  Pass `null` to clear the policy.
     pub required_fingerprint: Option<String>,
+    /// Minimum attestation level required (2 = stack-attested, 3 = container-verified).
+    /// Defaults to 2 if omitted (supply-chain.md §2).
+    pub required_level: Option<i64>,
 }
 
 #[derive(Serialize)]
 pub struct StackPolicyResponse {
     pub repo_id: String,
     pub required_fingerprint: Option<String>,
+    /// Minimum attestation level required by this policy. `None` when no policy is set.
+    pub required_level: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -202,17 +236,28 @@ pub async fn get_stack_policy(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
-    let required_fingerprint = state
+    let raw = state
         .kv_store
         .kv_get("repo_stack_policies", &repo_id)
         .await
         .ok()
         .flatten();
 
-    Ok(Json(StackPolicyResponse {
-        repo_id,
-        required_fingerprint,
-    }))
+    match raw {
+        Some(value) => {
+            let policy = parse_stack_policy(&value);
+            Ok(Json(StackPolicyResponse {
+                repo_id,
+                required_fingerprint: Some(policy.fingerprint),
+                required_level: Some(policy.required_level),
+            }))
+        }
+        None => Ok(Json(StackPolicyResponse {
+            repo_id,
+            required_fingerprint: None,
+            required_level: None,
+        })),
+    }
 }
 
 /// PUT /api/v1/repos/:id/stack-policy — set (or clear) the required stack fingerprint.
@@ -240,24 +285,35 @@ pub async fn set_stack_policy(
 
     match &req.required_fingerprint {
         Some(fp) => {
+            let level = req.required_level.unwrap_or(2);
+            let policy = RepoStackPolicy {
+                fingerprint: fp.clone(),
+                required_level: level,
+            };
+            let json = serde_json::to_string(&policy).map_err(|e| ApiError::Internal(e.into()))?;
             state
                 .kv_store
-                .kv_set("repo_stack_policies", &repo_id, fp.clone())
+                .kv_set("repo_stack_policies", &repo_id, json)
                 .await
                 .map_err(ApiError::Internal)?;
+            Ok(Json(StackPolicyResponse {
+                repo_id,
+                required_fingerprint: Some(fp.clone()),
+                required_level: Some(level),
+            }))
         }
         None => {
             let _ = state
                 .kv_store
                 .kv_remove("repo_stack_policies", &repo_id)
                 .await;
+            Ok(Json(StackPolicyResponse {
+                repo_id,
+                required_fingerprint: None,
+                required_level: None,
+            }))
         }
     }
-
-    Ok(Json(StackPolicyResponse {
-        repo_id,
-        required_fingerprint: req.required_fingerprint,
-    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +452,8 @@ mod tests {
             json["required_fingerprint"].as_str().unwrap(),
             "abc123def456"
         );
+        // Defaults to level 2 when not specified.
+        assert_eq!(json["required_level"].as_i64().unwrap(), 2);
 
         // GET returns same policy
         let resp = app
@@ -413,6 +471,53 @@ mod tests {
             json["required_fingerprint"].as_str().unwrap(),
             "abc123def456"
         );
+        assert_eq!(json["required_level"].as_i64().unwrap(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_and_get_stack_policy_level3() {
+        let (app, _state) = app_with_agent_and_repo();
+
+        let body =
+            serde_json::json!({ "required_fingerprint": "abc123def456", "required_level": 3 });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/repos/repo-1/stack-policy")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["required_fingerprint"].as_str().unwrap(),
+            "abc123def456"
+        );
+        assert_eq!(json["required_level"].as_i64().unwrap(), 3);
+
+        // GET returns Level 3 policy
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/stack-policy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["required_fingerprint"].as_str().unwrap(),
+            "abc123def456"
+        );
+        assert_eq!(json["required_level"].as_i64().unwrap(), 3);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -452,6 +557,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(json["required_fingerprint"].is_null());
+        assert!(json["required_level"].is_null());
 
         // GET returns null
         let resp = app
@@ -465,6 +571,7 @@ mod tests {
             .unwrap();
         let json = body_json(resp).await;
         assert!(json["required_fingerprint"].is_null());
+        assert!(json["required_level"].is_null());
     }
 
     #[test]
@@ -540,6 +647,22 @@ mod tests {
             StatusCode::FORBIDDEN,
             "agent role must not modify stack attestation policy (NEW-39)"
         );
+    }
+
+    #[test]
+    fn parse_stack_policy_structured_json() {
+        let json = r#"{"fingerprint":"sha256:abc","required_level":3}"#;
+        let policy = parse_stack_policy(json);
+        assert_eq!(policy.fingerprint, "sha256:abc");
+        assert_eq!(policy.required_level, 3);
+    }
+
+    #[test]
+    fn parse_stack_policy_legacy_plain_string() {
+        // Legacy entries store just the fingerprint string, not JSON.
+        let policy = parse_stack_policy("sha256:legacy-fp");
+        assert_eq!(policy.fingerprint, "sha256:legacy-fp");
+        assert_eq!(policy.required_level, 2); // backward compat default
     }
 
     #[test]

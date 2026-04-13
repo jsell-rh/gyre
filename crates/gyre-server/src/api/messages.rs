@@ -11,18 +11,16 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use gyre_common::{
     message::{Destination, Message, MessageKind, MessageOrigin, MessageTier},
     Id,
 };
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{auth::AuthenticatedAgent, AppState};
+use crate::{auth::AuthenticatedAgent, signing::sign_message, AppState};
 
 use super::error::ApiError;
 
@@ -56,53 +54,6 @@ fn origin_from_auth(auth: &AuthenticatedAgent) -> MessageOrigin {
         // Per-agent token → Agent
         MessageOrigin::Agent(Id::new(&auth.agent_id))
     }
-}
-
-/// Sign a message with the server's Ed25519 key.
-/// Returns (signature_b64, key_id).
-fn sign_message(state: &AppState, msg: &Message) -> (String, String) {
-    let (from_type, from_id) = match &msg.from {
-        MessageOrigin::Server => ("server", "".to_string()),
-        MessageOrigin::Agent(id) => ("agent", id.as_str().to_string()),
-        MessageOrigin::User(id) => ("user", id.as_str().to_string()),
-    };
-    let (to_type, to_id) = match &msg.to {
-        Destination::Agent(id) => ("agent", id.as_str().to_string()),
-        Destination::Workspace(id) => ("workspace", id.as_str().to_string()),
-        Destination::Broadcast => ("broadcast", "".to_string()),
-    };
-    let ws_id = msg
-        .workspace_id
-        .as_ref()
-        .map(|id| id.as_str().to_string())
-        .unwrap_or_default();
-
-    let payload_json = msg
-        .payload
-        .as_ref()
-        .map(|v| serde_json::to_string(v).unwrap_or_default())
-        .unwrap_or_default();
-
-    let mut hasher = Sha256::new();
-    hasher.update(payload_json.as_bytes());
-    let payload_hash = format!("{:x}", hasher.finalize());
-
-    let sign_input = format!(
-        "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
-        msg.id.as_str(),
-        from_type,
-        from_id,
-        ws_id,
-        to_type,
-        to_id,
-        msg.kind.as_str(),
-        payload_hash,
-        msg.created_at,
-    );
-
-    let sig_bytes = state.agent_signing_key.sign_bytes(sign_input.as_bytes());
-    let sig_b64 = B64.encode(&sig_bytes);
-    (sig_b64, state.agent_signing_key.kid.clone())
 }
 
 /// Build a response Message that excludes `acknowledged` (per spec: excluded from POST responses).
@@ -340,6 +291,9 @@ pub async fn send_message(
             .await
             .map_err(ApiError::Internal)?;
     }
+
+    // Broadcast to WebSocket clients for real-time delivery.
+    let _ = state.message_broadcast_tx.send(msg.clone());
 
     // Dispatch to consumers (best-effort, non-blocking).
     let _ = state.message_dispatch_tx.try_send(msg.clone());

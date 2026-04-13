@@ -1,11 +1,16 @@
+#![recursion_limit = "256"]
+
 pub(crate) mod abac;
 pub mod abac_middleware;
+pub mod abandoned_branch;
 pub mod api;
 pub mod attestation;
 pub mod audit_simulator;
 pub(crate) mod auth;
 pub mod commit_signatures;
+pub(crate) mod constraint_check;
 pub mod container_audit;
+pub mod dep_staleness;
 pub mod domain_events;
 pub mod gate_executor;
 pub(crate) mod git_http;
@@ -31,11 +36,15 @@ pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod retention;
 pub mod siem;
+pub(crate) mod signing;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
+pub mod spec_link_staleness;
+pub mod spec_patrol;
 pub mod spec_registry;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
+pub(crate) mod explorer_ws;
 pub mod notifications;
 pub mod otlp_receiver;
 pub mod policy_engine;
@@ -54,17 +63,17 @@ use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, Tel
 use gyre_common::Id;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AttestationRepository, AuditRepository, BudgetRepository, BudgetUsageRepository,
-    ComputeTargetRepository, ContainerAuditRepository, ConversationRepository, CostRepository,
-    DependencyRepository, GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository,
-    MetaSpecRepository, MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository,
-    PersonaRepository, PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository,
-    QualityGateRepository, RepoRepository, ReviewRepository, SpawnLogRepository,
-    SpecApprovalEventRepository, SpecApprovalRepository, SpecLedgerRepository,
-    SpecPolicyRepository, TaskRepository, TeamRepository, TraceRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceMembershipRepository, WorkspaceRepository,
-    WorktreeRepository,
+    AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetRepository,
+    BudgetUsageRepository, ComputeTargetRepository, ContainerAuditRepository,
+    ConversationRepository, CostRepository, DependencyPolicyRepository, DependencyRepository,
+    GateResultRepository, GitOpsPort, GraphPort, JjOpsPort, KvJsonStore, LlmConfigRepository,
+    MergeQueueRepository, MergeRequestRepository, MetaSpecBindingRepository, MetaSpecRepository,
+    MetaSpecSetRepository, NetworkPeerRepository, NotificationRepository, PersonaRepository,
+    PolicyRepository, PreAcceptGate, ProcessHandle, PushGateRepository, QualityGateRepository,
+    RepoRepository, ReviewRepository, SpawnLogRepository, SpecApprovalEventRepository,
+    SpecApprovalRepository, SpecLedgerRepository, SpecPolicyRepository, TaskRepository,
+    TeamRepository, TraceRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceMembershipRepository, WorkspaceRepository, WorktreeRepository,
 };
 use jobs::JobRegistry;
 use retention::RetentionStore;
@@ -241,6 +250,10 @@ pub struct AppState {
     pub network_peers: Arc<dyn NetworkPeerRepository>,
     /// Cross-repo dependency graph (M22.4).
     pub dependencies: Arc<dyn DependencyRepository>,
+    /// Breaking change records (M22.4 — TASK-020).
+    pub breaking_changes: Arc<dyn BreakingChangeRepository>,
+    /// Per-workspace dependency enforcement policies (M22.4 — TASK-020).
+    pub dependency_policies: Arc<dyn DependencyPolicyRepository>,
     /// Request rate limiter (requests/sec).
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
@@ -270,6 +283,12 @@ pub struct AppState {
     pub spec_policies: Arc<dyn gyre_ports::SpecPolicyRepository>,
     /// Merge attestation bundles (persisted).
     pub attestation_store: Arc<dyn gyre_ports::AttestationRepository>,
+    /// Authorization provenance attestation chains (TASK-006).
+    pub chain_attestations: Arc<dyn gyre_ports::ChainAttestationRepository>,
+    /// Ephemeral key bindings for authorization provenance (TASK-006).
+    pub key_bindings: Arc<dyn gyre_ports::KeyBindingRepository>,
+    /// Trust anchors for authorization provenance (TASK-006).
+    pub trust_anchors: Arc<dyn gyre_ports::TrustAnchorRepository>,
     /// Trusted remote Gyre base URLs for cross-instance JWT federation (G11).
     /// Populated from `GYRE_TRUSTED_ISSUERS` (comma-separated list of base URLs).
     pub trusted_issuers: Vec<String>,
@@ -313,6 +332,8 @@ pub struct AppState {
     pub wg_config: WireGuardConfig,
     /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
     pub graph_store: Arc<dyn GraphPort>,
+    /// Saved explorer views (per-repo).
+    pub saved_views: Arc<dyn gyre_ports::SavedViewRepository>,
     /// DB-backed meta-spec registry (agent-runtime spec §2).
     pub meta_specs: Arc<dyn MetaSpecRepository>,
     /// Meta-spec binding repository.
@@ -370,6 +391,30 @@ pub struct AppState {
     pub user_tokens: Arc<dyn gyre_ports::UserTokenRepository>,
     /// Aggregated judgment ledger for user activity history (HSI §12).
     pub judgment_ledger: Arc<dyn gyre_ports::JudgmentLedgerRepository>,
+    /// WebSocket ticket store: short-lived, single-use tokens for WS auth.
+    /// Replaces the insecure ?token= query parameter pattern.
+    pub ws_tickets: auth::WsTicketStore,
+}
+
+/// Compute the SHA-256 hash of a workspace's meta-spec set JSON.
+///
+/// Returns the hex-encoded hash, or an empty string if no meta-spec set is
+/// configured for the workspace. Used at spec approval time (to populate
+/// `InputContent.meta_spec_set_sha`) and during constraint evaluation (to
+/// populate `AgentContext.meta_spec_set_sha`).
+pub(crate) async fn compute_meta_spec_set_sha(
+    meta_spec_sets: &dyn gyre_ports::MetaSpecSetRepository,
+    workspace_id: &Id,
+) -> String {
+    use sha2::{Digest, Sha256};
+    match meta_spec_sets.get(workspace_id).await {
+        Ok(Some(json)) => {
+            let mut hasher = Sha256::new();
+            hasher.update(json.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+        _ => String::new(),
+    }
 }
 
 /// Helper: sign a bus message and return (base64_signature, key_id).
@@ -606,6 +651,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/.well-known/jwks.json", get(oidc::jwks))
         .route("/ws", get(ws::ws_handler))
         .route("/ws/agents/:id/tty", get(tty::tty_handler))
+        // WebSocket ticket endpoint: issues short-lived, single-use tokens.
+        // Prevents leaking real auth tokens in WebSocket URL query parameters.
+        .route("/api/v1/ws-ticket", post(explorer_ws::issue_ws_ticket))
+        // Explorer WebSocket (explorer-implementation.md).
+        // WebSocket upgrades cannot go through body-reading ABAC middleware,
+        // so auth + repo-scoped tenant checks are enforced inside the handler.
+        .route(
+            "/api/v1/repos/:repo_id/explorer",
+            get(explorer_ws::explorer_ws),
+        )
         // Git smart HTTP -- auth enforced per-handler via AuthenticatedAgent extractor.
         // M34 Slice 6: workspace-slug/repo-name URL format.
         .route(
@@ -806,6 +861,8 @@ pub fn build_state(
             mem::MemNetworkPeerRepository::default()
         ),
         dependencies: Arc::new(mem::MemDependencyRepository::default()),
+        breaking_changes: Arc::new(mem::MemBreakingChangeRepository::default()),
+        dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),
@@ -840,6 +897,18 @@ pub fn build_state(
         attestation_store: store!(
             dyn AttestationRepository,
             mem::MemAttestationRepository::default()
+        ),
+        chain_attestations: store!(
+            dyn gyre_ports::ChainAttestationRepository,
+            mem::MemChainAttestationRepository::default()
+        ),
+        key_bindings: store!(
+            dyn gyre_ports::KeyBindingRepository,
+            mem::MemKeyBindingRepository::default()
+        ),
+        trust_anchors: store!(
+            dyn gyre_ports::TrustAnchorRepository,
+            mem::MemTrustAnchorRepository::default()
         ),
         trusted_issuers: std::env::var("GYRE_TRUSTED_ISSUERS")
             .ok()
@@ -897,6 +966,12 @@ pub fn build_state(
             Arc::clone(d) as Arc<dyn GraphPort>
         } else {
             Arc::new(gyre_adapters::MemGraphStore::new()) as Arc<dyn GraphPort>
+        },
+        saved_views: if let Some(ref d) = sqlite_db {
+            Arc::clone(d) as Arc<dyn gyre_ports::SavedViewRepository>
+        } else {
+            Arc::new(gyre_adapters::MemSavedViewRepository::default())
+                as Arc<dyn gyre_ports::SavedViewRepository>
         },
         meta_specs: store!(
             dyn MetaSpecRepository,
@@ -969,6 +1044,7 @@ pub fn build_state(
             dyn gyre_ports::JudgmentLedgerRepository,
             mem::MemJudgmentLedgerRepository
         ),
+        ws_tickets: auth::WsTicketStore::new(),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
                 Ok(factory) => Some(Arc::new(factory) as Arc<dyn gyre_ports::LlmPortFactory>),

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{DiffStats, MergeRequest, MrStatus};
+use gyre_domain::{DependencySource, DiffStats, MergeRequest, MergeRequestDependency, MrStatus};
 use gyre_ports::MergeRequestRepository;
 use std::sync::Arc;
 
@@ -61,8 +61,19 @@ struct MergeRequestRow {
 impl MergeRequestRow {
     fn into_mr(self) -> Result<MergeRequest> {
         let reviewer_strs: Vec<String> = serde_json::from_str(&self.reviewers).unwrap_or_default();
-        let depends_on_strs: Vec<String> =
-            serde_json::from_str(&self.depends_on).unwrap_or_default();
+        // Backward compat: try new format first, fall back to plain Vec<String>.
+        let depends_on: Vec<MergeRequestDependency> = if let Ok(deps) =
+            serde_json::from_str::<Vec<MergeRequestDependency>>(&self.depends_on)
+        {
+            deps
+        } else if let Ok(id_strs) = serde_json::from_str::<Vec<String>>(&self.depends_on) {
+            id_strs
+                .into_iter()
+                .map(|id| MergeRequestDependency::new(Id::new(id), DependencySource::Explicit))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let diff_stats = match (
             self.diff_files_changed,
             self.diff_insertions,
@@ -87,7 +98,7 @@ impl MergeRequestRow {
             diff_stats,
             has_conflicts: self.has_conflicts.map(|v| v != 0),
             spec_ref: self.spec_ref,
-            depends_on: depends_on_strs.into_iter().map(Id::new).collect(),
+            depends_on,
             atomic_group: self.atomic_group,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
@@ -133,8 +144,7 @@ impl MergeRequestRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let reviewer_strs: Vec<&str> = m.reviewers.iter().map(|id| id.as_str()).collect();
             let reviewers_json = serde_json::to_string(&reviewer_strs)?;
-            let dep_strs: Vec<&str> = m.depends_on.iter().map(|id| id.as_str()).collect();
-            let depends_on_json = serde_json::to_string(&dep_strs)?;
+            let depends_on_json = serde_json::to_string(&m.depends_on)?;
             let row = NewMergeRequestRow {
                 id: m.id.as_str(),
                 repository_id: m.repository_id.as_str(),
@@ -261,8 +271,7 @@ impl MergeRequestRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let reviewer_strs: Vec<&str> = m.reviewers.iter().map(|id| id.as_str()).collect();
             let reviewers_json = serde_json::to_string(&reviewer_strs)?;
-            let dep_strs: Vec<&str> = m.depends_on.iter().map(|id| id.as_str()).collect();
-            let depends_on_json = serde_json::to_string(&dep_strs)?;
+            let depends_on_json = serde_json::to_string(&m.depends_on)?;
             diesel::update(merge_requests::table.find(m.id.as_str()))
                 .set((
                     merge_requests::title.eq(&m.title),
@@ -314,7 +323,11 @@ impl MergeRequestRepository for SqliteStorage {
         let target = mr_id.as_str();
         let dependents = all
             .into_iter()
-            .filter(|mr| mr.depends_on.iter().any(|dep| dep.as_str() == target))
+            .filter(|mr| {
+                mr.depends_on
+                    .iter()
+                    .any(|dep| dep.target_mr_id.as_str() == target)
+            })
             .map(|mr| mr.id)
             .collect();
         Ok(dependents)
@@ -505,16 +518,22 @@ mod tests {
 
     #[tokio::test]
     async fn depends_on_roundtrip() {
+        use gyre_domain::{DependencySource, MergeRequestDependency};
         let (_tmp, s) = setup();
         create_repo(&s, "p1", "r1").await;
         let mut mr = make_mr("mr2", "r1");
-        mr.depends_on = vec![Id::new("mr1")];
+        mr.depends_on = vec![MergeRequestDependency::new(
+            Id::new("mr1"),
+            DependencySource::Explicit,
+        )];
         MergeRequestRepository::create(&s, &mr).await.unwrap();
         let found = MergeRequestRepository::find_by_id(&s, &mr.id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(found.depends_on, vec![Id::new("mr1")]);
+        assert_eq!(found.depends_on.len(), 1);
+        assert_eq!(found.depends_on[0].target_mr_id, Id::new("mr1"));
+        assert_eq!(found.depends_on[0].source, DependencySource::Explicit);
     }
 
     #[tokio::test]
@@ -533,13 +552,20 @@ mod tests {
 
     #[tokio::test]
     async fn list_dependents_works() {
+        use gyre_domain::{DependencySource, MergeRequestDependency};
         let (_tmp, s) = setup();
         create_repo(&s, "p1", "r1").await;
         let mr1 = make_mr("mr1", "r1");
         let mut mr2 = make_mr("mr2", "r1");
-        mr2.depends_on = vec![Id::new("mr1")];
+        mr2.depends_on = vec![MergeRequestDependency::new(
+            Id::new("mr1"),
+            DependencySource::Explicit,
+        )];
         let mut mr3 = make_mr("mr3", "r1");
-        mr3.depends_on = vec![Id::new("mr1")];
+        mr3.depends_on = vec![MergeRequestDependency::new(
+            Id::new("mr1"),
+            DependencySource::BranchLineage,
+        )];
         MergeRequestRepository::create(&s, &mr1).await.unwrap();
         MergeRequestRepository::create(&s, &mr2).await.unwrap();
         MergeRequestRepository::create(&s, &mr3).await.unwrap();
@@ -550,5 +576,82 @@ mod tests {
         assert_eq!(deps.len(), 2);
         assert!(deps.contains(&Id::new("mr2")));
         assert!(deps.contains(&Id::new("mr3")));
+    }
+
+    #[tokio::test]
+    async fn backward_compat_plain_vec_string_deserializes_as_explicit() {
+        // Simulate old-format data: plain ["id1", "id2"] stored in depends_on column.
+        let (_tmp, s) = setup();
+        create_repo(&s, "p1", "r1").await;
+
+        // Insert a row with old-format depends_on directly via Diesel.
+        {
+            use crate::schema::merge_requests;
+            let pool = std::sync::Arc::clone(&s.pool);
+            tokio::task::spawn_blocking(move || {
+                let mut conn = pool.get().unwrap();
+                diesel::insert_into(merge_requests::table)
+                    .values((
+                        merge_requests::id.eq("mr-old"),
+                        merge_requests::repository_id.eq("r1"),
+                        merge_requests::title.eq("Old format MR"),
+                        merge_requests::source_branch.eq("feat/old"),
+                        merge_requests::target_branch.eq("main"),
+                        merge_requests::status.eq("Open"),
+                        merge_requests::reviewers.eq("[]"),
+                        merge_requests::created_at.eq(1000i64),
+                        merge_requests::updated_at.eq(1000i64),
+                        merge_requests::tenant_id.eq("default"),
+                        // Old format: plain JSON array of strings.
+                        merge_requests::depends_on.eq(r#"["mr-dep1","mr-dep2"]"#),
+                        merge_requests::workspace_id.eq("ws1"),
+                    ))
+                    .execute(&mut *conn)
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+        }
+
+        let found = MergeRequestRepository::find_by_id(&s, &Id::new("mr-old"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.depends_on.len(), 2);
+        assert_eq!(found.depends_on[0].target_mr_id, Id::new("mr-dep1"));
+        assert_eq!(
+            found.depends_on[0].source,
+            gyre_domain::DependencySource::Explicit
+        );
+        assert!(found.depends_on[0].reason.is_none());
+        assert_eq!(found.depends_on[1].target_mr_id, Id::new("mr-dep2"));
+    }
+
+    #[tokio::test]
+    async fn dependency_metadata_roundtrip_with_reason() {
+        use gyre_domain::{DependencySource, MergeRequestDependency};
+        let (_tmp, s) = setup();
+        create_repo(&s, "p1", "r1").await;
+        let mut mr = make_mr("mr-meta", "r1");
+        mr.depends_on = vec![
+            MergeRequestDependency::new(Id::new("dep1"), DependencySource::Explicit),
+            MergeRequestDependency::new(Id::new("dep2"), DependencySource::BranchLineage),
+            MergeRequestDependency::new(Id::new("dep3"), DependencySource::AgentDeclared)
+                .with_reason("needs migration from dep3"),
+        ];
+        MergeRequestRepository::create(&s, &mr).await.unwrap();
+        let found = MergeRequestRepository::find_by_id(&s, &mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.depends_on.len(), 3);
+        assert_eq!(found.depends_on[0].source, DependencySource::Explicit);
+        assert!(found.depends_on[0].reason.is_none());
+        assert_eq!(found.depends_on[1].source, DependencySource::BranchLineage);
+        assert_eq!(found.depends_on[2].source, DependencySource::AgentDeclared);
+        assert_eq!(
+            found.depends_on[2].reason.as_deref(),
+            Some("needs migration from dep3")
+        );
     }
 }

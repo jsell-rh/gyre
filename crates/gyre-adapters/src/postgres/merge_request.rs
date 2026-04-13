@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{DiffStats, MergeRequest, MrStatus};
+use gyre_domain::{DependencySource, DiffStats, MergeRequest, MergeRequestDependency, MrStatus};
 use gyre_ports::MergeRequestRepository;
 use std::sync::Arc;
 
@@ -61,8 +61,19 @@ struct MergeRequestRow {
 impl MergeRequestRow {
     fn into_mr(self) -> Result<MergeRequest> {
         let reviewer_strs: Vec<String> = serde_json::from_str(&self.reviewers).unwrap_or_default();
-        let depends_on_strs: Vec<String> =
-            serde_json::from_str(&self.depends_on).unwrap_or_default();
+        // Backward compat: try new format first, fall back to plain Vec<String>.
+        let depends_on: Vec<MergeRequestDependency> = if let Ok(deps) =
+            serde_json::from_str::<Vec<MergeRequestDependency>>(&self.depends_on)
+        {
+            deps
+        } else if let Ok(id_strs) = serde_json::from_str::<Vec<String>>(&self.depends_on) {
+            id_strs
+                .into_iter()
+                .map(|id| MergeRequestDependency::new(Id::new(id), DependencySource::Explicit))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let diff_stats = match (
             self.diff_files_changed,
             self.diff_insertions,
@@ -87,7 +98,7 @@ impl MergeRequestRow {
             diff_stats,
             has_conflicts: self.has_conflicts.map(|v| v != 0),
             spec_ref: self.spec_ref,
-            depends_on: depends_on_strs.into_iter().map(Id::new).collect(),
+            depends_on,
             atomic_group: self.atomic_group,
             created_at: self.created_at as u64,
             updated_at: self.updated_at as u64,
@@ -133,8 +144,7 @@ impl MergeRequestRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let reviewer_strs: Vec<&str> = m.reviewers.iter().map(|id| id.as_str()).collect();
             let reviewers_json = serde_json::to_string(&reviewer_strs)?;
-            let dep_strs: Vec<&str> = m.depends_on.iter().map(|id| id.as_str()).collect();
-            let depends_on_json = serde_json::to_string(&dep_strs)?;
+            let depends_on_json = serde_json::to_string(&m.depends_on)?;
             let row = NewMergeRequestRow {
                 id: m.id.as_str(),
                 repository_id: m.repository_id.as_str(),
@@ -261,8 +271,7 @@ impl MergeRequestRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let reviewer_strs: Vec<&str> = m.reviewers.iter().map(|id| id.as_str()).collect();
             let reviewers_json = serde_json::to_string(&reviewer_strs)?;
-            let dep_strs: Vec<&str> = m.depends_on.iter().map(|id| id.as_str()).collect();
-            let depends_on_json = serde_json::to_string(&dep_strs)?;
+            let depends_on_json = serde_json::to_string(&m.depends_on)?;
             diesel::update(merge_requests::table.find(m.id.as_str()))
                 .set((
                     merge_requests::title.eq(&m.title),
@@ -313,7 +322,11 @@ impl MergeRequestRepository for PgStorage {
         let target = mr_id.as_str().to_string();
         let dependents = all
             .into_iter()
-            .filter(|mr| mr.depends_on.iter().any(|dep| dep.as_str() == target))
+            .filter(|mr| {
+                mr.depends_on
+                    .iter()
+                    .any(|dep| dep.target_mr_id.as_str() == target)
+            })
             .map(|mr| mr.id)
             .collect();
         Ok(dependents)

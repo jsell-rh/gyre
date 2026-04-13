@@ -24,7 +24,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures_util::Stream;
-use gyre_ports::{LlmPort, LlmPortFactory};
+use gyre_ports::{
+    ContentBlock, ConversationContent, ConversationMessage, LlmPort, LlmPortFactory, ToolCall,
+    ToolCallingResponse, ToolDefinition,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::pin::Pin;
@@ -255,6 +258,127 @@ impl RigVertexAiAdapter {
         body
     }
 
+    /// Build the Anthropic Messages API request body with tool definitions
+    /// and a multi-turn conversation history.
+    fn claude_request_body_with_tools(
+        system_prompt: &str,
+        messages: &[ConversationMessage],
+        tools: &[ToolDefinition],
+        max_tokens: Option<u32>,
+    ) -> Value {
+        // Convert messages to Anthropic format
+        let api_messages: Vec<Value> = messages
+            .iter()
+            .map(|msg| {
+                let content = match &msg.content {
+                    ConversationContent::Text(text) => Value::String(text.clone()),
+                    ConversationContent::Blocks(blocks) => {
+                        let api_blocks: Vec<Value> = blocks
+                            .iter()
+                            .map(|block| match block {
+                                ContentBlock::Text { text } => {
+                                    serde_json::json!({"type": "text", "text": text})
+                                }
+                                ContentBlock::ToolUse { id, name, input } => {
+                                    serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input})
+                                }
+                                ContentBlock::ToolResult {
+                                    tool_use_id,
+                                    content,
+                                } => {
+                                    serde_json::json!({"type": "tool_result", "tool_use_id": tool_use_id, "content": content})
+                                }
+                            })
+                            .collect();
+                        Value::Array(api_blocks)
+                    }
+                };
+                serde_json::json!({"role": msg.role, "content": content})
+            })
+            .collect();
+
+        // Convert tool definitions to Anthropic format
+        let api_tools: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                })
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "anthropic_version": "vertex-2023-10-16",
+            "messages": api_messages,
+            "max_tokens": max_tokens.unwrap_or(4096),
+        });
+        if !system_prompt.is_empty() {
+            body["system"] = system_prompt.into();
+        }
+        if !api_tools.is_empty() {
+            body["tools"] = Value::Array(api_tools);
+        }
+        body
+    }
+
+    /// Parse a Claude response that may contain tool_use blocks.
+    fn parse_tool_calling_response(response: &Value) -> Result<ToolCallingResponse> {
+        let content = response
+            .get("content")
+            .and_then(|c| c.as_array())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Expected content array in Claude response: {}",
+                    serde_json::to_string(response).unwrap_or_default()
+                )
+            })?;
+
+        let mut text_parts = Vec::new();
+        let mut tool_calls = Vec::new();
+
+        for block in content {
+            match block.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        text_parts.push(text.to_string());
+                    }
+                }
+                Some("tool_use") => {
+                    let id = block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let input = block
+                        .get("input")
+                        .cloned()
+                        .unwrap_or(Value::Object(Default::default()));
+                    tool_calls.push(ToolCall { id, name, input });
+                }
+                _ => {}
+            }
+        }
+
+        let stop_reason = response
+            .get("stop_reason")
+            .and_then(|s| s.as_str())
+            .unwrap_or("end_turn")
+            .to_string();
+
+        Ok(ToolCallingResponse {
+            text: text_parts.join(""),
+            tool_calls,
+            stop_reason,
+        })
+    }
+
     /// Build the Google generateContent request body for Gemini on Vertex AI.
     fn gemini_request_body(
         system_prompt: &str,
@@ -433,6 +557,37 @@ impl LlmPort for RigVertexAiAdapter {
             .await?;
         let chunks: Vec<Result<String>> = vec![Ok(text)];
         Ok(Box::pin(futures_util::stream::iter(chunks)))
+    }
+
+    async fn complete_with_tools(
+        &self,
+        system_prompt: &str,
+        messages: &[ConversationMessage],
+        tools: &[ToolDefinition],
+        max_tokens: Option<u32>,
+    ) -> Result<ToolCallingResponse> {
+        if !self.is_claude() {
+            // Gemini: fall back to text-only completion
+            let user_text = messages
+                .iter()
+                .filter(|m| m.role == "user")
+                .filter_map(|m| match &m.content {
+                    ConversationContent::Text(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .last()
+                .unwrap_or("");
+            let text = self.complete(system_prompt, user_text, max_tokens).await?;
+            return Ok(ToolCallingResponse {
+                text,
+                tool_calls: vec![],
+                stop_reason: "end_turn".to_string(),
+            });
+        }
+
+        let body = Self::claude_request_body_with_tools(system_prompt, messages, tools, max_tokens);
+        let response = self.post_json(&self.endpoint_url(), body).await?;
+        Self::parse_tool_calling_response(&response)
     }
 }
 

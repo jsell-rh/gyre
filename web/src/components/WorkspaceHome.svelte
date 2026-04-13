@@ -17,6 +17,10 @@
   import { relativeTime, formatDuration } from '../lib/timeFormat.js';
   import { specStatusTooltip, taskStatusTooltip, mrStatusTooltip, agentStatusTooltip, SPEC_STATUS_ICONS } from '../lib/statusTooltips.js';
   import RepoCard from './RepoCard.svelte';
+  import DependencyHealthCard from './DependencyHealthCard.svelte';
+  import DependencyGraph from './DependencyGraph.svelte';
+  import MergeQueueGraph from './MergeQueueGraph.svelte';
+  import ImpactAnalysisModal from './ImpactAnalysisModal.svelte';
   import Modal from '../lib/Modal.svelte';
   import Icon from '../lib/Icon.svelte';
   import CopyableId from '../lib/CopyableId.svelte';
@@ -376,6 +380,68 @@
   }
 
 
+  // ── Dependency health: state + load ─────────────────────────────────────
+  let depHealthLoading = $state(true);
+  let depHealthData = $state({ totalWithDeps: 0, staleCount: 0, breakingCount: 0 });
+  let wsBreakingChanges = $state([]);
+  let depGraphOpen = $state(false);
+  let depGraphScope = $state('workspace');
+  let depGraphNodes = $state([]);
+  let depGraphEdges = $state([]);
+
+  async function loadDepHealth() {
+    if (!workspace?.id) return;
+    depHealthLoading = true;
+    try {
+      const [graphData, staleEdges, breakingList] = await Promise.all([
+        api.workspaceDependencyGraph(workspace.id).catch(() => ({ nodes: [], edges: [] })),
+        api.staleDependencies(workspace.id).catch(() => []),
+        api.breakingChanges().catch(() => []),
+      ]);
+      const nodesWithEdges = new Set();
+      for (const e of graphData.edges ?? []) {
+        nodesWithEdges.add(e.source);
+        nodesWithEdges.add(e.target);
+      }
+      // Count repos with stale deps (unique source repos among stale edges)
+      const staleRepos = new Set((staleEdges ?? []).map(e => e.source_repo_id));
+      depGraphNodes = graphData.nodes ?? [];
+      depGraphEdges = graphData.edges ?? [];
+      // Filter breaking changes to workspace scope — the tenant-wide endpoint
+      // returns all breaking changes, but the dashboard should only show those
+      // affecting repos in the current workspace (checklist item 97).
+      const wsRepoIds = new Set((graphData.nodes ?? []).map(n => n.repo_id));
+      const filteredBreaking = (breakingList ?? []).filter(b => !b.acknowledged && wsRepoIds.has(b.source_repo_id));
+      wsBreakingChanges = filteredBreaking;
+      depHealthData = {
+        totalWithDeps: nodesWithEdges.size,
+        staleCount: staleRepos.size,
+        breakingCount: filteredBreaking.length,
+      };
+    } catch {
+      depHealthData = { totalWithDeps: 0, staleCount: 0, breakingCount: 0 };
+      wsBreakingChanges = [];
+      depGraphNodes = [];
+      depGraphEdges = [];
+    } finally {
+      depHealthLoading = false;
+    }
+  }
+
+  async function handleDepScopeChange(newScope) {
+    depGraphScope = newScope;
+    try {
+      const data = newScope === 'tenant'
+        ? await api.dependencyGraph()
+        : await api.workspaceDependencyGraph(workspace?.id);
+      depGraphNodes = data.nodes ?? [];
+      depGraphEdges = data.edges ?? [];
+    } catch {
+      depGraphNodes = [];
+      depGraphEdges = [];
+    }
+  }
+
   // ── Notification inline actions ────────────────────────────────────────
   async function handleApproveSpec(n) {
     const body = getBody(n);
@@ -579,6 +645,24 @@
     failed_gates: wsMrs.filter(m => m._gates?.failed > 0).length,
   });
 
+  // ── Impact analysis modal state ──────────────────────────────────────
+  let impactModalOpen = $state(false);
+  let impactRepoId = $state(null);
+  let impactRepoName = $state('');
+
+  function openImpactAnalysis() {
+    // When triggered from the pipeline, pick the first repo with breaking changes
+    const bc = wsBreakingChanges.length > 0 ? wsBreakingChanges[0] : null;
+    if (bc) {
+      impactRepoId = bc.source_repo_id;
+      impactRepoName = entityName('repo', bc.source_repo_id);
+    } else if (repos.length > 0) {
+      impactRepoId = repos[0].id;
+      impactRepoName = repos[0].name;
+    }
+    impactModalOpen = true;
+  }
+
   // ── Activity pagination ──────────────────────────────────────
   let activityLimit = $state(5);  // show enough activity to be useful
 
@@ -639,6 +723,8 @@
   // ── Merge Queue state ───────────────────────────────────────────────────
   let mergeQueueLoading = $state(true);
   let mergeQueueItems = $state([]);
+  let mergeQueueGraphNodes = $state([]);
+  let mergeQueueView = $state('list');
 
   async function loadMergeQueue() {
     mergeQueueLoading = true;
@@ -648,6 +734,7 @@
         api.mergeQueueGraph().catch(() => ({ nodes: [], edges: [] })),
       ]);
       const allItems = Array.isArray(all) ? all : [];
+      mergeQueueGraphNodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
       // Enrich queue items with MR details
       const mrIds = allItems.map(e => e.merge_request_id ?? e.mr_id).filter(Boolean);
       const mrDetails = {};
@@ -688,6 +775,7 @@
         .sort((a, b) => (a.position ?? a.priority ?? 0) - (b.position ?? b.priority ?? 0));
     } catch {
       mergeQueueItems = [];
+      mergeQueueGraphNodes = [];
     } finally {
       mergeQueueLoading = false;
     }
@@ -961,6 +1049,7 @@
     loadActivity();
     loadBudget();
     loadMergeQueue();
+    loadDepHealth();
   });
 </script>
 
@@ -1045,6 +1134,18 @@
               <span class="pipeline-stage-count">{pipelineMrs.merged}</span>
               <span class="pipeline-stage-label">Merged</span>
             </span>
+          {/if}
+          {#if depHealthData.breakingCount > 0}
+            <button
+              class="pipeline-breaking-btn"
+              onclick={openImpactAnalysis}
+              title="{depHealthData.breakingCount} breaking change{depHealthData.breakingCount !== 1 ? 's' : ''} — click for impact analysis"
+              data-testid="pipeline-impact-btn"
+            >
+              <span class="pipeline-breaking-icon">⚠</span>
+              <span class="pipeline-breaking-count">{depHealthData.breakingCount}</span>
+              <span class="pipeline-breaking-label">Breaking</span>
+            </button>
           {/if}
         </nav>
       {/if}
@@ -1205,6 +1306,32 @@
             {/if}
           {/if}
 
+          <!-- Dependency Graph (TASK-046) — toggleable via health card -->
+          {#if depGraphOpen}
+            <section class="dep-graph-section" data-testid="section-dep-graph">
+              <div class="section-header-row">
+                <h2 class="section-heading">Dependency Graph</h2>
+                <button class="section-btn section-btn-compact" onclick={() => { depGraphOpen = false; }}>Close</button>
+              </div>
+              <div class="dep-graph-wrapper">
+                <DependencyGraph
+                  nodes={depGraphNodes}
+                  edges={depGraphEdges}
+                  scope={depGraphScope}
+                  onScopeChange={handleDepScopeChange}
+                  onNodeClick={(node) => {
+                    const repo = repos.find(r => r.id === node.repo_id);
+                    if (repo) {
+                      onSelectRepo?.(repo);
+                    } else {
+                      toastError(`"${node.name}" is in another workspace and cannot be opened from here.`);
+                    }
+                  }}
+                />
+              </div>
+            </section>
+          {/if}
+
           <!-- Repos (primary content — the main thing users interact with) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
@@ -1329,17 +1456,55 @@
           <!-- Merge Queue -->
           {#if !mergeQueueLoading && mergeQueueItems.length > 0}
             <div class="sidebar-widget" data-testid="section-merge-queue">
-              <h3 class="sidebar-widget-title">Merge Queue <span class="sidebar-count">{mergeQueueItems.length}</span></h3>
-              {#each mergeQueueItems.slice(0, 5) as item, i (item.merge_request_id ?? item.mr_id ?? i)}
-                {@const mrId = item.merge_request_id ?? item.mr_id}
-                {@const mr = item._mr ?? {}}
-                <button class="sidebar-queue-item" onclick={() => nav('mr', mrId, { repo_id: mr.repository_id ?? mr.repo_id, title: item._title })}>
-                  <span class="sidebar-queue-pos">#{i + 1}</span>
-                  <span class="sidebar-queue-title">{item._title}</span>
-                </button>
-              {/each}
+              <div class="sidebar-widget-header">
+                <h3 class="sidebar-widget-title">Merge Queue <span class="sidebar-count">{mergeQueueItems.length}</span></h3>
+                <div class="mq-view-toggle" data-testid="mq-view-toggle">
+                  <button
+                    class="mq-toggle-btn"
+                    class:active={mergeQueueView === 'list'}
+                    onclick={() => { mergeQueueView = 'list'; }}
+                    title="List view"
+                    data-testid="mq-toggle-list"
+                  >List</button>
+                  <button
+                    class="mq-toggle-btn"
+                    class:active={mergeQueueView === 'dag'}
+                    onclick={() => { mergeQueueView = 'dag'; }}
+                    title="DAG view"
+                    data-testid="mq-toggle-dag"
+                  >DAG</button>
+                </div>
+              </div>
+              {#if mergeQueueView === 'dag'}
+                <div class="mq-dag-wrapper" data-testid="mq-dag-wrapper">
+                  <MergeQueueGraph
+                    nodes={mergeQueueGraphNodes}
+                    onNodeClick={(node) => nav('mr', node.mr_id, { title: node.title })}
+                  />
+                </div>
+              {:else}
+                {#each mergeQueueItems.slice(0, 5) as item, i (item.merge_request_id ?? item.mr_id ?? i)}
+                  {@const mrId = item.merge_request_id ?? item.mr_id}
+                  {@const mr = item._mr ?? {}}
+                  <button class="sidebar-queue-item" onclick={() => nav('mr', mrId, { repo_id: mr.repository_id ?? mr.repo_id, title: item._title })}>
+                    <span class="sidebar-queue-pos">#{i + 1}</span>
+                    <span class="sidebar-queue-title">{item._title}</span>
+                  </button>
+                {/each}
+              {/if}
             </div>
           {/if}
+
+          <!-- Dependency Health (TASK-046) -->
+          <div class="sidebar-widget" data-testid="section-dep-health">
+            <DependencyHealthCard
+              totalWithDeps={depHealthData.totalWithDeps}
+              staleCount={depHealthData.staleCount}
+              breakingCount={depHealthData.breakingCount}
+              loading={depHealthLoading}
+              onViewGraph={() => { depGraphOpen = !depGraphOpen; }}
+            />
+          </div>
 
           <!-- Recently Shipped -->
           {#if !mrsLoading}
@@ -1441,6 +1606,14 @@
   </div>
 </Modal>
 
+<!-- Impact Analysis Modal (merge queue trigger) -->
+<ImpactAnalysisModal
+  bind:open={impactModalOpen}
+  repoId={impactRepoId}
+  repoName={impactRepoName}
+  workspaceId={workspace?.id ?? null}
+/>
+
 <style>
   /* ── Section headings ──────────────────────────────────────── */
   .section-heading {
@@ -1464,6 +1637,17 @@
   .section-header-actions {
     display: flex;
     gap: var(--space-1);
+  }
+
+  .dep-graph-section {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: var(--space-3, 12px);
+  }
+
+  .dep-graph-wrapper {
+    height: 500px;
+    min-height: 400px;
   }
 
   .repos-section {
@@ -1758,6 +1942,53 @@
     padding: 0 var(--space-1);
     border-radius: var(--radius-sm);
     font-size: 10px;
+  }
+
+  .sidebar-widget-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+  }
+
+  .mq-view-toggle {
+    display: flex;
+    gap: 2px;
+  }
+
+  .mq-toggle-btn {
+    padding: 2px 8px;
+    font-size: 10px;
+    font-family: var(--font-body);
+    color: var(--color-text-muted);
+    background: transparent;
+    border: 1px solid var(--color-border);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .mq-toggle-btn:first-child {
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  }
+
+  .mq-toggle-btn:last-child {
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  }
+
+  .mq-toggle-btn:hover {
+    color: var(--color-text);
+    border-color: var(--color-border-hover, #444);
+  }
+
+  .mq-toggle-btn.active {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+    border-color: #60a5fa;
+  }
+
+  .mq-dag-wrapper {
+    height: 320px;
+    margin-top: var(--space-2);
   }
 
   /* Sidebar: agents */
@@ -2619,6 +2850,27 @@
     flex-shrink: 0;
     opacity: 0.5;
   }
+
+  .pipeline-breaking-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 3px var(--space-2);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border));
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: var(--text-xs);
+    flex-shrink: 0;
+    transition: background var(--transition-fast);
+    margin-left: auto;
+  }
+  .pipeline-breaking-btn:hover { background: color-mix(in srgb, var(--color-danger) 14%, transparent); }
+  .pipeline-breaking-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .pipeline-breaking-icon { font-size: var(--text-xs); }
+  .pipeline-breaking-count { font-weight: 700; color: var(--color-danger); font-family: var(--font-mono); }
+  .pipeline-breaking-label { font-weight: 500; color: var(--color-danger); }
 
   /* ── Workspace overview tabs ────────────────────────────────── */
   .ws-overview-section {

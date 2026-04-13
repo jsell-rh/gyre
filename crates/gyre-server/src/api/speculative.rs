@@ -12,7 +12,7 @@ use gyre_common::Id;
 use serde::Serialize;
 use std::sync::Arc;
 
-use crate::speculative_merge::{SpeculativeResult, SpeculativeStatus};
+use crate::speculative_merge::{ConflictType, SpeculativeResult, SpeculativeStatus};
 use crate::AppState;
 
 use super::error::ApiError;
@@ -25,6 +25,9 @@ pub struct SpeculativeResponse {
     pub conflicting_branch: Option<String>,
     pub conflicting_agent_id: Option<String>,
     pub conflicting_files: Vec<String>,
+    /// `"order_independent"` or `"order_dependent"` when status is `"conflict"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_type: Option<String>,
     pub detected_at: u64,
 }
 
@@ -36,6 +39,10 @@ impl From<SpeculativeResult> for SpeculativeResponse {
             SpeculativeStatus::Skipped => "skipped",
         }
         .to_string();
+        let conflict_type = r.conflict_type.map(|ct| match ct {
+            ConflictType::OrderIndependent => "order_independent".to_string(),
+            ConflictType::OrderDependent => "order_dependent".to_string(),
+        });
         Self {
             repo_id: r.repo_id,
             branch: r.branch,
@@ -43,6 +50,7 @@ impl From<SpeculativeResult> for SpeculativeResponse {
             conflicting_branch: r.conflicting_branch,
             conflicting_agent_id: r.conflicting_agent_id,
             conflicting_files: r.conflicting_files,
+            conflict_type,
             detected_at: r.detected_at,
         }
     }
@@ -105,7 +113,7 @@ pub async fn get_speculative_branch(
 #[cfg(test)]
 mod tests {
     use crate::mem::test_state;
-    use crate::speculative_merge::{SpeculativeResult, SpeculativeStatus};
+    use crate::speculative_merge::{ConflictType, SpeculativeResult, SpeculativeStatus};
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -191,6 +199,7 @@ mod tests {
                     conflicting_files: vec![],
                     conflicting_branch: None,
                     conflicting_agent_id: None,
+                    conflict_type: None,
                     detected_at: 1000,
                 },
             );
@@ -244,6 +253,7 @@ mod tests {
                     conflicting_files: vec!["src/lib.rs".to_string()],
                     conflicting_branch: Some("feat-z".to_string()),
                     conflicting_agent_id: Some("agent-1".to_string()),
+                    conflict_type: Some(ConflictType::OrderIndependent),
                     detected_at: 2000,
                 },
             );
@@ -264,5 +274,6 @@ mod tests {
         assert_eq!(json["conflicting_branch"], "feat-z");
         assert_eq!(json["conflicting_agent_id"], "agent-1");
         assert_eq!(json["conflicting_files"][0], "src/lib.rs");
+        assert_eq!(json["conflict_type"], "order_independent");
     }
 }

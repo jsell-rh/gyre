@@ -46,11 +46,6 @@ vi.mock('../lib/api.js', () => ({
   },
 }));
 
-// ExplorerCanvas is complex — stub it out
-vi.mock('../lib/ExplorerCanvas.svelte', () => ({
-  default: function ExplorerCanvasStub() {},
-}));
-
 vi.mock('../lib/toast.svelte.js', () => ({
   toastInfo: vi.fn(),
   toastError: vi.fn(),

@@ -69,8 +69,26 @@ func main() {
 
 	// Collect the module path to filter edges to project-local functions only.
 	var modulePath string
-	if len(pkgs) > 0 && pkgs[0].Module != nil {
-		modulePath = pkgs[0].Module.Path
+	for _, pkg := range pkgs {
+		if pkg.Module != nil && pkg.Module.Path != "" {
+			modulePath = pkg.Module.Path
+			break
+		}
+	}
+	if modulePath == "" {
+		// Fallback: try go.mod in the repo path
+		if goModData, err := os.ReadFile(repoPath + "/go.mod"); err == nil {
+			for _, line := range strings.Split(string(goModData), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "module ") {
+					modulePath = strings.TrimSpace(strings.TrimPrefix(line, "module"))
+					break
+				}
+			}
+		}
+	}
+	if modulePath == "" {
+		fmt.Fprintf(os.Stderr, "warning: could not determine module path; all edges will be included\n")
 	}
 
 	// Deduplicate edges.

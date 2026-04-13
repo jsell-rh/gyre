@@ -465,6 +465,7 @@ async fn compute_preview_blast_radius(
     state: &Arc<AppState>,
     workspace_id: &str,
 ) -> PreviewBlastRadius {
+    // caller-scope:ok — correctly uses ws_id (each workspace's own ID) inside the loop, not the parameter
     // Collect the spec paths currently bound in this workspace's meta-spec-set.
     let bound_paths: Vec<String> = state
         .meta_spec_sets

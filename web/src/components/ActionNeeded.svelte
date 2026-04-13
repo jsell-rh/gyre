@@ -1,3 +1,4 @@
+<!-- dead-component:ok — pre-existing, not imported (baseline for tightened check) -->
 <script>
   /**
    * ActionNeeded — compact attention bar for workspace home.

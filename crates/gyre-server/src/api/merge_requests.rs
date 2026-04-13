@@ -4,7 +4,10 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{AnalyticsEvent, MergeRequest, MrStatus, Review, ReviewComment, ReviewDecision};
+use gyre_domain::{
+    AnalyticsEvent, DependencySource, MergeRequest, MergeRequestDependency, MrStatus, Review,
+    ReviewComment, ReviewDecision,
+};
 use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
@@ -26,6 +29,9 @@ pub struct CreateMrRequest {
     pub author_agent_id: Option<String>,
     /// Optional spec reference "path/to/spec.md@<sha>" for cryptographic binding.
     pub spec_ref: Option<String>,
+    /// Optional MR IDs that must merge before this one (creation-time explicit deps).
+    #[serde(default)]
+    pub depends_on: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -104,7 +110,11 @@ impl From<MergeRequest> for MrResponse {
             }),
             has_conflicts: mr.has_conflicts,
             spec_ref: mr.spec_ref,
-            depends_on: mr.depends_on.iter().map(|id| id.to_string()).collect(),
+            depends_on: mr
+                .depends_on
+                .iter()
+                .map(|d| d.target_mr_id.to_string())
+                .collect(),
             atomic_group: mr.atomic_group,
             created_at: mr.created_at,
             updated_at: mr.updated_at,
@@ -268,6 +278,49 @@ pub async fn create_mr(
     mr.author_agent_id = req.author_agent_id.map(Id::new);
     mr.spec_ref = req.spec_ref;
 
+    // Validate and set creation-time explicit dependencies.
+    let explicit_deps = if let Some(ref dep_ids) = req.depends_on {
+        let mut validated = Vec::new();
+        for dep_id_str in dep_ids {
+            let dep_id = Id::new(dep_id_str);
+            state
+                .merge_requests
+                .find_by_id(&dep_id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::NotFound(format!("dependency merge request {dep_id_str} not found"))
+                })?;
+            validated.push(MergeRequestDependency::new(
+                dep_id,
+                DependencySource::Explicit,
+            ));
+        }
+
+        // Cycle check: build adjacency map from existing MRs.
+        let all_mrs = state.merge_requests.list().await?;
+        let mut adj: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for m in &all_mrs {
+            adj.insert(
+                m.id.to_string(),
+                m.depends_on
+                    .iter()
+                    .map(|d| d.target_mr_id.to_string())
+                    .collect(),
+            );
+        }
+        let mr_id_str = mr.id.to_string();
+        if super::merge_deps::would_create_cycle(&mr_id_str, dep_ids, &adj) {
+            return Err(ApiError::InvalidInput(
+                "cycle detected: adding these dependencies would create a circular dependency chain"
+                    .to_string(),
+            ));
+        }
+        validated
+    } else {
+        Vec::new()
+    };
+
     // Compute diff stats, conflict detection, and auto-detect branch lineage deps.
     if let Ok(Some(repo)) = state.repos.find_by_id(&repo_id).await {
         mr.workspace_id = repo.workspace_id.clone();
@@ -301,6 +354,23 @@ pub async fn create_mr(
         if !lineage_deps.is_empty() {
             mr.depends_on = lineage_deps;
         }
+    }
+
+    // Merge explicit deps with lineage deps: explicit takes precedence,
+    // lineage adds to the set for deps not already declared.
+    if !explicit_deps.is_empty() {
+        let explicit_ids: std::collections::HashSet<String> = explicit_deps
+            .iter()
+            .map(|d| d.target_mr_id.to_string())
+            .collect();
+        // Keep lineage deps that aren't already in explicit set.
+        let additional_lineage: Vec<_> = mr
+            .depends_on
+            .drain(..)
+            .filter(|d| !explicit_ids.contains(&d.target_mr_id.to_string()))
+            .collect();
+        mr.depends_on = explicit_deps;
+        mr.depends_on.extend(additional_lineage);
     }
 
     state.merge_requests.create(&mr).await?;
@@ -337,13 +407,13 @@ pub async fn create_mr(
 /// whether `source_branch` is a descendant of that MR's source branch by
 /// comparing the merge-base to the candidate branch tip. If merge-base == tip,
 /// the new branch was created from the candidate branch and should depend on it.
-async fn detect_lineage_deps(
-    state: &Arc<AppState>,
+pub(crate) async fn detect_lineage_deps(
+    state: &AppState,
     repo_id: &Id,
     repo_path: &str,
     source_branch: &str,
     target_branch: &str,
-) -> Vec<Id> {
+) -> Vec<MergeRequestDependency> {
     let all_mrs = match state.merge_requests.list_by_repo(repo_id).await {
         Ok(mrs) => mrs,
         Err(_) => return vec![],
@@ -421,7 +491,10 @@ async fn detect_lineage_deps(
                 mr_id = %candidate.id,
                 "auto-detected branch lineage dependency"
             );
-            deps.push(candidate.id);
+            deps.push(MergeRequestDependency::new(
+                candidate.id,
+                DependencySource::BranchLineage,
+            ));
         }
     }
 
@@ -1279,5 +1352,93 @@ mod tests {
         assert_eq!(json["attestation"]["attestation_version"], 1);
         assert!(json["signature"].as_str().is_some());
         assert!(json["signing_key_id"].as_str().is_some());
+    }
+
+    // ── Creation-time dependency tests (TASK-028) ────────────────────────
+
+    #[tokio::test]
+    async fn create_mr_with_depends_on() {
+        let app = app();
+        let (app, dep_id) = create_test_mr(app, "Dependency MR").await;
+
+        // Create MR with depends_on referencing the first one.
+        let body = serde_json::json!({
+            "repository_id": "repo-1",
+            "title": "Dependent MR",
+            "source_branch": "feat/dependent",
+            "target_branch": "main",
+            "depends_on": [dep_id]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-requests")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert!(
+            json["depends_on"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(dep_id)),
+            "creation-time dep should appear in MR response"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_mr_with_depends_on_nonexistent_rejected() {
+        let app = app();
+
+        let body = serde_json::json!({
+            "repository_id": "repo-1",
+            "title": "Bad dep MR",
+            "source_branch": "feat/bad",
+            "target_branch": "main",
+            "depends_on": ["does-not-exist"]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-requests")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_mr_without_depends_on_works() {
+        // Omitting depends_on should still work (backward compat).
+        let app = app();
+        let body = serde_json::json!({
+            "repository_id": "repo-1",
+            "title": "No deps MR",
+            "source_branch": "feat/nodeps",
+            "target_branch": "main"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-requests")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["depends_on"].as_array().unwrap().len(), 0);
     }
 }

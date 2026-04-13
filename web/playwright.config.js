@@ -7,7 +7,16 @@ export default defineConfig({
   },
   screenshot: 'only-on-failure',
   timeout: 30_000,
-  expect: { timeout: 10_000 },
+  expect: {
+    timeout: 10_000,
+    // Visual regression: screenshot comparison settings.
+    // maxDiffPixelRatio allows minor anti-aliasing differences across platforms.
+    toHaveScreenshot: {
+      maxDiffPixelRatio: 0.02,
+      // Store baselines alongside the test files for easy review and git tracking.
+      // Playwright default: <testDir>/<testFile>-snapshots/<snapshotName>
+    },
+  },
   webServer: {
     // In CI the release binary is pre-built by the workflow; use it directly to avoid
     // recompiling inside the 120s timeout.  Locally fall back to `cargo run`.

@@ -16,7 +16,11 @@ export function safeHref(url) {
 }
 
 function getAuthToken() {
-  return localStorage.getItem(AUTH_TOKEN_KEY) || 'gyre-dev-token';
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token && typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+    console.warn('[api] No auth token in localStorage and not on localhost — API calls may fail');
+  }
+  return token || 'gyre-dev-token';
 }
 
 export function setAuthToken(token) {
@@ -361,10 +365,14 @@ export const api = {
   // Spec registry (M21.1)
   getSpecs: () => request('/specs'),
   getSpec: (path) => request(`/specs/${encodeURIComponent(path)}`),
-  approveSpec: (path, sha) =>
+  approveSpec: (path, sha, { output_constraints, scope } = {}) =>
     request(`/specs/${encodeURIComponent(path)}/approve`, {
       method: 'POST',
-      body: JSON.stringify({ sha }),
+      body: JSON.stringify({
+        sha,
+        ...(output_constraints?.length ? { output_constraints } : {}),
+        ...(scope ? { scope } : {}),
+      }),
     }),
   revokeSpec: (path, reason) =>
     request(`/specs/${encodeURIComponent(path)}/revoke`, {
@@ -380,6 +388,15 @@ export const api = {
   getSpecProgress: (path) => request(`/specs/${encodeURIComponent(path)}/progress`),
   getPendingSpecs: () => request('/specs/pending'),
   getDriftedSpecs: () => request('/specs/drifted'),
+  // Constraint syntax validation (authorization-provenance.md §7.6)
+  validateConstraints: (data) =>
+    request('/constraints/validate', { method: 'POST', body: JSON.stringify(data) }),
+  // Constraint dry-run evaluation against repo state (authorization-provenance.md §7.6)
+  dryRunConstraints: (data) =>
+    request('/constraints/dry-run', { method: 'POST', body: JSON.stringify(data) }),
+  // Strategy-implied constraints preview (authorization-provenance.md §7.6)
+  getStrategyConstraints: (queryString) =>
+    request(`/constraints/strategy${queryString ? '?' + queryString : ''}`),
   // Search (M22.7)
   search: ({ q, entity_type, workspace_id, limit = 20 } = {}) => {
     const params = new URLSearchParams({ q: q || '' });
@@ -476,9 +493,15 @@ export const api = {
     request(`/personas/resolve?slug=${encodeURIComponent(slug)}&scope_kind=${encodeURIComponent(scopeKind)}&scope_id=${encodeURIComponent(scopeId)}`),
   // Dependency graph (M22.5)
   dependencyGraph: () => request('/dependencies/graph'),
+  workspaceDependencyGraph: (wsId) => request(`/workspaces/${wsId}/dependency-graph`),
   repoDependencies: (id) => request(`/repos/${id}/dependencies`),
   repoDependents: (id) => request(`/repos/${id}/dependents`),
   repoBlastRadius: (id) => request(`/repos/${id}/blast-radius`),
+  staleDependencies: (wsId) => request(`/dependencies/stale${wsId ? '?workspace_id=' + encodeURIComponent(wsId) : ''}`),
+  breakingChanges: () => request('/dependencies/breaking'),
+  acknowledgeBreakingChange: (id) =>
+    request(`/dependencies/breaking/${id}/acknowledge`, { method: 'POST' }),
+  workspaceDependencyPolicy: (wsId) => request(`/workspaces/${wsId}/dependency-policy`),
   // User profile (M22.5)
   me: () => request('/users/me'),
   updateMe: (data) =>
@@ -548,13 +571,20 @@ export const api = {
     request(`/policies/${policyId}`, { method: 'DELETE' }),
   simulateAbacPolicy: (id, data) =>
     request('/policies/evaluate', { method: 'POST', body: JSON.stringify(data) }),
-  // Explorer saved views (HSI §3)
+  // Explorer saved views — repo-scoped (canonical, via WS or REST)
+  savedViews: (repoId) => request(`/repos/${repoId}/views`),
+  createSavedView: (repoId, data) =>
+    request(`/repos/${repoId}/views`, { method: 'POST', body: JSON.stringify(data) }),
+  updateSavedView: (repoId, viewId, data) =>
+    request(`/repos/${repoId}/views/${viewId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteSavedView: (repoId, viewId) =>
+    request(`/repos/${repoId}/views/${viewId}`, { method: 'DELETE' }),
+  // Deprecated: workspace-scoped explorer views (legacy KV-based, use savedViews instead)
   explorerViews: (workspaceId) => request(`/workspaces/${workspaceId}/explorer-views`),
   saveExplorerView: (workspaceId, data) =>
     request(`/workspaces/${workspaceId}/explorer-views`, { method: 'POST', body: JSON.stringify(data) }),
   deleteExplorerView: (workspaceId, id) =>
     request(`/workspaces/${workspaceId}/explorer-views/${id}`, { method: 'DELETE' }),
-  // LLM view generation (SSE — returns raw Response, not parsed JSON)
   generateExplorerView: (workspaceId, body) =>
     fetch(`${API_BASE}/workspaces/${workspaceId}/explorer-views/generate`, {
       method: 'POST',
@@ -569,12 +599,24 @@ export const api = {
     request(`/specs${workspaceId ? '?workspace_id=' + encodeURIComponent(workspaceId) : ''}`),
   specContent: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  updateSpec: (path, repoId, content) =>
+    request(`/specs/${encodeURIComponent(path)}${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
   specProgress: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}/progress${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
   specLinks: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}/links${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
   specHistoryRepo: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}/history${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specDependents: (path) =>
+    request(`/specs/${encodeURIComponent(path)}/dependents`),
+  checkSpecAssertions: (repoId, specPath, content) =>
+    request(`/repos/${repoId}/spec-assertions/check`, {
+      method: 'POST',
+      body: JSON.stringify({ spec_path: specPath, content }),
+    }),
   specsAssist: (repoId, body) =>
     fetch(`${API_BASE}/repos/${repoId}/specs/assist`, {
       method: 'POST',
@@ -669,4 +711,21 @@ export const api = {
       throw e;
     }
   },
+  // Thorough preview: create throwaway branch, run agents, get real impact
+  thoroughPreview: async (repoId, body) => {
+    return await request(`/repos/${repoId}/graph/thorough-preview`, {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  },
+  // Task status polling
+  taskStatus: async (taskId) => {
+    return await request(`/tasks/${taskId}`);
+  },
+  // View query dry-run — resolves a view query server-side, returns node_metrics etc.
+  graphQueryDryrun: (repoId, query, selectedNodeId) =>
+    request(`/repos/${repoId}/graph/query-dryrun`, {
+      method: 'POST',
+      body: JSON.stringify({ query, selected_node_id: selectedNodeId ?? null }),
+    }),
 };

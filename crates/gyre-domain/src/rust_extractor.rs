@@ -11,7 +11,9 @@
 //! - Tables (`diesel::table!` macros)
 //! - Spec governance (`// spec: <path>` comments)
 
-use crate::extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
+use crate::extractor::{
+    shallow_scan_for_marker, ExtractionError, ExtractionResult, LanguageExtractor,
+};
 use gyre_common::{
     graph::{EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility},
     Id,
@@ -38,6 +40,7 @@ impl LanguageExtractor for RustExtractor {
 
     fn detect(&self, repo_root: &Path) -> bool {
         repo_root.join("Cargo.toml").is_file()
+            || shallow_scan_for_marker(repo_root, |d| d.join("Cargo.toml").is_file())
     }
 
     fn extract(&self, repo_root: &Path, commit_sha: &str) -> ExtractionResult {
@@ -56,6 +59,7 @@ impl LanguageExtractor for RustExtractor {
             name_to_id: HashMap::new(),
             import_aliases: HashMap::new(),
             unresolved_calls: Vec::new(),
+            deferred_returns: Vec::new(),
             workspace_crates: HashSet::new(),
         };
 
@@ -65,6 +69,7 @@ impl LanguageExtractor for RustExtractor {
         ctx.workspace_crates = ctx.name_to_id.keys().cloned().collect();
         ctx.extract_rust_files();
         ctx.resolve_calls();
+        ctx.resolve_returns();
 
         ExtractionResult {
             nodes: ctx.nodes,
@@ -103,6 +108,8 @@ struct ExtractionContext {
     import_aliases: HashMap<(String, String), String>,
     /// Unresolved call sites collected during the first pass.
     unresolved_calls: Vec<UnresolvedCall>,
+    /// Deferred Returns edges: (function_node_id, return_type_name) to resolve after extraction.
+    deferred_returns: Vec<(Id, String)>,
     /// Set of known workspace crate names (from Cargo.toml [package] names).
     workspace_crates: HashSet<String>,
 }
@@ -143,6 +150,7 @@ impl ExtractionContext {
             visibility,
             doc_comment,
             spec_path,
+            spec_paths: vec![],
             spec_confidence,
             last_modified_sha: self.commit_sha.clone(),
             last_modified_by: None,
@@ -158,6 +166,8 @@ impl ExtractionContext {
             last_seen_at: 0,
             deleted_at: None,
             test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
         }
     }
 
@@ -808,6 +818,41 @@ impl ExtractionContext {
 
         None
     }
+
+    /// Resolve deferred Returns edges: function → return type.
+    fn resolve_returns(&mut self) {
+        let returns = std::mem::take(&mut self.deferred_returns);
+        let mut seen = HashSet::new();
+        for (fn_id, type_name) in returns {
+            // Try to find the return type in name_to_id
+            // First try exact match, then suffix match
+            let target_id = self.name_to_id.get(&type_name).cloned().or_else(|| {
+                // Suffix match: find any node whose qualified name ends with ::type_name
+                let suffix = format!("::{}", type_name);
+                self.name_to_id
+                    .iter()
+                    .find(|(k, _)| k.ends_with(&suffix) || *k == &type_name)
+                    .map(|(_, v)| v.clone())
+            });
+            if let Some(target_id) = target_id {
+                let key = (fn_id.to_string(), target_id.to_string());
+                if seen.insert(key) {
+                    let edge = GraphEdge {
+                        id: Self::new_id(),
+                        repo_id: Self::placeholder_repo_id(),
+                        source_id: fn_id,
+                        target_id,
+                        edge_type: EdgeType::Returns,
+                        metadata: None,
+                        first_seen_at: self.now,
+                        last_seen_at: self.now,
+                        deleted_at: None,
+                    };
+                    self.edges.push(edge);
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,7 +1089,7 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                 let doc = extract_doc_comment(&e.attrs);
                 let is_subcommand = has_derive_attr(&e.attrs, "Subcommand");
 
-                let node = self.make_node(NodeType::Type, &name, 0, vis, doc);
+                let node = self.make_node(NodeType::Enum, &name, 0, vis, doc);
                 let node_id = node.id.clone();
                 let enum_qname = self.qualified(&name);
                 self.ctx
@@ -1088,7 +1133,7 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                 let name = t.ident.to_string();
                 let vis = syn_vis_to_visibility(&t.vis);
                 let doc = extract_doc_comment(&t.attrs);
-                let node = self.make_node(NodeType::Interface, &name, 0, vis, doc);
+                let node = self.make_node(NodeType::Trait, &name, 0, vis, doc);
                 let node_id = node.id.clone();
                 self.ctx
                     .name_to_id
@@ -1133,9 +1178,26 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                     self.ctx
                         .name_to_id
                         .insert(self.qualified(&name), node_id.clone());
-                    let edge = self.add_contains_edge(node_id);
+                    let edge = self.add_contains_edge(node_id.clone());
                     self.new_nodes.push(node);
                     self.new_edges.push(edge);
+                    // Emit Returns edge for the return type (if it's a named type)
+                    if let syn::ReturnType::Type(_, ty) = &f.sig.output {
+                        let ret_type_name = type_to_string(ty);
+                        // Strip references and generics wrapper for resolution
+                        let base_name = ret_type_name
+                            .trim_start_matches('&')
+                            .trim_start_matches("mut ")
+                            .split('<')
+                            .next()
+                            .unwrap_or("")
+                            .trim();
+                        if !base_name.is_empty() && base_name != "?" {
+                            self.ctx
+                                .deferred_returns
+                                .push((node_id, base_name.to_string()));
+                        }
+                    }
                 }
             }
             Item::Mod(m) => {
@@ -1329,7 +1391,28 @@ fn format_fn_sig(sig: &syn::Signature) -> String {
 fn path_to_string(path: &syn::Path) -> String {
     path.segments
         .iter()
-        .map(|s| s.ident.to_string())
+        .map(|s| {
+            let ident = s.ident.to_string();
+            match &s.arguments {
+                syn::PathArguments::None => ident,
+                syn::PathArguments::AngleBracketed(args) => {
+                    let inner: Vec<String> = args
+                        .args
+                        .iter()
+                        .map(|arg| match arg {
+                            syn::GenericArgument::Type(ty) => type_to_string(ty),
+                            syn::GenericArgument::Lifetime(lt) => format!("'{}", lt.ident),
+                            _ => "_".to_string(),
+                        })
+                        .collect();
+                    format!("{}<{}>", ident, inner.join(", "))
+                }
+                syn::PathArguments::Parenthesized(args) => {
+                    let inputs: Vec<String> = args.inputs.iter().map(type_to_string).collect();
+                    format!("{}({})", ident, inputs.join(", "))
+                }
+            }
+        })
         .collect::<Vec<_>>()
         .join("::")
 }
@@ -1503,14 +1586,14 @@ pub fn create_user(name: &str) -> User {
             result
                 .nodes
                 .iter()
-                .any(|n| n.node_type == NodeType::Type && n.name == "Status"),
+                .any(|n| n.node_type == NodeType::Enum && n.name == "Status"),
             "should extract Status enum"
         );
         assert!(
             result
                 .nodes
                 .iter()
-                .any(|n| n.node_type == NodeType::Interface && n.name == "Repository"),
+                .any(|n| n.node_type == NodeType::Trait && n.name == "Repository"),
             "should extract Repository trait"
         );
         assert!(

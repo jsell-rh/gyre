@@ -1,0 +1,6 @@
+# Mirrored-logic test exemptions
+# One test function name per line. These tests contain value-producing
+# match expressions that are intentional (e.g., parameterized test helpers).
+# Add the test name and a brief reason comment.
+#
+# See: specs/reviews/task-024.md F1, F2

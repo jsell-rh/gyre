@@ -1,0 +1,38 @@
+# Exemptions for check-notification-test-coverage.sh
+# Pre-existing violations grandfathered in when the check was introduced.
+# Each is a real gap — work through them as part of normal task flow.
+# See: specs/reviews/task-027.md R2 F3 for the flaw class.
+#
+# Format: one test function name per line.
+
+# spec_link_staleness.rs — run_once() tests
+staleness_job_detects_sha_mismatch
+staleness_job_skips_matching_sha
+staleness_job_marks_missing_target_as_broken
+staleness_job_skips_already_stale_links
+staleness_job_skips_links_without_target_sha
+
+# merge_processor.rs — process_next() tests
+selection_skips_gates_pending_tries_next_candidate
+selection_fails_gates_failed_entry_tries_next
+selection_skips_atomic_group_not_ready_tries_next_candidate
+atomic_group_all_members_merge_in_one_cycle
+atomic_group_no_interleaving_with_non_group_mr
+atomic_group_implies_dependency_ordering
+
+# merge_processor.rs — report_cascade_test_result() tests
+report_cascade_test_result_passed_no_follow_up_task
+report_cascade_test_result_failed_creates_follow_up_task
+
+# merge_processor.rs — rollback_atomic_group() tests
+atomic_group_rollback_requeues_all_members
+atomic_group_rollback_without_pre_group_sha
+
+# merge_processor.rs — trigger_cascade_tests() tests
+trigger_cascade_tests_creates_tasks_for_dependents
+trigger_cascade_tests_skips_when_policy_disabled
+trigger_cascade_tests_creates_task_per_dependent
+trigger_cascade_tests_no_dependents_is_noop
+trigger_cascade_tests_resolves_dependent_workspace
+trigger_cascade_tests_default_policy_enables_cascade
+trigger_cascade_tests_respects_dependent_workspace_opt_out

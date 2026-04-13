@@ -16,7 +16,10 @@ use axum::{
 };
 use futures_util::stream;
 use gyre_common::Id;
-use gyre_domain::{MergeRequest, Task, TaskPriority, TaskStatus};
+use gyre_domain::{
+    CostEntry, DependencySource, MergeRequest, MergeRequestDependency, Task, TaskPriority,
+    TaskStatus,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -191,7 +194,8 @@ fn tool_definitions() -> Value {
                         "repository_id": { "type": "string", "description": "Repository ID" },
                         "source_branch": { "type": "string", "description": "Source branch name" },
                         "target_branch": { "type": "string", "description": "Target branch name" },
-                        "author_agent_id": { "type": "string", "description": "Agent ID creating the MR" }
+                        "author_agent_id": { "type": "string", "description": "Agent ID creating the MR" },
+                        "depends_on": { "type": "array", "items": { "type": "string" }, "description": "MR IDs that must merge before this one" }
                     },
                     "required": ["title", "repository_id", "source_branch", "target_branch"]
                 }
@@ -209,7 +213,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "gyre_record_activity",
-                "description": "Record an activity event in the Gyre activity feed.",
+                "description": "Record an activity event in the Gyre activity feed. Per-kind fields: TOOL_CALL_START requires tool_name; TOOL_CALL_END requires tool_name and duration_ms; TEXT_MESSAGE_CONTENT requires content; STATE_CHANGED requires new_state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -224,7 +228,14 @@ fn tool_definitions() -> Value {
                             ],
                             "description": "AG-UI typed event type"
                         },
-                        "description": { "type": "string", "description": "Human-readable event description" }
+                        "description": { "type": "string", "description": "Human-readable event description" },
+                        "tool_name": { "type": "string", "description": "Tool name (required for TOOL_CALL_START and TOOL_CALL_END)" },
+                        "duration_ms": { "type": "integer", "description": "Tool call duration in milliseconds (required for TOOL_CALL_END)" },
+                        "task_id": { "type": "string", "description": "Associated task ID (optional, for RUN_STARTED and RUN_FINISHED)" },
+                        "content": { "type": "string", "description": "Text content (required for TEXT_MESSAGE_CONTENT)" },
+                        "role": { "type": "string", "description": "Message role (optional, for TEXT_MESSAGE_CONTENT)" },
+                        "old_state": { "type": "string", "description": "Previous state (optional, for STATE_CHANGED)" },
+                        "new_state": { "type": "string", "description": "New state (required for STATE_CHANGED)" }
                     },
                     "required": ["agent_id", "event_type", "description"]
                 }
@@ -330,6 +341,165 @@ fn tool_definitions() -> Value {
                         "limit": { "type": "number", "description": "Max results to return (default 10)" }
                     },
                     "required": ["q"]
+                }
+            },
+            {
+                "name": "gyre_message_send",
+                "description": "Send a Directed or Custom message to an agent or workspace in the same workspace. Wraps POST /api/v1/workspaces/:workspace_id/messages.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "to": {
+                            "type": "object",
+                            "description": "Destination: {\"agent\": \"<id>\"} or {\"workspace\": \"<id>\"}"
+                        },
+                        "kind": {
+                            "type": "string",
+                            "description": "MessageKind string (e.g. task_assignment, review_request, status_update, escalation, or a custom kind)"
+                        },
+                        "payload": {
+                            "type": "object",
+                            "description": "Optional structured payload for the message"
+                        },
+                        "tier": {
+                            "type": "string",
+                            "enum": ["directed", "event"],
+                            "description": "For Custom kinds: 'directed' to opt into ack-based delivery (default: event)"
+                        }
+                    },
+                    "required": ["to", "kind"]
+                }
+            },
+            {
+                "name": "gyre_message_poll",
+                "description": "Poll own inbox for new Directed messages. Wraps GET /api/v1/agents/:id/messages. Derives agent_id from JWT.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "after_ts": {
+                            "type": "number",
+                            "description": "Return messages with created_at > after_ts (default 0)"
+                        },
+                        "after_id": {
+                            "type": "string",
+                            "description": "Composite cursor: return messages after (after_ts, after_id)"
+                        },
+                        "limit": {
+                            "type": "number",
+                            "description": "Max messages to return (default 100, max 1000)"
+                        },
+                        "unacked_only": {
+                            "type": "boolean",
+                            "description": "If true, return only unacknowledged messages (crash recovery mode)"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "gyre_message_ack",
+                "description": "Acknowledge a received message. Wraps PUT /api/v1/agents/:id/messages/:message_id/ack. Derives agent_id from JWT.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "message_id": {
+                            "type": "string",
+                            "description": "ID of the message to acknowledge"
+                        }
+                    },
+                    "required": ["message_id"]
+                }
+            },
+            {
+                "name": "graph_summary",
+                "description": "Get a condensed summary of a repo's knowledge graph: node/edge counts, top types by fields, top functions by calls, modules, test coverage stats.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" }
+                    },
+                    "required": ["repo_id"]
+                }
+            },
+            {
+                "name": "graph_query_dryrun",
+                "description": "Dry-run a view query against the knowledge graph. Returns matched node count, names, resolved groups/callouts/narrative, and warnings (e.g. 'too many matches'). Use this to validate queries before sending to the frontend.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "query": { "type": "object", "description": "View query JSON (scope, emphasis, groups, callouts, narrative)" },
+                        "selected_node_id": { "type": "string", "description": "Currently selected node ID (for $selected/$clicked resolution)" }
+                    },
+                    "required": ["repo_id", "query"]
+                }
+            },
+            {
+                "name": "graph_nodes",
+                "description": "Query specific graph nodes by ID, name pattern, or node type. Returns up to 50 nodes with full details.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "node_id": { "type": "string", "description": "Specific node ID to look up" },
+                        "name_pattern": { "type": "string", "description": "Substring match on node name or qualified_name (case-insensitive)" },
+                        "node_type": { "type": "string", "description": "Filter by node type: package, module, type, interface, function, endpoint, component, table, constant, field" }
+                    },
+                    "required": ["repo_id"]
+                }
+            },
+            {
+                "name": "graph_edges",
+                "description": "Query graph edges by source/target node ID or edge type. Returns up to 100 edges.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "node_id": { "type": "string", "description": "Find all edges connected to this node (source or target)" },
+                        "edge_type": { "type": "string", "description": "Filter by edge type: contains, implements, depends_on, calls, field_of, returns, routes_to, governed_by" },
+                        "source_id": { "type": "string", "description": "Filter edges by source node ID" },
+                        "target_id": { "type": "string", "description": "Filter edges by target node ID" }
+                    },
+                    "required": ["repo_id"]
+                }
+            },
+            {
+                "name": "node_provenance",
+                "description": "Get provenance (creation/modification history) for specific nodes. Shows who created or modified the node, when, and in which commit.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "node_id": { "type": "string", "description": "Node ID to get provenance for" },
+                        "name_pattern": { "type": "string", "description": "Find nodes by name and return their provenance" }
+                    },
+                    "required": ["repo_id"]
+                }
+            },
+            {
+                "name": "graph_concept",
+                "description": "Search the knowledge graph by concept name. Returns matching nodes with type, name, qualified_name, spec linkage, and connecting edges. Searches repo-scoped or workspace-scoped graphs.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "concept": { "type": "string", "description": "Concept name to search for (case-insensitive substring match)" },
+                        "repo_id": { "type": "string", "description": "Repository ID (search within a single repo)" },
+                        "workspace_id": { "type": "string", "description": "Workspace ID (search across all repos in workspace)" }
+                    },
+                    "required": ["concept"]
+                }
+            },
+            {
+                "name": "spec_assist",
+                "description": "LLM-assisted spec editing. Sends an instruction to the LLM with the spec content and returns suggested edits.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "spec_path": { "type": "string", "description": "Path to the spec file (e.g. system/auth.md)" },
+                        "instruction": { "type": "string", "description": "Editing instruction for the LLM" },
+                        "draft_content": { "type": "string", "description": "Optional draft content to assist with" }
+                    },
+                    "required": ["repo_id", "spec_path", "instruction"]
                 }
             }
         ]
@@ -562,16 +732,102 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
         Some(t) => t.to_string(),
         None => return tool_error("missing required field: target_branch"),
     };
+
+    // Parse optional depends_on array.
+    let depends_on: Option<Vec<String>> = args.get("depends_on").and_then(|v| {
+        v.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+    });
+
+    // Validate and build explicit dependencies (mirrors REST create_mr logic).
+    let explicit_deps = if let Some(ref dep_ids) = depends_on {
+        let mut validated = Vec::new();
+        for dep_id_str in dep_ids {
+            let dep_id = Id::new(dep_id_str);
+            match state.merge_requests.find_by_id(&dep_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return tool_error(format!("dependency merge request {dep_id_str} not found"))
+                }
+                Err(e) => return tool_error(format!("Failed to validate dependency: {e}")),
+            }
+            validated.push(MergeRequestDependency::new(
+                dep_id,
+                DependencySource::Explicit,
+            ));
+        }
+
+        // Cycle check.
+        let all_mrs = match state.merge_requests.list().await {
+            Ok(m) => m,
+            Err(e) => return tool_error(format!("Failed to list MRs: {e}")),
+        };
+        let mut adj: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for m in &all_mrs {
+            adj.insert(
+                m.id.to_string(),
+                m.depends_on
+                    .iter()
+                    .map(|d| d.target_mr_id.to_string())
+                    .collect(),
+            );
+        }
+        // Use a temporary ID for the new MR for cycle check purposes.
+        let tmp_id = new_id();
+        if crate::api::merge_deps::would_create_cycle(&tmp_id.to_string(), dep_ids, &adj) {
+            return tool_error(
+                "cycle detected: adding these dependencies would create a circular dependency chain",
+            );
+        }
+        validated
+    } else {
+        Vec::new()
+    };
+
     let now = now_secs();
+    let rid = Id::new(&repo_id);
     let mut mr = MergeRequest::new(
         new_id(),
-        Id::new(&repo_id),
+        rid.clone(),
         title.clone(),
-        source,
-        target,
+        source.clone(),
+        target.clone(),
         now,
     );
     mr.author_agent_id = get_str(args, "author_agent_id").map(Id::new);
+
+    // Auto-detect branch lineage dependencies and set workspace_id (mirrors REST create_mr).
+    if let Ok(Some(repo)) = state.repos.find_by_id(&rid).await {
+        mr.workspace_id = repo.workspace_id.clone();
+        let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
+            state, &rid, &repo.path, &source, &target,
+        )
+        .await;
+        if !lineage_deps.is_empty() {
+            mr.depends_on = lineage_deps;
+        }
+    }
+
+    // Merge explicit deps with lineage deps: explicit takes precedence,
+    // lineage adds to the set for deps not already declared.
+    if !explicit_deps.is_empty() {
+        let explicit_ids: std::collections::HashSet<String> = explicit_deps
+            .iter()
+            .map(|d| d.target_mr_id.to_string())
+            .collect();
+        let additional_lineage: Vec<_> = mr
+            .depends_on
+            .drain(..)
+            .filter(|d| !explicit_ids.contains(&d.target_mr_id.to_string()))
+            .collect();
+        mr.depends_on = explicit_deps;
+        mr.depends_on.extend(additional_lineage);
+    }
+
     match state.merge_requests.create(&mr).await {
         Ok(()) => tool_result(format!("Created MR '{}' (id: {})", title, mr.id)),
         Err(e) => tool_error(format!("Failed to create MR: {e}")),
@@ -607,7 +863,14 @@ async fn handle_list_mrs(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_record_activity(state: &AppState, args: &Value) -> Value {
+async fn handle_record_activity(
+    state: &AppState,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     let agent_id = match get_str(args, "agent_id") {
         Some(a) => a.to_string(),
         None => return tool_error("missing required field: agent_id"),
@@ -620,22 +883,112 @@ async fn handle_record_activity(state: &AppState, args: &Value) -> Value {
         Some(d) => d.to_string(),
         None => return tool_error("missing required field: description"),
     };
-    let event_id = uuid::Uuid::new_v4().to_string();
-    // Emit as Telemetry-tier message via unified bus.
-    // Use a "default" workspace since MCP callers don't have workspace context here.
-    let ws_id = gyre_common::Id::new("default");
-    state.emit_telemetry(
-        ws_id,
-        gyre_common::message::MessageKind::StateChanged,
-        Some(serde_json::json!({
-            "event_id": event_id,
-            "agent_id": agent_id,
-            "event_type": event_type_str,
-            "description": description,
-            "timestamp": now_secs(),
-        })),
-    );
-    tool_result(format!("Recorded activity event {event_id}"))
+
+    // Map AG-UI event_type to the appropriate MessageKind per message-bus.md §MCP Integration.
+    let kind = match event_type_str {
+        "TOOL_CALL_START" => MessageKind::ToolCallStart,
+        "TOOL_CALL_END" => MessageKind::ToolCallEnd,
+        "TEXT_MESSAGE_CONTENT" => MessageKind::TextMessageContent,
+        "RUN_STARTED" => MessageKind::RunStarted,
+        "RUN_FINISHED" => MessageKind::RunFinished,
+        "STATE_CHANGED" => MessageKind::StateChanged,
+        _ => MessageKind::StateChanged, // Fallback for unknown/custom event types.
+    };
+
+    // Derive workspace and tenant from the caller's agent record.
+    let caller_agent_id = Id::new(&auth.agent_id);
+    let (ws_id, tenant_id) = match state.agents.find_by_id(&caller_agent_id).await {
+        Ok(Some(a)) => (a.workspace_id, Id::new(&auth.tenant_id)),
+        Ok(None) => {
+            // Fallback for global token auth: use default workspace/tenant.
+            (Id::new("default"), Id::new(&auth.tenant_id))
+        }
+        Err(_) => (Id::new("default"), Id::new(&auth.tenant_id)),
+    };
+
+    // Build per-kind payload per message-bus.md §Payload Schemas.
+    let payload = match event_type_str {
+        "TOOL_CALL_START" => {
+            let tool_name = get_str(args, "tool_name")
+                .unwrap_or(&description)
+                .to_string();
+            serde_json::json!({
+                "agent_id": agent_id,
+                "tool_name": tool_name,
+            })
+        }
+        "TOOL_CALL_END" => {
+            let tool_name = get_str(args, "tool_name")
+                .unwrap_or(&description)
+                .to_string();
+            let duration_ms = args
+                .get("duration_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            serde_json::json!({
+                "agent_id": agent_id,
+                "tool_name": tool_name,
+                "duration_ms": duration_ms,
+            })
+        }
+        "RUN_STARTED" | "RUN_FINISHED" => {
+            let task_id = get_str(args, "task_id").map(|s| s.to_string());
+            serde_json::json!({
+                "agent_id": agent_id,
+                "task_id": task_id,
+            })
+        }
+        "TEXT_MESSAGE_CONTENT" => {
+            let content = get_str(args, "content").unwrap_or(&description).to_string();
+            let role = get_str(args, "role").map(|s| s.to_string());
+            serde_json::json!({
+                "agent_id": agent_id,
+                "content": content,
+                "role": role,
+            })
+        }
+        "STATE_CHANGED" | _ => {
+            let old_state = get_str(args, "old_state").map(|s| s.to_string());
+            let new_state = get_str(args, "new_state")
+                .unwrap_or(&description)
+                .to_string();
+            serde_json::json!({
+                "agent_id": agent_id,
+                "old_state": old_state,
+                "new_state": new_state,
+            })
+        }
+    };
+
+    // Derive origin from auth context per message-bus.md §Message Envelope origin table.
+    // Agent JWT → MessageOrigin::Agent(sub claim), not Server.
+    let from = MessageOrigin::Agent(Id::new(&auth.agent_id));
+
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let msg_id = Id::new(uuid::Uuid::new_v4().to_string());
+
+    // Construct Message directly instead of using emit_telemetry, so that
+    // origin and tenant_id reflect the calling agent (F5 fix).
+    let msg = Message {
+        id: msg_id.clone(),
+        tenant_id,
+        from,
+        workspace_id: Some(ws_id.clone()),
+        to: Destination::Workspace(ws_id),
+        kind,
+        payload: Some(payload),
+        created_at,
+        signature: None, // Telemetry tier is unsigned.
+        key_id: None,
+        acknowledged: false,
+    };
+    state.telemetry_buffer.push(msg.clone());
+    let _ = state.message_broadcast_tx.send(msg);
+
+    tool_result(format!("Recorded activity event {}", msg_id))
 }
 
 async fn handle_agent_heartbeat(state: &AppState, args: &Value) -> Value {
@@ -1151,6 +1504,756 @@ async fn handle_search(state: &AppState, args: &Value) -> Value {
     }
 }
 
+// ── Message bus MCP tools ────────────────────────────────────────────────────
+
+async fn handle_message_send(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+    use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, MessageTier};
+
+    // Parse destination.
+    let to_value = match args.get("to") {
+        Some(v) => v,
+        None => return tool_error("missing required field: to"),
+    };
+    let to = match parse_mcp_destination(to_value) {
+        Ok(d) => d,
+        Err(msg) => return tool_error(msg),
+    };
+
+    // Parse kind.
+    let kind_str = match get_str(args, "kind") {
+        Some(k) => k,
+        None => return tool_error("missing required field: kind"),
+    };
+    let kind: MessageKind =
+        match serde_json::from_value(serde_json::Value::String(kind_str.to_string())) {
+            Ok(k) => k,
+            Err(_) => return tool_error(format!("unknown message kind: {kind_str}")),
+        };
+
+    // server_only check: MCP agents cannot send server-only kinds.
+    if kind.server_only() {
+        return tool_error(format!(
+            "kind '{}' can only be sent by the server",
+            kind_str
+        ));
+    }
+
+    // Telemetry-tier standard kinds are not valid for message.send — they route
+    // through gyre_record_activity instead (message-bus.md §MCP Integration).
+    if kind.tier() == MessageTier::Telemetry && !matches!(kind, MessageKind::Custom(_)) {
+        return tool_error(format!(
+            "kind '{}' is Telemetry-tier — use gyre_record_activity instead of message.send",
+            kind_str
+        ));
+    }
+
+    // Determine effective tier.
+    let effective_tier = if let MessageKind::Custom(_) = &kind {
+        if get_str(args, "tier") == Some("directed") {
+            MessageTier::Directed
+        } else {
+            MessageTier::Event
+        }
+    } else {
+        kind.tier()
+    };
+
+    // Derive workspace from agent identity.
+    let agent_id = Id::new(&auth.agent_id);
+    let agent = match state.agents.find_by_id(&agent_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return tool_error(format!("agent {} not found", auth.agent_id)),
+        Err(e) => return tool_error(format!("failed to lookup agent: {e}")),
+    };
+    let ws_id = agent.workspace_id.clone();
+
+    // Validate destination constraints.
+    match (&effective_tier, &to) {
+        (MessageTier::Directed, Destination::Workspace(_)) => {
+            return tool_error("Directed tier requires Agent destination, not Workspace");
+        }
+        (MessageTier::Directed, Destination::Broadcast) => {
+            return tool_error("Directed tier requires Agent destination, not Broadcast");
+        }
+        (MessageTier::Telemetry, Destination::Agent(_)) => {
+            return tool_error("Telemetry tier cannot target Agent destination");
+        }
+        _ => {}
+    }
+
+    // Same-workspace constraint for Agent destination.
+    if let Destination::Agent(ref target_id) = to {
+        let target = match state.agents.find_by_id(target_id).await {
+            Ok(Some(a)) => a,
+            Ok(None) => return tool_error(format!("target agent {} not found", target_id)),
+            Err(e) => return tool_error(format!("failed to lookup target agent: {e}")),
+        };
+        if target.workspace_id != ws_id {
+            return tool_error(format!(
+                "target agent {} is not in the same workspace",
+                target_id
+            ));
+        }
+
+        // Queue depth check for Directed tier.
+        if effective_tier == MessageTier::Directed {
+            let unacked = state.messages.count_unacked(target_id).await.unwrap_or(0);
+            if unacked >= state.agent_inbox_max {
+                return tool_error(format!(
+                    "agent {} inbox is full ({} unacked messages)",
+                    target_id, unacked
+                ));
+            }
+        }
+    }
+
+    // Workspace destination must match sender's workspace.
+    if let Destination::Workspace(ref dest_ws) = to {
+        if *dest_ws != ws_id {
+            return tool_error("workspace destination must match sender's workspace");
+        }
+    }
+
+    let from = MessageOrigin::Agent(agent_id);
+    let created_at = now_ms();
+    let msg_id = Id::new(uuid::Uuid::new_v4().to_string());
+
+    let workspace_id_opt = if matches!(to, Destination::Broadcast) {
+        None
+    } else {
+        Some(ws_id.clone())
+    };
+
+    let mut msg = Message {
+        id: msg_id.clone(),
+        tenant_id: Id::new(&auth.tenant_id),
+        from,
+        workspace_id: workspace_id_opt,
+        to,
+        kind,
+        payload: args.get("payload").cloned(),
+        created_at,
+        signature: None,
+        key_id: None,
+        acknowledged: false,
+    };
+
+    // Sign Directed and Event tier.
+    if effective_tier != MessageTier::Telemetry {
+        let (sig, kid) = crate::signing::sign_message(state, &msg);
+        msg.signature = Some(sig);
+        msg.key_id = Some(kid);
+    }
+
+    // Persist Directed and Event tier.
+    if effective_tier != MessageTier::Telemetry && !matches!(msg.to, Destination::Broadcast) {
+        if let Err(e) = state.messages.store(&msg).await {
+            return tool_error(format!("failed to store message: {e}"));
+        }
+    }
+
+    // Broadcast to WebSocket clients (must happen before dispatch so WS
+    // subscribers see the message even if dispatch consumers are slow).
+    let _ = state.message_broadcast_tx.send(msg.clone());
+
+    // Dispatch to consumers (notifications, etc.).
+    let _ = state.message_dispatch_tx.try_send(msg.clone());
+
+    tool_result(format!("Message sent: id={}, kind={}", msg_id, kind_str,))
+}
+
+// Signing uses the shared `crate::signing::sign_message` — no local copy.
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Parse MCP destination for `message.send`.
+///
+/// Per spec (message-bus.md §MCP Integration), `message.send` supports only
+/// Directed or Custom messages to an agent in the same workspace. Broadcast
+/// destination is NOT valid — it requires Server origin or Admin role, which
+/// agent MCP callers do not have.
+fn parse_mcp_destination(
+    v: &serde_json::Value,
+) -> Result<gyre_common::message::Destination, String> {
+    if let Some(obj) = v.as_object() {
+        if let Some(agent_id) = obj.get("agent").and_then(|v| v.as_str()) {
+            return Ok(gyre_common::message::Destination::Agent(Id::new(agent_id)));
+        }
+        if let Some(ws_id) = obj.get("workspace").and_then(|v| v.as_str()) {
+            return Ok(gyre_common::message::Destination::Workspace(Id::new(ws_id)));
+        }
+    }
+    Err("invalid 'to': expected {\"agent\": \"<id>\"} or {\"workspace\": \"<id>\"}".to_string())
+}
+
+async fn handle_message_poll(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+    // Derive agent_id from auth context.
+    let agent_id = Id::new(&auth.agent_id);
+
+    // Verify agent exists.
+    match state.agents.find_by_id(&agent_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return tool_error(format!("agent {} not found", auth.agent_id)),
+        Err(e) => return tool_error(format!("failed to lookup agent: {e}")),
+    }
+
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100)
+        .min(1000) as usize;
+
+    let unacked_only = args
+        .get("unacked_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let messages = if unacked_only {
+        state.messages.list_unacked(&agent_id, limit).await
+    } else {
+        let after_ts = args.get("after_ts").and_then(|v| v.as_u64()).unwrap_or(0);
+        let after_id = get_str(args, "after_id").map(Id::new);
+        state
+            .messages
+            .list_after(&agent_id, after_ts, after_id.as_ref(), limit)
+            .await
+    };
+
+    match messages {
+        Ok(msgs) => {
+            let items: Vec<serde_json::Value> = msgs
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
+                .collect();
+            tool_result(format!(
+                "{} message(s):\n{}",
+                items.len(),
+                serde_json::to_string_pretty(&items).unwrap_or_default()
+            ))
+        }
+        Err(e) => tool_error(format!("failed to poll messages: {e}")),
+    }
+}
+
+async fn handle_message_ack(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+    let message_id = match get_str(args, "message_id") {
+        Some(id) => id.to_string(),
+        None => return tool_error("missing required field: message_id"),
+    };
+
+    let agent_id = Id::new(&auth.agent_id);
+    let mid = Id::new(&message_id);
+
+    // Verify agent exists.
+    match state.agents.find_by_id(&agent_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return tool_error(format!("agent {} not found", auth.agent_id)),
+        Err(e) => return tool_error(format!("failed to lookup agent: {e}")),
+    }
+
+    match state.messages.acknowledge(&mid, &agent_id).await {
+        Ok(()) => tool_result(format!("Message {} acknowledged", message_id)),
+        Err(e) => tool_error(format!("failed to ack message: {e}")),
+    }
+}
+
+// ── Explorer graph MCP tools ──────────────────────────────────────────────────
+
+async fn handle_graph_summary(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let rid = Id::new(&repo_id);
+    let nodes = match state.graph_store.list_nodes(&rid, None).await {
+        Ok(n) => n,
+        Err(e) => return tool_error(format!("Failed to load graph nodes: {e}")),
+    };
+    let edges = match state.graph_store.list_edges(&rid, None).await {
+        Ok(e) => e,
+        Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
+    };
+    let summary = gyre_domain::view_query_resolver::compute_graph_summary(&repo_id, &nodes, &edges);
+    tool_result(serde_json::to_string_pretty(&summary).unwrap_or_default())
+}
+
+async fn handle_graph_query_dryrun(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let query_value = match args.get("query") {
+        Some(q) => q.clone(),
+        None => return tool_error("missing required field: query"),
+    };
+    let query: gyre_common::view_query::ViewQuery = match serde_json::from_value(query_value) {
+        Ok(q) => q,
+        Err(e) => return tool_error(format!("Invalid view query: {e}")),
+    };
+    let selected = get_str(args, "selected_node_id");
+
+    let rid = Id::new(&repo_id);
+    let nodes = match state.graph_store.list_nodes(&rid, None).await {
+        Ok(n) => n,
+        Err(e) => return tool_error(format!("Failed to load graph nodes: {e}")),
+    };
+    let edges = match state.graph_store.list_edges(&rid, None).await {
+        Ok(e) => e,
+        Err(e) => return tool_error(format!("Failed to load graph edges: {e}")),
+    };
+
+    let result = gyre_domain::view_query_resolver::dry_run(&query, &nodes, &edges, selected);
+    tool_result(serde_json::to_string_pretty(&result).unwrap_or_default())
+}
+
+async fn handle_graph_nodes(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let rid = Id::new(&repo_id);
+
+    // Specific node by ID
+    if let Some(node_id) = get_str(args, "node_id") {
+        let nid = Id::new(node_id);
+        match state.graph_store.get_node(&nid).await {
+            Ok(Some(node)) => {
+                return tool_result(serde_json::to_string_pretty(&node).unwrap_or_default());
+            }
+            Ok(None) => return tool_error(format!("Node not found: {node_id}")),
+            Err(e) => return tool_error(format!("Failed: {e}")),
+        }
+    }
+
+    // Filter by type
+    let node_type_filter =
+        get_str(args, "node_type").and_then(|s| match s.to_lowercase().as_str() {
+            "package" => Some(gyre_common::NodeType::Package),
+            "module" => Some(gyre_common::NodeType::Module),
+            "type" | "struct" => Some(gyre_common::NodeType::Type),
+            "trait" => Some(gyre_common::NodeType::Trait),
+            "interface" => Some(gyre_common::NodeType::Interface),
+            "function" => Some(gyre_common::NodeType::Function),
+            "method" => Some(gyre_common::NodeType::Method),
+            "class" => Some(gyre_common::NodeType::Class),
+            "enum" => Some(gyre_common::NodeType::Enum),
+            "enum_variant" | "variant" => Some(gyre_common::NodeType::EnumVariant),
+            "endpoint" => Some(gyre_common::NodeType::Endpoint),
+            "component" => Some(gyre_common::NodeType::Component),
+            "table" => Some(gyre_common::NodeType::Table),
+            "constant" => Some(gyre_common::NodeType::Constant),
+            "field" => Some(gyre_common::NodeType::Field),
+            "spec" => Some(gyre_common::NodeType::Spec),
+            _ => None,
+        });
+
+    let nodes = match state.graph_store.list_nodes(&rid, node_type_filter).await {
+        Ok(n) => n,
+        Err(e) => return tool_error(format!("Failed: {e}")),
+    };
+
+    // Name pattern filter
+    let name_pattern = get_str(args, "name_pattern").map(|s| s.to_lowercase());
+    let filtered: Vec<_> = nodes
+        .into_iter()
+        .filter(|n| n.deleted_at.is_none())
+        .filter(|n| match &name_pattern {
+            Some(pat) => {
+                n.name.to_lowercase().contains(pat) || n.qualified_name.to_lowercase().contains(pat)
+            }
+            None => true,
+        })
+        .take(50)
+        .collect();
+
+    let items: Vec<serde_json::Value> = filtered
+        .iter()
+        .map(|n| {
+            json!({
+                "id": n.id.to_string(),
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "node_type": format!("{:?}", n.node_type).to_lowercase(),
+                "file_path": n.file_path,
+                "line_start": n.line_start,
+                "line_end": n.line_end,
+                "visibility": format!("{:?}", n.visibility).to_lowercase(),
+                "spec_path": n.spec_path,
+                "complexity": n.complexity,
+                "test_node": n.test_node,
+                "test_coverage": n.test_coverage,
+            })
+        })
+        .collect();
+
+    tool_result(format!(
+        "{} nodes:\n{}",
+        items.len(),
+        serde_json::to_string_pretty(&items).unwrap_or_default()
+    ))
+}
+
+async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let rid = Id::new(&repo_id);
+
+    // If node_id is specified, get edges for that node
+    if let Some(node_id) = get_str(args, "node_id") {
+        let nid = Id::new(node_id);
+        match state.graph_store.list_edges_for_node(&nid).await {
+            Ok(edges) => {
+                let items: Vec<serde_json::Value> = edges
+                    .iter()
+                    .filter(|e| e.deleted_at.is_none())
+                    .take(100)
+                    .map(|e| {
+                        json!({
+                            "id": e.id.to_string(),
+                            "source_id": e.source_id.to_string(),
+                            "target_id": e.target_id.to_string(),
+                            "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
+                        })
+                    })
+                    .collect();
+                return tool_result(format!(
+                    "{} edges:\n{}",
+                    items.len(),
+                    serde_json::to_string_pretty(&items).unwrap_or_default()
+                ));
+            }
+            Err(e) => return tool_error(format!("Failed: {e}")),
+        }
+    }
+
+    // Filter by edge type
+    let edge_type_filter =
+        get_str(args, "edge_type").and_then(|s| match s.to_lowercase().as_str() {
+            "contains" => Some(gyre_common::EdgeType::Contains),
+            "implements" => Some(gyre_common::EdgeType::Implements),
+            "depends_on" => Some(gyre_common::EdgeType::DependsOn),
+            "calls" => Some(gyre_common::EdgeType::Calls),
+            "field_of" => Some(gyre_common::EdgeType::FieldOf),
+            "returns" => Some(gyre_common::EdgeType::Returns),
+            "routes_to" => Some(gyre_common::EdgeType::RoutesTo),
+            "governed_by" => Some(gyre_common::EdgeType::GovernedBy),
+            _ => None,
+        });
+
+    let edges = match state.graph_store.list_edges(&rid, edge_type_filter).await {
+        Ok(e) => e,
+        Err(e) => return tool_error(format!("Failed: {e}")),
+    };
+
+    let source_filter = get_str(args, "source_id");
+    let target_filter = get_str(args, "target_id");
+
+    let items: Vec<serde_json::Value> = edges
+        .iter()
+        .filter(|e| e.deleted_at.is_none())
+        .filter(|e| {
+            source_filter.map_or(true, |s| e.source_id.to_string() == s)
+                && target_filter.map_or(true, |t| e.target_id.to_string() == t)
+        })
+        .take(100)
+        .map(|e| {
+            json!({
+                "id": e.id.to_string(),
+                "source_id": e.source_id.to_string(),
+                "target_id": e.target_id.to_string(),
+                "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
+            })
+        })
+        .collect();
+
+    tool_result(format!(
+        "{} edges:\n{}",
+        items.len(),
+        serde_json::to_string_pretty(&items).unwrap_or_default()
+    ))
+}
+
+async fn handle_node_provenance(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let rid = Id::new(&repo_id);
+
+    // Find nodes by ID or name pattern
+    let target_nodes: Vec<gyre_common::graph::GraphNode> =
+        if let Some(node_id) = get_str(args, "node_id") {
+            let nid = Id::new(node_id);
+            match state.graph_store.get_node(&nid).await {
+                Ok(Some(n)) => vec![n],
+                Ok(None) => return tool_error(format!("Node not found: {node_id}")),
+                Err(e) => return tool_error(format!("Failed: {e}")),
+            }
+        } else if let Some(pattern) = get_str(args, "name_pattern") {
+            let pat_lower = pattern.to_lowercase();
+            match state.graph_store.list_nodes(&rid, None).await {
+                Ok(nodes) => nodes
+                    .into_iter()
+                    .filter(|n| {
+                        n.deleted_at.is_none()
+                            && (n.name.to_lowercase().contains(&pat_lower)
+                                || n.qualified_name.to_lowercase().contains(&pat_lower))
+                    })
+                    .take(10)
+                    .collect(),
+                Err(e) => return tool_error(format!("Failed: {e}")),
+            }
+        } else {
+            return tool_error("Provide either node_id or name_pattern");
+        };
+
+    let items: Vec<Value> = target_nodes
+        .iter()
+        .map(|n| {
+            json!({
+                "id": n.id.to_string(),
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "node_type": format!("{:?}", n.node_type).to_lowercase(),
+                "file_path": n.file_path,
+                "created_at": n.created_at,
+                "last_modified_at": n.last_modified_at,
+                "created_sha": n.created_sha,
+                "last_modified_sha": n.last_modified_sha,
+                "spec_path": n.spec_path,
+                "complexity": n.complexity,
+                "churn_count_30d": n.churn_count_30d,
+                "test_coverage": n.test_coverage,
+            })
+        })
+        .collect();
+
+    tool_result(format!(
+        "{} node(s) provenance:\n{}",
+        items.len(),
+        serde_json::to_string_pretty(&items).unwrap_or_default()
+    ))
+}
+
+/// MCP tool handler for `graph.concept` — delegates to the same shared
+/// `assemble_concept_results` function used by the REST handlers (HSI §11 parity).
+async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
+    let concept = match require_str(args, "concept") {
+        Ok(c) => c.to_string(),
+        Err(_) => return tool_error("missing required field: concept"),
+    };
+
+    // Determine scope: repo_id or workspace_id.
+    let repo_ids: Vec<String> = if let Some(repo_id) = get_str(args, "repo_id") {
+        vec![repo_id.to_string()]
+    } else if let Some(workspace_id) = get_str(args, "workspace_id") {
+        let ws_id = Id::new(workspace_id);
+        match state.repos.list_by_workspace(&ws_id).await {
+            Ok(repos) => repos.into_iter().map(|r| r.id.to_string()).collect(),
+            Err(e) => return tool_error(format!("failed to list repos: {e}")),
+        }
+    } else {
+        return tool_error("provide either repo_id or workspace_id");
+    };
+
+    // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
+    match crate::api::graph::assemble_concept_results(state, &repo_ids, &concept).await {
+        Ok(response) => {
+            let result =
+                serde_json::to_value(&response).unwrap_or_else(|e| json!({"error": e.to_string()}));
+            tool_result(serde_json::to_string_pretty(&result).unwrap_or_default())
+        }
+        Err(_) => tool_error("concept search failed"),
+    }
+}
+
+async fn handle_spec_assist(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let spec_path = match require_str(args, "spec_path") {
+        Ok(p) => p.to_string(),
+        Err(_) => return tool_error("missing required field: spec_path"),
+    };
+    let instruction = match require_str(args, "instruction") {
+        Ok(i) => i.to_string(),
+        Err(_) => return tool_error("missing required field: instruction"),
+    };
+    let draft_content = get_str(args, "draft_content").map(|s| s.to_string());
+
+    // Verify repo exists and resolve workspace_id for rate limiting.
+    let repo_id_typed = Id::new(&repo_id);
+    let repo = match state.repos.find_by_id(&repo_id_typed).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return tool_error(format!("repo not found: {repo_id}")),
+        Err(e) => return tool_error(format!("failed to look up repo: {e}")),
+    };
+
+    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    {
+        let workspace_id = repo.workspace_id.to_string();
+        let mut limiter = state.llm_rate_limiter.lock().await;
+        if let Err(retry_after) = crate::llm_rate_limit::check_rate_limit(
+            &mut limiter,
+            &auth.agent_id,
+            &workspace_id,
+            crate::llm_rate_limit::LLM_RATE_LIMIT,
+            crate::llm_rate_limit::LLM_WINDOW_SECS,
+        ) {
+            return tool_error(format!("rate limited — retry after {retry_after}s"));
+        }
+    }
+
+    // Require LLM to be configured.
+    let factory = match state.llm.as_ref() {
+        Some(f) => f,
+        None => return tool_error("LLM not configured — spec assist unavailable"),
+    };
+
+    // Determine effective spec content: draft_content overrides committed content.
+    let spec_content = if let Some(ref draft) = draft_content {
+        draft.clone()
+    } else {
+        match state
+            .git_ops
+            .read_file(&repo.path, &repo.default_branch, &spec_path)
+            .await
+        {
+            Ok(Some(bytes)) => String::from_utf8_lossy(&bytes).to_string(),
+            Ok(None) => {
+                return tool_error(format!("spec {spec_path} not found in repo {repo_id}"));
+            }
+            Err(e) => {
+                tracing::warn!(repo_id = %repo_id, spec_path = %spec_path, "Failed to read spec from repo: {e}");
+                String::new()
+            }
+        }
+    };
+
+    // Build knowledge graph context: query nodes governed by this spec.
+    let graph_context = match state
+        .graph_store
+        .get_nodes_by_spec(&repo_id_typed, &spec_path)
+        .await
+    {
+        Ok(nodes) if !nodes.is_empty() => {
+            let summaries: Vec<String> = nodes
+                .iter()
+                .take(50)
+                .map(|n| {
+                    format!(
+                        "- {} ({:?}): {} [{}:{}–{}]",
+                        n.name,
+                        n.node_type,
+                        n.qualified_name,
+                        n.file_path,
+                        n.line_start,
+                        n.line_end
+                    )
+                })
+                .collect();
+            summaries.join("\n")
+        }
+        Ok(_) => "No graph nodes are currently linked to this spec.".to_string(),
+        Err(e) => {
+            tracing::warn!(repo_id = %repo_id, spec_path = %spec_path, "Failed to load graph context: {e}");
+            "Graph context unavailable.".to_string()
+        }
+    };
+
+    // Load effective prompt; fall back to hardcoded default.
+    let template_content = state
+        .prompt_templates
+        .get_effective(&repo.workspace_id, "specs-assist")
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.content)
+        .unwrap_or_else(|| crate::llm_defaults::PROMPT_SPECS_ASSIST.to_string());
+
+    let system_prompt = template_content
+        .replace("{{spec_path}}", &spec_path)
+        .replace("{{spec_content}}", &spec_content)
+        .replace("{{graph_context}}", &graph_context)
+        .replace("{{instruction}}", &instruction)
+        .replace(
+            "{{draft_content}}",
+            draft_content.as_deref().unwrap_or(&spec_content),
+        );
+    let user_prompt = format!("Instruction: {instruction}");
+
+    // Resolve model and call LLM.
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(state, &repo.workspace_id, "specs-assist").await;
+
+    use futures_util::StreamExt as _;
+    let stream = match factory
+        .for_model(&model)
+        .stream_complete(&system_prompt, &user_prompt, max_tokens)
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => return tool_error(format!("LLM call failed: {e}")),
+    };
+
+    // Collect all chunks into the final text.
+    let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
+    let full_text = chunks.join("");
+
+    // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158).
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let base_estimate = (estimated_input + 500) as f64;
+    let estimated_tokens = base_estimate * 3.0;
+    let cost_entry = CostEntry::new(
+        new_id(),
+        Id::new(auth.agent_id.clone()),
+        None,
+        "llm_query",
+        estimated_tokens,
+        "tokens",
+        now_secs(),
+    );
+    if let Err(e) = state.costs.record(&cost_entry).await {
+        tracing::warn!("Failed to record MCP specs/assist cost entry: {e}");
+    }
+
+    // Validate LLM response: parse JSON, check diff+explanation fields, validate diff ops.
+    // Must match REST handler validation (specs_assist.rs) per HSI §11 MCP parity.
+    match serde_json::from_str::<serde_json::Value>(&full_text) {
+        Ok(parsed) if parsed.get("diff").is_some() && parsed.get("explanation").is_some() => {
+            // Validate diff ops: each must have valid op and path.
+            let diff = parsed["diff"].as_array();
+            let valid_diff = diff
+                .map(|ops| {
+                    ops.iter().all(|op| {
+                        let op_str = op.get("op").and_then(|v| v.as_str()).unwrap_or("");
+                        let has_path = op.get("path").and_then(|v| v.as_str()).is_some();
+                        matches!(op_str, "add" | "remove" | "replace") && has_path
+                    })
+                })
+                .unwrap_or(false);
+
+            if valid_diff {
+                tool_result(serde_json::to_string_pretty(&parsed).unwrap_or_default())
+            } else {
+                tool_error("LLM produced invalid diff operations. Each operation must have op (add/remove/replace), path, and content fields.")
+            }
+        }
+        Ok(_) => tool_error(
+            "LLM response is valid JSON but missing required 'diff' and/or 'explanation' fields.",
+        ),
+        Err(_) => tool_error("LLM returned invalid JSON. Please try rephrasing your instruction."),
+    }
+}
+
 // ── MCP Resources ─────────────────────────────────────────────────────────────
 
 fn resource_definitions() -> Value {
@@ -1182,6 +2285,27 @@ fn resource_definitions() -> Value {
                 "name": "Conversation Context",
                 "description": "Original agent conversation history for interrogation agents (HSI §4). Only accessible to the spawned interrogation agent.",
                 "mimeType": "application/json"
+            },
+            {
+                "uri": "briefing://",
+                "name": "Workspace Briefing",
+                "description": "Workspace briefing narrative (HSI §9). URI: briefing://{workspace_id} (optional ?since=<epoch>)",
+                "mimeType": "application/json",
+                "uriTemplate": "briefing://{workspace_id}"
+            },
+            {
+                "uri": "notifications://",
+                "name": "Inbox Notifications",
+                "description": "Inbox notifications for the authenticated user (HSI §11). URI: notifications://{workspace_id} (optional ?min_priority=&max_priority=)",
+                "mimeType": "application/json",
+                "uriTemplate": "notifications://{workspace_id}"
+            },
+            {
+                "uri": "trace://",
+                "name": "MR System Trace",
+                "description": "SDLC system trace for a merge request (HSI §3a). URI: trace://{mr_id}",
+                "mimeType": "application/json",
+                "uriTemplate": "trace://{mr_id}"
             }
         ]
     })
@@ -1296,6 +2420,139 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             }
             Err(e) => json!({"error": format!("failed to list merge queue: {e}")}),
         }
+    } else if let Some(rest) = uri.strip_prefix("briefing://") {
+        // briefing://{workspace_id}?since=<epoch>
+        // Parse workspace_id and optional ?since= query param.
+        let (workspace_id, since_param) = match rest.split_once('?') {
+            Some((ws, qs)) => {
+                let since = qs
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("since="))
+                    .and_then(|v| v.parse::<u64>().ok());
+                (ws, since)
+            }
+            None => (rest, None),
+        };
+        if workspace_id.is_empty() {
+            return json!({"error": "briefing:// requires a workspace_id"});
+        }
+        // Verify workspace exists.
+        let ws_id = Id::new(workspace_id);
+        match state.workspaces.find_by_id(&ws_id).await {
+            Ok(None) => return json!({"error": format!("workspace not found: {workspace_id}")}),
+            Err(e) => return json!({"error": format!("failed to look up workspace: {e}")}),
+            Ok(Some(_)) => {}
+        }
+        // Resolve `since`: explicit param > last_seen_at from user_workspace_state > 24h fallback.
+        // Matches the REST handler's three-step resolution (HSI §11 parity).
+        let since: u64 = if let Some(s) = since_param {
+            s
+        } else if let Some(uid) = &auth.user_id {
+            let last_seen = state
+                .user_workspace_state
+                .get_last_seen(uid.as_str(), workspace_id)
+                .await
+                .unwrap_or(None);
+            last_seen
+                .map(|ts| ts as u64)
+                .unwrap_or_else(|| now_secs().saturating_sub(24 * 3600))
+        } else {
+            now_secs().saturating_sub(24 * 3600)
+        };
+        // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
+        match crate::api::graph::assemble_briefing(&state, workspace_id, since).await {
+            Ok(briefing) => {
+                let briefing_json = serde_json::to_value(&briefing)
+                    .unwrap_or_else(|e| json!({"error": e.to_string()}));
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&briefing_json).unwrap_or_default()
+                    }]
+                })
+            }
+            Err(_) => json!({"error": "failed to assemble briefing"}),
+        }
+    } else if let Some(rest) = uri.strip_prefix("notifications://") {
+        // notifications://{workspace_id}?min_priority=&max_priority=
+        let (workspace_id, min_pri, max_pri) = match rest.split_once('?') {
+            Some((ws, qs)) => {
+                let min_p = qs
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("min_priority="))
+                    .and_then(|v| v.parse::<u8>().ok());
+                let max_p = qs
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("max_priority="))
+                    .and_then(|v| v.parse::<u8>().ok());
+                (ws, min_p, max_p)
+            }
+            None => (rest, None, None),
+        };
+        if workspace_id.is_empty() {
+            return json!({"error": "notifications:// requires a workspace_id"});
+        }
+        // Resolve user_id from auth (same logic as get_my_notifications).
+        let user_id = auth
+            .user_id
+            .clone()
+            .unwrap_or_else(|| Id::new(auth.agent_id.clone()));
+        let ws_id = Id::new(workspace_id);
+        match state
+            .notifications
+            .list_for_user(&user_id, Some(&ws_id), min_pri, max_pri, None, 50, 0)
+            .await
+        {
+            Ok(notifications) => {
+                // Serialize via NotificationResponse for REST parity (HSI §11).
+                let items: Vec<crate::api::users::NotificationResponse> =
+                    notifications.into_iter().map(Into::into).collect();
+                let result = json!({ // mcp-parity:ok — envelope matches REST handler's json!() at users.rs:313; items are NotificationResponse structs
+                    "notifications": items,
+                    "limit": 50,
+                    "offset": 0,
+                });
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            }
+            Err(e) => json!({"error": format!("failed to list notifications: {e}")}),
+        }
+    } else if let Some(mr_id) = uri.strip_prefix("trace://") {
+        // trace://{mr_id}
+        if mr_id.is_empty() {
+            return json!({"error": "trace:// requires an mr_id"});
+        }
+        let mr_id_typed = Id::new(mr_id);
+        // Verify the MR exists.
+        match state.merge_requests.find_by_id(&mr_id_typed).await {
+            Ok(None) => return json!({"error": format!("merge request not found: {mr_id}")}),
+            Err(e) => return json!({"error": format!("failed to look up merge request: {e}")}),
+            Ok(Some(_)) => {}
+        }
+        // Find the most recent trace for this MR.
+        // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
+        match state.traces.get_by_mr(&mr_id_typed).await {
+            Ok(Some(trace)) => {
+                let response = crate::api::traces::assemble_gate_trace(trace);
+                let result = serde_json::to_value(&response)
+                    .unwrap_or_else(|e| json!({"error": e.to_string()}));
+                json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(&result).unwrap_or_default()
+                    }]
+                })
+            }
+            Ok(None) => json!({"error": format!("no trace found for merge request: {mr_id}")}),
+            Err(e) => json!({"error": format!("failed to load trace: {e}")}),
+        }
     } else {
         json!({"error": format!("unknown resource URI scheme: {uri}")})
     }
@@ -1355,6 +2612,8 @@ pub async fn mcp_handler(
                     | "gyre_agent_heartbeat"
                     | "gyre_agent_complete"
                     | "conversation_upload"
+                    | "gyre_message_send"
+                    | "gyre_message_ack"
             );
             if needs_write && !has_role_at_least(&auth.roles, UserRole::Agent) {
                 return Json(JsonRpcResponse::err(
@@ -1420,12 +2679,22 @@ pub async fn mcp_handler(
                 "gyre_update_task" => handle_update_task(&state, &args).await,
                 "gyre_create_mr" => handle_create_mr(&state, &args).await,
                 "gyre_list_mrs" => handle_list_mrs(&state, &args).await,
-                "gyre_record_activity" => handle_record_activity(&state, &args).await,
+                "gyre_record_activity" => handle_record_activity(&state, &args, &auth).await,
                 "gyre_agent_heartbeat" => handle_agent_heartbeat(&state, &args).await,
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
                 "gyre_search" => handle_search(&state, &args).await,
                 "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
+                "gyre_message_send" => handle_message_send(&state, &args, &auth).await,
+                "gyre_message_poll" => handle_message_poll(&state, &args, &auth).await,
+                "gyre_message_ack" => handle_message_ack(&state, &args, &auth).await,
+                "graph_summary" => handle_graph_summary(&state, &args).await,
+                "graph_query_dryrun" => handle_graph_query_dryrun(&state, &args).await,
+                "graph_nodes" => handle_graph_nodes(&state, &args).await,
+                "graph_edges" => handle_graph_edges(&state, &args).await,
+                "node_provenance" => handle_node_provenance(&state, &args).await,
+                "graph_concept" => handle_graph_concept(&state, &args).await,
+                "spec_assist" => handle_spec_assist(&state, &args, &auth).await,
                 other => tool_error(format!("Unknown tool: {other}")),
             };
             JsonRpcResponse::ok(id, result)
@@ -1474,13 +2743,17 @@ mod tests {
     }
 
     async fn mcp_post(app: Router, body: Value) -> (StatusCode, Value) {
+        mcp_post_with_token(app, body, "test-token").await
+    }
+
+    async fn mcp_post_with_token(app: Router, body: Value, token: &str) -> (StatusCode, Value) {
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/mcp")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1538,6 +2811,7 @@ mod tests {
         assert!(names.contains(&"gyre_agent_heartbeat"));
         assert!(names.contains(&"gyre_agent_complete"));
         assert!(names.contains(&"gyre_search"));
+        assert!(names.contains(&"node_provenance"));
     }
 
     #[tokio::test]
@@ -1757,6 +3031,7 @@ mod tests {
                 "scope": "agent",
                 "task_id": "task-1"
             })),
+            deprecated_token_auth: false,
         };
         assert!(is_agent_jwt(&auth_with_agent_scope));
 
@@ -1767,6 +3042,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            deprecated_token_auth: false,
         };
         assert!(!is_agent_jwt(&auth_global));
 
@@ -1780,6 +3056,7 @@ mod tests {
                 "sub": "user-abc",
                 "realm_access": {"roles": ["developer"]}
             })),
+            deprecated_token_auth: false,
         };
         assert!(!is_agent_jwt(&auth_keycloak));
     }
@@ -2199,6 +3476,695 @@ mod tests {
         assert_eq!(payload["conversation_sha"], "abc123");
     }
 
+    // ── message bus MCP tools ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_tools_list_includes_message_tools() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 70,
+                "method": "tools/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            names.contains(&"gyre_message_send"),
+            "missing gyre_message_send"
+        );
+        assert!(
+            names.contains(&"gyre_message_poll"),
+            "missing gyre_message_poll"
+        );
+        assert!(
+            names.contains(&"gyre_message_ack"),
+            "missing gyre_message_ack"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_requires_agent() {
+        // Sending a message requires an agent to exist
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 71,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "target-agent"},
+                        "kind": "task_assignment"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // system agent doesn't exist in test state → error
+        assert!(json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_directed_succeeds() {
+        let state = test_state();
+        // Create sender agent (test-token maps to agent_id "system")
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-mcp");
+        state.agents.create(&sender).await.unwrap();
+        // Create target agent in same workspace
+        let mut target = gyre_domain::Agent::new(Id::new("agent-target"), "target", 0);
+        target.workspace_id = Id::new("ws-mcp");
+        state.agents.create(&target).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 72,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-target"},
+                        "kind": "task_assignment",
+                        "payload": {"task_id": "TASK-99"}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "message send should succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Message sent"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_broadcasts_to_websocket_channel() {
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-bc");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-bc-target"), "target", 0);
+        target.workspace_id = Id::new("ws-bc");
+        state.agents.create(&target).await.unwrap();
+
+        // Subscribe to broadcast channel BEFORE sending.
+        let mut rx = state.message_broadcast_tx.subscribe();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 200,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-bc-target"},
+                        "kind": "task_assignment",
+                        "payload": {"task_id": "TASK-BC"}
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "send should succeed: {json}"
+        );
+
+        // F7: verify the message was broadcast to WebSocket channel.
+        let broadcast_msg = rx
+            .try_recv()
+            .expect("message must be broadcast to WS channel");
+        assert_eq!(
+            broadcast_msg.to,
+            gyre_common::message::Destination::Agent(Id::new("agent-bc-target"))
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_cross_workspace_rejected() {
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-a");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-other-ws"), "other", 0);
+        target.workspace_id = Id::new("ws-b");
+        state.agents.create(&target).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 73,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"agent": "agent-other-ws"},
+                        "kind": "task_assignment"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("not in the same workspace"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_server_only_rejected() {
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-so");
+        state.agents.create(&sender).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 74,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"workspace": "ws-so"},
+                        "kind": "agent_created"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("server"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_poll_returns_messages() {
+        let state = test_state();
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-poll");
+        state.agents.create(&agent).await.unwrap();
+
+        // Store a message for the agent.
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+        let msg = Message {
+            id: Id::new("poll-msg-1"),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-poll")),
+            to: Destination::Agent(Id::new("system")),
+            kind: MessageKind::TaskAssignment,
+            payload: Some(json!({"task_id": "T-1"})),
+            created_at: 5_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 75,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_poll",
+                    "arguments": {
+                        "after_ts": 0,
+                        "limit": 10
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "poll should succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("1 message(s)"));
+        assert!(text.contains("poll-msg-1"));
+        // F8: verify full Message serialization — must include fields previously omitted.
+        assert!(
+            text.contains("workspace_id"),
+            "poll response must include workspace_id (full Message serialization)"
+        );
+        assert!(
+            text.contains("tenant_id"),
+            "poll response must include tenant_id (full Message serialization)"
+        );
+        assert!(
+            text.contains("to"),
+            "poll response must include 'to' destination (full Message serialization)"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_message_poll_unacked_only() {
+        let state = test_state();
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-unack");
+        state.agents.create(&agent).await.unwrap();
+
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+        let msg = Message {
+            id: Id::new("unack-msg-1"),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-unack")),
+            to: Destination::Agent(Id::new("system")),
+            kind: MessageKind::ReviewRequest,
+            payload: None,
+            created_at: 1_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 76,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_poll",
+                    "arguments": {
+                        "unacked_only": true
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("1 message(s)"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_ack_succeeds() {
+        let state = test_state();
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-ack");
+        state.agents.create(&agent).await.unwrap();
+
+        use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+        let msg = Message {
+            id: Id::new("ack-mcp-1"),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-ack")),
+            to: Destination::Agent(Id::new("system")),
+            kind: MessageKind::TaskAssignment,
+            payload: None,
+            created_at: 2_000,
+            signature: None,
+            key_id: None,
+            acknowledged: false,
+        };
+        state.messages.store(&msg).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 77,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_ack",
+                    "arguments": {
+                        "message_id": "ack-mcp-1"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "ack should succeed: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("acknowledged"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_ack_missing_id_returns_error() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 78,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_ack",
+                    "arguments": {}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_broadcast_rejected() {
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-bc");
+        state.agents.create(&sender).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 80,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": "broadcast",
+                        "kind": "task_assignment"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["isError"].as_bool().unwrap(),
+            "broadcast destination should be rejected for message.send: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("invalid"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_telemetry_kind_rejected() {
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-tel");
+        state.agents.create(&sender).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 81,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_message_send",
+                    "arguments": {
+                        "to": {"workspace": "ws-tel"},
+                        "kind": "tool_call_start"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["isError"].as_bool().unwrap(),
+            "telemetry kind should be rejected for message.send: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Telemetry-tier"));
+        assert!(text.contains("gyre_record_activity"));
+    }
+
+    #[tokio::test]
+    async fn mcp_record_activity_maps_event_types() {
+        let state = test_state();
+        // Create an agent so workspace lookup succeeds.
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-activity");
+        state.agents.create(&agent).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+
+        // Test each AG-UI event type mapping.
+        for event_type in &[
+            "TOOL_CALL_START",
+            "TOOL_CALL_END",
+            "TEXT_MESSAGE_CONTENT",
+            "RUN_STARTED",
+            "RUN_FINISHED",
+            "STATE_CHANGED",
+        ] {
+            let (status, json) = mcp_post(
+                app.clone(),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 82,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "gyre_record_activity",
+                        "arguments": {
+                            "agent_id": "system",
+                            "event_type": event_type,
+                            "description": format!("test {}", event_type),
+                        }
+                    }
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "failed for {event_type}");
+            assert!(
+                !json["result"]["isError"].as_bool().unwrap(),
+                "record_activity should succeed for {event_type}: {json}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_record_activity_uses_agent_origin_and_tenant() {
+        // F5: verify that record_activity messages use MessageOrigin::Agent,
+        // not Server, and use the caller's tenant_id.
+        let state = test_state();
+        // Global token auth maps to agent_id "system", so create agent with that id.
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-f5");
+        state.agents.create(&agent).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 90,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "system",
+                        "event_type": "RUN_STARTED",
+                        "description": "test origin"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap(),
+            "record_activity failed: {json}"
+        );
+
+        // Verify the telemetry buffer message has agent origin, not server.
+        let msgs = state.telemetry_buffer.list_since(&Id::new("ws-f5"), 0, 100);
+        assert!(!msgs.is_empty(), "telemetry buffer should have messages");
+        let msg = &msgs[0];
+        match &msg.from {
+            gyre_common::message::MessageOrigin::Agent(id) => {
+                // Global token auth maps to agent_id "system".
+                assert_eq!(id.to_string(), "system");
+            }
+            other => panic!("expected MessageOrigin::Agent, got {:?}", other),
+        }
+        // tenant_id should come from auth context, not hardcoded.
+        assert_eq!(msg.tenant_id.to_string(), "default"); // test auth uses default tenant
+    }
+
+    #[tokio::test]
+    async fn mcp_record_activity_per_kind_payload_schemas() {
+        // F6: verify that per-kind payloads conform to message-bus.md §Payload Schemas.
+        let state = test_state();
+        let mut agent = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        agent.workspace_id = Id::new("ws-f6");
+        state.agents.create(&agent).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+
+        // Test TOOL_CALL_START — should have agent_id + tool_name.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 91,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "system",
+                        "event_type": "TOOL_CALL_START",
+                        "description": "fallback tool name",
+                        "tool_name": "grep"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        // Test TOOL_CALL_END — should have agent_id + tool_name + duration_ms.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 92,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "system",
+                        "event_type": "TOOL_CALL_END",
+                        "description": "grep completed",
+                        "tool_name": "grep",
+                        "duration_ms": 42
+                    }
+                }
+            }),
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        // Test TEXT_MESSAGE_CONTENT — should have agent_id + content.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 93,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "system",
+                        "event_type": "TEXT_MESSAGE_CONTENT",
+                        "description": "some text",
+                        "content": "hello world",
+                        "role": "assistant"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        // Test STATE_CHANGED — should have agent_id + new_state.
+        let (_status, json) = mcp_post(
+            app.clone(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 94,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_record_activity",
+                    "arguments": {
+                        "agent_id": "system",
+                        "event_type": "STATE_CHANGED",
+                        "description": "thinking",
+                        "old_state": "idle",
+                        "new_state": "thinking"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        // Verify stored telemetry payloads have per-kind fields.
+        let msgs = state.telemetry_buffer.list_since(&Id::new("ws-f6"), 0, 100);
+        assert!(
+            msgs.len() >= 4,
+            "expected 4+ telemetry messages, got {}",
+            msgs.len()
+        );
+
+        // Check TOOL_CALL_START payload.
+        let tool_start = msgs
+            .iter()
+            .find(|m| matches!(m.kind, gyre_common::message::MessageKind::ToolCallStart))
+            .expect("ToolCallStart message");
+        let p = tool_start.payload.as_ref().unwrap();
+        assert_eq!(p["tool_name"], "grep");
+        assert_eq!(p["agent_id"], "system");
+
+        // Check TOOL_CALL_END payload.
+        let tool_end = msgs
+            .iter()
+            .find(|m| matches!(m.kind, gyre_common::message::MessageKind::ToolCallEnd))
+            .expect("ToolCallEnd message");
+        let p = tool_end.payload.as_ref().unwrap();
+        assert_eq!(p["tool_name"], "grep");
+        assert_eq!(p["duration_ms"], 42);
+
+        // Check TEXT_MESSAGE_CONTENT payload.
+        let text_msg = msgs
+            .iter()
+            .find(|m| {
+                matches!(
+                    m.kind,
+                    gyre_common::message::MessageKind::TextMessageContent
+                )
+            })
+            .expect("TextMessageContent message");
+        let p = text_msg.payload.as_ref().unwrap();
+        assert_eq!(p["content"], "hello world");
+        assert_eq!(p["role"], "assistant");
+
+        // Check STATE_CHANGED payload.
+        let state_changed = msgs
+            .iter()
+            .find(|m| matches!(m.kind, gyre_common::message::MessageKind::StateChanged))
+            .expect("StateChanged message");
+        let p = state_changed.payload.as_ref().unwrap();
+        assert_eq!(p["new_state"], "thinking");
+        assert_eq!(p["old_state"], "idle");
+    }
+
     #[test]
     fn build_agent_completed_payload_without_summary() {
         let payload = build_agent_completed_payload("agent-2", None, &None);
@@ -2207,5 +4173,423 @@ mod tests {
         assert_eq!(payload["decisions"].as_array().unwrap().len(), 0);
         assert_eq!(payload["uncertainties"].as_array().unwrap().len(), 0);
         assert!(payload.get("spec_ref").is_none() || payload["spec_ref"].is_null());
+    }
+
+    // ── TASK-010: briefing:// resource ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_resources_list_includes_new_resources() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "resources/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let resources = json["result"]["resources"].as_array().unwrap();
+        let names: Vec<&str> = resources
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"Workspace Briefing"));
+        assert!(names.contains(&"Inbox Notifications"));
+        assert!(names.contains(&"MR System Trace"));
+    }
+
+    #[tokio::test]
+    async fn mcp_briefing_resource_requires_workspace_id() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "resources/read",
+                "params": { "uri": "briefing://" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("requires a workspace_id"));
+    }
+
+    #[tokio::test]
+    async fn mcp_briefing_resource_workspace_not_found() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 102,
+                "method": "resources/read",
+                "params": { "uri": "briefing://nonexistent-ws" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("workspace not found"));
+    }
+
+    #[tokio::test]
+    async fn mcp_briefing_resource_returns_sections() {
+        // Create a workspace first.
+        let st = test_state();
+        use gyre_domain::Workspace;
+        let ws = Workspace::new(
+            Id::new("ws-briefing"),
+            Id::new("default"),
+            "briefing-test",
+            "briefing-test",
+            now_secs(),
+        );
+        st.workspaces.create(&ws).await.unwrap();
+        let app = crate::build_router(st);
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 103,
+                "method": "resources/read",
+                "params": { "uri": "briefing://ws-briefing?since=0" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let contents = json["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        let text = contents[0]["text"].as_str().unwrap();
+        let briefing: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(briefing["workspace_id"], "ws-briefing");
+        assert!(briefing["completed"].as_array().is_some());
+        assert!(briefing["in_progress"].as_array().is_some());
+        assert!(briefing["cross_workspace"].as_array().is_some());
+        assert!(briefing["exceptions"].as_array().is_some());
+        assert!(briefing["metrics"].is_object());
+        assert!(briefing.get("summary").is_some());
+        assert!(briefing["completed_agents"].as_array().is_some());
+    }
+
+    #[tokio::test]
+    async fn mcp_briefing_resource_uses_last_seen_at_default() {
+        // F8: when no ?since= param, MCP briefing must use last_seen_at from
+        // user_workspace_state (matching the REST handler's three-step resolution).
+        let st = test_state();
+
+        // Create workspace.
+        use gyre_domain::{User, Workspace};
+        let ws = Workspace::new(
+            Id::new("ws-seen"),
+            Id::new("default"),
+            "seen-test",
+            "seen-test",
+            now_secs(),
+        );
+        st.workspaces.create(&ws).await.unwrap();
+
+        // Create user + API key so auth.user_id is Some.
+        let user = User::new(Id::new("u-seen"), "ext-seen", "tester", 1000);
+        st.users.create(&user).await.unwrap();
+        let raw_key = "gyre_test_briefing_key";
+        st.api_keys
+            .create(
+                &crate::auth::hash_api_key(raw_key),
+                &user.id,
+                "briefing-key",
+            )
+            .await
+            .unwrap();
+
+        // Set last_seen_at to a specific timestamp.
+        let last_seen_ts: i64 = now_secs() as i64 - 3600; // 1 hour ago
+        st.user_workspace_state
+            .upsert_last_seen("u-seen", "ws-seen", last_seen_ts)
+            .await
+            .unwrap();
+
+        let app = crate::build_router(st);
+        let (status, json) = mcp_post_with_token(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 104,
+                "method": "resources/read",
+                "params": { "uri": "briefing://ws-seen" }
+            }),
+            raw_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let contents = json["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        let text = contents[0]["text"].as_str().unwrap();
+        let briefing: Value = serde_json::from_str(text).unwrap();
+        // The briefing should use last_seen_at (~1h ago), not the 24h fallback.
+        // Verify the `since` field reflects the last_seen_at timestamp.
+        let since_val = briefing["since"].as_u64().unwrap();
+        assert_eq!(
+            since_val, last_seen_ts as u64,
+            "briefing since should use last_seen_at ({last_seen_ts}), got {since_val}"
+        );
+    }
+
+    // ── TASK-010: notifications:// resource ──────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_notifications_resource_requires_workspace_id() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 110,
+                "method": "resources/read",
+                "params": { "uri": "notifications://" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("requires a workspace_id"));
+    }
+
+    #[tokio::test]
+    async fn mcp_notifications_resource_returns_list() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 111,
+                "method": "resources/read",
+                "params": { "uri": "notifications://some-workspace" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let contents = json["result"]["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        let text = contents[0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert!(result["notifications"].as_array().is_some());
+        assert!(result["limit"].as_u64().is_some());
+        assert!(result.get("offset").is_some());
+    }
+
+    // ── TASK-010: trace:// resource ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_trace_resource_requires_mr_id() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 120,
+                "method": "resources/read",
+                "params": { "uri": "trace://" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("requires an mr_id"));
+    }
+
+    #[tokio::test]
+    async fn mcp_trace_resource_mr_not_found() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 121,
+                "method": "resources/read",
+                "params": { "uri": "trace://nonexistent-mr" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("merge request not found"));
+    }
+
+    #[tokio::test]
+    async fn mcp_trace_resource_no_trace_for_mr() {
+        // Create an MR but don't create a trace for it.
+        let st = test_state();
+        let mr = MergeRequest::new(
+            Id::new("mr-trace-test"),
+            Id::new("repo-1"),
+            "Test MR",
+            "feat/test",
+            "main",
+            now_secs(),
+        );
+        st.merge_requests.create(&mr).await.unwrap();
+        let app = crate::build_router(st);
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 122,
+                "method": "resources/read",
+                "params": { "uri": "trace://mr-trace-test" }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no trace found"));
+    }
+
+    // ── TASK-010: graph_concept tool ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_graph_concept_requires_concept() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 130,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("missing required field: concept"));
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_concept_requires_scope() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 131,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": { "concept": "auth" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("provide either repo_id or workspace_id"));
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_concept_with_repo_id() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 132,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {
+                        "concept": "auth",
+                        "repo_id": "repo-1"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert!(result["nodes"].as_array().is_some());
+        assert!(result["edges"].as_array().is_some());
+        assert!(result["repo_id"].as_str().is_some());
+    }
+
+    // ── TASK-010: spec_assist tool ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_spec_assist_requires_fields() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 140,
+                "method": "tools/call",
+                "params": {
+                    "name": "spec_assist",
+                    "arguments": {}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_spec_assist_repo_not_found() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 141,
+                "method": "tools/call",
+                "params": {
+                    "name": "spec_assist",
+                    "arguments": {
+                        "repo_id": "nonexistent-repo",
+                        "spec_path": "system/auth.md",
+                        "instruction": "Add a section about rate limiting"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repo not found"));
+    }
+
+    // ── TASK-010: tools/list includes new tools ──────────────────────────────
+
+    #[tokio::test]
+    async fn mcp_tools_list_includes_new_tools() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 150,
+                "method": "tools/list"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let tools = json["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            names.contains(&"graph_concept"),
+            "must list graph_concept tool"
+        );
+        assert!(names.contains(&"spec_assist"), "must list spec_assist tool");
     }
 }

@@ -23,6 +23,7 @@ use axum::{
     Json,
 };
 use futures_util::{stream, StreamExt as _};
+use gyre_common::GateStatus;
 use gyre_common::{
     graph::{ArchitecturalDelta, EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence},
     Id,
@@ -63,6 +64,20 @@ pub struct GraphNodeResponse {
     pub complexity: Option<u32>,
     pub churn_count_30d: u32,
     pub test_coverage: Option<f64>,
+    /// Unix timestamp when this node first appeared in any extraction.
+    pub first_seen_at: u64,
+    /// Unix timestamp of the most recent extraction that included this node.
+    pub last_seen_at: u64,
+    /// Set when a node is no longer present in extraction (soft-delete). `None` = active.
+    pub deleted_at: Option<u64>,
+    /// Whether this node is a test function/class (for structural test coverage analysis).
+    pub test_node: bool,
+    /// When a spec was approved for this node (epoch seconds), if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_approved_at: Option<u64>,
+    /// When a milestone was completed for this node (epoch seconds), if applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub milestone_completed_at: Option<u64>,
 }
 
 impl From<GraphNode> for GraphNodeResponse {
@@ -88,6 +103,12 @@ impl From<GraphNode> for GraphNodeResponse {
             complexity: n.complexity,
             churn_count_30d: n.churn_count_30d,
             test_coverage: n.test_coverage,
+            first_seen_at: n.first_seen_at,
+            last_seen_at: n.last_seen_at,
+            deleted_at: n.deleted_at,
+            test_node: n.test_node,
+            spec_approved_at: n.spec_approved_at,
+            milestone_completed_at: n.milestone_completed_at,
         }
     }
 }
@@ -100,6 +121,12 @@ pub struct GraphEdgeResponse {
     pub target_id: String,
     pub edge_type: EdgeType,
     pub metadata: Option<String>,
+    /// Unix timestamp when this edge first appeared in any extraction.
+    pub first_seen_at: u64,
+    /// Unix timestamp of the most recent extraction that included this edge.
+    pub last_seen_at: u64,
+    /// Set when an edge is no longer present in extraction (soft-delete). `None` = active.
+    pub deleted_at: Option<u64>,
 }
 
 impl From<GraphEdge> for GraphEdgeResponse {
@@ -111,6 +138,9 @@ impl From<GraphEdge> for GraphEdgeResponse {
             target_id: e.target_id.to_string(),
             edge_type: e.edge_type,
             metadata: e.metadata,
+            first_seen_at: e.first_seen_at,
+            last_seen_at: e.last_seen_at,
+            deleted_at: e.deleted_at,
         }
     }
 }
@@ -120,6 +150,10 @@ pub struct KnowledgeGraphResponse {
     pub repo_id: String,
     pub nodes: Vec<GraphNodeResponse>,
     pub edges: Vec<GraphEdgeResponse>,
+    /// Warnings about data quality — e.g., missing LSP toolchains that make
+    /// call graphs incomplete. The frontend should surface these prominently.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -231,6 +265,13 @@ pub struct BriefingItem {
     pub entity_id: Option<String>,
     pub spec_path: Option<String>,
     pub timestamp: u64,
+    /// Suggested actions for exception items (HSI §9).
+    /// Empty for non-exception sections (completed, in_progress, cross_workspace).
+    pub actions: Vec<String>,
+    /// External workspace slug for cross_workspace items (HSI §9).
+    /// Extracted from `target_display` (e.g., "@platform-core/..." → "platform-core").
+    /// None for non-cross_workspace sections.
+    pub source_workspace_slug: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -358,10 +399,31 @@ pub async fn get_repo_graph(
         all_edges
     };
 
+    // Heuristic toolchain warnings: detect when code nodes exist but call
+    // graph edges are missing — indicates LSP toolchain was unavailable.
+    use gyre_common::graph::{EdgeType, NodeType};
+    let mut warnings = Vec::new();
+    let has_function_nodes = nodes.iter().any(|n| {
+        matches!(
+            n.node_type,
+            NodeType::Function | NodeType::Method | NodeType::Endpoint
+        )
+    });
+    let has_calls_edges = edges.iter().any(|e| e.edge_type == EdgeType::Calls);
+    if has_function_nodes && !has_calls_edges {
+        warnings.push(
+            "No call graph edges detected. LSP toolchains may not be installed \
+             (rust-analyzer, pyright, gopls, typescript-language-server). \
+             Blast radius, test coverage, and coupling analyses will be incomplete."
+                .to_string(),
+        );
+    }
+
     Ok(Json(KnowledgeGraphResponse {
         repo_id: id,
         nodes: nodes.into_iter().map(Into::into).collect(),
         edges: edges.into_iter().map(Into::into).collect(),
+        warnings,
     }))
 }
 
@@ -401,6 +463,7 @@ pub async fn get_graph_types(
         repo_id: id,
         nodes: nodes.into_iter().map(Into::into).collect(),
         edges: edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
     }))
 }
 
@@ -440,6 +503,7 @@ pub async fn get_graph_modules(
         repo_id: id,
         nodes: nodes.into_iter().map(Into::into).collect(),
         edges: edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
     }))
 }
 
@@ -511,7 +575,78 @@ pub async fn get_graph_by_spec(
         repo_id: id,
         nodes: nodes.into_iter().map(Into::into).collect(),
         edges: edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
     }))
+}
+
+/// Shared concept-search logic used by both REST and MCP handlers (HSI §11 parity).
+///
+/// Searches nodes across the given `repo_ids` whose `name` or `qualified_name`
+/// contains the `pattern` (case-insensitive substring match). Returns matched
+/// nodes and edges where both source and target are in the matched node set.
+pub async fn assemble_concept_results(
+    state: &AppState,
+    repo_ids: &[String],
+    pattern: &str,
+) -> Result<KnowledgeGraphResponse, ApiError> {
+    let pattern = pattern.to_lowercase();
+    let mut matched_nodes = Vec::new();
+    let mut matched_edges = Vec::new();
+    let mut matched_node_ids = std::collections::HashSet::new();
+
+    for rid in repo_ids {
+        let repo_id = Id::new(rid);
+        let all_nodes = state
+            .graph_store
+            .list_nodes(&repo_id, None)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        let nodes: Vec<GraphNode> = all_nodes
+            .into_iter()
+            .filter(|n| {
+                n.name.to_lowercase().contains(&pattern)
+                    || n.qualified_name.to_lowercase().contains(&pattern)
+            })
+            .collect();
+
+        for n in &nodes {
+            matched_node_ids.insert(n.id.to_string());
+        }
+        matched_nodes.extend(nodes);
+    }
+
+    for rid in repo_ids {
+        let repo_id = Id::new(rid);
+        let all_edges = state
+            .graph_store
+            .list_edges(&repo_id, None)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        let edges: Vec<GraphEdge> = all_edges
+            .into_iter()
+            .filter(|e| {
+                matched_node_ids.contains(e.source_id.as_str())
+                    && matched_node_ids.contains(e.target_id.as_str())
+            })
+            .collect();
+
+        matched_edges.extend(edges);
+    }
+
+    let repo_id_label = if repo_ids.len() == 1 {
+        repo_ids[0].clone()
+    } else {
+        "multi-repo".to_string()
+    };
+
+    Ok(KnowledgeGraphResponse {
+        repo_id: repo_id_label,
+        nodes: matched_nodes.into_iter().map(Into::into).collect(),
+        edges: matched_edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
+    })
 }
 
 /// GET /api/v1/repos/{id}/graph/concept/{name}
@@ -524,44 +659,8 @@ pub async fn get_graph_concept(
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
     require_repo(&state, &id).await?;
-    let repo_id = Id::new(&id);
-    let pattern = concept_name.to_lowercase();
-
-    let all_nodes = state
-        .graph_store
-        .list_nodes(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    let nodes: Vec<GraphNode> = all_nodes
-        .into_iter()
-        .filter(|n| {
-            n.name.to_lowercase().contains(&pattern)
-                || n.qualified_name.to_lowercase().contains(&pattern)
-        })
-        .collect();
-
-    let node_ids: std::collections::HashSet<String> =
-        nodes.iter().map(|n| n.id.to_string()).collect();
-
-    let all_edges = state
-        .graph_store
-        .list_edges(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    let edges: Vec<GraphEdge> = all_edges
-        .into_iter()
-        .filter(|e| {
-            node_ids.contains(e.source_id.as_str()) && node_ids.contains(e.target_id.as_str())
-        })
-        .collect();
-
-    Ok(Json(KnowledgeGraphResponse {
-        repo_id: id,
-        nodes: nodes.into_iter().map(Into::into).collect(),
-        edges: edges.into_iter().map(Into::into).collect(),
-    }))
+    let response = assemble_concept_results(&state, &[id], &concept_name).await?;
+    Ok(Json(response))
 }
 
 /// GET /api/v1/repos/{id}/graph/timeline
@@ -701,47 +800,27 @@ pub async fn get_workspace_graph(
         repo_id: id,
         nodes: all_nodes.into_iter().map(Into::into).collect(),
         edges: all_edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
     }))
 }
 
-/// GET /api/v1/workspaces/{id}/briefing
-/// Returns the HSI-defined briefing for a workspace (HSI §9).
-/// When `?since=` is omitted, uses `last_seen_at` from `user_workspace_state` as default.
-/// Falls back to 24 hours ago if no row exists (first visit). Always returns 200.
-pub async fn get_workspace_briefing(
-    State(state): State<Arc<AppState>>,
-    auth: AuthenticatedAgent,
-    Path(id): Path<String>,
-    Query(q): Query<BriefingQuery>,
-) -> Result<Json<BriefingResponse>, ApiError> {
-    require_workspace(&state, &id).await?;
-
-    // Resolve `since`: explicit param > last_seen_at from user_workspace_state > 24h fallback.
-    let since: u64 = if let Some(s) = q.since {
-        s
-    } else if let Some(uid) = &auth.user_id {
-        let last_seen = state
-            .user_workspace_state
-            .get_last_seen(uid.as_str(), &id)
-            .await
-            .unwrap_or(None);
-        last_seen
-            .map(|ts| ts as u64)
-            .unwrap_or_else(|| now_secs().saturating_sub(24 * 3600))
-    } else {
-        now_secs().saturating_sub(24 * 3600)
-    };
-
-    // Collect MRs and tasks for this workspace.
-    let workspace_id = Id::new(&id);
+/// Core briefing assembly logic shared by both REST and MCP handlers.
+/// Collects MRs, tasks, completed agents, and builds the summary string.
+pub async fn assemble_briefing(
+    state: &AppState,
+    workspace_id: &str,
+    since: u64,
+) -> Result<BriefingResponse, ApiError> {
+    // caller-scope:ok — all iterated entities pre-filtered to same workspace via list_by_workspace
+    let ws_id = Id::new(workspace_id);
     let all_mrs = state
         .merge_requests
-        .list_by_workspace(&workspace_id)
+        .list_by_workspace(&ws_id)
         .await
         .unwrap_or_default();
     let all_tasks = state
         .tasks
-        .list_by_workspace(&workspace_id)
+        .list_by_workspace(&ws_id)
         .await
         .unwrap_or_default();
 
@@ -759,6 +838,8 @@ pub async fn get_workspace_briefing(
                 .as_ref()
                 .map(|s| s.split('@').next().unwrap_or(s).to_string()),
             timestamp: mr.updated_at,
+            actions: Vec::new(),
+            source_workspace_slug: None,
         })
         .collect();
 
@@ -776,14 +857,156 @@ pub async fn get_workspace_briefing(
             entity_id: Some(t.id.to_string()),
             spec_path: t.spec_path.clone(),
             timestamp: t.updated_at,
+            actions: Vec::new(),
+            source_workspace_slug: None,
         })
         .collect();
 
-    // Section: cross_workspace — stub (empty for now).
-    let cross_workspace: Vec<BriefingItem> = Vec::new();
+    // Section: cross_workspace — inbound spec links from other workspaces.
+    let cross_workspace: Vec<BriefingItem> = {
+        let ws_repos = state
+            .repos
+            .list_by_workspace(&ws_id)
+            .await
+            .unwrap_or_default();
+        let ws_repo_ids: std::collections::HashSet<String> =
+            ws_repos.iter().map(|r| r.id.to_string()).collect();
+        let links = state.spec_links_store.lock().await;
+        links
+            .iter()
+            .filter(|link| {
+                // Our spec (source) depends on an external spec (target).
+                // source_repo_id IN workspace, target_repo_id NOT IN workspace.
+                // Filter by created_at (link creation/refresh) OR stale_since (target SHA advanced).
+                link.source_repo_id
+                    .as_ref()
+                    .is_some_and(|sid| ws_repo_ids.contains(sid))
+                    && link
+                        .target_repo_id
+                        .as_ref()
+                        .is_some_and(|tid| !ws_repo_ids.contains(tid))
+                    && (link.created_at >= since || link.stale_since.is_some_and(|t| t >= since))
+            })
+            .map(|link| BriefingItem {
+                title: format!("Cross-workspace dependency: {}", link.target_path),
+                description: link
+                    .target_display
+                    .as_ref()
+                    .map(|d| format!("Depends on {d} (link type: {:?})", link.link_type))
+                    .unwrap_or_else(|| {
+                        format!(
+                            "Depends on {} (link type: {:?})",
+                            link.target_path, link.link_type
+                        )
+                    }),
+                entity_type: "spec_link".to_string(),
+                entity_id: Some(link.id.clone()),
+                // spec_path = our local spec that is affected (so user can navigate to it)
+                spec_path: Some(link.source_path.clone()),
+                timestamp: link.stale_since.unwrap_or(link.created_at),
+                actions: Vec::new(),
+                // Extract workspace slug from target_display: "@platform-core/..." → "platform-core"
+                source_workspace_slug: link.target_display.as_ref().and_then(|d| {
+                    d.strip_prefix('@')
+                        .and_then(|s| s.split('/').next())
+                        .map(String::from)
+                }),
+            })
+            .collect()
+    };
 
-    // Section: exceptions — stub (empty for now, future: gate failures).
-    let exceptions: Vec<BriefingItem> = Vec::new();
+    // Section: exceptions — gate failures, spec assertion failures, MR reverts.
+    let exceptions: Vec<BriefingItem> = {
+        let mut items = Vec::new();
+
+        // 1. Gate failures: failed gate results for workspace MRs since `since`.
+        for mr in all_mrs.iter().filter(|mr| mr.updated_at >= since) {
+            let results = state
+                .gate_results
+                .list_by_mr_id(&mr.id.to_string())
+                .await
+                .unwrap_or_default();
+            for gr in results.iter().filter(|gr| {
+                gr.status == GateStatus::Failed && gr.finished_at.map_or(false, |t| t >= since)
+            }) {
+                items.push(BriefingItem {
+                    title: format!("Gate failure: {} MR", mr.title),
+                    description: gr
+                        .output
+                        .as_deref()
+                        .unwrap_or("Gate check failed")
+                        .to_string(),
+                    entity_type: "gate_failure".to_string(),
+                    entity_id: Some(mr.id.to_string()),
+                    spec_path: mr
+                        .spec_ref
+                        .as_ref()
+                        .map(|s| s.split('@').next().unwrap_or(s).to_string()),
+                    timestamp: gr.finished_at.unwrap_or(mr.updated_at),
+                    actions: vec![
+                        "View Diff".to_string(),
+                        "View Test Output".to_string(),
+                        "Override".to_string(),
+                        "Close MR".to_string(),
+                    ],
+                    source_workspace_slug: None,
+                });
+            }
+        }
+
+        // 2. Spec assertion failures: recent notifications of type SpecAssertionFailure.
+        let recent_notifications = state
+            .notifications
+            .list_recent(200)
+            .await
+            .unwrap_or_default();
+        for n in recent_notifications.iter().filter(|n| {
+            n.notification_type == gyre_common::NotificationType::SpecAssertionFailure
+                && n.workspace_id == ws_id
+                && n.created_at >= since as i64
+        }) {
+            items.push(BriefingItem {
+                title: n.title.clone(),
+                description: n.body.clone().unwrap_or_default(),
+                entity_type: "spec_assertion_failure".to_string(),
+                entity_id: n.entity_ref.clone(),
+                spec_path: n.entity_ref.clone(),
+                timestamp: n.created_at as u64,
+                actions: vec![
+                    "View Spec".to_string(),
+                    "View Assertion".to_string(),
+                    "Dismiss".to_string(),
+                ],
+                source_workspace_slug: None,
+            });
+        }
+
+        // 3. MR reverts: MRs with Reverted status since `since`.
+        for mr in all_mrs
+            .iter()
+            .filter(|mr| mr.status == MrStatus::Reverted && mr.updated_at >= since)
+        {
+            items.push(BriefingItem {
+                title: format!("MR reverted: {}", mr.title),
+                description: format!("{} → {} (reverted)", mr.source_branch, mr.target_branch),
+                entity_type: "reverted".to_string(),
+                entity_id: Some(mr.id.to_string()),
+                spec_path: mr
+                    .spec_ref
+                    .as_ref()
+                    .map(|s| s.split('@').next().unwrap_or(s).to_string()),
+                timestamp: mr.reverted_at.unwrap_or(mr.updated_at),
+                actions: vec![
+                    "View Revert MR".to_string(),
+                    "View Original MR".to_string(),
+                    "Re-open".to_string(),
+                ],
+                source_workspace_slug: None,
+            });
+        }
+
+        items
+    };
 
     // Metrics: count merged MRs since `since`.
     let mrs_merged = completed.len() as u32;
@@ -796,12 +1019,11 @@ pub async fn get_workspace_briefing(
 
     // ── Completed agents section (HSI §4) ────────────────────────────────────
     // Read AgentCompleted Event-tier messages from the message bus for this workspace.
-    let ws_id_obj = Id::new(&id);
     let since_ms = since.saturating_mul(1000); // convert epoch seconds to milliseconds
     let completed_msgs = state
         .messages
         .list_by_workspace(
-            &ws_id_obj,
+            &ws_id,
             Some("agent_completed"),
             Some(since_ms),
             None,
@@ -877,8 +1099,8 @@ pub async fn get_workspace_briefing(
         )
     };
 
-    Ok(Json(BriefingResponse {
-        workspace_id: id,
+    Ok(BriefingResponse {
+        workspace_id: workspace_id.to_string(),
         since,
         completed,
         in_progress,
@@ -887,7 +1109,39 @@ pub async fn get_workspace_briefing(
         metrics,
         summary,
         completed_agents,
-    }))
+    })
+}
+
+/// GET /api/v1/workspaces/{id}/briefing
+/// Returns the HSI-defined briefing for a workspace (HSI §9).
+/// When `?since=` is omitted, uses `last_seen_at` from `user_workspace_state` as default.
+/// Falls back to 24 hours ago if no row exists (first visit). Always returns 200.
+pub async fn get_workspace_briefing(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+    Query(q): Query<BriefingQuery>,
+) -> Result<Json<BriefingResponse>, ApiError> {
+    require_workspace(&state, &id).await?;
+
+    // Resolve `since`: explicit param > last_seen_at from user_workspace_state > 24h fallback.
+    let since: u64 = if let Some(s) = q.since {
+        s
+    } else if let Some(uid) = &auth.user_id {
+        let last_seen = state
+            .user_workspace_state
+            .get_last_seen(uid.as_str(), &id)
+            .await
+            .unwrap_or(None);
+        last_seen
+            .map(|ts| ts as u64)
+            .unwrap_or_else(|| now_secs().saturating_sub(24 * 3600))
+    } else {
+        now_secs().saturating_sub(24 * 3600)
+    };
+
+    let briefing = assemble_briefing(&state, &id, since).await?;
+    Ok(Json(briefing))
 }
 
 /// POST /api/v1/workspaces/{id}/briefing/ask
@@ -1032,7 +1286,6 @@ pub async fn get_workspace_graph_concept(
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
     require_workspace(&state, &id).await?;
-    let pattern = concept_name.to_lowercase();
 
     let repo_ids: Vec<String> = state
         .repos
@@ -1043,60 +1296,31 @@ pub async fn get_workspace_graph_concept(
         .map(|r| r.id.to_string())
         .collect();
 
-    let mut matched_nodes = Vec::new();
-    let mut matched_edges = Vec::new();
+    let response = assemble_concept_results(&state, &repo_ids, &concept_name).await?;
+    Ok(Json(response))
+}
 
-    for rid in &repo_ids {
-        let repo_id = Id::new(rid);
-        let all_nodes = state
-            .graph_store
-            .list_nodes(&repo_id, None)
-            .await
-            .map_err(ApiError::Internal)?;
-
-        let nodes: Vec<GraphNode> = all_nodes
-            .into_iter()
-            .filter(|n| {
-                n.name.to_lowercase().contains(&pattern)
-                    || n.qualified_name.to_lowercase().contains(&pattern)
-            })
-            .collect();
-
-        let node_ids: std::collections::HashSet<String> =
-            nodes.iter().map(|n| n.id.to_string()).collect();
-
-        let all_edges = state
-            .graph_store
-            .list_edges(&repo_id, None)
-            .await
-            .map_err(ApiError::Internal)?;
-
-        let edges: Vec<GraphEdge> = all_edges
-            .into_iter()
-            .filter(|e| {
-                node_ids.contains(e.source_id.as_str()) && node_ids.contains(e.target_id.as_str())
-            })
-            .collect();
-
-        matched_nodes.extend(nodes);
-        matched_edges.extend(edges);
-    }
-
-    Ok(Json(KnowledgeGraphResponse {
-        repo_id: id,
-        nodes: matched_nodes.into_iter().map(Into::into).collect(),
-        edges: matched_edges.into_iter().map(Into::into).collect(),
-    }))
+/// Request body for structural prediction.
+#[derive(Deserialize, Default)]
+pub struct PredictRequest {
+    /// Spec file path for contextual prediction.
+    pub spec_path: Option<String>,
+    /// Draft spec content to predict impact of.
+    pub draft_content: Option<String>,
 }
 
 /// GET /api/v1/repos/{id}/graph/predict (legacy compat)
 /// POST /api/v1/repos/{id}/graph/predict
-/// Structural prediction via LLM — analyzes graph nodes and returns structured predictions.
-/// Request body (POST): `{spec_path, draft_content}` — reserved for future implementation.
+/// Structural prediction via LLM — analyzes the spec diff against the current
+/// knowledge graph and predicts new types/traits, modifications, and dependency changes.
 pub async fn predict_graph(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    caller: AuthenticatedAgent,
+    body: Option<Json<PredictRequest>>,
 ) -> Result<Json<PredictResponse>, ApiError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+
     // Load repo to get workspace_id.
     let repo = state
         .repos
@@ -1104,6 +1328,20 @@ pub async fn predict_graph(
         .await
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    // Per-user/repo sliding-window rate limit: 10 req/60 s.
+    {
+        let mut limiter = state.llm_rate_limiter.lock().await;
+        if let Err(retry_after) = check_rate_limit(
+            &mut limiter,
+            &caller.agent_id,
+            &id,
+            LLM_RATE_LIMIT,
+            LLM_WINDOW_SECS,
+        ) {
+            return Err(ApiError::RateLimited(retry_after));
+        }
+    }
 
     // Require LLM to be configured.
     let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
@@ -1119,28 +1357,69 @@ pub async fn predict_graph(
         .map(|t| t.content)
         .unwrap_or_else(|| crate::llm_defaults::PROMPT_GRAPH_PREDICT.to_string());
 
-    // Load graph nodes for context.
+    // Load graph nodes and edges for context.
     let repo_id = Id::new(&id);
     let nodes = state
         .graph_store
         .list_nodes(&repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
+    let edges = state
+        .graph_store
+        .list_edges(&repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
 
+    // Build rich context including edges and spec linkage
     let nodes_summary: Vec<serde_json::Value> = nodes
         .iter()
+        .filter(|n| n.deleted_at.is_none())
         .map(|n| {
             serde_json::json!({
                 "name": n.name,
                 "qualified_name": n.qualified_name,
                 "type": format!("{:?}", n.node_type),
+                "spec_path": n.spec_path,
+                "visibility": format!("{:?}", n.visibility),
             })
         })
         .collect();
-    let nodes_json = serde_json::to_string(&nodes_summary).unwrap_or_else(|_| "[]".to_string());
 
-    let system_prompt = template_content.replace("{{nodes}}", &nodes_json);
-    let user_prompt = format!("Predict structural improvements for repo {id}.");
+    // Include edge summary for structural context
+    let mut edge_summary: Vec<serde_json::Value> = Vec::new();
+    let node_names: std::collections::HashMap<String, &str> = nodes
+        .iter()
+        .map(|n| (n.id.to_string(), n.name.as_str()))
+        .collect();
+    for e in edges.iter().filter(|e| e.deleted_at.is_none()).take(200) {
+        let src = node_names.get(&e.source_id.to_string()).unwrap_or(&"?");
+        let tgt = node_names.get(&e.target_id.to_string()).unwrap_or(&"?");
+        edge_summary.push(serde_json::json!({
+            "source": src, "target": tgt,
+            "type": format!("{:?}", e.edge_type).to_lowercase(),
+        }));
+    }
+
+    let nodes_json = serde_json::to_string(&nodes_summary).unwrap_or_else(|_| "[]".to_string());
+    let edges_json = serde_json::to_string(&edge_summary).unwrap_or_else(|_| "[]".to_string());
+
+    let mut system_prompt = template_content
+        .replace("{{nodes}}", &nodes_json)
+        .replace("{{edges}}", &edges_json);
+
+    // Build user prompt based on whether spec context is provided
+    let user_prompt = if let (Some(spec_path), Some(draft)) = (&req.spec_path, &req.draft_content) {
+        system_prompt.push_str(
+            "\n\nThe user is editing a spec and wants to understand the structural impact.",
+        );
+        format!(
+            "Predict what would change in the codebase if this spec is implemented:\n\nSpec: {spec_path}\n\nContent:\n{draft}"
+        )
+    } else if let Some(spec_path) = &req.spec_path {
+        format!("Predict structural improvements related to spec: {spec_path}")
+    } else {
+        format!("Predict structural improvements for repo {id}.")
+    };
 
     // Resolve model and call LLM for structured JSON output.
     let (model, _) =
@@ -1163,6 +1442,38 @@ pub async fn predict_graph(
     }))
 }
 
+// ── View query dry-run ───────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ViewQueryDryRunRequest {
+    pub query: gyre_common::view_query::ViewQuery,
+    #[serde(default)]
+    pub selected_node_id: Option<String>,
+}
+
+pub async fn view_query_dryrun(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<ViewQueryDryRunRequest>,
+) -> Result<Json<gyre_domain::view_query_resolver::DryRunResult>, ApiError> {
+    let repo_id = Id::new(&id);
+    let nodes = state
+        .graph_store
+        .list_nodes(&repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    let edges = state
+        .graph_store
+        .list_edges(&repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let selected = req.selected_node_id.as_deref();
+    let result = gyre_domain::view_query_resolver::dry_run(&req.query, &nodes, &edges, selected);
+
+    Ok(Json(result))
+}
+
 // ── Helper for tests ──────────────────────────────────────────────────────────
 
 fn _new_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
@@ -1179,6 +1490,7 @@ fn _new_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         visibility: gyre_common::graph::Visibility::Public,
         doc_comment: None,
         spec_path: None,
+        spec_paths: vec![],
         spec_confidence: SpecConfidence::None,
         last_modified_sha: "abc123".to_string(),
         last_modified_by: None,
@@ -1192,6 +1504,8 @@ fn _new_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         last_seen_at: now,
         deleted_at: None,
         test_node: false,
+        spec_approved_at: None,
+        milestone_completed_at: None,
     }
 }
 
@@ -1590,5 +1904,426 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp.headers().get("content-type").unwrap();
         assert!(ct.to_str().unwrap().contains("text/event-stream"));
+    }
+
+    // ── Briefing cross_workspace + exceptions tests (TASK-013) ──────────
+
+    /// Helper: create a workspace and repo, returning (workspace_id, repo_id).
+    async fn setup_workspace_and_repo(state: &Arc<AppState>) -> (String, String) {
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-briefing"),
+            Id::new("tenant-1"),
+            "briefing-ws",
+            "briefing-ws",
+            1000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = gyre_domain::Repository {
+            id: Id::new("repo-1"),
+            workspace_id: Id::new("ws-briefing"),
+            name: "billing-service".to_string(),
+            path: "/repos/billing-service".to_string(),
+            default_branch: "main".to_string(), // hardcoded-default:ok — test fixture
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.repos.create(&repo).await.unwrap();
+        ("ws-briefing".to_string(), "repo-1".to_string())
+    }
+
+    #[tokio::test]
+    async fn briefing_cross_workspace_populated_when_linked_spec_changes() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Add a cross-workspace spec link: our local spec depends on external spec.
+        // source = local spec (in workspace), target = external dependency.
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-1".to_string(),
+                source_path: "system/payment-retry.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/idempotent-api.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
+                target_display: Some("@platform-core/api-svc/system/idempotent-api.md".to_string()),
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 2000,
+                stale_since: None,
+            });
+        }
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(briefing.cross_workspace.len(), 1);
+        // Title references the external dependency (target).
+        assert!(briefing.cross_workspace[0]
+            .title
+            .contains("idempotent-api.md"));
+        assert_eq!(briefing.cross_workspace[0].entity_type, "spec_link");
+        // spec_path = our local spec that is affected (source_path).
+        assert_eq!(
+            briefing.cross_workspace[0].spec_path.as_deref(),
+            Some("system/payment-retry.md")
+        );
+        // source_workspace_slug extracted from target_display "@platform-core/..."
+        assert_eq!(
+            briefing.cross_workspace[0].source_workspace_slug.as_deref(),
+            Some("platform-core")
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_cross_workspace_excludes_same_workspace_links() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Add a same-workspace link (source_repo_id is also in the workspace).
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-same".to_string(),
+                source_path: "system/auth.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/users.md".to_string(),
+                target_repo_id: Some("repo-1".to_string()),
+                target_display: None,
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 2000,
+                stale_since: None,
+            });
+        }
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(
+            briefing.cross_workspace.is_empty(),
+            "same-workspace links should not appear in cross_workspace section"
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_cross_workspace_stale_since_includes_recently_stale_link() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Link with old created_at (before since) but recent stale_since (after since).
+        // This simulates a dependency whose target SHA advanced after the link was created.
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-stale".to_string(),
+                source_path: "system/payment-retry.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/idempotent-api.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
+                target_display: Some("@platform-core/api-svc/system/idempotent-api.md".to_string()),
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 500,         // before since=1500
+                stale_since: Some(2000), // after since=1500
+            });
+        }
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(
+            briefing.cross_workspace.len(),
+            1,
+            "link with stale_since >= since should be included even when created_at < since"
+        );
+        // Timestamp should prefer stale_since over created_at.
+        assert_eq!(briefing.cross_workspace[0].timestamp, 2000);
+        assert_eq!(
+            briefing.cross_workspace[0].source_workspace_slug.as_deref(),
+            Some("platform-core")
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_cross_workspace_stale_since_excludes_old_stale_link() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Link where both created_at and stale_since are before since — should be excluded.
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-old-stale".to_string(),
+                source_path: "system/billing.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/old-api.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
+                target_display: Some("@other-ws/repo/system/old-api.md".to_string()),
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 500,        // before since=1500
+                stale_since: Some(800), // also before since=1500
+            });
+        }
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(
+            briefing.cross_workspace.is_empty(),
+            "link with both created_at and stale_since before `since` should be excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_exceptions_gate_failures() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Create an MR in the workspace.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-47"),
+            Id::new("repo-1"),
+            "Add billing retry",
+            "feat/billing-retry",
+            "main",
+            2000,
+        );
+        mr.workspace_id = Id::new("ws-briefing");
+        mr.updated_at = 2000;
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Create a failed gate result for that MR.
+        let gr = gyre_domain::GateResult {
+            id: Id::new("gr-1"),
+            gate_id: Id::new("gate-tests"),
+            mr_id: Id::new("mr-47"),
+            status: GateStatus::Failed,
+            output: Some("cargo test failed (3 tests)".to_string()),
+            started_at: Some(1900),
+            finished_at: Some(2000),
+        };
+        state.gate_results.save(&gr).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let gate_failures: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "gate_failure")
+            .collect();
+        assert_eq!(gate_failures.len(), 1);
+        assert!(gate_failures[0].title.contains("Add billing retry"));
+        assert!(gate_failures[0].description.contains("cargo test failed"));
+        assert_eq!(
+            gate_failures[0].actions,
+            vec!["View Diff", "View Test Output", "Override", "Close MR"]
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_exceptions_gate_failures_excludes_old_gate_results() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // MR updated after since (e.g., reviewer added), but gate failure is old.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-old-gate"),
+            Id::new("repo-1"),
+            "Old gate failure MR",
+            "feat/old-gate",
+            "main",
+            400,
+        );
+        mr.workspace_id = Id::new("ws-briefing");
+        mr.updated_at = 2000; // after since=1500
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Gate result finished BEFORE since — should be excluded.
+        let gr = gyre_domain::GateResult {
+            id: Id::new("gr-old"),
+            gate_id: Id::new("gate-tests"),
+            mr_id: Id::new("mr-old-gate"),
+            status: GateStatus::Failed,
+            output: Some("old failure".to_string()),
+            started_at: Some(300),
+            finished_at: Some(500), // before since=1500
+        };
+        state.gate_results.save(&gr).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let gate_failures: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "gate_failure")
+            .collect();
+        assert!(
+            gate_failures.is_empty(),
+            "gate results finished before `since` should be excluded even if the MR was updated after `since`"
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_exceptions_spec_assertion_failures() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Create a SpecAssertionFailure notification in this workspace.
+        let notif = gyre_common::Notification::new(
+            Id::new("notif-1"),
+            Id::new("ws-briefing"),
+            Id::new("user-1"),
+            gyre_common::NotificationType::SpecAssertionFailure,
+            "Spec assertion failed: auth.md §3",
+            "tenant-1",
+            2000,
+        );
+        state.notifications.create(&notif).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let assertions: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "spec_assertion_failure")
+            .collect();
+        assert_eq!(assertions.len(), 1);
+        assert!(assertions[0].title.contains("Spec assertion failed"));
+        assert_eq!(
+            assertions[0].actions,
+            vec!["View Spec", "View Assertion", "Dismiss"]
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_exceptions_mr_reverts() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Create a reverted MR. Transition: Open → Approved → Merged → Reverted.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-99"),
+            Id::new("repo-1"),
+            "Broken migration",
+            "feat/migration",
+            "main",
+            1800,
+        );
+        mr.workspace_id = Id::new("ws-briefing");
+        mr.transition_status(MrStatus::Approved).unwrap();
+        mr.transition_status(MrStatus::Merged).unwrap();
+        mr.revert(Id::new("revert-mr-1"), 2100).unwrap();
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        let reverts: Vec<_> = briefing
+            .exceptions
+            .iter()
+            .filter(|e| e.entity_type == "reverted")
+            .collect();
+        assert_eq!(reverts.len(), 1);
+        assert!(reverts[0].title.contains("Broken migration"));
+        assert_eq!(
+            reverts[0].actions,
+            vec!["View Revert MR", "View Original MR", "Re-open"]
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_empty_sections_return_empty_arrays() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(briefing.cross_workspace.is_empty());
+        assert!(briefing.exceptions.is_empty());
+        assert!(briefing.completed.is_empty());
+        assert!(briefing.in_progress.is_empty());
+    }
+
+    #[tokio::test]
+    async fn briefing_since_filtering_excludes_old_data() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // Add a cross-workspace link with old timestamp.
+        // source = our local spec, target = external dependency (correct direction).
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-old".to_string(),
+                source_path: "system/old-dep.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "old-spec.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
+                target_display: None,
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 500, // before since=1500
+                stale_since: None,
+            });
+        }
+
+        // Create an old reverted MR. Transition: Open → Approved → Merged → Reverted.
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-old"),
+            Id::new("repo-1"),
+            "Old revert",
+            "feat/old",
+            "main",
+            400,
+        );
+        mr.workspace_id = Id::new("ws-briefing");
+        mr.transition_status(MrStatus::Approved).unwrap();
+        mr.transition_status(MrStatus::Merged).unwrap();
+        mr.revert(Id::new("revert-old"), 500).unwrap();
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(
+            briefing.cross_workspace.is_empty(),
+            "old cross-workspace links should be filtered out"
+        );
+        assert!(
+            briefing.exceptions.is_empty(),
+            "old MR reverts should be filtered out"
+        );
     }
 }

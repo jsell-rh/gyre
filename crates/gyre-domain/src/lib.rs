@@ -18,12 +18,14 @@ pub mod audit;
 pub mod budget;
 pub mod compose;
 pub mod compute_target;
+pub mod constraint_evaluator;
 pub mod container_audit;
 pub mod dependency;
 pub mod extractor;
 pub mod git_types;
 pub mod go_extractor;
 pub mod llm_config;
+pub mod lsp_call_graph;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
@@ -38,6 +40,7 @@ pub mod repository;
 pub mod review;
 pub mod rust_extractor;
 pub mod spec_approval;
+pub mod spec_assertions;
 pub mod spec_ledger;
 pub mod spec_policy;
 pub mod task;
@@ -47,6 +50,7 @@ pub mod tree_sitter_utils;
 pub mod typescript_extractor;
 pub mod user;
 pub mod user_profile;
+pub mod view_query_resolver;
 pub mod workspace;
 pub mod workspace_membership;
 
@@ -55,19 +59,31 @@ pub use agent::{Agent, AgentError, AgentStatus, AgentUsage, DisconnectedBehavior
 pub use agent_card::AgentCard;
 pub use agent_tracking::{AgentCommit, AgentWorktree, LoopConfig, Session};
 pub use analytics::{AnalyticsEvent, CostEntry};
-pub use attestation::{AttestationBundle, AttestationGateResult, MergeAttestation};
+pub use attestation::{
+    constraint_count, root_signer, AttestationBundle, AttestationGateResult, MergeAttestation,
+};
 pub use audit::{AuditEvent, AuditEventType};
 pub use budget::{BudgetCallRecord, BudgetConfig, BudgetUsage};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};
 pub use compute_target::{ComputeTargetEntity, ComputeTargetType};
+pub use constraint_evaluator::{
+    build_cel_context, collect_all_constraints, derive_strategy_constraints, evaluate_all,
+    evaluate_constraint, Action, AgentContext, ConstraintInput, DiffStatsContext, OutputContext,
+    TargetContext,
+};
 pub use container_audit::ContainerAuditRecord;
-pub use dependency::{DependencyEdge, DependencyStatus, DependencyType, DetectionMethod};
+pub use dependency::{
+    BreakingChange, BreakingChangeBehavior, DependencyEdge, DependencyPolicy, DependencyStatus,
+    DependencyType, DetectionMethod,
+};
 pub use extractor::{ExtractionError, ExtractionResult, LanguageExtractor};
 pub use git_types::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
 pub use go_extractor::GoExtractor;
 pub use llm_config::{is_valid_function_key, LlmFunctionConfig, VALID_FUNCTION_KEYS};
 pub use merge_queue::{MergeQueueEntry, MergeQueueEntryStatus};
-pub use merge_request::{DiffStats, MergeRequest, MrError, MrStatus};
+pub use merge_request::{
+    DependencySource, DiffStats, MergeRequest, MergeRequestDependency, MrError, MrStatus,
+};
 pub use message_type::MessageType;
 pub use meta_spec::{
     MetaSpec, MetaSpecApprovalStatus, MetaSpecBinding, MetaSpecKind, MetaSpecScope, MetaSpecVersion,
@@ -85,6 +101,10 @@ pub use repository::{RepoStatus, Repository};
 pub use review::{Review, ReviewComment, ReviewDecision};
 pub use rust_extractor::RustExtractor;
 pub use spec_approval::SpecApproval;
+pub use spec_assertions::{
+    evaluate_assertions, parse_assertions, AssertionResult, Comparison, ParsedAssertion, Predicate,
+    Subject,
+};
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_policy::SpecPolicy;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};

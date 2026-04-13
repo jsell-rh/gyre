@@ -159,6 +159,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/diff", "graph", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/link", "graph", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/graph/predict", "graph", None),
+                RouteResourceMapping::api("/api/v1/repos/:id/graph/query-dryrun", "graph", None),
                 // ── Agents ─────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/agents", "agent", None),
                 RouteResourceMapping::api("/api/v1/agents/spawn", "agent", Some("spawn")),
@@ -636,6 +637,33 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
+        // Priority 998: Require signed authorization for push/merge (§7.2).
+        // Immutable Deny: non-system subjects must have a valid attestation chain
+        // for push and merge actions. Cannot be overridden by Allow policies.
+        Policy {
+            id: Id::new("builtin-require-signed-authorization"),
+            name: "builtin:require-signed-authorization".to_string(),
+            description:
+                "Deny push/merge for non-system subjects unless valid attestation chain exists"
+                    .to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 998,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.type".to_string(),
+                operator: ConditionOp::NotEquals,
+                value: ConditionValue::String("system".to_string()),
+            }],
+            actions: vec!["push".to_string(), "merge".to_string()],
+            resource_types: vec!["attestation".to_string()],
+            enabled: true,
+            built_in: true,
+            immutable: true,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
         // Priority 1: Default deny — lowest priority catchall.
         // Anything not explicitly allowed is denied.
         Policy {
@@ -1086,5 +1114,28 @@ pub mod tests {
         assert!(dev_p.priority > ro_p.priority, "developer > readonly");
         assert!(ro_p.priority > deny_p.priority, "readonly > default-deny");
         assert_eq!(deny_p.effect, PolicyEffect::Deny);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_require_signed_authorization_seeded() {
+        let state = test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state));
+        });
+
+        let policies = state.policies.list().await.unwrap();
+        let rsa = policies
+            .iter()
+            .find(|p| p.name == "builtin:require-signed-authorization")
+            .expect("builtin:require-signed-authorization policy must be seeded");
+
+        assert_eq!(rsa.priority, 998);
+        assert!(rsa.immutable, "must be immutable");
+        assert!(rsa.built_in, "must be built-in");
+        assert_eq!(rsa.effect, PolicyEffect::Deny);
+        assert!(rsa.actions.contains(&"push".to_string()));
+        assert!(rsa.actions.contains(&"merge".to_string()));
+        assert!(rsa.resource_types.contains(&"attestation".to_string()));
     }
 }

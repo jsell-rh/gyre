@@ -26,6 +26,9 @@ impl AttestationRow {
             attestation,
             signature: self.signature,
             signing_key_id: self.signing_key_id,
+            deprecation_notice: Some(
+                "This format is deprecated. Use GET /api/v1/repos/{id}/attestations/{commit_sha}/verification for chain attestation.".to_string()
+            ),
         })
     }
 }

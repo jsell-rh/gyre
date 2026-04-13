@@ -1,0 +1,19 @@
+# Event emission coverage exemptions.
+# One test function name per line.
+# Add a test here ONLY if the test intentionally does not verify event
+# emission and the function's event behavior is covered by another test.
+#
+# Format: test_function_name
+
+# Pre-existing: speculative_merge run_once — event emission is secondary
+# to the scheduling logic being tested.
+run_once_with_no_agents
+
+# Pre-existing: enforce_push_constraints — these tests focus on the
+# allow/reject decision, not the event side-effect. Event emission for
+# evaluate_push_constraints is already covered by dedicated tests in the
+# same file. These enforcement-layer tests verify the gate behavior.
+enforce_push_no_attestation_allows
+enforce_push_invalid_chain_rejects
+enforce_push_constraint_failure_rejects
+enforce_push_valid_chain_allows

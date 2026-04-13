@@ -41,6 +41,10 @@ vi.mock('../components/RepoSettings.svelte', () => ({
   },
 }));
 
+vi.mock('../components/RepoDependencies.svelte', () => ({
+  default: function RepoDependenciesStub() {},
+}));
+
 vi.mock('../lib/api.js', () => ({
   api: {
     agents: vi.fn().mockResolvedValue([]),
@@ -56,6 +60,8 @@ vi.mock('../lib/api.js', () => ({
     mrGates: vi.fn().mockResolvedValue([]),
     mrDiff: vi.fn().mockResolvedValue({ files_changed: 0, insertions: 0, deletions: 0 }),
     mergeQueue: vi.fn().mockResolvedValue([]),
+    repoDependencies: vi.fn().mockResolvedValue([]),
+    repoDependents: vi.fn().mockResolvedValue([]),
   },
   setAuthToken: vi.fn(),
 }));
@@ -328,12 +334,12 @@ describe('Agent panel', () => {
 // ── Tab bar ────────────────────────────────────────────────────────────
 
 describe('Tab bar', () => {
-  it('renders all 8 tabs', () => {
+  it('renders all 9 tabs', () => {
     const { container } = render(RepoMode, {
       props: { workspace: mockWorkspace, repo: mockRepo, activeTab: 'specs' },
     });
     const tabs = container.querySelectorAll('.tab-btn');
-    expect(tabs.length).toBe(8);
+    expect(tabs.length).toBe(9);
   });
 
   it('marks the active tab with aria-selected=true', () => {

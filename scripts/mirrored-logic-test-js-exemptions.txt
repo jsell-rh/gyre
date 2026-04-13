@@ -1,0 +1,18 @@
+# Mirrored-logic test exemptions for JS/TS test files.
+# One file path (or partial path) per line. Lines matching any entry are skipped.
+# Baseline exemptions for pre-existing violations (pre TASK-053).
+
+# AppShell URL parsing helpers — tested in isolation intentionally
+AppShell.test.js
+
+# ExplorerCanvas.test.js — pre-existing mirrored logic tests
+# queryNodeOpacity, specBorderColor, isVisibleAtZoom
+ExplorerCanvas.test.js
+
+# ExplorerChat.test.js — pre-existing mirrored logic tests
+# isSaveDisabled, extractSpecPaths, computeFreshnessLabel, shouldInvalidate
+ExplorerChat.test.js
+
+# NodeDetailPanel.test.js — pre-existing mirrored logic test
+# visibilityBadge
+NodeDetailPanel.test.js

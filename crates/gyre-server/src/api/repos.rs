@@ -356,6 +356,16 @@ pub async fn delete_repo(
     }
 
     state.repos.delete(&repo.id).await?;
+
+    // Clean up the git directory on disk to prevent stale directories from
+    // blocking future repo/mirror creation with the same workspace + name.
+    let path = std::path::Path::new(&repo.path);
+    if path.exists() {
+        if let Err(e) = tokio::fs::remove_dir_all(path).await {
+            tracing::warn!(repo_id = %id, path = %repo.path, "Failed to remove repo directory on delete: {e}");
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -444,9 +454,48 @@ pub async fn create_mirror_repo(
     };
     state.repos.create(&repo).await?;
 
+    // Clean up any stale directory left by a previously deleted repo with the same
+    // workspace + name. Without this, `git clone --mirror` fails with "already exists".
+    let path = std::path::Path::new(&repo_path);
+    if path.exists() {
+        tracing::info!("Removing stale repo directory before mirror clone: {repo_path}");
+        if let Err(e) = tokio::fs::remove_dir_all(path).await {
+            tracing::warn!("Failed to remove stale directory {repo_path}: {e}");
+        }
+    }
+
     // Clone the remote as a bare mirror; log on failure but don't block the response.
     if let Err(e) = state.git_ops.clone_mirror(&url, &repo_path).await {
         tracing::warn!("clone_mirror failed for {repo_path}: {e}");
+    } else {
+        // Trigger immediate graph extraction after successful clone so the
+        // architecture tab is populated without waiting for the 60s sync cycle.
+        let extract_repo_id = repo.id.to_string();
+        let extract_path = repo_path.clone();
+        let graph_store = Arc::clone(&state.graph_store);
+        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+        let default_ref = format!("refs/heads/{}", repo.default_branch);
+        tokio::spawn(async move {
+            if let Ok(output) = tokio::process::Command::new(&git_bin)
+                .args(["-C", &extract_path, "rev-parse", &default_ref])
+                .output()
+                .await
+            {
+                if output.status.success() {
+                    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    crate::graph_extraction::extract_and_store_graph(
+                        &extract_path,
+                        &extract_repo_id,
+                        &sha,
+                        graph_store,
+                        &git_bin,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+            }
+        });
     }
 
     Ok((
@@ -507,6 +556,7 @@ pub async fn sync_mirror(
                 Some(&state.workspaces),
                 Some(&state.repos),
                 workspace_tenant_id.as_ref(),
+                Some(&state.tasks),
             )
             .await;
 
@@ -514,7 +564,7 @@ pub async fn sync_mirror(
                 &repo.path,
                 &repo_id_str,
                 &new_sha,
-                state.graph_store.as_ref(),
+                Arc::clone(&state.graph_store),
                 &git_bin,
                 None,
                 None,

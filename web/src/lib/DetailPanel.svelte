@@ -8,6 +8,7 @@
   import EmptyState from './EmptyState.svelte';
   import EditorSplit from './EditorSplit.svelte';
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
+  import ConstraintEditor from './ConstraintEditor.svelte';
   import { api } from './api.js';
   import { entityName as sharedEntityName, shortId as sharedShortId, formatSha, formatId as sharedFormatId } from './entityNames.svelte.js';
   import { relativeTime, absoluteTime, formatDuration, formatDate } from './timeFormat.js';
@@ -16,6 +17,8 @@
   import { detectLang, highlightLine } from './syntaxHighlight.js';
   import { renderMarkdown } from './markdown.js';
   import CopyableId from './CopyableId.svelte';
+  import ProvenanceChain from '../components/ProvenanceChain.svelte';
+  import ImpactAnalysisModal from '../components/ImpactAnalysisModal.svelte';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -48,6 +51,7 @@
   let interrogationLoading = $state(false);
   let interrogationAgentId = $state(null);
   let enqueueing = $state(false);
+  let impactModalOpen = $state(false);
   let conversationData = $state(null);
   let conversationLoading = $state(false);
 
@@ -935,6 +939,11 @@
   let specHistory = $state(null);
   let specHistoryLoading = $state(false);
 
+  // Impact analysis state for links tab
+  let impactData = $state(null);
+  let impactLoading = $state(false);
+  let impactError = $state(null);
+
   // Edit tab
   let editContent = $state('');
   let llmInstruction = $state('');
@@ -947,6 +956,7 @@
   let approving = $state(false);
   let revoking = $state(false);
   let rejecting = $state(false);
+  let showConstraintEditor = $state(false);
 
   async function approveCurrentSpec() {
     if (!entity || approving) return;
@@ -958,6 +968,24 @@
       await api.approveSpec(path, sha);
       toastSuccess($t('detail_panel.spec_approved'));
       // Update local state to reflect approval
+      if (entity.data) entity = { ...entity, data: { ...entity.data, approval_status: 'approved' } };
+    } catch (e) {
+      toastError($t('detail_panel.approval_failed', { values: { error: e.message } }));
+    } finally {
+      approving = false;
+    }
+  }
+
+  async function approveWithConstraints({ output_constraints, scope }) {
+    if (!entity || approving) return;
+    const sha = entity.data?.current_sha;
+    const path = entity.id;
+    if (!sha || !path) { toastError($t('detail_panel.approve_missing_sha')); return; }
+    approving = true;
+    try {
+      await api.approveSpec(path, sha, { output_constraints, scope });
+      toastSuccess($t('detail_panel.spec_approved'));
+      showConstraintEditor = false;
       if (entity.data) entity = { ...entity, data: { ...entity.data, approval_status: 'approved' } };
     } catch (e) {
       toastError($t('detail_panel.approval_failed', { values: { error: e.message } }));
@@ -1027,6 +1055,8 @@
       archLoaded = false;
       archError = null;
       archGhostOverlays = [];
+      impactData = null;
+      impactError = null;
     }
   });
 
@@ -1123,6 +1153,86 @@
       archLoaded = true; // mark loaded even on error so we don't retry automatically
     } finally {
       if (entity?.id === loadingEntityId) archLoading = false;
+    }
+  }
+
+  // ── Impact analysis for links tab ─────────────────────────────────────────
+  async function loadImpactAnalysis() {
+    const path = entity?.id;
+    if (!path || impactLoading) return;
+    impactLoading = true;
+    impactError = null;
+    try {
+      // Fetch direct dependents from the API
+      const directDeps = await api.specDependents(path);
+      // Fetch the full graph for transitive traversal
+      const graph = await api.specsGraph();
+      const allEdges = graph?.edges ?? [];
+      const allNodes = graph?.nodes ?? [];
+
+      // Build reverse adjacency for transitive traversal
+      const IMPACT_LINK_TYPES = new Set(['dependson', 'depends_on', 'implements', 'extends']);
+      const reverseAdj = new Map();
+      for (const e of allEdges) {
+        const lt = (e.link_type ?? '').toLowerCase();
+        if (!IMPACT_LINK_TYPES.has(lt)) continue;
+        if (!reverseAdj.has(e.target)) reverseAdj.set(e.target, []);
+        reverseAdj.get(e.target).push({ source: e.source, link_type: e.link_type });
+      }
+
+      // BFS from the current spec
+      // Use BFS depth to determine directness (depth === 1 → direct), not API
+      // response membership, since the server only returns depends_on/implements
+      // but not extends links in directDeps.
+      const visited = new Map();
+      const queue = [{ path, depth: 0 }];
+      while (queue.length > 0) {
+        const { path: current, depth } = queue.shift();
+        const sources = reverseAdj.get(current) ?? [];
+        for (const { source, link_type } of sources) {
+          if (!visited.has(source)) {
+            visited.set(source, { link_type, depth: depth + 1 });
+            queue.push({ path: source, depth: depth + 1 });
+          }
+        }
+      }
+
+      // Build a lookup of source_repo_id from directDeps (keyed by source_path)
+      const depRepoMap = new Map();
+      for (const d of directDeps) {
+        depRepoMap.set(d.source_path, d.source_repo_id ?? null);
+      }
+
+      // Build result grouped by repo
+      const deps = Array.from(visited.entries()).map(([depPath, info]) => {
+        const node = allNodes.find(n => n.path === depPath);
+        return {
+          path: depPath,
+          link_type: info.link_type,
+          depth: info.depth,
+          direct: info.depth === 1,
+          approval_status: node?.approval_status ?? 'unknown',
+          repo_id: depRepoMap.get(depPath) ?? null,
+        };
+      }).sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path));
+
+      // Group by repo
+      const groups = new Map();
+      for (const dep of deps) {
+        const key = dep.repo_id ?? 'unknown';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(dep);
+      }
+
+      impactData = {
+        total: deps.length,
+        repoCount: new Set(deps.map(d => d.repo_id).filter(Boolean)).size,
+        byRepo: Array.from(groups.entries()).map(([repo, items]) => ({ repo, items })),
+      };
+    } catch (e) {
+      impactError = e.message ?? 'Failed to load impact analysis';
+    } finally {
+      impactLoading = false;
     }
   }
 
@@ -1774,108 +1884,6 @@
       return result;
     });
   }
-
-  /** Truncate a UUID/SHA to 8 chars for display. Full value shown in title. */
-  function shortId(id) {
-    if (!id) return '—';
-    return id.length > 12 ? id.slice(0, 8) + '...' : id;
-  }
-
-  /** Navigate to an entity in the detail panel. */
-  function navigateTo(type, id, data) {
-    openDetailPanel?.({ type, id, data: data ?? {} });
-  }
-
-  /** Queue entity name resolution outside of template rendering. */
-  function queueNameResolution(type, id) {
-    if (!id) return;
-    const key = `${type}:${id}`;
-    if (entityNameCache[key] !== undefined) return;
-    // Use queueMicrotask to avoid state mutation during template rendering
-    queueMicrotask(() => {
-      if (entityNameCache[key] !== undefined) return;
-      entityNameCache = { ...entityNameCache, [key]: null };
-      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
-                      type === 'task' ? api.task(id).then(t => t?.title) :
-                      Promise.resolve(null);
-      fetcher.then(name => {
-        if (name) entityNameCache = { ...entityNameCache, [key]: name };
-      }).catch(() => {});
-    });
-  }
-
-  function entityName(type, id) {
-    if (!id) return shortId(id);
-    const cached = entityNameCache[`${type}:${id}`];
-    if (cached) return cached;
-    queueNameResolution(type, id);
-    return shortId(id);
-  }
-
-  async function submitComment() {
-    if (!newCommentText.trim() || !entity || submittingComment) return;
-    submittingComment = true;
-    try {
-      await api.submitComment(entity.id, { author_agent_id: 'human-reviewer', body: newCommentText.trim() });
-      toastSuccess('Comment added');
-      newCommentText = '';
-      // Reload comments
-      const cmts = await api.mrComments(entity.id).catch(() => []);
-      mrComments = Array.isArray(cmts) ? cmts : [];
-    } catch (e) {
-      toastError('Failed to add comment: ' + (e.message ?? e));
-    } finally {
-      submittingComment = false;
-    }
-  }
-
-  async function submitReview() {
-    if (!entity || submittingReview) return;
-    submittingReview = true;
-    try {
-      await api.submitReview(entity.id, {
-        reviewer_agent_id: 'human-reviewer',
-        decision: newReviewDecision,
-        body: newReviewBody.trim() || undefined,
-      });
-      toastSuccess('Review submitted');
-      newReviewBody = '';
-      // Reload reviews
-      const revs = await api.mrReviews(entity.id).catch(() => []);
-      mrReviews = Array.isArray(revs) ? revs : [];
-    } catch (e) {
-      toastError('Failed to submit review: ' + (e.message ?? e));
-    } finally {
-      submittingReview = false;
-    }
-  }
-
-  /** Map timeline event types to human-readable labels and icons */
-  function timelineEventLabel(evt) {
-    const map = {
-      'created': 'MR created',
-      'mr_created': 'MR created',
-      'commit_pushed': 'Commits pushed',
-      'gate_started': 'Gate started',
-      'gate_passed': 'Gate passed',
-      'gate_failed': 'Gate failed',
-      'enqueued': 'Enqueued for merge',
-      'merged': 'Merged',
-      'closed': 'Closed',
-      'review_submitted': 'Review submitted',
-      'comment_added': 'Comment added',
-      'graph_extracted': 'Graph extracted',
-      'attestation_created': 'Attestation signed',
-    };
-    return map[evt] ?? evt?.replace(/_/g, ' ') ?? 'Event';
-  }
-
-  function timelineEventVariant(evt) {
-    if (evt === 'merged' || evt === 'gate_passed') return 'success';
-    if (evt === 'gate_failed' || evt === 'closed') return 'danger';
-    if (evt?.startsWith('gate_')) return 'warning';
-    return 'info';
-  }
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -2002,6 +2010,10 @@
                     {enqueueing ? 'Enqueuing...' : 'Enqueue'}
                   </button>
                 {/if}
+                <button class="mr-quick-btn mr-quick-impact" onclick={() => { impactModalOpen = true; }} title="View blast radius and breaking change impact" data-testid="check-impact-btn">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" width="14" height="14"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7" stroke-dasharray="2 2"/><circle cx="12" cy="12" r="11" stroke-dasharray="1 3"/></svg>
+                  Check Impact
+                </button>
               </div>
               <!-- Prominent status journey block — click steps to see details -->
               {#if mr._statusStory?.length > 0}
@@ -3122,6 +3134,16 @@
               </div>
             {/if}
 
+            <!-- Cryptographic attestation chain visualization (§7.6) -->
+            {#if c.repository_id || c.repo_id}
+              {@const commitRepoId = c.repository_id ?? c.repo_id}
+              <ProvenanceChain
+                repoId={commitRepoId}
+                commitSha={sha}
+                token={localStorage.getItem('gyre_token') ?? ''}
+              />
+            {/if}
+
             <!-- Investigate: spawn interrogation agent from this commit's context -->
             {#if c.agent_id && c.conversation_sha}
               <div class="commit-investigate">
@@ -3325,11 +3347,25 @@
                 <button class="approval-btn approve" onclick={approveCurrentSpec} disabled={approving}>
                   {approving ? $t('detail_panel.approving') : $t('detail_panel.approve')}
                 </button>
+                <button class="approval-btn secondary" onclick={() => showConstraintEditor = !showConstraintEditor}>
+                  {showConstraintEditor ? 'Hide Constraints' : 'Approve with Constraints'}
+                </button>
                 <button class="approval-btn revoke" onclick={rejectCurrentSpec} disabled={rejecting}>
                   {rejecting ? 'Rejecting...' : 'Reject'}
                 </button>
               {/if}
             </div>
+            {#if showConstraintEditor && sd.approval_status !== 'approved'}
+              <ConstraintEditor
+                specPath={entity.id}
+                specSha={sd.current_sha}
+                workspaceId={sd.workspace_id ?? ''}
+                repoId={sd.repo_id ?? ''}
+                onApprove={approveWithConstraints}
+                onCancel={() => showConstraintEditor = false}
+                {approving}
+              />
+            {/if}
             {#if sd.linked_tasks?.length > 0}
               <span class="progress-section-label">Linked Tasks</span>
               <ul class="task-list">
@@ -3642,6 +3678,53 @@
             {:else}
               <p class="no-data">{$t('detail_panel.no_links')}</p>
             {/if}
+
+            <!-- Impact Analysis section -->
+            <div class="impact-analysis-section" data-testid="impact-analysis-section">
+              <div class="impact-analysis-header">
+                <span class="progress-section-label">Impact Analysis</span>
+                <Button
+                  variant="secondary"
+                  onclick={loadImpactAnalysis}
+                  disabled={impactLoading}
+                  data-testid="analyze-impact-detail-btn"
+                >
+                  {impactLoading ? 'Analyzing...' : 'Analyze Impact'}
+                </Button>
+              </div>
+              {#if impactError}
+                <p class="no-data" style="color: var(--color-danger);">{impactError}</p>
+              {/if}
+              {#if impactData}
+                <div class="impact-tree" data-testid="impact-tree">
+                  <p class="impact-tree-header" data-testid="impact-tree-header">
+                    {impactData.total} spec{impactData.total !== 1 ? 's' : ''} across {impactData.repoCount} repo{impactData.repoCount !== 1 ? 's' : ''} would need review
+                  </p>
+                  {#if impactData.total > 0}
+                    {#each impactData.byRepo as { repo, items }}
+                      <div class="impact-tree-repo" data-testid="impact-tree-repo-{repo}">
+                        <span class="impact-tree-repo-name">{repo}</span>
+                        <ul class="impact-tree-list">
+                          {#each items as dep}
+                            <li class="impact-tree-item" data-testid="impact-tree-item-{dep.path}">
+                              <span class="impact-tree-depth" title="Dependency depth: {dep.depth}">{dep.direct ? 'direct' : `depth ${dep.depth}`}</span>
+                              <button class="entity-link mono" title="Navigate to {dep.path}" onclick={() => navigateTo('spec', dep.path, { path: dep.path })}>{dep.path.split('/').pop()?.replace(/\.md$/, '')}</button>
+                              <Badge value={dep.link_type?.replace(/_/g, ' ') ?? 'related'} variant="info" />
+                              <Badge
+                                value={dep.approval_status}
+                                variant={dep.approval_status === 'approved' ? 'success' : dep.approval_status === 'rejected' ? 'danger' : dep.approval_status === 'pending' ? 'warning' : 'muted'}
+                              />
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/each}
+                  {:else}
+                    <p class="no-data">No specs depend on this spec.</p>
+                  {/if}
+                </div>
+              {/if}
+            </div>
           {/if}
         </div>
 
@@ -5025,6 +5108,16 @@
   {/if}
 </div>
 
+{#if entity?.type === 'mr'}
+  {@const mrData = mrDetail ?? entity.data ?? {}}
+  <ImpactAnalysisModal
+    bind:open={impactModalOpen}
+    repoId={mrData.repository_id ?? mrData.repo_id ?? null}
+    repoName={entityName('repo', mrData.repository_id ?? mrData.repo_id ?? '')}
+    workspaceId={mrData.workspace_id ?? entity.data?.workspace_id ?? null}
+  />
+{/if}
+
 <style>
   /* Full-page entity detail mode — takes up the entire content area */
   .detail-page {
@@ -6203,6 +6296,69 @@
     text-transform: uppercase;
     color: var(--color-text-muted);
     flex-shrink: 0;
+  }
+
+  /* ── Impact analysis (links tab) ──────────────────────────────── */
+  .impact-analysis-section {
+    margin-top: var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
+  }
+  .impact-analysis-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+  }
+  .impact-tree {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .impact-tree-header {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0 0 var(--space-2) 0;
+  }
+  .impact-tree-repo {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .impact-tree-repo-name {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding-bottom: var(--space-1);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .impact-tree-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .impact-tree-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+  }
+  .impact-tree-depth {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    min-width: 50px;
   }
 
   .link-target {
@@ -8392,6 +8548,16 @@
   .mr-quick-enqueue:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  .mr-quick-impact {
+    border-color: color-mix(in srgb, var(--color-danger) 40%, var(--color-border));
+    color: var(--color-danger);
+  }
+
+  .mr-quick-impact:hover {
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+    border-color: var(--color-danger);
   }
 
   .mr-status-journey {

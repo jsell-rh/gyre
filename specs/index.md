@@ -49,6 +49,10 @@ What Gyre does - the product.
 | UI Journeys & Navigation | [`system/ui-journeys.md`](system/ui-journeys.md) | (Superseded by Human-System Interface) Journey-oriented navigation |
 | **Human-System Interface** | [`system/human-system-interface.md`](system/human-system-interface.md) | **How humans interact with autonomous development:** trust gradient, progressive Explorer (C4 + LLM views), agent interrogation, conversation-to-code provenance, scoped chat, cross-workspace spec links, completion summaries |
 | UI Layout & Interactions | [`system/ui-layout.md`](system/ui-layout.md) | Spatial structure, view specification grammar (data/layout/encoding), interaction patterns (scope transitions, drill-down, inline chat), rendering technology (SVG + ELK/dagre) |
+| Explorer Canvas | [`system/explorer-canvas.md`](system/explorer-canvas.md) | Unified canvas replacing Graph + Flow tabs: three-lens architecture (Structural/Evaluative/Observable), progressive drill-down, causal flow traces, evaluative heat maps |
+| View Query Grammar | [`system/view-query-grammar.md`](system/view-query-grammar.md) | Declarative grammar for LLM-generated visualizations: computed references ($callers, $test_reachable), scope/emphasis/edge/zoom primitives, interactive bindings |
+| LSP-Powered Call Graph | [`system/lsp-call-graph.md`](system/lsp-call-graph.md) | Two-pass extraction: tree-sitter/syn for declarations, LSP/type-checker for complete call resolution (rust-analyzer, pyright, Go callgraph, tsserver) |
+| Explorer Implementation | [`system/explorer-implementation.md`](system/explorer-implementation.md) | Implementation plan: WebSocket protocol, Claude Agent SDK explorer agent, dry-run self-check loop, saved views DB schema, component architecture |
 | Trusted Foundry (Future) | [`system/trusted-foundry-integration.md`](system/trusted-foundry-integration.md) | Reference pattern: IR-first development with audited components, deterministic compilation, reduced review surface. Not scheduled for implementation. |
 
 ## Development of This System
