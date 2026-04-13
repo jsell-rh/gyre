@@ -2,7 +2,7 @@
 
 **Spec:** [`system/authorization-provenance.md`](../../system/authorization-provenance.md)
 **Last audited:** 2026-04-13
-**Coverage:** 40/40 (7 n/a, 6 verified, 34 implemented)
+**Coverage:** 40/40 (7 n/a, 11 verified, 29 implemented)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -16,11 +16,11 @@
 | 8 | 2.2 Structure | 3 | verified | - | All struct fields match spec: SignedInput{content, output_constraints, valid_until, expected_generation, signature, key_binding}. InputContent{spec_path, spec_sha, workspace_id, repo_id, persona_constraints, meta_spec_set_sha, scope}. ScopeConstraint{allowed_paths, forbidden_paths}. Serde roundtrip tested. |
 | 9 | 2.3 Key Binding | 3 | verified | - | KeyBinding type (gyre-common/src/key_binding.rs:19) with all 8 spec fields. POST /api/v1/auth/key-binding exchange (key_binding.rs:69). Ed25519 proof-of-possession via ring. Platform countersign. DELETE /key-binding/:id and /key-bindings revocation. 12+ tests covering creation, signature verification, TTL capping, revocation, authorization. |
 | 10 | 2.4 Context Binding (Replay Prevention) | 3 | implemented | - | Partial — valid_until checked in verify_chain (git_http.rs:3108). spec_sha tamper-proof via signature. But workspace_id/repo_id are signed into InputContent without being compared against actual push target at verification time (no strategy-implied constraint). expected_generation field exists (Option<u32>) but always None and never verified. Consider splitting missing enforcement into separate task. |
-| 11 | 3 Output Constraints | 2 | implemented | - | OutputConstraint type. CEL evaluation engine (gyre-domain/src/constraint_evaluator.rs). |
-| 12 | 3.1 Structure | 3 | implemented | - | OutputConstraint { name, expression } struct with serde tests. |
-| 13 | 3.2 Constraint Sources | 3 | implemented | - | derive_strategy_constraints() implements persona, meta-spec, scope, trust level, attestation level constraints. GateConstraint type for gate-produced constraints. |
-| 14 | 3.3 CEL Evaluation Context | 3 | implemented | - | build_cel_context() with OutputContext, AgentContext, TargetContext, Action. All fields per spec §3.3. Uses cel-interpreter crate. |
-| 15 | 3.4 Constraint Evaluation: Fail Closed | 3 | implemented | - | evaluate_all() stops on first failure. Evaluation errors treated as failures. No "error → allow" path. |
+| 11 | 3 Output Constraints | 2 | verified | - | OutputConstraint type (gyre-common/src/attestation.rs:114). CEL evaluation engine (gyre-domain/src/constraint_evaluator.rs). Both audit-only (evaluate_push/merge_constraints) and enforcement (enforce_push/merge_constraints) paths in constraint_check.rs. |
+| 12 | 3.1 Structure | 3 | verified | - | OutputConstraint { name: String, expression: String } (attestation.rs:114-120). Exact match to spec. Serde roundtrip tested (output_constraint_roundtrip). |
+| 13 | 3.2 Constraint Sources | 3 | verified | - | All 3 sources: (1) Explicit via SignedInput.output_constraints, (2) Strategy-implied via derive_strategy_constraints() — persona, meta_spec_set_sha, scope allowed/forbidden paths, workspace trust level, attestation level (constraint_evaluator.rs:264-316), (3) Gate via GateConstraint type (attestation.rs:128-138). collect_all_constraints() merges all additively. 35+ tests including multi-persona, forbidden paths, supervised workspace, attestation levels. |
+| 14 | 3.3 CEL Evaluation Context | 3 | verified | - | build_cel_context() (constraint_evaluator.rs:102-122). OutputContext (6 fields), DiffStatsContext (2 fields), AgentContext (9 fields), TargetContext (4 fields), Action enum (Push/Merge → "push"/"merge"). All fields match spec §3.3 exactly. Uses cel-interpreter crate. Tests verify nested access, indexed persona_constraints, action strings, diff_stats. |
+| 15 | 3.4 Constraint Evaluation: Fail Closed | 3 | verified | - | evaluate_all() (constraint_evaluator.rs:161-211): sequential evaluation, stops at first failure, errors treated as failures, non-boolean treated as error. No "error → allow" path. Tests: evaluate_all_stops_at_first_failure (3rd constraint never reached), evaluate_all_error_is_failure, evaluate_malformed_cel_is_error, evaluate_non_boolean_result_is_error. |
 | 16 | 4 Derived Input: Delegation Provenance | 2 | implemented | - | DerivedInput type in gyre-common/src/attestation.rs. |
 | 17 | 4.1 Structure | 3 | implemented | - | DerivedInput { parent_ref, preconditions, update, output_constraints, signature, key_binding }. Serde roundtrip tests. |
 | 18 | 4.2 When a Derived Input Is Created | 3 | implemented | - | create_derived_input_for_agent() in spawn.rs. Created on agent spawn from parent task attestation. |
