@@ -7,9 +7,9 @@
 | abac-policy-engine.md | 19 | 2 | 0 | 17 | 0 | 0 | 0% |
 | activity-dashboard.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
-| agent-gates.md | 25 | 9 | 5 | 11 | 0 | 0 | 0% |
+| agent-gates.md | 25 | 9 | 0 | 16 | 0 | 0 | 0% |
 | agent-runtime.md | 33 | 1 | 0 | 32 | 0 | 0 | 0% |
-| analytics.md | 12 | 0 | 12 | 0 | 0 | 0 | 0% |
+| analytics.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | authorization-provenance.md | 47 | 7 | 0 | 0 | 29 | 11 | 100% |
 | business-continuity.md | 10 | 0 | 10 | 0 | 0 | 0 | 0% |
 | dependency-graph.md | 19 | 0 | 19 | 0 | 0 | 0 | 0% |
@@ -25,7 +25,7 @@
 | message-bus.md | 17 | 0 | 17 | 0 | 0 | 0 | 0% |
 | meta-spec-reconciliation.md | 18 | 0 | 18 | 0 | 0 | 0 | 0% |
 | observability.md | 9 | 0 | 0 | 3 | 6 | 0 | 66% |
-| platform-model.md | 56 | 4 | 2 | 25 | 23 | 2 | 48% |
+| platform-model.md | 56 | 4 | 0 | 27 | 23 | 2 | 48% |
 | ralph-loop.md | 27 | 27 | 0 | 0 | 0 | 0 | 0% |
 | realized-model.md | 12 | 0 | 12 | 0 | 0 | 0 | 0% |
 | repo-lifecycle.md | 20 | 0 | 20 | 0 | 0 | 0 | 0% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 0 | 14 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **92** | **393** | **195** | **104** | **18** | **17%** |
+| **TOTAL** | **802** | **92** | **374** | **214** | **104** | **18** | **17%** |
