@@ -300,6 +300,7 @@ pub async fn sync_spec_ledger(
     now: u64,
     // Context for cross-workspace resolution (pass None to skip resolution).
     source_repo_id: Option<&str>,
+    source_workspace_id: Option<&str>,
     workspaces: Option<&Arc<dyn gyre_ports::WorkspaceRepository>>,
     repos: Option<&Arc<dyn gyre_ports::RepoRepository>>,
     tenant_id: Option<&gyre_common::Id>,
@@ -366,6 +367,13 @@ pub async fn sync_spec_ledger(
             existing.title = entry.title.clone();
             existing.owner = entry.owner.clone();
             existing.approval_mode = approval_mode;
+            // Backfill repo_id/workspace_id on existing entries for signal chain routing.
+            if existing.repo_id.is_none() {
+                existing.repo_id = source_repo_id.map(|s| s.to_string());
+            }
+            if existing.workspace_id.is_none() {
+                existing.workspace_id = source_workspace_id.map(|s| s.to_string());
+            }
             if existing.approval_status == ApprovalStatus::Deprecated {
                 existing.approval_status = ApprovalStatus::Pending;
                 existing.updated_at = now;
@@ -386,6 +394,8 @@ pub async fn sync_spec_ledger(
                 drift_status: "unknown".to_string(),
                 created_at: now,
                 updated_at: now,
+                repo_id: source_repo_id.map(|s| s.to_string()),
+                workspace_id: source_workspace_id.map(|s| s.to_string()),
             }
         };
         let _ = ledger.save(&updated_entry).await;
@@ -806,6 +816,8 @@ specs:
                     drift_status: "unknown".to_string(),
                     created_at: now,
                     updated_at: now,
+                    repo_id: None,
+                    workspace_id: None,
                 },
             );
         }
@@ -839,6 +851,8 @@ specs:
                     drift_status: "clean".to_string(),
                     created_at: now,
                     updated_at: now,
+                    repo_id: None,
+                    workspace_id: None,
                 },
             );
         }
@@ -881,6 +895,8 @@ specs:
                     drift_status: "clean".to_string(),
                     created_at: now,
                     updated_at: now,
+                    repo_id: None,
+                    workspace_id: None,
                 },
             );
         }

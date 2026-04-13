@@ -220,11 +220,11 @@ The Analytics view in the Svelte dashboard (sidebar: "Analytics" under Operation
 
 Analytics close the feedback loop for autonomous development:
 
-1. **CEO agent** assigns tasks to implement a feature
+1. **Workspace orchestrator** creates delegation tasks to implement a feature
 2. **Implementation agent** ships the code, opens MR
 3. **MR merges** → `mr.merged` event recorded
 4. **Analytics tracks adoption** over the next N days
-5. **CEO agent** (or dedicated review agent) calls `GET /api/v1/analytics/decide?decision=feature.promote`
+5. **Repo orchestrator** (or dedicated review agent) calls `GET /api/v1/analytics/decide?decision=feature.promote`
 6. Agent either promotes the flag (removing the feature flag toggle from code) or rolls back (reverts the MR)
 
 This replaces human "did the metrics look good?" review cycles with a quantified, auditable decision backed by real data.

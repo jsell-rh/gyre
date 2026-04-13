@@ -59,6 +59,9 @@ diesel::table! {
         repo_id -> Text,
         cancelled_at -> Nullable<BigInt>,
         cancelled_reason -> Nullable<Text>,
+        task_type -> Nullable<Text>,
+        order -> Nullable<Integer>,
+        depends_on -> Text,
     }
 }
 
@@ -84,6 +87,7 @@ diesel::table! {
         workspace_id -> Text,
         reverted_at -> Nullable<BigInt>,
         revert_mr_id -> Nullable<Text>,
+        spec_ref -> Nullable<Text>,
     }
 }
 
@@ -527,6 +531,8 @@ diesel::table! {
         drift_status -> Text,
         created_at -> BigInt,
         updated_at -> BigInt,
+        repo_id -> Nullable<Text>,
+        workspace_id -> Nullable<Text>,
     }
 }
 

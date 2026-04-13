@@ -25,7 +25,7 @@ labels: ["spec-implementation", "auto-created"]
 spec_ref: "{spec_path}@{blob_sha}"
 ```
 
-The CEO agent picks this up in its next OBSERVE cycle and decomposes it into implementation work.
+The workspace orchestrator picks this up in its next OBSERVE cycle and decomposes it into implementation work.
 
 ### Trigger: Existing Spec Modified
 
@@ -95,7 +95,7 @@ The Accountability agent's patrol checks for:
 - `spec-implementation` tasks that have been in Backlog for more than N days
 - Specs that were modified but have no corresponding task (should never happen if the hook works, but defense in depth)
 
-If any of these are found, the Accountability agent escalates to the CEO.
+If any of these are found, the Accountability agent escalates to the workspace orchestrator.
 
 ## Spec Approval Interaction
 
@@ -106,7 +106,7 @@ From the agent-gates spec: specs have an approval ledger. When a spec is modifie
 
 ## What This Does NOT Do
 
-- **Does not auto-assign tasks.** The CEO agent decides who works on what.
+- **Does not auto-assign tasks.** The repo orchestrator decides task decomposition.
 - **Does not block spec changes.** Anyone with push access can modify specs. The system reacts, it doesn't prevent.
 - **Does not create tasks for non-spec files.** Only files under `specs/` trigger this behavior.
 - **Does not create tasks for milestone specs.** Changes to `specs/milestones/` are informational (planning), not implementation contracts. Only `specs/system/` and `specs/development/` trigger tasks. *(Configurable per repo.)*

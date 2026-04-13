@@ -102,6 +102,11 @@ pub enum MessageKind {
     PushRejected,
     PushAccepted,
     SpecChanged,
+    /// Emitted when a human approves a spec (`POST /api/v1/specs/:path/approve`).
+    /// server_only = true. Payload: `{repo_id, spec_path, spec_sha, approved_by, approval_id}`.
+    /// Distinct from `SpecChanged` (which fires on push, before approval).
+    /// Destination: Workspace(workspace_id) — consumed by workspace orchestrator.
+    SpecApproved,
     GateFailure,
     StaleSpecWarning,
     SpeculativeConflict,
@@ -147,6 +152,7 @@ impl MessageKind {
             MessageKind::PushRejected => "push_rejected",
             MessageKind::PushAccepted => "push_accepted",
             MessageKind::SpecChanged => "spec_changed",
+            MessageKind::SpecApproved => "spec_approved",
             MessageKind::GateFailure => "gate_failure",
             MessageKind::StaleSpecWarning => "stale_spec_warning",
             MessageKind::SpeculativeConflict => "speculative_conflict",
@@ -185,6 +191,7 @@ impl MessageKind {
                 | MessageKind::PushRejected
                 | MessageKind::PushAccepted
                 | MessageKind::SpecChanged
+                | MessageKind::SpecApproved
                 | MessageKind::GateFailure
                 | MessageKind::StaleSpecWarning
                 | MessageKind::SpeculativeConflict
@@ -220,6 +227,7 @@ impl MessageKind {
             | MessageKind::PushRejected
             | MessageKind::PushAccepted
             | MessageKind::SpecChanged
+            | MessageKind::SpecApproved
             | MessageKind::GateFailure
             | MessageKind::StaleSpecWarning
             | MessageKind::SpeculativeConflict
@@ -261,6 +269,7 @@ impl MessageKind {
             "push_rejected" => MessageKind::PushRejected,
             "push_accepted" => MessageKind::PushAccepted,
             "spec_changed" => MessageKind::SpecChanged,
+            "spec_approved" => MessageKind::SpecApproved,
             "gate_failure" => MessageKind::GateFailure,
             "stale_spec_warning" => MessageKind::StaleSpecWarning,
             "speculative_conflict" => MessageKind::SpeculativeConflict,
@@ -530,6 +539,7 @@ mod tests {
             MessageKind::PushRejected,
             MessageKind::PushAccepted,
             MessageKind::SpecChanged,
+            MessageKind::SpecApproved,
             MessageKind::GateFailure,
             MessageKind::StaleSpecWarning,
             MessageKind::SpeculativeConflict,

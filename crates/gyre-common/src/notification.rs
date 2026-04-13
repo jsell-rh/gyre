@@ -40,6 +40,8 @@ pub enum NotificationType {
     AgentEscalation,
     /// Priority 10 — knowledge-graph extraction suggests a spec link.
     SuggestedSpecLink,
+    /// Priority 2 — a spec was rejected while agents were implementing it.
+    SpecRejected,
 }
 
 impl NotificationType {
@@ -59,6 +61,7 @@ impl NotificationType {
             Self::AgentCompleted => "AgentCompleted",
             Self::AgentEscalation => "AgentEscalation",
             Self::SuggestedSpecLink => "SuggestedSpecLink",
+            Self::SpecRejected => "SpecRejected",
         }
     }
 
@@ -78,6 +81,7 @@ impl NotificationType {
             "AgentCompleted" => Some(Self::AgentCompleted),
             "AgentEscalation" => Some(Self::AgentEscalation),
             "SuggestedSpecLink" => Some(Self::SuggestedSpecLink),
+            "SpecRejected" => Some(Self::SpecRejected),
             _ => None,
         }
     }
@@ -98,6 +102,7 @@ impl NotificationType {
             Self::AgentCompleted => 9,
             Self::AgentEscalation => 5,
             Self::SuggestedSpecLink => 10,
+            Self::SpecRejected => 2,
         }
     }
 }
@@ -199,6 +204,7 @@ mod tests {
             NotificationType::AgentCompleted,
             NotificationType::AgentEscalation,
             NotificationType::SuggestedSpecLink,
+            NotificationType::SpecRejected,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));

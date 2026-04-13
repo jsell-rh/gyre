@@ -351,9 +351,10 @@
                 {#if isDismissed}<span class="sr-only">({$t('decisions.dismissed')})</span>{/if}
                 <div class="card-header-text">
                   <span class="card-title">{n.title}</span>
-                  {#if body.agent_id || body.mr_title}
+                  {#if body.agent_id || body.mr_title || body.agent_name}
                     <span class="card-subtitle">
-                      {#if body.agent_id}{body.agent_id}{/if}
+                      {#if body.agent_name}{body.agent_name}
+                      {:else if body.agent_id}{body.agent_id.length > 12 ? body.agent_id.slice(0, 8) + '...' : body.agent_id}{/if}
                       {#if body.mr_title} {$t('decisions.on_mr', { values: { title: body.mr_title } })}{/if}
                       {#if body.spec_path}
                         ({$t('decisions.spec_label_short', { values: { name: body.spec_path.split('/').pop()?.replace('.md', '') } })})

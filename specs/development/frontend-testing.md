@@ -105,6 +105,6 @@ All three must pass before merge.
 
 ## Relationship to Existing Specs
 
-- **Ralph Loops** (`development/ralph-loops.md`): Frontend tests are a quality gate in every agent's loop
+- **Agent Runtime** (`system/agent-runtime.md` §1): Frontend tests are a quality gate in every agent's loop
 - **Speed & Backpressure** (`development/speed-backpressure.md`): vitest is sub-second for component tests
 - **Agent Experience** (`development/agent-experience.md`): Agents get immediate feedback on UI breaks

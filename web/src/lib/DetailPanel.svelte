@@ -12,6 +12,7 @@
   import { toastSuccess, toastError } from './toast.svelte.js';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
+  const openDetailPanel = getContext('openDetailPanel') ?? null;
 
   /**
    * DetailPanel — slide-in panel from the right.
@@ -89,7 +90,9 @@
     if (type === 'mr') {
       result.push(
         { id: 'diff',        label: $t('detail_panel.tabs.diff') },
+        { id: 'timeline',    label: 'Timeline' },
         { id: 'gates',       label: $t('detail_panel.tabs.gates') },
+        { id: 'reviews',     label: 'Reviews' },
       );
       if (data.status === 'merged') {
         result.push({ id: 'attestation', label: $t('detail_panel.tabs.attestation') });
@@ -243,6 +246,136 @@
     if (!entity) expanded = false;
   });
 
+  // ── MR entity tab state ─────────────────────────────────────────────────────
+  let mrDetail = $state(null);
+  let mrDetailLoading = $state(false);
+  let mrDiff = $state(null);
+  let mrDiffLoading = $state(false);
+  let mrGates = $state(null);
+  let mrGatesLoading = $state(false);
+  let mrAttestation = $state(null);
+  let mrAttestationLoading = $state(false);
+  let mrTimeline = $state(null);
+  let mrTimelineLoading = $state(false);
+  let mrReviews = $state(null);
+  let mrReviewsLoading = $state(false);
+  let mrComments = $state(null);
+  let mrCommentsLoading = $state(false);
+  let newCommentText = $state('');
+  let submittingComment = $state(false);
+  let newReviewDecision = $state('approved');
+  let newReviewBody = $state('');
+  let submittingReview = $state(false);
+
+  // Agent/task name cache for cross-references
+  let entityNameCache = $state({});
+
+  // ── Agent entity tab state ─────────────────────────────────────────────────
+  let agentDetail = $state(null);
+  let agentDetailLoading = $state(false);
+  let agentLogs = $state(null);
+  let agentLogsLoading = $state(false);
+
+  // Reset MR/agent data when entity changes
+  $effect(() => {
+    if (entity?.type === 'mr') {
+      mrDetail = null;
+      mrDiff = null;
+      mrGates = null;
+      mrAttestation = null;
+      mrTimeline = null;
+      mrReviews = null;
+      mrComments = null;
+    }
+    if (entity?.type === 'agent') {
+      agentDetail = null;
+      agentLogs = null;
+    }
+  });
+
+  // Load MR data per tab
+  $effect(() => {
+    if (entity?.type !== 'mr') return;
+    const id = entity.id;
+
+    if (activeTab === 'info' && !mrDetail && !mrDetailLoading) {
+      mrDetailLoading = true;
+      api.mergeRequest(id)
+        .then((d) => { mrDetail = d; })
+        .catch(() => { mrDetail = null; })
+        .finally(() => { mrDetailLoading = false; });
+    }
+    if (activeTab === 'diff' && !mrDiff && !mrDiffLoading) {
+      mrDiffLoading = true;
+      api.mrDiff(id)
+        .then((d) => { mrDiff = d; })
+        .catch(() => { mrDiff = null; })
+        .finally(() => { mrDiffLoading = false; });
+    }
+    if (activeTab === 'gates' && !mrGates && !mrGatesLoading) {
+      mrGatesLoading = true;
+      const mr = mrDetail ?? entity.data ?? {};
+      const repoId = mr.repository_id ?? mr.repo_id ?? entity.data?.repository_id ?? entity.data?.repo_id;
+      Promise.all([
+        api.mrGates(id),
+        repoId ? api.repoGates(repoId).catch(() => []) : Promise.resolve([]),
+      ])
+        .then(([results, defs]) => {
+          const raw = Array.isArray(results) ? results : (results?.gates ?? []);
+          const defMap = Object.fromEntries((Array.isArray(defs) ? defs : []).map(g => [g.id, g]));
+          mrGates = raw.map(r => ({ ...r, ...(defMap[r.gate_id] ?? {}), _result_id: r.id }));
+        })
+        .catch(() => { mrGates = []; })
+        .finally(() => { mrGatesLoading = false; });
+    }
+    if (activeTab === 'attestation' && !mrAttestation && !mrAttestationLoading) {
+      mrAttestationLoading = true;
+      api.mrAttestation(id)
+        .then((d) => { mrAttestation = d; })
+        .catch(() => { mrAttestation = null; })
+        .finally(() => { mrAttestationLoading = false; });
+    }
+    if (activeTab === 'timeline' && !mrTimeline && !mrTimelineLoading) {
+      mrTimelineLoading = true;
+      api.mrTimeline(id)
+        .then((d) => { mrTimeline = Array.isArray(d) ? d : []; })
+        .catch(() => { mrTimeline = []; })
+        .finally(() => { mrTimelineLoading = false; });
+    }
+    if (activeTab === 'reviews' && !mrReviews && !mrReviewsLoading) {
+      mrReviewsLoading = true;
+      mrCommentsLoading = true;
+      Promise.all([
+        api.mrReviews(id).catch(() => []),
+        api.mrComments(id).catch(() => []),
+      ]).then(([revs, cmts]) => {
+        mrReviews = Array.isArray(revs) ? revs : [];
+        mrComments = Array.isArray(cmts) ? cmts : [];
+      }).finally(() => { mrReviewsLoading = false; mrCommentsLoading = false; });
+    }
+  });
+
+  // Load agent data per tab
+  $effect(() => {
+    if (entity?.type !== 'agent') return;
+    const id = entity.id;
+
+    if (activeTab === 'info' && !agentDetail && !agentDetailLoading) {
+      agentDetailLoading = true;
+      api.agent(id)
+        .then((d) => { agentDetail = d; })
+        .catch(() => { agentDetail = null; })
+        .finally(() => { agentDetailLoading = false; });
+    }
+    if (activeTab === 'trace' && !agentLogs && !agentLogsLoading) {
+      agentLogsLoading = true;
+      api.agentLogs(id)
+        .then((d) => { agentLogs = Array.isArray(d) ? d : (d?.logs ?? d?.entries ?? []); })
+        .catch(() => { agentLogs = []; })
+        .finally(() => { agentLogsLoading = false; });
+    }
+  });
+
   // ── Spec entity tab state (S4.5) ────────────────────────────────────────────
   // Lazy-loaded data for each tab when entity.type === 'spec'
   let specDetail = $state(null);
@@ -335,7 +468,20 @@
     if ((activeTab === 'content' || activeTab === 'edit') && !specDetail && !specDetailLoading) {
       specDetailLoading = true;
       api.specContent(path, repoId)
-        .then((d) => { specDetail = d; editContent = d?.content ?? ''; })
+        .then(async (d) => {
+          specDetail = d;
+          editContent = d?.content ?? '';
+          // If no content but we got a repo_id from the ledger, try fetching content with repo context
+          if (!d?.content && d?.repo_id && !repoId) {
+            try {
+              const withContent = await api.specContent(path, d.repo_id);
+              if (withContent?.content) {
+                specDetail = { ...d, ...withContent };
+                editContent = withContent.content;
+              }
+            } catch { /* best effort */ }
+          }
+        })
         .catch(() => { specDetail = null; })
         .finally(() => { specDetailLoading = false; });
     }
@@ -576,6 +722,108 @@
       month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
     });
   }
+
+  /** Truncate a UUID/SHA to 8 chars for display. Full value shown in title. */
+  function shortId(id) {
+    if (!id) return '—';
+    return id.length > 12 ? id.slice(0, 8) + '...' : id;
+  }
+
+  /** Navigate to an entity in the detail panel. */
+  function navigateTo(type, id, data) {
+    openDetailPanel?.({ type, id, data: data ?? {} });
+  }
+
+  /** Queue entity name resolution outside of template rendering. */
+  function queueNameResolution(type, id) {
+    if (!id) return;
+    const key = `${type}:${id}`;
+    if (entityNameCache[key] !== undefined) return;
+    // Use queueMicrotask to avoid state mutation during template rendering
+    queueMicrotask(() => {
+      if (entityNameCache[key] !== undefined) return;
+      entityNameCache = { ...entityNameCache, [key]: null };
+      const fetcher = type === 'agent' ? api.agent(id).then(a => a?.name) :
+                      type === 'task' ? api.task(id).then(t => t?.title) :
+                      Promise.resolve(null);
+      fetcher.then(name => {
+        if (name) entityNameCache = { ...entityNameCache, [key]: name };
+      }).catch(() => {});
+    });
+  }
+
+  function entityName(type, id) {
+    if (!id) return shortId(id);
+    const cached = entityNameCache[`${type}:${id}`];
+    if (cached) return cached;
+    queueNameResolution(type, id);
+    return shortId(id);
+  }
+
+  async function submitComment() {
+    if (!newCommentText.trim() || !entity || submittingComment) return;
+    submittingComment = true;
+    try {
+      await api.submitComment(entity.id, { author_agent_id: 'human-reviewer', body: newCommentText.trim() });
+      toastSuccess('Comment added');
+      newCommentText = '';
+      // Reload comments
+      const cmts = await api.mrComments(entity.id).catch(() => []);
+      mrComments = Array.isArray(cmts) ? cmts : [];
+    } catch (e) {
+      toastError('Failed to add comment: ' + (e.message ?? e));
+    } finally {
+      submittingComment = false;
+    }
+  }
+
+  async function submitReview() {
+    if (!entity || submittingReview) return;
+    submittingReview = true;
+    try {
+      await api.submitReview(entity.id, {
+        reviewer_agent_id: 'human-reviewer',
+        decision: newReviewDecision,
+        body: newReviewBody.trim() || undefined,
+      });
+      toastSuccess('Review submitted');
+      newReviewBody = '';
+      // Reload reviews
+      const revs = await api.mrReviews(entity.id).catch(() => []);
+      mrReviews = Array.isArray(revs) ? revs : [];
+    } catch (e) {
+      toastError('Failed to submit review: ' + (e.message ?? e));
+    } finally {
+      submittingReview = false;
+    }
+  }
+
+  /** Map timeline event types to human-readable labels and icons */
+  function timelineEventLabel(evt) {
+    const map = {
+      'created': 'MR created',
+      'mr_created': 'MR created',
+      'commit_pushed': 'Commits pushed',
+      'gate_started': 'Gate started',
+      'gate_passed': 'Gate passed',
+      'gate_failed': 'Gate failed',
+      'enqueued': 'Enqueued for merge',
+      'merged': 'Merged',
+      'closed': 'Closed',
+      'review_submitted': 'Review submitted',
+      'comment_added': 'Comment added',
+      'graph_extracted': 'Graph extracted',
+      'attestation_created': 'Attestation signed',
+    };
+    return map[evt] ?? evt?.replace(/_/g, ' ') ?? 'Event';
+  }
+
+  function timelineEventVariant(evt) {
+    if (evt === 'merged' || evt === 'gate_passed') return 'success';
+    if (evt === 'gate_failed' || evt === 'closed') return 'danger';
+    if (evt?.startsWith('gate_')) return 'warning';
+    return 'info';
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -644,19 +892,149 @@
     <div class="panel-content" id="detail-panel-content" role="tabpanel" aria-labelledby="tab-{activeTab}">
       {#if activeTab === 'info'}
         <div class="tab-pane">
-          <dl class="entity-meta">
-            <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
-            <dt>{$t('detail_panel.id')}</dt><dd class="mono">{entity.id}</dd>
-            {#if entity.data?.status}
-              <dt>{$t('detail_panel.status')}</dt><dd>{entity.data.status}</dd>
+          {#if entity.type === 'mr'}
+            {#if mrDetailLoading && !entity.data}
+              <div class="spec-skeleton">
+                {#each Array(5) as _}<Skeleton width="100%" height="1.2rem" />{/each}
+              </div>
+            {:else}
+              {@const mr = mrDetail ?? entity.data ?? {}}
+              <dl class="entity-meta">
+                <dt>Title</dt><dd>{mr.title ?? '—'}</dd>
+                <dt>Status</dt><dd><Badge value={mr.status ?? 'unknown'} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} /></dd>
+                <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+                {#if mr.source_branch}
+                  <dt>Branch</dt><dd class="mono">{mr.source_branch} → {mr.target_branch ?? 'main'}</dd>
+                {/if}
+                {#if mr.diff_stats}
+                  <dt>Changes</dt>
+                  <dd>
+                    <span class="diff-stat-inline">{mr.diff_stats.files_changed ?? 0} files</span>
+                    <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                    <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                  </dd>
+                {/if}
+                {#if mr.spec_ref}
+                  {@const specPath = mr.spec_ref.split('@')[0]}
+                  <dt>Spec</dt><dd><button class="entity-link mono" title={mr.spec_ref} onclick={() => navigateTo('spec', specPath, { path: specPath, repo_id: mr.repository_id ?? mr.repo_id })}>{specPath.split('/').pop()}</button></dd>
+                {/if}
+                {#if mr.author_agent_id}
+                  <dt>Agent</dt><dd><button class="entity-link mono" title={mr.author_agent_id} onclick={() => navigateTo('agent', mr.author_agent_id)}>{entityName('agent', mr.author_agent_id)}</button></dd>
+                {:else if mr.agent_id}
+                  <dt>Agent</dt><dd><button class="entity-link mono" title={mr.agent_id} onclick={() => navigateTo('agent', mr.agent_id)}>{entityName('agent', mr.agent_id)}</button></dd>
+                {/if}
+                {#if mr.author_id && mr.author_id !== mr.author_agent_id}
+                  <dt>Author</dt><dd class="mono" title={mr.author_id}>{shortId(mr.author_id)}</dd>
+                {/if}
+                {#if mr.task_id}
+                  <dt>Task</dt><dd><button class="entity-link" title={mr.task_id} onclick={() => navigateTo('task', mr.task_id)}>{entityName('task', mr.task_id)}</button></dd>
+                {/if}
+                {#if mr.has_conflicts}
+                  <dt>Conflicts</dt><dd><Badge value="conflicts" variant="danger" /></dd>
+                {/if}
+                {#if mr.depends_on?.length}
+                  <dt>Depends on</dt><dd class="mono">{mr.depends_on.map(shortId).join(', ')}</dd>
+                {/if}
+                {#if mr.atomic_group}
+                  <dt>Atomic group</dt><dd class="mono">{mr.atomic_group}</dd>
+                {/if}
+                {#if mr.created_at}
+                  <dt>Created</dt><dd>{fmtDate(mr.created_at)}</dd>
+                {/if}
+                {#if mr.merged_at ?? mr.updated_at}
+                  <dt>{mr.status === 'merged' ? 'Merged' : 'Updated'}</dt><dd>{fmtDate(mr.merged_at ?? mr.updated_at)}</dd>
+                {/if}
+              </dl>
             {/if}
-            {#if entity.data?.created_at}
-              <dt>{$t('detail_panel.created')}</dt><dd>{fmtDate(entity.data.created_at)}</dd>
+          {:else if entity.type === 'agent'}
+            {#if agentDetailLoading && !entity.data}
+              <div class="spec-skeleton">
+                {#each Array(5) as _}<Skeleton width="100%" height="1.2rem" />{/each}
+              </div>
+            {:else}
+              {@const ag = agentDetail ?? entity.data ?? {}}
+              <dl class="entity-meta">
+                <dt>Name</dt><dd>{ag.name ?? entity.id}</dd>
+                <dt>Status</dt><dd><Badge value={ag.status ?? 'unknown'} variant={ag.status === 'active' ? 'success' : ag.status === 'completed' ? 'info' : ag.status === 'failed' ? 'danger' : 'muted'} /></dd>
+                <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+                {#if ag.agent_type}
+                  <dt>Type</dt><dd>{ag.agent_type}</dd>
+                {/if}
+                {#if ag.branch}
+                  <dt>Branch</dt><dd class="mono">{ag.branch}</dd>
+                {/if}
+                {#if ag.task_id}
+                  <dt>Task</dt><dd><button class="entity-link" title={ag.task_id} onclick={() => navigateTo('task', ag.task_id)}>{entityName('task', ag.task_id)}</button></dd>
+                {/if}
+                {#if ag.repo_id}
+                  <dt>Repo</dt><dd class="mono" title={ag.repo_id}>{shortId(ag.repo_id)}</dd>
+                {/if}
+                {#if ag.mr_id}
+                  <dt>MR</dt><dd><button class="entity-link mono" title={ag.mr_id} onclick={() => navigateTo('mr', ag.mr_id)}>{shortId(ag.mr_id)}</button></dd>
+                {/if}
+                {#if ag.created_at}
+                  <dt>Created</dt><dd>{fmtDate(ag.created_at)}</dd>
+                {/if}
+                {#if ag.completed_at}
+                  <dt>Completed</dt><dd>{fmtDate(ag.completed_at)}</dd>
+                {:else if ag.created_at}
+                  {@const elapsed = Math.round((Date.now() / 1000 - ag.created_at) / 60)}
+                  <dt>Running</dt><dd>{elapsed < 60 ? `${elapsed}m` : `${Math.round(elapsed / 60)}h ${elapsed % 60}m`}</dd>
+                {/if}
+              </dl>
             {/if}
-            {#if entity.data?.spec_path}
-              <dt>{$t('detail_panel.spec')}</dt><dd class="mono">{entity.data.spec_path}</dd>
-            {/if}
-          </dl>
+          {:else if entity.type === 'task'}
+            {@const tk = entity.data ?? {}}
+            <dl class="entity-meta">
+              <dt>Title</dt><dd>{tk.title ?? '—'}</dd>
+              <dt>Status</dt><dd><Badge value={tk.status ?? 'unknown'} variant={taskStatusColor(tk.status)} /></dd>
+              <dt>ID</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+              {#if tk.priority}
+                <dt>Priority</dt><dd><Badge value={tk.priority} variant={tk.priority === 'high' || tk.priority === 'critical' ? 'danger' : tk.priority === 'low' ? 'muted' : 'warning'} /></dd>
+              {/if}
+              {#if tk.task_type}
+                <dt>Type</dt><dd>{tk.task_type}</dd>
+              {/if}
+              {#if tk.description}
+                <dt>Description</dt><dd>{tk.description}</dd>
+              {/if}
+              {#if tk.spec_path}
+                <dt>Spec</dt><dd><button class="entity-link mono" title={tk.spec_path} onclick={() => navigateTo('spec', tk.spec_path, { path: tk.spec_path, repo_id: tk.repo_id })}>{tk.spec_path.split('/').pop()}</button></dd>
+              {/if}
+              {#if tk.branch}
+                <dt>Branch</dt><dd class="mono">{tk.branch}</dd>
+              {/if}
+              {#if tk.assigned_to}
+                <dt>Assigned</dt><dd><button class="entity-link mono" title={tk.assigned_to} onclick={() => navigateTo('agent', tk.assigned_to)}>{shortId(tk.assigned_to)}</button></dd>
+              {/if}
+              {#if tk.repo_id}
+                <dt>Repo</dt><dd class="mono" title={tk.repo_id}>{shortId(tk.repo_id)}</dd>
+              {/if}
+              {#if tk.labels?.length > 0}
+                <dt>Labels</dt><dd>{tk.labels.join(', ')}</dd>
+              {/if}
+              {#if tk.created_at}
+                <dt>Created</dt><dd>{fmtDate(tk.created_at)}</dd>
+              {/if}
+              {#if tk.updated_at}
+                <dt>Updated</dt><dd>{fmtDate(tk.updated_at)}</dd>
+              {/if}
+            </dl>
+          {:else}
+            <dl class="entity-meta">
+              <dt>{$t('detail_panel.type')}</dt><dd>{entity.type}</dd>
+              <dt>{$t('detail_panel.id')}</dt><dd class="mono" title={entity.id}>{shortId(entity.id)}</dd>
+              {#if entity.data?.status}
+                <dt>{$t('detail_panel.status')}</dt><dd>{entity.data.status}</dd>
+              {/if}
+              {#if entity.data?.created_at}
+                <dt>{$t('detail_panel.created')}</dt><dd>{fmtDate(entity.data.created_at)}</dd>
+              {/if}
+              {#if entity.data?.spec_path}
+                <dt>{$t('detail_panel.spec')}</dt><dd class="mono">{entity.data.spec_path}</dd>
+              {/if}
+            </dl>
+          {/if}
         </div>
 
       {:else if activeTab === 'content'}
@@ -728,7 +1106,7 @@
                 <dt>{$t('detail_panel.updated')}</dt><dd>{fmtDate(entity.data.updated_at)}</dd>
               {/if}
             </dl>
-            {#if !entity.data?.repo_id}
+            {#if !entity.data?.repo_id && !specDetail?.repo_id}
               <p class="spec-hint">{$t('detail_panel.full_content_requires_repo')}</p>
             {/if}
           {/if}
@@ -841,12 +1219,15 @@
               {#each Array(4) as _}<Skeleton width="100%" height="1.5rem" />{/each}
             </div>
           {:else if specProgress}
-            {@const total = specProgress.total_tasks ?? 0}
+            {@const totalTasks = specProgress.total_tasks ?? (specProgress.tasks?.length ?? 0)}
             {@const done = specProgress.completed_tasks ?? 0}
-            {@const pct = total > 0 ? Math.round((done / total) * 100) : 0}
+            {@const pct = totalTasks > 0 ? Math.round((done / totalTasks) * 100) : 0}
             <div class="progress-summary">
-              <span class="progress-big">{done}/{total}</span>
+              <span class="progress-big">{done}/{totalTasks}</span>
               <span class="progress-lbl">{$t('detail_panel.tasks_complete')}</span>
+              {#if specProgress.merged_mrs}
+                <span class="progress-mrs">{specProgress.merged_mrs} MR{specProgress.merged_mrs !== 1 ? 's' : ''} merged</span>
+              {/if}
             </div>
             <div
               class="progress-bar-track"
@@ -858,19 +1239,37 @@
               <div class="progress-bar-fill" style="width: {pct}%"></div>
             </div>
             {#if specProgress.tasks?.length > 0}
+              <span class="progress-section-label">Tasks</span>
               <ul class="task-list">
                 {#each specProgress.tasks as task}
-                  <li class="task-item">
+                  <li class="task-item clickable-row" onclick={() => navigateTo('task', task.id ?? task.task_id, task)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('task', task.id ?? task.task_id, task); }}>
                     <Badge value={task.status} variant={taskStatusColor(task.status)} />
                     <span class="task-title">{task.title}</span>
+                    {#if task.priority && task.priority !== 'medium'}
+                      <span class="task-priority priority-{task.priority}">{task.priority}</span>
+                    {/if}
                     {#if task.agent_id}
-                      <span class="task-agent mono">{task.agent_id.slice(0, 8)}</span>
+                      <span class="task-agent mono" title={task.agent_id}>{task.agent_id.slice(0, 8)}</span>
                     {/if}
                   </li>
                 {/each}
               </ul>
             {:else}
               <p class="no-data">{$t('detail_panel.no_tasks')}</p>
+            {/if}
+            {#if specProgress.mrs?.length > 0}
+              <span class="progress-section-label">Merge Requests</span>
+              <ul class="task-list">
+                {#each specProgress.mrs as mr}
+                  <li class="task-item clickable-row" onclick={() => navigateTo('mr', mr.id ?? mr.mr_id, mr)} tabindex="0" role="button" onkeydown={(e) => { if (e.key === 'Enter') navigateTo('mr', mr.id ?? mr.mr_id, mr); }}>
+                    <Badge value={mr.status} variant={mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : 'muted'} />
+                    <span class="task-title">{mr.title}</span>
+                    {#if mr.source_branch}
+                      <span class="task-agent mono">{mr.source_branch}</span>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
             {/if}
           {:else}
             <p class="no-data">{$t('detail_panel.progress_requires_repo')}</p>
@@ -932,13 +1331,16 @@
                     <div class="history-row">
                       <Badge
                         value={ev.event}
-                        variant={ev.event === 'approved' ? 'success' : ev.event === 'invalidated' ? 'danger' : 'muted'}
+                        variant={ev.event === 'approved' ? 'success' : ev.event === 'rejected' || ev.event === 'invalidated' || ev.event === 'revoked' ? 'danger' : 'muted'}
                       />
                       <span class="history-user mono">{ev.user_id || ev.approver_id || '—'}</span>
                       <span class="history-time">{fmtDate(ev.timestamp || ev.approved_at)}</span>
                     </div>
                     {#if ev.sha || ev.spec_sha}
                       <span class="history-sha mono">{(ev.sha || ev.spec_sha).slice(0, 7)}</span>
+                    {/if}
+                    {#if ev.reason}
+                      <p class="history-reason">{ev.reason}</p>
                     {/if}
                   </div>
                 {/each}
@@ -1001,22 +1403,321 @@
 
       {:else if activeTab === 'diff'}
         <div class="tab-pane">
-          <EmptyState title={$t('detail_panel.diff_not_available')} description={$t('detail_panel.diff_not_available_desc')} />
+          {#if mrDiffLoading}
+            <div class="spec-skeleton">
+              {#each Array(6) as _}<Skeleton width="100%" height="1.2rem" />{/each}
+            </div>
+          {:else if mrDiff}
+            <div class="diff-summary">
+              <span class="diff-stat">{mrDiff.files_changed ?? 0} files changed</span>
+              <span class="diff-ins">+{mrDiff.insertions ?? 0}</span>
+              <span class="diff-del">-{mrDiff.deletions ?? 0}</span>
+            </div>
+            {#if mrDiff.files?.length > 0}
+              <div class="diff-file-list">
+                {#each mrDiff.files as file}
+                  <div class="diff-file">
+                    <div class="diff-file-header">
+                      <Badge value={file.status ?? 'modified'} variant={file.status === 'added' ? 'success' : file.status === 'deleted' ? 'danger' : 'info'} />
+                      <span class="diff-file-path mono">{file.path}</span>
+                      {#if file.insertions != null || file.deletions != null}
+                        <span class="diff-file-stats">
+                          {#if file.insertions}<span class="diff-ins">+{file.insertions}</span>{/if}
+                          {#if file.deletions}<span class="diff-del">-{file.deletions}</span>{/if}
+                        </span>
+                      {/if}
+                    </div>
+                    {#if file.patch}
+                      <div class="diff-patch">{#each file.patch.split('\n') as line}<span class={line.startsWith('+') ? 'diff-line-add' : line.startsWith('-') ? 'diff-line-del' : line.startsWith('@@') ? 'diff-line-hunk' : 'diff-line'}>{line}
+</span>{/each}</div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="no-data">No file details available</p>
+            {/if}
+          {:else}
+            <p class="no-data">No diff data available</p>
+          {/if}
         </div>
 
       {:else if activeTab === 'gates'}
         <div class="tab-pane">
-          <EmptyState title={$t('detail_panel.no_gates')} description={$t('detail_panel.no_gates_desc')} />
+          {#if mrGatesLoading}
+            <div class="spec-skeleton">
+              {#each Array(3) as _}<Skeleton width="100%" height="2rem" />{/each}
+            </div>
+          {:else if Array.isArray(mrGates) && mrGates.length > 0}
+            <ul class="gates-list">
+              {#each mrGates as gate}
+                {@const duration = (gate.started_at && gate.finished_at) ? Math.round((gate.finished_at - gate.started_at) * 1000) : gate.duration_ms}
+                <li class="gate-item">
+                  <div class="gate-row">
+                    <Badge
+                      value={gate.status === 'Passed' || gate.status === 'passed' ? 'passed' : gate.status === 'Failed' || gate.status === 'failed' ? 'failed' : gate.status === 'Running' || gate.status === 'running' ? 'running' : gate.status ?? 'pending'}
+                      variant={gate.status === 'Passed' || gate.status === 'passed' ? 'success' : gate.status === 'Failed' || gate.status === 'failed' ? 'danger' : gate.status === 'Running' || gate.status === 'running' ? 'warning' : 'muted'}
+                    />
+                    <span class="gate-name">{gate.name ?? gate.gate_name ?? 'Gate'}</span>
+                    {#if gate.gate_type}
+                      <span class="gate-type-badge">{gate.gate_type}</span>
+                    {/if}
+                    {#if gate.required !== undefined}
+                      <span class="gate-required-badge" class:advisory={!gate.required}>
+                        {gate.required ? 'required' : 'advisory'}
+                      </span>
+                    {/if}
+                    {#if duration}
+                      <span class="gate-duration">{duration}ms</span>
+                    {/if}
+                  </div>
+                  {#if gate.command}
+                    <div class="gate-cmd-row">
+                      <span class="gate-cmd-label">Command</span>
+                      <code class="gate-cmd mono">{gate.command}</code>
+                    </div>
+                  {/if}
+                  {#if gate.output}
+                    <div class="gate-output-row">
+                      <span class="gate-output-label">Output</span>
+                      <pre class="gate-output">{gate.output}</pre>
+                    </div>
+                  {/if}
+                  {#if gate.error}
+                    <div class="gate-output-row">
+                      <span class="gate-output-label">Error</span>
+                      <pre class="gate-output gate-error">{gate.error}</pre>
+                    </div>
+                  {/if}
+                  {#if gate.started_at}
+                    <span class="gate-timing">{fmtDate(gate.started_at)}{#if gate.finished_at} — {fmtDate(gate.finished_at)}{/if}</span>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <p class="no-data">No gates configured for this merge request</p>
+          {/if}
         </div>
 
       {:else if activeTab === 'attestation'}
         <div class="tab-pane">
-          <EmptyState title={$t('detail_panel.no_attestation')} description={$t('detail_panel.no_attestation_desc')} />
+          {#if mrAttestationLoading}
+            <div class="spec-skeleton">
+              {#each Array(4) as _}<Skeleton width="100%" height="1.2rem" />{/each}
+            </div>
+          {:else if mrAttestation}
+            {@const att = mrAttestation.attestation ?? mrAttestation}
+            <div class="attestation-block">
+              <div class="attestation-header">
+                <Badge value="Signed" variant="success" />
+                {#if att.attestation_version}
+                  <span class="att-version">v{att.attestation_version}</span>
+                {/if}
+              </div>
+              <dl class="entity-meta">
+                {#if att.merge_commit_sha}
+                  <dt>Merge commit</dt><dd class="mono" title={att.merge_commit_sha}>{att.merge_commit_sha.slice(0, 12)}...</dd>
+                {/if}
+                {#if att.merged_at}
+                  <dt>Merged at</dt><dd>{fmtDate(att.merged_at)}</dd>
+                {/if}
+                {#if att.spec_ref}
+                  {@const attSpecPath = att.spec_ref.split('@')[0]}
+                  <dt>Spec</dt><dd><button class="entity-link mono" title={att.spec_ref} onclick={() => navigateTo('spec', attSpecPath, { path: attSpecPath })}>{attSpecPath.split('/').pop()}</button></dd>
+                {/if}
+                {#if att.spec_fully_approved !== undefined}
+                  <dt>Spec approved</dt><dd><Badge value={att.spec_fully_approved ? 'yes' : 'no'} variant={att.spec_fully_approved ? 'success' : 'warning'} /></dd>
+                {/if}
+                {#if att.author_agent_id}
+                  <dt>Agent</dt><dd><button class="entity-link mono" title={att.author_agent_id} onclick={() => navigateTo('agent', att.author_agent_id)}>{entityName('agent', att.author_agent_id)}</button></dd>
+                {/if}
+                {#if att.mr_id}
+                  <dt>MR</dt><dd class="mono" title={att.mr_id}>{shortId(att.mr_id)}</dd>
+                {/if}
+                {#if att.task_id}
+                  <dt>Task</dt><dd><button class="entity-link" title={att.task_id} onclick={() => navigateTo('task', att.task_id)}>{entityName('task', att.task_id)}</button></dd>
+                {/if}
+                {#if att.repo_id}
+                  <dt>Repo</dt><dd class="mono" title={att.repo_id}>{shortId(att.repo_id)}</dd>
+                {/if}
+                {#if att.gate_results?.length > 0}
+                  {@const passed = att.gate_results.filter(g => g.status === 'Passed' || g.status === 'passed').length}
+                  {@const total = att.gate_results.length}
+                  <dt>Gates</dt>
+                  <dd>
+                    <Badge value="{passed}/{total} passed" variant={passed === total ? 'success' : 'warning'} />
+                  </dd>
+                {/if}
+              </dl>
+              {#if mrAttestation.signature}
+                <div class="att-sig-block">
+                  <span class="att-sig-label">Ed25519 Signature</span>
+                  <code class="att-sig-value mono" title={mrAttestation.signature}>{mrAttestation.signature.slice(0, 24)}...</code>
+                </div>
+              {/if}
+            </div>
+          {:else}
+            <p class="no-data">No attestation bundle available for this merge request</p>
+          {/if}
+        </div>
+
+      {:else if activeTab === 'timeline'}
+        <div class="tab-pane">
+          {#if mrTimelineLoading}
+            <div class="spec-skeleton">
+              {#each Array(5) as _}<Skeleton width="100%" height="1.5rem" />{/each}
+            </div>
+          {:else if Array.isArray(mrTimeline) && mrTimeline.length > 0}
+            <div class="timeline-list">
+              {#each mrTimeline as evt, i}
+                <div class="timeline-item">
+                  <div class="timeline-connector">
+                    <div class="timeline-dot timeline-dot-{timelineEventVariant(evt.event_type ?? evt.event)}"></div>
+                    {#if i < mrTimeline.length - 1}<div class="timeline-line"></div>{/if}
+                  </div>
+                  <div class="timeline-content">
+                    <div class="timeline-header">
+                      <Badge value={timelineEventLabel(evt.event_type ?? evt.event)} variant={timelineEventVariant(evt.event_type ?? evt.event)} />
+                      <span class="timeline-time">{fmtDate(evt.timestamp ?? evt.created_at)}</span>
+                    </div>
+                    {#if evt.actor || evt.actor_id || evt.agent_id}
+                      <span class="timeline-actor mono">{evt.actor ?? shortId(evt.actor_id ?? evt.agent_id)}</span>
+                    {/if}
+                    {#if evt.detail || evt.message || evt.details}
+                      <p class="timeline-detail">{evt.detail ?? evt.message ?? (typeof evt.details === 'string' ? evt.details : JSON.stringify(evt.details))}</p>
+                    {/if}
+                    {#if evt.gate_name}
+                      <span class="timeline-gate-ref mono">{evt.gate_name}</span>
+                    {/if}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <p class="no-data">No timeline events for this merge request</p>
+          {/if}
+        </div>
+
+      {:else if activeTab === 'reviews'}
+        <div class="tab-pane">
+          {#if mrReviewsLoading}
+            <div class="spec-skeleton">
+              {#each Array(3) as _}<Skeleton width="100%" height="2rem" />{/each}
+            </div>
+          {:else}
+            {#if Array.isArray(mrReviews) && mrReviews.length > 0}
+              <span class="progress-section-label">Reviews</span>
+              <div class="reviews-list">
+                {#each mrReviews as review}
+                  <div class="review-item">
+                    <div class="review-header">
+                      <Badge
+                        value={review.decision ?? review.status ?? 'review'}
+                        variant={
+                          (review.decision === 'approved' || review.status === 'approved') ? 'success' :
+                          (review.decision === 'changes_requested' || review.status === 'changes_requested') ? 'danger' : 'info'
+                        }
+                      />
+                      <span class="review-author mono">{review.reviewer ?? review.user_id ?? shortId(review.reviewer_id)}</span>
+                      <span class="review-time">{fmtDate(review.created_at ?? review.timestamp)}</span>
+                    </div>
+                    {#if review.body}
+                      <p class="review-body">{review.body}</p>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="no-data no-data-sm">No reviews yet</p>
+            {/if}
+
+            {#if Array.isArray(mrComments) && mrComments.length > 0}
+              <span class="progress-section-label">Comments</span>
+              <div class="reviews-list">
+                {#each mrComments as comment}
+                  <div class="review-item comment-item">
+                    <div class="review-header">
+                      <span class="review-author mono">{comment.author ?? comment.user_id ?? shortId(comment.author_id)}</span>
+                      <span class="review-time">{fmtDate(comment.created_at ?? comment.timestamp)}</span>
+                    </div>
+                    {#if comment.body}
+                      <p class="review-body">{comment.body}</p>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="no-data no-data-sm">No comments yet</p>
+            {/if}
+
+            <!-- Comment submission form -->
+            <div class="comment-form">
+              <span class="progress-section-label">Add Comment</span>
+              <textarea
+                class="comment-textarea"
+                bind:value={newCommentText}
+                placeholder="Write a comment..."
+                rows="2"
+                disabled={submittingComment}
+              ></textarea>
+              <div class="comment-form-actions">
+                <Button variant="primary" size="sm" onclick={submitComment} disabled={!newCommentText.trim() || submittingComment}>
+                  {submittingComment ? 'Posting...' : 'Comment'}
+                </Button>
+              </div>
+            </div>
+
+            <!-- Review submission form -->
+            <div class="comment-form">
+              <span class="progress-section-label">Submit Review</span>
+              <div class="review-form-row">
+                <select class="review-decision-select" bind:value={newReviewDecision}>
+                  <option value="approved">Approve</option>
+                  <option value="changes_requested">Request Changes</option>
+                </select>
+              </div>
+              <textarea
+                class="comment-textarea"
+                bind:value={newReviewBody}
+                placeholder="Review comment (optional)..."
+                rows="2"
+                disabled={submittingReview}
+              ></textarea>
+              <div class="comment-form-actions">
+                <Button
+                  variant={newReviewDecision === 'approved' ? 'primary' : 'secondary'}
+                  size="sm"
+                  onclick={submitReview}
+                  disabled={submittingReview}
+                >
+                  {submittingReview ? 'Submitting...' : newReviewDecision === 'approved' ? 'Approve' : 'Request Changes'}
+                </Button>
+              </div>
+            </div>
+          {/if}
         </div>
 
       {:else if activeTab === 'trace'}
         <div class="tab-pane">
-          <EmptyState title={$t('detail_panel.no_trace')} description={$t('detail_panel.no_trace_desc')} />
+          {#if agentLogsLoading}
+            <div class="spec-skeleton">
+              {#each Array(5) as _}<Skeleton width="100%" height="1.5rem" />{/each}
+            </div>
+          {:else if Array.isArray(agentLogs) && agentLogs.length > 0}
+            <div class="trace-list">
+              {#each agentLogs as entry}
+                <div class="trace-entry">
+                  {#if entry.timestamp || entry.created_at}
+                    <span class="trace-time">{fmtDate(entry.timestamp ?? entry.created_at)}</span>
+                  {/if}
+                  <span class="trace-msg">{entry.message ?? entry.content ?? JSON.stringify(entry)}</span>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <p class="no-data">No trace logs available for this agent</p>
+          {/if}
         </div>
 
       {:else if activeTab === 'ask-why'}
@@ -1701,6 +2402,41 @@
     flex-shrink: 0;
   }
 
+  .task-priority {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 1px var(--space-1);
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+
+  .task-priority.priority-high,
+  .task-priority.priority-critical {
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  }
+
+  .task-priority.priority-low {
+    color: var(--color-text-muted);
+    background: var(--color-surface-elevated);
+  }
+
+  .progress-mrs {
+    font-size: var(--text-xs);
+    color: var(--color-success);
+    margin-left: auto;
+  }
+
+  .progress-section-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
+    margin-top: var(--space-2);
+  }
+
   /* Links tab */
   .links-list {
     list-style: none;
@@ -1868,5 +2604,519 @@
     padding: var(--space-2) var(--space-3);
     border-top: 1px solid var(--color-border);
     flex-shrink: 0;
+  }
+
+  /* ── MR Diff tab ─────────────────────────────────────────────────────────── */
+  .diff-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .diff-stat { font-weight: 600; color: var(--color-text); }
+  .diff-stat-inline { font-size: var(--text-xs); color: var(--color-text-secondary); margin-right: var(--space-1); }
+  .diff-ins { color: var(--color-success); font-family: var(--font-mono); font-size: var(--text-xs); }
+  .diff-del { color: var(--color-danger); font-family: var(--font-mono); font-size: var(--text-xs); }
+
+  .diff-file-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .diff-file {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+
+  .diff-file-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .diff-file-path {
+    flex: 1;
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .diff-file-stats {
+    display: flex;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  .diff-patch {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--color-text);
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  .diff-line { display: block; }
+  .diff-line-add { display: block; background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); }
+  .diff-line-del { display: block; background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); }
+  .diff-line-hunk { display: block; color: var(--color-info); font-weight: 500; background: color-mix(in srgb, var(--color-info) 8%, transparent); }
+
+  /* ── MR Gates tab ────────────────────────────────────────────────────────── */
+  .gates-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .gate-item {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .gate-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .gate-name {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+    flex: 1;
+  }
+
+  .gate-duration {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .gate-cmd {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    padding: var(--space-1) var(--space-2);
+    background: var(--color-surface);
+    border-radius: var(--radius-sm);
+    display: block;
+  }
+
+  .gate-output {
+    margin: 0;
+    padding: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--color-text-muted);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    max-height: 150px;
+    overflow-y: auto;
+  }
+
+  .gate-error { color: var(--color-danger); }
+
+  .gate-type-badge {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: 1px var(--space-2);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+  }
+
+  .gate-required-badge {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    color: var(--color-danger);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .gate-required-badge.advisory {
+    background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+    color: var(--color-text-muted);
+    border-color: var(--color-border);
+  }
+
+  .gate-cmd-row,
+  .gate-output-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .gate-cmd-label,
+  .gate-output-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .gate-timing {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  /* ── MR Attestation tab ──────────────────────────────────────────────────── */
+  .attestation-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .attestation-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .att-version {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .att-sig-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  .att-sig-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .att-sig-value {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    word-break: break-all;
+    line-height: 1.5;
+  }
+
+  /* ── Agent Trace tab ─────────────────────────────────────────────────────── */
+  .trace-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .trace-entry {
+    display: flex;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+  }
+
+  .trace-entry:last-child { border-bottom: none; }
+
+  .trace-time {
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .trace-msg {
+    color: var(--color-text);
+    word-break: break-word;
+  }
+
+  /* ── Clickable entity links ─────────────────────────────────────────────── */
+  .entity-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--color-primary);
+    cursor: pointer;
+    font: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-color: color-mix(in srgb, var(--color-primary) 40%, transparent);
+    transition: color var(--transition-fast), text-decoration-color var(--transition-fast);
+  }
+
+  .entity-link:hover {
+    color: var(--color-primary-hover, var(--color-primary));
+    text-decoration-color: var(--color-primary);
+  }
+
+  .entity-link:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .entity-link.mono {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .clickable-row {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .clickable-row:hover {
+    background: var(--color-surface-hover, color-mix(in srgb, var(--color-primary) 5%, transparent));
+    border-color: color-mix(in srgb, var(--color-primary) 30%, transparent);
+  }
+
+  .clickable-row:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  /* ── Timeline tab ───────────────────────────────────────────────────────── */
+  .timeline-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .timeline-item {
+    display: flex;
+    gap: var(--space-3);
+    min-height: 48px;
+  }
+
+  .timeline-connector {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 16px;
+    flex-shrink: 0;
+    padding-top: var(--space-2);
+  }
+
+  .timeline-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid var(--color-border-strong);
+    background: var(--color-surface);
+    flex-shrink: 0;
+    z-index: 1;
+  }
+
+  .timeline-dot-success { border-color: var(--color-success); background: color-mix(in srgb, var(--color-success) 20%, transparent); }
+  .timeline-dot-danger { border-color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 20%, transparent); }
+  .timeline-dot-warning { border-color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 20%, transparent); }
+  .timeline-dot-info { border-color: var(--color-info); background: color-mix(in srgb, var(--color-info) 20%, transparent); }
+
+  .timeline-line {
+    width: 2px;
+    flex: 1;
+    background: var(--color-border);
+    margin-top: var(--space-1);
+  }
+
+  .timeline-content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-1) 0 var(--space-3) 0;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .timeline-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .timeline-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: auto;
+  }
+
+  .timeline-actor {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .timeline-detail {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    margin: 0;
+    line-height: 1.4;
+  }
+
+  .timeline-gate-ref {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: 1px var(--space-1);
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius-sm);
+    width: fit-content;
+  }
+
+  /* ── Reviews tab ────────────────────────────────────────────────────────── */
+  .reviews-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .review-item {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .review-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .review-author {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .review-time {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: auto;
+  }
+
+  .review-body {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    margin: 0;
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+
+  .comment-item {
+    border-left: 3px solid var(--color-border-strong);
+  }
+
+  .no-data-sm {
+    padding: var(--space-2) 0;
+    font-size: var(--text-xs);
+  }
+
+  /* ── Comment/Review form ─────────────────────────────────────────────────── */
+  .comment-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .comment-textarea {
+    width: 100%;
+    min-height: 48px;
+    max-height: 120px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    resize: vertical;
+    box-sizing: border-box;
+  }
+
+  .comment-textarea:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+    border-color: var(--color-focus);
+  }
+
+  .comment-textarea:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .comment-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .review-form-row {
+    display: flex;
+    gap: var(--space-2);
+  }
+
+  .review-decision-select {
+    appearance: none;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    padding: var(--space-1) var(--space-5) var(--space-1) var(--space-2);
+    cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right var(--space-1) center;
+    background-size: var(--space-3);
+  }
+
+  .review-decision-select:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  /* ── Spec history reason ────────────────────────────────────────────────── */
+  .history-reason {
+    font-size: var(--text-xs);
+    color: var(--color-danger);
+    margin: 0;
+    padding: var(--space-1) var(--space-2);
+    background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+    border-radius: var(--radius-sm);
+    line-height: 1.4;
   }
 </style>

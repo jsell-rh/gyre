@@ -122,7 +122,7 @@ This is richer than any external changelog generator because the forge has nativ
 
 Releases are triggered explicitly (not on every push). The flow:
 
-1. **Human or CEO agent triggers release:**
+1. **Human or workspace orchestrator triggers release:**
    ```
    gyre release prepare
    ```

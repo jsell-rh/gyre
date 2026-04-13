@@ -70,8 +70,18 @@
       } else if (tab === 'merge-requests') {
         mrs = await api.mergeRequests({ repository_id: repoId });
       } else if (tab === 'merge-queue') {
-        const all = await api.mergeQueue();
-        queue = Array.isArray(all) ? all.filter(e => e.repository_id === repoId || e.repo_id === repoId) : [];
+        const [all, mrList] = await Promise.all([
+          api.mergeQueue(),
+          api.mergeRequests({ repository_id: repoId }),
+        ]);
+        const mrMap = Object.fromEntries((Array.isArray(mrList) ? mrList : []).map(m => [m.id, m]));
+        queue = (Array.isArray(all) ? all : [])
+          .filter(e => e.repository_id === repoId || e.repo_id === repoId)
+          .map(e => {
+            const mrId = e.merge_request_id ?? e.mr_id;
+            const mr = mrMap[mrId];
+            return { ...e, _mr_title: mr?.title, _mr_status: mr?.status, _mr_branch: mr?.source_branch };
+          });
       }
     } catch (e) {
       error = $t('code_tab.load_failed', { values: { tab, error: e.message } });
@@ -280,18 +290,35 @@
           <thead>
             <tr>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('title')}>{$t('code_tab.col_title')} {sortIcon('title')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('source_branch')}>Branch {sortIcon('source_branch')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>{$t('code_tab.col_status')} {sortIcon('status')}</button></th>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('author_id')}>{$t('code_tab.col_author')} {sortIcon('author_id')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('updated_at')}>{$t('code_tab.col_updated')} {sortIcon('updated_at')}</button></th>
             </tr>
           </thead>
           <tbody>
             {#each filteredMrs as mr}
               <tr class="table-row" onclick={() => onRowClick(mr, 'mr')} tabindex="0" role="button" aria-label="View MR {mr.title}" onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(mr, 'mr'); } }}>
-                <td title={mr.title}>{mr.title}</td>
+                <td>
+                  <div class="mr-title-cell">
+                    <span title={mr.title}>{mr.title}</span>
+                    {#if mr.spec_ref}
+                      <span class="mr-spec-ref" title={mr.spec_ref}>{mr.spec_ref.split('@')[0]?.split('/').pop()}</span>
+                    {/if}
+                  </div>
+                </td>
+                <td class="mono secondary">{mr.source_branch ?? '—'}</td>
                 <td><span class="status-badge status-{mr.status}">{mr.status}</span></td>
-                <td class="secondary">{mr.author_id ?? '—'}</td>
-                <td class="secondary">{relativeTime(mr.updated_at)}</td>
+                <td class="secondary">
+                  <div class="mr-updated-cell">
+                    <span>{relativeTime(mr.updated_at)}</span>
+                    {#if mr.diff_stats}
+                      <span class="mr-diff-stats">
+                        <span class="mr-diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                        <span class="mr-diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                      </span>
+                    {/if}
+                  </div>
+                </td>
               </tr>
             {/each}
           </tbody>
@@ -305,17 +332,25 @@
         <table class="code-table">
           <thead>
             <tr>
-              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('mr')}>{$t('code_tab.col_mr')} {sortIcon('mr')}</button></th>
+              <th scope="col"><button class="sort-btn" onclick={() => toggleSort('mr')}>Merge Request {sortIcon('mr')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('priority')}>{$t('code_tab.col_priority')} {sortIcon('priority')}</button></th>
               <th scope="col"><button class="sort-btn" onclick={() => toggleSort('status')}>{$t('code_tab.col_status')} {sortIcon('status')}</button></th>
             </tr>
           </thead>
           <tbody>
             {#each filteredQueue as entry}
-              <tr class="table-row" onclick={() => onRowClick(entry, 'mr')} tabindex="0" role="button" aria-label={$t('code_tab.view_queue_entry')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick(entry, 'mr'); } }}>
-                <td class="mono">{entry.merge_request_id ?? entry.mr_id ?? '—'}</td>
-                <td>{entry.priority ?? '—'}</td>
-                <td><span class="status-badge">{entry.status ?? 'queued'}</span></td>
+              {@const mrId = entry.merge_request_id ?? entry.mr_id}
+              <tr class="table-row" onclick={() => onRowClick({ id: mrId, ...entry }, 'mr')} tabindex="0" role="button" aria-label={entry._mr_title ? `View MR: ${entry._mr_title}` : $t('code_tab.view_queue_entry')} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onRowClick({ id: mrId, ...entry }, 'mr'); } }}>
+                <td>
+                  <div class="queue-mr-cell">
+                    <span>{entry._mr_title ?? (mrId ? mrId.slice(0, 8) + '...' : '—')}</span>
+                    {#if entry._mr_branch}
+                      <span class="queue-branch mono">{entry._mr_branch}</span>
+                    {/if}
+                  </div>
+                </td>
+                <td><span class="priority-pill priority-{entry.priority <= 25 ? 'high' : entry.priority <= 75 ? 'normal' : 'low'}">P{entry.priority ?? '—'}</span></td>
+                <td><span class="status-badge status-{entry._mr_status ?? ''}">{entry.status ?? 'queued'}</span></td>
               </tr>
             {/each}
           </tbody>
@@ -564,6 +599,80 @@
     border-color: var(--color-primary);
   }
   .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  /* MR title cell with spec ref */
+  .mr-title-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .mr-spec-ref {
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-text-muted);
+    padding: 1px var(--space-1);
+    background: color-mix(in srgb, var(--color-info) 8%, transparent);
+    border-radius: var(--radius-sm);
+    width: fit-content;
+  }
+
+  /* Queue MR cell */
+  .queue-mr-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .queue-branch {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  /* Priority pill */
+  .priority-pill {
+    display: inline-block;
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-full);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    font-family: var(--font-mono);
+  }
+
+  .priority-high {
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    color: var(--color-danger);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+  }
+
+  .priority-normal {
+    background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+    color: var(--color-warning);
+    border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent);
+  }
+
+  .priority-low {
+    background: var(--color-surface-elevated);
+    color: var(--color-text-muted);
+    border: 1px solid var(--color-border);
+  }
+
+  /* MR updated cell with diff stats */
+  .mr-updated-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .mr-diff-stats {
+    display: flex;
+    gap: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+  }
+
+  .mr-diff-ins { color: var(--color-success); }
+  .mr-diff-del { color: var(--color-danger); }
 
   @media (prefers-reduced-motion: reduce) {
     .subtab-btn, .sort-btn, .table-row { transition: none; }

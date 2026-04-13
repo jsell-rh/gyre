@@ -19,8 +19,11 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
 
     let agents = state.agents.list().await?;
     for mut agent in agents {
-        // Skip already-dead or already-paused agents.
-        if agent.status == AgentStatus::Dead || agent.status == AgentStatus::Paused {
+        // Skip agents in terminal states.
+        if matches!(
+            agent.status,
+            AgentStatus::Dead | AgentStatus::Stopped | AgentStatus::Failed
+        ) {
             continue;
         }
         if agent.is_alive(now, HEARTBEAT_TIMEOUT_SECS) {
@@ -95,8 +98,8 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
 
             DisconnectedBehavior::Pause => {
                 info!(agent_id = %agent.id, agent_name = %agent.name,
-                    "pausing stale agent (disconnected_behavior=pause)");
-                let _ = agent.transition_status(AgentStatus::Paused);
+                    "stopping stale agent (disconnected_behavior=pause)");
+                let _ = agent.transition_status(AgentStatus::Stopped);
                 let _ = state.agents.update(&agent).await;
 
                 let ws_id = agent.workspace_id.clone();
@@ -105,8 +108,8 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                     MessageKind::AgentStatusChanged,
                     Some(serde_json::json!({
                         "agent_id": agent.id.to_string(),
-                        "status": "paused",
-                        "reason": format!("Agent {} paused (no heartbeat)", agent.name),
+                        "status": "stopped",
+                        "reason": format!("Agent {} stopped (no heartbeat, pause behavior)", agent.name),
                     })),
                 );
             }

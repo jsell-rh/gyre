@@ -195,21 +195,25 @@ describe('DetailPanel', () => {
     });
 
     it('calls spawnAgent with correct payload on click', async () => {
+      render(DetailPanel, { props: { entity: interrogationEntity } });
+      const askWhyTab = screen.getByRole('tab', { name: /ask why/i });
+      await fireEvent.click(askWhyTab);
+      // Clear any background fetches (e.g. agent detail) before the spawn click
+      global.fetch.mockClear();
       global.fetch.mockResolvedValueOnce({
         ok: true,
         status: 200,
         json: async () => ({ agent: { id: 'intr-1' }, token: 'tok', worktree_path: '/w', clone_url: 'u', branch: 'b' }),
       });
-      render(DetailPanel, { props: { entity: interrogationEntity } });
-      const askWhyTab = screen.getByRole('tab', { name: /ask why/i });
-      await fireEvent.click(askWhyTab);
       const btn = screen.getByRole('button', { name: /ask why.*spawn review/i });
       await fireEvent.click(btn);
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining('/agents/spawn'),
         expect.objectContaining({ method: 'POST' }),
       );
-      const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+      const spawnCall = global.fetch.mock.calls.find(c => c[0].includes('/agents/spawn'));
+      expect(spawnCall).toBeTruthy();
+      const body = JSON.parse(spawnCall[1].body);
       expect(body.agent_type).toBe('interrogation');
       expect(body.conversation_sha).toBe('deadbeef1234');
       expect(body.repo_id).toBe('repo-abc');
@@ -225,6 +229,8 @@ describe('DetailPanel', () => {
       render(DetailPanel, { props: { entity: noContextEntity } });
       const askWhyTab = screen.getByRole('tab', { name: /ask why/i });
       await fireEvent.click(askWhyTab);
+      // Reset fetch mock after any background agent detail fetches
+      global.fetch.mockClear();
       const btn = screen.getByRole('button', { name: /ask why.*spawn review/i });
       await fireEvent.click(btn);
       expect(global.fetch).not.toHaveBeenCalled();

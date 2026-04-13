@@ -133,7 +133,7 @@ Close the gaps identified in the CISO audit (2026-03-23):
 
 ---
 
-## Open Questions for CEO Review
+## Open Questions for Review
 
 1. Should M26 include the agent-side `wg0` interface setup (M26.2), or ship coordination-plane
    only first and tackle agent-side in a follow-up?

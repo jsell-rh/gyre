@@ -27,6 +27,21 @@ pub enum TaskPriority {
     Critical,
 }
 
+/// Discriminates task purpose in the spec→orchestrator→task→agent signal chain.
+///
+/// - `Implementation`: triggers mechanical agent spawning (worker agents).
+/// - `Delegation`: triggers repo orchestrator spawning for spec decomposition.
+/// - `Coordination`: triggers repo orchestrator for cross-repo dependency changes.
+///
+/// Tasks without a `task_type` (e.g. push-hook spec-lifecycle tasks) do NOT
+/// trigger agent spawning — they are informational until spec approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskType {
+    Implementation,
+    Delegation,
+    Coordination,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: Id,
@@ -51,6 +66,12 @@ pub struct Task {
     pub cancelled_at: Option<u64>,
     /// Human-readable reason for cancellation.
     pub cancelled_reason: Option<String>,
+    /// Task type discriminator for the signal chain. None for pre-approval push-hook tasks.
+    pub task_type: Option<TaskType>,
+    /// Execution priority (lower = first). Tasks with the same order can run in parallel.
+    pub order: Option<u32>,
+    /// Task IDs that must complete before this task starts.
+    pub depends_on: Vec<Id>,
 }
 
 impl Task {
@@ -73,6 +94,9 @@ impl Task {
             spec_path: None,
             cancelled_at: None,
             cancelled_reason: None,
+            task_type: None,
+            order: None,
+            depends_on: Vec::new(),
         }
     }
 

@@ -66,11 +66,14 @@ impl From<Agent> for AgentResponse {
 
 fn parse_agent_status(s: &str) -> Result<AgentStatus, ApiError> {
     match s.to_lowercase().as_str() {
-        "idle" => Ok(AgentStatus::Idle),
         "active" => Ok(AgentStatus::Active),
-        "blocked" => Ok(AgentStatus::Blocked),
-        "error" => Ok(AgentStatus::Error),
+        "idle" => Ok(AgentStatus::Idle),
+        "failed" => Ok(AgentStatus::Failed),
+        "stopped" => Ok(AgentStatus::Stopped),
         "dead" => Ok(AgentStatus::Dead),
+        // Legacy status mappings.
+        "blocked" | "error" => Ok(AgentStatus::Failed),
+        "paused" => Ok(AgentStatus::Stopped),
         _ => Err(ApiError::InvalidInput(format!("unknown agent status: {s}"))),
     }
 }
@@ -336,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn create_agent_and_get() {
         let app = app();
-        let (app, id) = create_test_agent(app, "ceo").await;
+        let (app, id) = create_test_agent(app, "workspace-orchestrator").await;
 
         let resp = app
             .oneshot(
@@ -349,7 +352,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["name"], "ceo");
+        assert_eq!(json["name"], "workspace-orchestrator");
         assert_eq!(json["status"], "idle");
     }
 
@@ -380,8 +383,24 @@ mod tests {
         let app = app();
         let (app, id) = create_test_agent(app, "worker2").await;
 
-        // Idle -> Blocked is invalid
-        let body = serde_json::json!({ "status": "blocked" });
+        // First move to Dead (terminal state).
+        let body = serde_json::json!({ "status": "dead" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/agents/{id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Dead -> Active is invalid (Dead is terminal).
+        let body = serde_json::json!({ "status": "active" });
         let resp = app
             .oneshot(
                 Request::builder()

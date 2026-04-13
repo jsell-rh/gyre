@@ -46,6 +46,10 @@ pub struct SpecLedgerResponse {
     pub drift_status: String,
     pub created_at: u64,
     pub updated_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 impl From<SpecLedgerEntry> for SpecLedgerResponse {
@@ -63,6 +67,8 @@ impl From<SpecLedgerEntry> for SpecLedgerResponse {
             drift_status: e.drift_status,
             created_at: e.created_at,
             updated_at: e.updated_at,
+            repo_id: e.repo_id,
+            workspace_id: e.workspace_id,
         }
     }
 }
@@ -445,6 +451,34 @@ pub async fn approve_spec(
             entry.approval_status = ApprovalStatus::Approved;
             entry.updated_at = now;
             let _ = state.spec_ledger.save(&entry).await;
+
+            // Emit SpecApproved event on the message bus (agent-runtime.md §1).
+            // This is the single trigger for all agent work via the signal chain:
+            // SpecApproved → workspace orchestrator → delegation task → repo orchestrator → sub-tasks → agents.
+            // Destination: Workspace(workspace_id) — consumed by workspace orchestrator.
+            let dest = match entry.workspace_id.as_deref() {
+                Some(ws_id) => {
+                    gyre_common::message::Destination::Workspace(gyre_common::Id::new(ws_id))
+                }
+                None => gyre_common::message::Destination::Broadcast,
+            };
+            state
+                .emit_event(
+                    entry
+                        .workspace_id
+                        .as_ref()
+                        .map(|ws| gyre_common::Id::new(ws.as_str())),
+                    dest,
+                    gyre_common::message::MessageKind::SpecApproved,
+                    Some(serde_json::json!({
+                        "repo_id": entry.repo_id,
+                        "spec_path": spec_path,
+                        "spec_sha": req.sha,
+                        "approved_by": event.approver_id,
+                        "approval_id": event.id,
+                    })),
+                )
+                .await;
         }
     }
 
@@ -571,6 +605,81 @@ pub async fn reject_spec(
             mr.status = gyre_domain::MrStatus::Closed;
             mr.updated_at = now;
             let _ = state.merge_requests.update(&mr).await;
+        }
+    }
+
+    // Spec rejection mid-flight (agent-runtime.md §1): cancel all in-flight tasks
+    // referencing this spec and shutdown active agents working on those tasks.
+    {
+        let spec_tasks = state
+            .tasks
+            .list_by_spec_path(&spec_path)
+            .await
+            .unwrap_or_default();
+        let cancel_reason = format!("spec rejected: {}", req.reason);
+        for mut task in spec_tasks {
+            // Only cancel tasks that are still in-flight (Backlog, InProgress, Review, Blocked).
+            if matches!(
+                task.status,
+                gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
+            ) {
+                continue;
+            }
+            let _ = task.cancel(Some(cancel_reason.clone()), now);
+            let _ = state.tasks.update(&task).await;
+
+            // If an agent is working on this task, stop it.
+            let agents = state.agents.list().await.unwrap_or_default();
+            for mut agent in agents {
+                if agent.current_task_id.as_ref() == Some(&task.id)
+                    && matches!(agent.status, gyre_domain::AgentStatus::Active)
+                {
+                    let _ = agent.transition_status(gyre_domain::AgentStatus::Stopped);
+                    let _ = state.agents.update(&agent).await;
+
+                    // Send shutdown message to agent's inbox.
+                    state
+                        .emit_event(
+                            None,
+                            gyre_common::message::Destination::Agent(agent.id.clone()),
+                            gyre_common::message::MessageKind::StatusUpdate,
+                            Some(serde_json::json!({
+                                "action": "shutdown",
+                                "reason": cancel_reason,
+                                "spec_path": spec_path,
+                                "grace_period_secs": 60,
+                            })),
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
+    // Agent-runtime §1: Create priority-2 "Spec rejected" notification for
+    // workspace Admin/Developer members.
+    if let Some(ref ws_id) = entry.workspace_id {
+        let ws_id = gyre_common::Id::new(ws_id.as_str());
+        if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
+            for member in &members {
+                if matches!(
+                    member.role,
+                    gyre_domain::WorkspaceRole::Admin
+                        | gyre_domain::WorkspaceRole::Developer
+                        | gyre_domain::WorkspaceRole::Owner
+                ) {
+                    let tenant_id = entry.repo_id.as_deref().unwrap_or("default");
+                    crate::notifications::notify(
+                        state.as_ref(),
+                        ws_id.clone(),
+                        member.user_id.clone(),
+                        gyre_common::NotificationType::SpecRejected,
+                        format!("Spec '{}' rejected: {}", spec_path, req.reason),
+                        tenant_id,
+                    )
+                    .await;
+                }
+            }
         }
     }
 
@@ -902,6 +1011,8 @@ mod tests {
                         drift_status: "unknown".to_string(),
                         created_at: 1700000000,
                         updated_at: 1700000000,
+                        repo_id: None,
+                        workspace_id: None,
                     })
                     .await
                     .unwrap();
@@ -1158,6 +1269,8 @@ mod tests {
             drift_status: "unknown".to_string(),
             created_at: 1700000000,
             updated_at: 1700000000,
+            repo_id: None,
+            workspace_id: None,
         }
     }
 
@@ -1609,6 +1722,138 @@ specs:
             store[0].link_type,
             crate::spec_registry::SpecLinkType::Supersedes
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Spec rejection mid-flight (agent-runtime §1)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_cancels_in_flight_tasks() {
+        let state = test_state();
+        // Seed a spec entry.
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/target.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+
+        // Create an in-flight task linked to the spec.
+        let task_id = gyre_common::Id::new("reject-task-1");
+        let mut task = gyre_domain::Task::new(task_id.clone(), "Implement target", 1700000000);
+        task.spec_path = Some("system/target.md".to_string());
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        let _ = task.transition_status(gyre_domain::TaskStatus::InProgress);
+        state.tasks.create(&task).await.unwrap();
+
+        // Create an active agent working on this task.
+        let agent_id = gyre_common::Id::new("reject-agent-1");
+        let mut agent = gyre_domain::Agent::new(agent_id.clone(), "reject-worker", 1700000000);
+        agent.assign_task(task_id.clone());
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "spec is invalid" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Ftarget.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Task should be cancelled.
+        let updated_task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(updated_task.status, gyre_domain::TaskStatus::Cancelled);
+        assert!(updated_task
+            .cancelled_reason
+            .unwrap()
+            .contains("spec rejected"));
+
+        // Agent should be stopped.
+        let updated_agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
+        assert_eq!(updated_agent.status, gyre_domain::AgentStatus::Stopped);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_skips_already_done_tasks() {
+        let state = test_state();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/done-spec.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+
+        // Create a completed task linked to the spec.
+        let task_id = gyre_common::Id::new("done-task-1");
+        let mut task = gyre_domain::Task::new(task_id.clone(), "Already done", 1700000000);
+        task.spec_path = Some("system/done-spec.md".to_string());
+        let _ = task.transition_status(gyre_domain::TaskStatus::InProgress);
+        let _ = task.transition_status(gyre_domain::TaskStatus::Review);
+        let _ = task.transition_status(gyre_domain::TaskStatus::Done);
+        state.tasks.create(&task).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "not needed" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdone-spec.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Done task should remain done (not cancelled).
+        let updated_task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
+        assert_eq!(updated_task.status, gyre_domain::TaskStatus::Done);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_sets_status_to_rejected() {
+        let (app, state) = app_with_spec();
+        let body = serde_json::json!({ "reason": "outdated design" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let entry = state
+            .spec_ledger
+            .find_by_path("system/design-principles.md")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.approval_status, ApprovalStatus::Rejected);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -291,12 +291,11 @@ pub async fn archive_repo(
             .as_ref()
             .map(|tid| repo_task_ids.contains(tid.as_str()))
             .unwrap_or(false);
-        let stoppable = matches!(
-            agent.status,
-            AgentStatus::Active | AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::Paused
-        );
+        let stoppable = matches!(agent.status, AgentStatus::Active | AgentStatus::Idle);
         if is_repo_task && stoppable {
-            agent.status = AgentStatus::Dead;
+            // Stopped (not Dead): repo archive is operator-initiated shutdown,
+            // not heartbeat expiration (agent-runtime.md §1 AgentStatus enum).
+            let _ = agent.transition_status(AgentStatus::Stopped);
             state.agents.update(&agent).await?;
         }
     }
@@ -947,14 +946,14 @@ mod tests {
         // Archive
         archive_via_api(&app, &repo_id).await;
 
-        // Agent 1 should be Dead
+        // Agent 1 should be Stopped (repo archive is operator-initiated shutdown)
         let a1 = state
             .agents
             .find_by_id(&Id::new("agent-1"))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(a1.status, AgentStatus::Dead);
+        assert_eq!(a1.status, AgentStatus::Stopped);
 
         // Agent 2 still Idle
         let a2 = state

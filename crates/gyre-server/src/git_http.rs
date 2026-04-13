@@ -470,6 +470,7 @@ pub async fn git_receive_pack(
                 &update.new_sha,
                 now,
                 Some(repo_id_clone.as_str()),
+                Some(repo_workspace_id_str.as_str()),
                 Some(&state_clone.workspaces),
                 Some(&state_clone.repos),
                 workspace_tenant_id.as_ref(),
@@ -1248,6 +1249,9 @@ async fn process_spec_lifecycle(
                 "Auto-created by spec lifecycle hook.\nSpec: {path}\nRepo: {repo_id}"
             ));
             task.spec_path = Some(path.clone());
+            task.repo_id = gyre_common::Id::new(repo_id);
+            // task_type intentionally left as None: push-hook tasks are informational
+            // and must NOT trigger agent spawning (agent-runtime.md §1 Phase 4).
 
             match state.tasks.create(&task).await {
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),

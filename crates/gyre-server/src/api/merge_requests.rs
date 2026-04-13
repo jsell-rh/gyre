@@ -694,10 +694,21 @@ pub async fn get_diff(
         None => return Ok(Json(mock_diff_response())),
     };
 
+    // For merged MRs, source and target may point to the same commit after
+    // fast-forward merge, producing an empty diff. Diff the source branch
+    // against its parent commit to show what the MR actually changed.
+    // This works for single-commit branches (the common agent case) and
+    // is a reasonable approximation for multi-commit branches.
+    let diff_from = if mr.status == gyre_domain::MrStatus::Merged {
+        format!("{}^", mr.source_branch)
+    } else {
+        mr.target_branch.clone()
+    };
+
     // If git diff fails (branches don't exist yet), return demo data
     let diff = match state
         .git_ops
-        .diff(&repo.path, &mr.target_branch, &mr.source_branch)
+        .diff(&repo.path, &diff_from, &mr.source_branch)
         .await
     {
         Ok(d) => d,

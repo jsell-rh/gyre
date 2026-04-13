@@ -249,7 +249,10 @@
                 <span class="agent-row-status agent-status-{agent.status ?? 'active'}">{agent.status ?? 'active'}</span>
               </div>
               {#if agent.task_id}
-                <span class="agent-row-task">{$t('repo_mode.task_label', { values: { id: agent.task_id } })}</span>
+                <span class="agent-row-task" title={agent.task_id}>{$t('repo_mode.task_label', { values: { id: agent.task_id.length > 12 ? agent.task_id.slice(0, 8) + '...' : agent.task_id } })}</span>
+              {/if}
+              {#if agent.branch}
+                <span class="agent-row-branch">{agent.branch}</span>
               {/if}
             </button>
             {#if selectedAgentId === agent.id}
@@ -597,6 +600,12 @@
   }
 
   .agent-row-task {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .agent-row-branch {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     font-family: var(--font-mono);

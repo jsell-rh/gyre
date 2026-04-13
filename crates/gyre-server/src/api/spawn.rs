@@ -282,6 +282,35 @@ pub async fn spawn_agent(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {} not found", req.task_id)))?;
 
+    // Agent-runtime §1 Phase 4: Only Implementation tasks trigger worker agent spawning.
+    // Delegation and Coordination tasks trigger orchestrator spawning (different path).
+    // Tasks without a task_type (pre-approval push-hook tasks) do NOT trigger agent spawning.
+    // Exception: interrogation agents bypass this check (they are system-initiated, not task-driven).
+    let is_interrogation = req.agent_type.as_deref() == Some("interrogation");
+    if !is_interrogation {
+        match &task.task_type {
+            Some(gyre_domain::TaskType::Implementation) => { /* allowed */ }
+            Some(gyre_domain::TaskType::Delegation) => {
+                return Err(ApiError::InvalidInput(
+                    "delegation tasks trigger orchestrator spawning, not worker agent spawning"
+                        .to_string(),
+                ));
+            }
+            Some(gyre_domain::TaskType::Coordination) => {
+                return Err(ApiError::InvalidInput(
+                    "coordination tasks trigger orchestrator spawning, not worker agent spawning"
+                        .to_string(),
+                ));
+            }
+            None => {
+                return Err(ApiError::InvalidInput(
+                    "tasks without a task_type (pre-approval push-hook tasks) cannot trigger agent spawning; set task_type to 'implementation' first"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
     // Fetch workspace for compute target resolution and clone URL.
     let workspace = state
         .workspaces
@@ -352,8 +381,6 @@ pub async fn spawn_agent(
         .transition_status(AgentStatus::Active)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.create(&agent).await?;
-
-    let is_interrogation = req.agent_type.as_deref() == Some("interrogation");
 
     // HSI §4: Interrogation agents get a short-lived 30-minute JWT.
     let jwt_ttl = if is_interrogation {
@@ -1044,6 +1071,23 @@ pub async fn complete_agent(
         now,
     );
     mr.author_agent_id = Some(agent.id.clone());
+
+    // Propagate spec_ref from the task to the MR for provenance linkage.
+    // If the task has a spec_path, build a spec_ref in "path@sha" format
+    // by looking up the current SHA from the spec ledger.
+    if let Some(task_id) = &agent.current_task_id {
+        if let Ok(Some(task)) = state.tasks.find_by_id(task_id).await {
+            if let Some(ref spec_path) = task.spec_path {
+                if let Ok(Some(entry)) = state.spec_ledger.find_by_path(spec_path).await {
+                    mr.spec_ref = Some(format!("{}@{}", spec_path, entry.current_sha));
+                } else {
+                    // Spec not in ledger — use path without SHA.
+                    mr.spec_ref = Some(spec_path.clone());
+                }
+            }
+        }
+    }
+
     state.merge_requests.create(&mr).await?;
 
     // Transition task to Review (navigate through intermediate states as needed)
@@ -1326,7 +1370,7 @@ mod tests {
     }
 
     async fn create_task(app: Router, title: &str) -> (Router, String) {
-        let body = serde_json::json!({"title": title});
+        let body = serde_json::json!({"title": title, "task_type": "implementation"});
         let resp = app
             .clone()
             .oneshot(
@@ -2198,6 +2242,178 @@ mod tests {
             json["compute_target_id"].as_str().unwrap_or(""),
             &ct_id,
             "spawn should fall back to tenant-default compute target: {json}"
+        );
+    }
+
+    // ── Signal chain: task_type filtering tests (agent-runtime §1 Phase 4) ───
+
+    /// Helper: create a task with a specific task_type via the API.
+    async fn create_task_with_type(
+        app: Router,
+        title: &str,
+        task_type: Option<&str>,
+    ) -> (Router, String) {
+        let mut body = serde_json::json!({"title": title});
+        if let Some(tt) = task_type {
+            body["task_type"] = serde_json::Value::String(tt.to_string());
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Helper: attempt spawn and return the response (without asserting status).
+    async fn try_spawn(
+        app: Router,
+        name: &str,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+    ) -> (Router, axum::response::Response) {
+        let body = serde_json::json!({
+            "name": name,
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (app, resp)
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_delegation_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Delegation task", Some("delegation")).await;
+        let (_, resp) = try_spawn(app, "worker-deleg", &repo_id, &task_id, "feat/deleg").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "delegation tasks must not trigger worker agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("delegation"),
+            "error should mention delegation: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_coordination_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Coordination task", Some("coordination")).await;
+        let (_, resp) = try_spawn(app, "worker-coord", &repo_id, &task_id, "feat/coord").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "coordination tasks must not trigger worker agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("coordination"),
+            "error should mention coordination: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_tasks_without_task_type() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        // Create task without task_type (simulates push-hook pre-approval task).
+        let (app, task_id) = create_task_with_type(app, "Pre-approval push-hook task", None).await;
+        let (_, resp) = try_spawn(app, "worker-none", &repo_id, &task_id, "feat/no-type").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "tasks without task_type must not trigger agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("task_type"),
+            "error should mention task_type: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_allows_implementation_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Implementation task", Some("implementation")).await;
+        let (_, resp) = try_spawn(app, "worker-impl", &repo_id, &task_id, "feat/impl").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "implementation tasks should spawn agents"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrogation_agents_bypass_task_type_check() {
+        // Interrogation agents are system-initiated and should work with any task_type,
+        // including delegation tasks that would normally be rejected.
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Delegation for interrogation", Some("delegation")).await;
+
+        let body = serde_json::json!({
+            "name": "interrogation-bypass",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "interrogation/bypass",
+            "agent_type": "interrogation",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "interrogation agents should bypass task_type filtering"
         );
     }
 }
