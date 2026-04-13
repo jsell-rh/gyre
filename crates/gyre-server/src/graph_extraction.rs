@@ -881,6 +881,7 @@ mod tests {
             first_seen_at: 1000,
             last_seen_at: 1000,
             deleted_at: None,
+            test_node: false,
         }
     }
 

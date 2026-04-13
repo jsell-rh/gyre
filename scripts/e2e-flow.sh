@@ -297,6 +297,20 @@ GATE2_RESPONSE=$(api_post "${API}/repos/${REPO_ID}/gates" "{
 GATE2_ID=$(echo "$GATE2_RESPONSE" | jq -r '.id')
 ok "Gate 'lint-check': ${GATE2_ID} (lint_command, advisory)"
 
+# Create a trace capture gate (observational — emits OTLP spans for flow visualization)
+TRACE_EMITTER="$(cd "$(dirname "$0")" && pwd)/e2e-trace-emitter.sh"
+GATE3_BODY=$(jq -n \
+  --arg cmd "$TRACE_EMITTER" \
+  '{
+    name: "integration-traces",
+    gate_type: "trace_capture",
+    command: ({otlp_port: 14318, test_command: $cmd, max_spans: 100} | tostring),
+    required: false
+  }')
+GATE3_RESPONSE=$(curl -sf -X POST -H "$AUTH" -H "$CT" -d "$GATE3_BODY" "${API}/repos/${REPO_ID}/gates")
+GATE3_ID=$(echo "$GATE3_RESPONSE" | jq -r '.id')
+ok "Gate 'integration-traces': ${GATE3_ID} (trace_capture, observational)"
+
 # Verify gates are listed
 GATES_LIST=$(api_get "${API}/repos/${REPO_ID}/gates")
 GATE_COUNT=$(echo "$GATES_LIST" | jq 'length')
@@ -662,9 +676,9 @@ if [ "$GATE_RESULT_COUNT" -gt 0 ]; then
     echo -e "  ${DIM}  ${line}${NC}"
   done || true
   # Check no required gates failed (merge wouldn't succeed if they did, but verify)
-  GATE_PASSED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Passed")] | length')
-  GATE_FAILED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Failed")] | length')
-  GATE_PENDING=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "Pending" or .status == "Running")] | length')
+  GATE_PASSED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "passed")] | length')
+  GATE_FAILED=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "failed")] | length')
+  GATE_PENDING=$(echo "$GATE_RESULTS" | jq '[.[] | select(.status == "pending" or .status == "running")] | length')
   if [ "$GATE_FAILED" = "0" ]; then
     ok "${GATE_PASSED} passed, ${GATE_PENDING} pending/advisory"
   else
@@ -672,6 +686,29 @@ if [ "$GATE_RESULT_COUNT" -gt 0 ]; then
   fi
 else
   warn "No gate results found — gates may not have triggered"
+fi
+
+# Verify trace capture (flow visualization data)
+info "Checking trace capture for MR..."
+TRACE_RESP=$(curl -s -H "$AUTH" "${API}/merge-requests/${MR_ID}/trace")
+TRACE_SPAN_COUNT=$(echo "$TRACE_RESP" | jq '.spans | length' 2>/dev/null || echo "0")
+if [ "$TRACE_SPAN_COUNT" -gt 0 ] 2>/dev/null; then
+  TRACE_ID=$(echo "$TRACE_RESP" | jq -r '.trace_id // .id // "unknown"')
+  ROOT_SPANS=$(echo "$TRACE_RESP" | jq '.root_spans // [] | length')
+  ok "Trace captured: ${TRACE_SPAN_COUNT} spans, ${ROOT_SPANS} root span(s)"
+  # Show span tree
+  echo "$TRACE_RESP" | jq -r '.spans[] | "    \(.operation_name) [\(.service_name)] \(.duration_us // 0)us"' 2>/dev/null | head -10 | while IFS= read -r line; do
+    echo -e "  ${DIM}${line}${NC}"
+  done || true
+  # Verify at least one span has graph node linkage
+  LINKED_SPANS=$(echo "$TRACE_RESP" | jq '[.spans[] | select(.graph_node_id != null)] | length' 2>/dev/null || echo "0")
+  if [ "$LINKED_SPANS" -gt 0 ] 2>/dev/null; then
+    ok "${LINKED_SPANS} span(s) linked to knowledge graph nodes"
+  else
+    info "No spans linked to graph nodes (graph may not have extracted yet)"
+  fi
+else
+  warn "No trace spans found (trace_capture gate may not have emitted spans)"
 fi
 
 # Push to main to trigger knowledge graph extraction.
@@ -827,6 +864,7 @@ step $((STEP++)) "MR reviews"
 # =============================================================================
 # Submit a review on the merged MR (post-merge review is still valid)
 REVIEW_RESP=$(api_post "${API}/merge-requests/${MR_ID}/reviews" "{
+  \"reviewer_agent_id\": \"e2e-reviewer\",
   \"decision\": \"approved\",
   \"body\": \"LGTM — all acceptance criteria met\"
 }" 2>/dev/null) || REVIEW_RESP=""
@@ -843,6 +881,7 @@ ok "Reviews on MR: ${REVIEW_CT}"
 
 # Submit a comment
 COMMENT_RESP=$(api_post "${API}/merge-requests/${MR_ID}/comments" "{
+  \"author_agent_id\": \"e2e-reviewer\",
   \"body\": \"Great implementation of the greeting service spec.\"
 }" 2>/dev/null) || COMMENT_RESP=""
 [ -n "$COMMENT_RESP" ] && ok "Comment added" || warn "Comment submission failed"
@@ -887,7 +926,7 @@ ok "Workload attestation: pid=${WL_PID}"
 
 # Agent card
 CARD_RESP=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
-  -d "{\"name\":\"e2e-worker\",\"capabilities\":[\"rust\",\"greeting\"],\"protocols\":[\"mcp\"]}" \
+  -d "{\"agent_id\":\"${AGENT_ID}\",\"name\":\"e2e-worker\",\"description\":\"E2E test agent\",\"capabilities\":[\"rust\",\"greeting\"],\"protocols\":[\"mcp\"],\"endpoint\":null}" \
   "${API}/agents/${AGENT_ID}/card")
 CARD_CODE=$(echo "$CARD_RESP" | tail -1)
 ok "Agent card published: HTTP ${CARD_CODE}"
@@ -916,7 +955,7 @@ step $((STEP++)) "Push gates (pre-accept)"
 # =============================================================================
 # Configure push gates
 PG_RESP=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
-  -d '{"gates":["ConventionalCommit"]}' \
+  -d '{"gates":["conventional-commit"]}' \
   "${API}/repos/${REPO_ID}/push-gates")
 PG_CODE=$(echo "$PG_RESP" | tail -1)
 ok "Push gates set: ConventionalCommit (HTTP ${PG_CODE})"
@@ -966,9 +1005,12 @@ ok "Spec policy: $(echo "$SP_GET" | jq -c '{require_spec_ref,warn_stale_spec}')"
 step $((STEP++)) "ABAC policies"
 # =============================================================================
 POLICY_RESP=$(api_post "${API}/policies" "{
-  \"name\": \"e2e-allow-agents\",
-  \"effect\": \"Allow\",
-  \"rules\": [{\"claim\": \"scope\", \"operator\": \"Equals\", \"value\": \"agent\"}],
+  \"name\": \"e2e-allow-agents-${RUN_ID}\",
+  \"scope\": \"tenant\",
+  \"effect\": \"allow\",
+  \"conditions\": [{\"attribute\": \"subject.type\", \"operator\": \"equals\", \"value\": \"agent\"}],
+  \"actions\": [\"push\"],
+  \"resource_types\": [\"repo\"],
   \"priority\": 100
 }" 2>/dev/null) || POLICY_RESP=""
 if [ -n "$POLICY_RESP" ]; then
@@ -981,7 +1023,9 @@ fi
 
 # Dry-run evaluation
 EVAL_RESP=$(api_post "${API}/policies/evaluate" "{
-  \"context\": {\"scope\": \"agent\", \"action\": \"push\"}
+  \"subject\": {\"type\": \"agent\", \"id\": \"test-agent\"},
+  \"action\": \"push\",
+  \"resource\": {\"type\": \"repo\"}
 }" 2>/dev/null) || EVAL_RESP="{}"
 EVAL_DECISION=$(echo "$EVAL_RESP" | jq -r '.decision // "unknown"')
 ok "ABAC evaluate: decision=${EVAL_DECISION}"
@@ -1012,6 +1056,11 @@ ok "Budget: $(echo "$BUDGET" | jq -c '{max_concurrent_agents,max_tokens_per_day}
 # Tenant budget summary
 BUDGET_SUM=$(api_get "${API}/budget/summary" 2>/dev/null) || BUDGET_SUM="{}"
 ok "Tenant budget summary retrieved"
+
+# Reset budget to not block later agent spawns
+curl -s -X PUT -H "$AUTH" -H "$CT" \
+  -d '{"max_concurrent_agents":100,"max_tokens_per_day":1000000,"max_cost_per_day":1000}' \
+  "${API}/workspaces/${WS_ID}/budget" >/dev/null 2>&1
 
 # =============================================================================
 step $((STEP++)) "Spec links (implements/conflicts enforcement)"
@@ -1060,8 +1109,8 @@ git_with_token "$REPO_DIR" "$TOKEN" push origin main 2>&1 | tail -2
 sleep 1
 
 # Check spec links
-LINKS=$(api_get "${API}/specs/${SPEC2_PATH_ENCODED}/links" 2>/dev/null) || LINKS="{}"
-LINK_CT=$(echo "$LINKS" | jq '.links | length // 0')
+LINKS=$(api_get "${API}/specs/${SPEC2_PATH_ENCODED}/links" 2>/dev/null) || LINKS="[]"
+LINK_CT=$(echo "$LINKS" | jq 'length // 0')
 ok "Spec links: ${LINK_CT} link(s) on child spec"
 
 # Check spec graph
@@ -1285,9 +1334,9 @@ step $((STEP++)) "Meta-spec registry"
 MS_CREATE=$(api_post "${API}/meta-specs-registry" "{
   \"name\": \"e2e-coding-standard\",
   \"kind\": \"meta:standard\",
-  \"path\": \"standards/e2e-test.md\",
-  \"content\": \"# E2E Coding Standard\n\nAll functions must have doc comments.\",
-  \"version\": 1
+  \"scope\": \"Global\",
+  \"prompt\": \"All functions must have doc comments.\",
+  \"required\": false
 }" 2>/dev/null) || MS_CREATE=""
 if [ -n "$MS_CREATE" ]; then
   MS_ID=$(echo "$MS_CREATE" | jq -r '.id // "none"')
@@ -1475,6 +1524,276 @@ ok "Server: $(echo "$VERSION" | jq -c '{name,version,milestone}')"
 # Auth token info
 TOKEN_INFO=$(api_get "${API}/auth/token-info" 2>/dev/null) || TOKEN_INFO="{}"
 ok "Token info: $(echo "$TOKEN_INFO" | jq -r '.token_kind // "retrieved"')"
+
+# #############################################################################
+#  LLM-POWERED TESTS — requires LLM credentials
+# #############################################################################
+
+# Probe: check if LLM is configured by checking the LLM config endpoint.
+# The briefing/ask SSE endpoint is unreliable for probing (streams data).
+# Instead, try to get the effective LLM config — if it returns a model name, LLM is configured.
+LLM_PROBE=$(curl -s -w '\n%{http_code}' -H "$AUTH" \
+  "${API}/workspaces/${WS_ID}/llm/config/briefing-ask" --max-time 5 2>/dev/null)
+LLM_PROBE_CODE=$(echo "$LLM_PROBE" | tail -1)
+# 503 = LLM unavailable, 200 = configured, 404 = no override but default may exist
+# Treat anything except 503 as "available" (the server has LLM if it doesn't 503)
+if [ "$LLM_PROBE_CODE" = "503" ]; then
+  LLM_PROBE_CODE="503"
+else
+  LLM_PROBE_CODE="200"
+fi
+
+if [ "$LLM_PROBE_CODE" = "503" ]; then
+  step $((STEP++)) "Real agent spawn (Claude Agent SDK)"
+  info "LLM not configured — skipping real agent test"
+
+  step $((STEP++)) "LLM moldable development"
+  info "LLM not configured on server (503) — skipping moldable development tests"
+  info "Start server with GYRE_VERTEX_PROJECT + GYRE_LLM_MODEL to enable"
+else
+  ok "LLM is available (HTTP ${LLM_PROBE_CODE})"
+
+  # =========================================================================
+  step $((STEP++)) "Real agent spawn (Claude Agent SDK)"
+  # =========================================================================
+  # This is the key test: the server spawns a real process that runs Claude
+  # Code with MCP connection back to Gyre. The agent reads its task,
+  # implements code, commits, pushes, and calls gyre_agent_complete — all
+  # autonomously via the Claude Agent SDK.
+
+  # The server uses GYRE_AGENT_COMMAND to spawn agent processes.
+  # scripts/e2e-agent-claude.sh handles clone, git setup, and delegates
+  # to docker/gyre-agent/agent-runner.mjs (the real Claude Agent SDK runner).
+  AGENT_SCRIPT="$(cd "$(dirname "$0")" && pwd)/e2e-agent-claude.sh"
+
+  if [ ! -f "$AGENT_SCRIPT" ]; then
+    warn "Agent script not found: ${AGENT_SCRIPT}"
+  else
+    ok "Agent entrypoint: ${AGENT_SCRIPT}"
+  fi
+
+  # Verify the server was started with GYRE_AGENT_COMMAND
+  SERVER_PID=$(lsof -ti :${BASE_URL##*:} 2>/dev/null | head -1)
+  if [ -n "$SERVER_PID" ]; then
+    AGENT_CMD=$(tr '\0' '\n' < /proc/$SERVER_PID/environ 2>/dev/null | grep "^GYRE_AGENT_COMMAND=" | cut -d= -f2-)
+    if [ -n "$AGENT_CMD" ]; then
+      ok "Server GYRE_AGENT_COMMAND=${AGENT_CMD}"
+    else
+      warn "Server missing GYRE_AGENT_COMMAND — agent spawn will fail"
+      info "Restart: GYRE_AGENT_COMMAND=${AGENT_SCRIPT} cargo run -p gyre-server"
+    fi
+  fi
+
+  {
+    # Create a task for the real agent
+    REAL_TASK=$(api_post "${API}/tasks" "{
+      \"title\": \"Add a version module with build info\",
+      \"description\": \"Create src/version.rs that exports a Version struct with name, version, and build_timestamp fields. Add a pub fn current() -> Version that returns the current build info. Re-export from lib.rs.\",
+      \"priority\": \"medium\",
+      \"task_type\": \"implementation\",
+      \"spec_path\": \"${SPEC_PATH}\",
+      \"workspace_id\": \"${WS_ID}\",
+      \"repo_id\": \"${REPO_ID}\"
+    }")
+    REAL_TASK_ID=$(echo "$REAL_TASK" | jq -r '.id')
+    ok "Task for real agent: ${REAL_TASK_ID}"
+
+    # Spawn the agent — the server will exec GYRE_AGENT_COMMAND
+    info "Spawning real Claude agent..."
+    REAL_SPAWN=$(api_post "${API}/agents/spawn" "{
+      \"name\": \"claude-agent-${RUN_ID}\",
+      \"repo_id\": \"${REPO_ID}\",
+      \"task_id\": \"${REAL_TASK_ID}\",
+      \"branch\": \"feat/version-module\"
+    }")
+    REAL_AGENT_ID=$(echo "$REAL_SPAWN" | jq -r '.agent.id')
+    ok "Agent spawned: ${REAL_AGENT_ID}"
+
+    # Wait for the agent to complete (polls status, max 120s)
+    info "Waiting for Claude agent to complete autonomously..."
+    AGENT_DONE=false
+    for i in $(seq 1 120); do
+      sleep 2
+      REAL_AGENT_STATUS=$(api_get "${API}/agents/${REAL_AGENT_ID}" | jq -r '.status')
+      if [ "$REAL_AGENT_STATUS" = "idle" ]; then
+        AGENT_DONE=true
+        break
+      fi
+      if [ "$REAL_AGENT_STATUS" = "failed" ] || [ "$REAL_AGENT_STATUS" = "dead" ]; then
+        warn "Agent ended with status: ${REAL_AGENT_STATUS}"
+        AGENT_DONE=true
+        break
+      fi
+      [ $((i % 15)) -eq 0 ] && info "Agent working... (${i}s, status: ${REAL_AGENT_STATUS})"
+    done
+
+    if [ "$AGENT_DONE" = true ] && [ "$REAL_AGENT_STATUS" = "idle" ]; then
+      ok "Claude agent completed autonomously!"
+
+      # Verify MR was created by the agent
+      REAL_MRS=$(api_get "${API}/merge-requests?repository_id=${REPO_ID}")
+      REAL_AGENT_MR=$(echo "$REAL_MRS" | jq ".[] | select(.author_agent_id == \"${REAL_AGENT_ID}\")")
+      if [ -n "$REAL_AGENT_MR" ]; then
+        REAL_MR_ID=$(echo "$REAL_AGENT_MR" | jq -r '.id')
+        REAL_MR_STATUS=$(echo "$REAL_AGENT_MR" | jq -r '.status')
+        ok "Agent created MR: ${REAL_MR_ID} (${REAL_MR_STATUS})"
+
+        # Check the diff
+        REAL_DIFF=$(api_get "${API}/merge-requests/${REAL_MR_ID}/diff")
+        REAL_DIFF_FILES=$(echo "$REAL_DIFF" | jq '.files_changed')
+        ok "Agent MR diff: ${REAL_DIFF_FILES} files changed"
+      else
+        warn "No MR found from the real agent"
+      fi
+
+      # Verify agent logs were captured
+      AGENT_LOGS=$(api_get "${API}/agents/${REAL_AGENT_ID}/logs")
+      AGENT_LOG_COUNT=$(echo "$AGENT_LOGS" | jq 'length')
+      if [ "$AGENT_LOG_COUNT" -gt 0 ] 2>/dev/null; then
+        ok "Agent logs: ${AGENT_LOG_COUNT} log lines captured"
+        # Show first and last log line
+        echo "$AGENT_LOGS" | jq -r '.[0]' | sed "s/^/  ${DIM}first: /" | sed "s/$/${NC}/"
+        echo "$AGENT_LOGS" | jq -r '.[-1]' | sed "s/^/  ${DIM}last:  /" | sed "s/$/${NC}/"
+      else
+        warn "No agent logs captured (agent-runner should POST to /agents/:id/logs)"
+      fi
+
+      # Verify conversation provenance (HSI §5)
+      # The conversation SHA should be stored in agent_provenance KV bucket.
+      # We can check it by looking at the MR attestation after merge, or by
+      # querying the conversation endpoint directly.
+      # First, try to find the conversation SHA from the agent's logs
+      CONV_SHA=""
+      if [ "$AGENT_LOG_COUNT" -gt 0 ] 2>/dev/null; then
+        CONV_SHA=$(echo "$AGENT_LOGS" | jq -r '.[] | select(contains("conversation_sha=")) | .' | grep -oP 'conversation_sha=\K[a-f0-9]+' | head -1 || true)
+      fi
+      if [ -n "$CONV_SHA" ]; then
+        ok "Conversation SHA from logs: ${CONV_SHA}"
+        # Verify the conversation is retrievable
+        CONV_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" "${API}/conversations/${CONV_SHA}")
+        if [ "$CONV_STATUS" = "200" ]; then
+          CONV_BODY=$(curl -s -H "$AUTH" "${API}/conversations/${CONV_SHA}")
+          CONV_SIZE=${#CONV_BODY}
+          ok "Conversation retrieved: ${CONV_SIZE} bytes (SHA: ${CONV_SHA:0:16}...)"
+        else
+          warn "Conversation retrieval returned HTTP ${CONV_STATUS} (SHA: ${CONV_SHA})"
+        fi
+      else
+        info "Could not extract conversation SHA from logs (check agent-runner output)"
+      fi
+    elif [ "$AGENT_DONE" = false ]; then
+      warn "Agent did not complete within 240s (status: ${REAL_AGENT_STATUS})"
+    fi
+
+  }
+
+  # =========================================================================
+  step $((STEP++)) "LLM moldable development"
+  # =========================================================================
+
+  # --- Spec Assist (LLM-assisted editing) ---
+  info "Testing spec assist (SSE stream)..."
+  ASSIST_RESP=$(curl -s -N -H "$AUTH" -H "$CT" --max-time 30 \
+    -d "{\"spec_path\":\"${SPEC_PATH}\",\"instruction\":\"Add a rate limiting section to the greeting service spec\"}" \
+    "${API}/repos/${REPO_ID}/specs/assist" 2>/dev/null | head -20)
+  if echo "$ASSIST_RESP" | grep -q "event:\|data:"; then
+    ASSIST_EVENTS=$(echo "$ASSIST_RESP" | grep -c "^event:" || echo "0")
+    ok "Spec assist: ${ASSIST_EVENTS} SSE events received"
+    # Show first data payload
+    echo "$ASSIST_RESP" | grep "^data:" | head -1 | sed 's/^data://' | jq -r '.content // .text // . | .[:80]' 2>/dev/null | while IFS= read -r line; do
+      echo -e "  ${DIM}  ${line}${NC}"
+    done || true
+  else
+    warn "Spec assist: no SSE events (response: ${ASSIST_RESP:0:100})"
+  fi
+
+  # --- Briefing Ask (conversational Q&A on workspace) ---
+  info "Testing briefing ask (SSE stream)..."
+  BRIEF_RESP=$(curl -s -N -H "$AUTH" -H "$CT" --max-time 30 \
+    -d '{"question":"What types were added in the greeting service implementation?"}' \
+    "${API}/workspaces/${WS_ID}/briefing/ask" 2>/dev/null | head -30)
+  if echo "$BRIEF_RESP" | grep -q "event:\|data:"; then
+    BRIEF_EVENTS=$(echo "$BRIEF_RESP" | grep -c "^event:" || echo "0")
+    ok "Briefing ask: ${BRIEF_EVENTS} SSE events"
+    # Show a snippet of the LLM response
+    BRIEF_TEXT=$(echo "$BRIEF_RESP" | grep "^data:" | sed 's/^data://' | tr -d '\n' | head -c 200)
+    echo -e "  ${DIM}  ${BRIEF_TEXT:0:100}${NC}"
+  else
+    warn "Briefing ask: no SSE events"
+  fi
+
+  # --- Explorer View Generate (LLM-generated graph perspective) ---
+  info "Testing explorer view generation..."
+  EXPLORER_RESP=$(curl -s -N -H "$AUTH" -H "$CT" --max-time 30 \
+    -d '{"question":"Show me all types related to greeting and their relationships"}' \
+    "${API}/workspaces/${WS_ID}/explorer-views/generate" 2>/dev/null | head -20)
+  if echo "$EXPLORER_RESP" | grep -q "event:\|data:\|name\|query"; then
+    ok "Explorer view generated"
+    echo "$EXPLORER_RESP" | grep "^data:" | head -1 | sed 's/^data://' | jq -r '.name // .query // . | .[:80]' 2>/dev/null | while IFS= read -r line; do
+      echo -e "  ${DIM}  ${line}${NC}"
+    done || true
+  else
+    warn "Explorer view generation: unexpected response"
+  fi
+
+  # --- LLM Config (per-workspace model overrides) ---
+  info "Testing LLM config..."
+  # Set a workspace-level model override
+  LLM_CFG_SET=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
+    -d '{"model_name":"claude-sonnet-4-20250514","max_tokens":4096}' \
+    "${API}/workspaces/${WS_ID}/llm/config/briefing-ask")
+  LLM_CFG_CODE=$(echo "$LLM_CFG_SET" | tail -1)
+  ok "LLM config override set: HTTP ${LLM_CFG_CODE}"
+
+  # Get effective config
+  LLM_CFG_GET=$(api_get "${API}/workspaces/${WS_ID}/llm/config/briefing-ask" 2>/dev/null) || LLM_CFG_GET="{}"
+  ok "Effective LLM config: $(echo "$LLM_CFG_GET" | jq -r '.model_name // "default"')"
+
+  # List all workspace LLM configs
+  LLM_CFG_LIST=$(api_get "${API}/workspaces/${WS_ID}/llm/config" 2>/dev/null) || LLM_CFG_LIST="[]"
+  ok "Workspace LLM configs: $(echo "$LLM_CFG_LIST" | jq 'length // 0')"
+
+  # Clean up override
+  curl -s -X DELETE -H "$AUTH" "${API}/workspaces/${WS_ID}/llm/config/briefing-ask" >/dev/null 2>&1
+
+  # --- LLM Prompts (per-workspace prompt template overrides) ---
+  info "Testing prompt templates..."
+  # Set a custom prompt
+  PROMPT_SET=$(curl -s -w '\n%{http_code}' -X PUT -H "$AUTH" -H "$CT" \
+    -d '{"content":"You are a greeting service expert. Answer questions about the architecture. Context: {{context}}\n\nQuestion: {{question}}"}' \
+    "${API}/workspaces/${WS_ID}/llm/prompts/briefing-ask")
+  PROMPT_CODE=$(echo "$PROMPT_SET" | tail -1)
+  ok "Custom prompt template set: HTTP ${PROMPT_CODE}"
+
+  # Get effective prompt
+  PROMPT_GET=$(api_get "${API}/workspaces/${WS_ID}/llm/prompts/briefing-ask" 2>/dev/null) || PROMPT_GET="{}"
+  ok "Effective prompt: $(echo "$PROMPT_GET" | jq -r '.content[:60] // "default"')"
+
+  # Clean up
+  curl -s -X DELETE -H "$AUTH" "${API}/workspaces/${WS_ID}/llm/prompts/briefing-ask" >/dev/null 2>&1
+
+  # --- Admin LLM Defaults ---
+  ADMIN_CFG=$(api_get "${API}/admin/llm/config/briefing-ask" 2>/dev/null) || ADMIN_CFG="{}"
+  ok "Admin default LLM config: $(echo "$ADMIN_CFG" | jq -r '.model_name // "not set"')"
+
+  ADMIN_PROMPT=$(api_get "${API}/admin/llm/prompts/briefing-ask" 2>/dev/null) || ADMIN_PROMPT="{}"
+  ok "Admin default prompt: $(echo "$ADMIN_PROMPT" | jq -r '.content[:60] // "not set"')"
+
+  # --- Meta-spec Preview (async reconciliation preview) ---
+  info "Testing meta-spec preview..."
+  PREVIEW_RESP=$(api_post "${API}/workspaces/${WS_ID}/meta-specs/preview" "{}" 2>/dev/null) || PREVIEW_RESP=""
+  if [ -n "$PREVIEW_RESP" ]; then
+    PREVIEW_ID=$(echo "$PREVIEW_RESP" | jq -r '.preview_id // "none"')
+    ok "Meta-spec preview started: ${PREVIEW_ID}"
+    if [ "$PREVIEW_ID" != "none" ]; then
+      sleep 2
+      PREVIEW_STATUS=$(api_get "${API}/workspaces/${WS_ID}/meta-specs/preview/${PREVIEW_ID}" 2>/dev/null) || PREVIEW_STATUS="{}"
+      ok "Preview status: $(echo "$PREVIEW_STATUS" | jq -r '.status // "unknown"')"
+    fi
+  else
+    info "Meta-spec preview not available"
+  fi
+fi
 
 # =============================================================================
 # Summary

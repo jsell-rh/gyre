@@ -67,15 +67,17 @@ describe('RepoSettings', () => {
     expect(tablist.getAttribute('aria-label')).toBe('Repo settings sections');
   });
 
-  it('renders all 6 inner tabs', () => {
+  it('renders all 8 inner tabs', () => {
     const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(6);
+    expect(tabs.length).toBe(8);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('General');
     expect(labels).toContain('Gates');
     expect(labels).toContain('Policies');
     expect(labels).toContain('Budget');
+    expect(labels).toContain('Dependencies');
+    expect(labels).toContain('Release');
     expect(labels).toContain('Audit');
     expect(labels).toContain('Danger Zone');
   });

@@ -140,16 +140,48 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         }
     }
 
-    let _ = state
-        .gate_results
-        .update_status(
-            result_id.as_str(),
-            status,
-            None,
-            Some(finished_at),
-            Some(output),
-        )
-        .await;
+    // Retry up to 3 times with backoff — concurrent gate writers can
+    // contend on the SQLite write lock even with busy_timeout set.
+    let mut last_err = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt))).await;
+        }
+        match state
+            .gate_results
+            .update_status(
+                result_id.as_str(),
+                status.clone(),
+                None,
+                Some(finished_at),
+                Some(output.clone()),
+            )
+            .await
+        {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                warn!(
+                    gate_id = %gate.id,
+                    result_id = %result_id,
+                    attempt,
+                    error = format!("{e:#}"),
+                    "gate result update failed, retrying"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        warn!(
+            gate_id = %gate.id,
+            result_id = %result_id,
+            error = format!("{e:#}"),
+            "failed to persist final gate result status after retries"
+        );
+    }
 }
 
 /// Run an AgentReview gate.

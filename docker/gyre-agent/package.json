@@ -1,0 +1,14 @@
+{
+  "name": "gyre-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Gyre autonomous agent runner — Claude Agent SDK with conversation provenance",
+  "scripts": {
+    "start": "node agent-runner.mjs",
+    "test": "node --test cred-proxy.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.81"
+  }
+}

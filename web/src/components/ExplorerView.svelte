@@ -2,6 +2,7 @@
   import { getContext, onDestroy } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { entityName } from '../lib/entityNames.svelte.js';
   import MoldableView from '../lib/MoldableView.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -40,6 +41,7 @@
 
   // Filter panel state
   let filterVisible = $state(false);
+  let insightsCollapsed = $state(true);
   let activeFilters = $state(null);
 
   function onFilterChange(filters) {
@@ -281,6 +283,47 @@
   let conceptFilterIds = $derived.by(() =>
     conceptNodes ? new Set(conceptNodes.map(n => n.id)) : null
   );
+
+  // ── Repo dependencies & risk metrics ────────────────────────────────
+  let repoDeps = $state(null);
+  let repoDepsLoading = $state(false);
+  let repoRisks = $state(null);
+  let repoRisksLoading = $state(false);
+  let graphTypes = $state(null);
+  let graphModules = $state(null);
+  let graphTimeline = $state(null);
+
+  $effect(() => {
+    if (!selectedRepoId || explorerTab !== 'architecture') return;
+    if (repoDeps !== null) return; // already loaded
+    repoDepsLoading = true;
+    repoRisksLoading = true;
+    Promise.all([
+      api.repoDependencies(selectedRepoId).catch(() => []),
+      api.repoDependents(selectedRepoId).catch(() => []),
+      api.repoGraphRisks(selectedRepoId).catch(() => []),
+      api.repoGraphTypes(selectedRepoId).catch(() => ({ nodes: [] })),
+      api.repoGraphModules(selectedRepoId).catch(() => ({ nodes: [] })),
+      api.repoGraphTimeline(selectedRepoId).catch(() => []),
+    ]).then(([deps, depts, risks, types, modules, timeline]) => {
+      repoDeps = { dependencies: Array.isArray(deps) ? deps : [], dependents: Array.isArray(depts) ? depts : [] };
+      repoRisks = Array.isArray(risks) ? risks : [];
+      graphTypes = types?.nodes ?? (Array.isArray(types) ? types : []);
+      graphModules = modules?.nodes ?? (Array.isArray(modules) ? modules : []);
+      graphTimeline = Array.isArray(timeline) ? timeline : [];
+    }).finally(() => { repoDepsLoading = false; repoRisksLoading = false; });
+  });
+
+  // Reset when repo changes
+  $effect(() => {
+    if (selectedRepoId) {
+      repoDeps = null;
+      repoRisks = null;
+      graphTypes = null;
+      graphModules = null;
+      graphTimeline = null;
+    }
+  });
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
@@ -337,31 +380,36 @@
     <!-- Header -->
     <div class="explorer-header">
       <div class="header-left">
-        <h1 class="page-title">{$t('explorer_view.system_title')}</h1>
-        <p class="subtitle">{$t('explorer_view.system_subtitle')}</p>
+        <h1 class="page-title">{scopeType === 'repo' ? $t('explorer_view.architecture_title') : $t('explorer_view.system_title')}</h1>
+        {#if scopeType !== 'repo'}
+          <p class="subtitle">{$t('explorer_view.system_subtitle')}</p>
+        {/if}
       </div>
       <div class="header-right">
-        {#if reposLoading}
-          <div class="repo-selector-skeleton">
-            <Skeleton lines={1} />
-          </div>
-        {:else}
-          <div class="repo-select-wrap">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="repo-icon" aria-hidden="true">
-              <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
-            </svg>
-            <select
-              class="repo-select"
-              value={selectedRepoId}
-              onchange={onRepoChange}
-              aria-label={$t('explorer_view.select_repo')}
-            >
-              <option value="">{$t('explorer_view.select_repo')}</option>
-              {#each repos as repo}
-                <option value={repo.id}>{repo.name}</option>
-              {/each}
-            </select>
-          </div>
+        <!-- Repo selector — hidden in repo scope (auto-selected from parent) -->
+        {#if scopeType !== 'repo'}
+          {#if reposLoading}
+            <div class="repo-selector-skeleton">
+              <Skeleton lines={1} />
+            </div>
+          {:else}
+            <div class="repo-select-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" class="repo-icon" aria-hidden="true">
+                <path d="M3 3h6l2 3h10a2 2 0 012 2v11a2 2 0 01-2 2H3a2 2 0 01-2-2V5a2 2 0 012-2z"/>
+              </svg>
+              <select
+                class="repo-select"
+                value={selectedRepoId}
+                onchange={onRepoChange}
+                aria-label={$t('explorer_view.select_repo')}
+              >
+                <option value="">{$t('explorer_view.select_repo')}</option>
+                {#each repos as repo}
+                  <option value={repo.id}>{repo.name}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
         {/if}
 
         {#if graph && explorerTab === 'architecture'}
@@ -380,8 +428,8 @@
       </div>
     </div>
 
-    <!-- Architecture / Code tab switcher — only shown when a repo is selected -->
-    {#if selectedRepoId}
+    <!-- Architecture / Briefing / Code tab switcher — only shown in non-repo scope (in repo scope, these are separate top-level tabs) -->
+    {#if selectedRepoId && scopeType !== 'repo'}
       <!-- svelte-ignore a11y_interactive_supports_focus -->
       <div class="explorer-tabs" role="tablist" aria-label={$t('explorer_view.system_title')}
         onkeydown={(e) => {
@@ -551,13 +599,18 @@
       <div class="explorer-body-main">
         {#if !selectedRepoId}
           <div class="empty-state-wrap">
-            <EmptyState
-              title={$t('explorer_view.select_repo')}
-              description={$t('explorer_view.select_repo_desc')}
-            />
-            {#if repos.length === 0 && !reposLoading}
-              <p class="hint">{$t('explorer_view.no_repos_hint')}</p>
-              <button class="go-admin-btn" onclick={() => goToWorkspaceSettings?.()}>{$t('explorer_view.go_to_settings')}</button>
+            {#if scopeType === 'repo'}
+              <!-- Repo scope: repo ID will be set by the auto-select effect -->
+              <Skeleton lines={6} />
+            {:else}
+              <EmptyState
+                title={$t('explorer_view.select_repo')}
+                description={$t('explorer_view.select_repo_desc')}
+              />
+              {#if repos.length === 0 && !reposLoading}
+                <p class="hint">{$t('explorer_view.no_repos_hint')}</p>
+                <button class="go-admin-btn" onclick={() => goToWorkspaceSettings?.()}>{$t('explorer_view.go_to_settings')}</button>
+              {/if}
             {/if}
           </div>
 
@@ -592,6 +645,130 @@
             categoryFilters={activeFilters}
             nodeTypeFilter={viewSpecNodeTypes}
           />
+        {/if}
+
+        <!-- Repo dependencies, risks, types, modules, timeline (below graph, architecture tab only) -->
+        {#if selectedRepoId && explorerTab === 'architecture' && !loading && (repoDeps || repoRisks?.length || graphTypes?.length || graphModules?.length || graphTimeline?.length)}
+          <div class="arch-insights-toggle">
+            <button
+              class="arch-insights-btn"
+              onclick={() => insightsCollapsed = !insightsCollapsed}
+              aria-expanded={!insightsCollapsed}
+              aria-controls="arch-insights-panel"
+            >
+              <span class="arch-toggle-icon" class:open={!insightsCollapsed}>&#9654;</span>
+              Architecture Insights
+            </button>
+          </div>
+          <div class="arch-insights" id="arch-insights-panel" class:collapsed={insightsCollapsed}>
+            <!-- Graph Types (structs/enums extracted from code) -->
+            {#if graphTypes?.length > 0}
+              <div class="arch-insight-section">
+                <h3 class="arch-insight-title">Types ({graphTypes.length})</h3>
+                <p class="arch-insight-desc">Structs, enums, and type definitions extracted from the codebase.</p>
+                <div class="arch-type-grid">
+                  {#each graphTypes.slice(0, 20) as node}
+                    <div class="arch-type-card" title={node.qualified_name ?? node.name}>
+                      <span class="arch-type-kind">{node.node_type ?? 'type'}</span>
+                      <span class="arch-type-name">{node.name ?? node.qualified_name}</span>
+                      {#if node.doc_comment}
+                        <span class="arch-type-doc">{node.doc_comment.slice(0, 80)}{node.doc_comment.length > 80 ? '...' : ''}</span>
+                      {/if}
+                    </div>
+                  {/each}
+                  {#if graphTypes.length > 20}
+                    <span class="arch-more">+{graphTypes.length - 20} more</span>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
+            <!-- Graph Modules -->
+            {#if graphModules?.length > 0}
+              <div class="arch-insight-section">
+                <h3 class="arch-insight-title">Modules ({graphModules.length})</h3>
+                <p class="arch-insight-desc">Module hierarchy extracted from the codebase.</p>
+                <ul class="arch-dep-list">
+                  {#each graphModules.slice(0, 15) as mod}
+                    <li class="arch-dep-item">
+                      <span class="mono">{mod.qualified_name ?? mod.name}</span>
+                      {#if mod.doc_comment}
+                        <span class="arch-mod-doc">{mod.doc_comment.slice(0, 60)}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+
+            {#if repoDeps && (repoDeps.dependencies.length > 0 || repoDeps.dependents.length > 0)}
+              <div class="arch-insight-section">
+                <h3 class="arch-insight-title">Cross-Repo Dependencies</h3>
+                {#if repoDeps.dependencies.length > 0}
+                  <div class="arch-dep-group">
+                    <span class="arch-dep-label">Depends on ({repoDeps.dependencies.length})</span>
+                    <ul class="arch-dep-list">
+                      {#each repoDeps.dependencies as dep}
+                        <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? entityName('repo', dep.repo_id ?? dep)}</li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/if}
+                {#if repoDeps.dependents.length > 0}
+                  <div class="arch-dep-group">
+                    <span class="arch-dep-label">Depended on by ({repoDeps.dependents.length})</span>
+                    <ul class="arch-dep-list">
+                      {#each repoDeps.dependents as dep}
+                        <li class="arch-dep-item">{dep.name ?? dep.repo_name ?? entityName('repo', dep.repo_id ?? dep)}</li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+            {#if repoRisks?.length > 0}
+              <div class="arch-insight-section">
+                <h3 class="arch-insight-title">Risk Hotspots ({repoRisks.length})</h3>
+                <p class="arch-insight-desc">Nodes scored for complexity, coupling, or churn that may warrant attention.</p>
+                <ul class="arch-risk-list">
+                  {#each repoRisks.slice(0, 10) as node}
+                    <li class="arch-risk-item">
+                      <span class="arch-risk-name">{node.qualified_name ?? node.name}</span>
+                      <span class="arch-risk-score" title="Risk score">{node.risk_score ?? node.score ?? '—'}</span>
+                      {#if node.risk_reason ?? node.reason}
+                        <span class="arch-risk-reason">{node.risk_reason ?? node.reason}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              </div>
+            {/if}
+
+            <!-- Architecture Timeline (deltas over time) -->
+            {#if graphTimeline?.length > 0}
+              <div class="arch-insight-section">
+                <h3 class="arch-insight-title">Architecture Timeline ({graphTimeline.length} changes)</h3>
+                <p class="arch-insight-desc">How the architecture has evolved over time.</p>
+                <div class="arch-timeline">
+                  {#each graphTimeline.slice(0, 10) as delta}
+                    <div class="arch-timeline-entry">
+                      <span class="arch-timeline-time">{delta.timestamp ? new Date(typeof delta.timestamp === 'number' ? delta.timestamp * 1000 : delta.timestamp).toLocaleDateString() : '—'}</span>
+                      <span class="arch-timeline-label">{delta.change_type ?? delta.event ?? 'change'}</span>
+                      {#if delta.added_count || delta.removed_count}
+                        <span class="arch-timeline-stats">
+                          {#if delta.added_count}<span class="diff-ins">+{delta.added_count}</span>{/if}
+                          {#if delta.removed_count}<span class="diff-del">-{delta.removed_count}</span>{/if}
+                        </span>
+                      {/if}
+                      {#if delta.commit_sha}
+                        <code class="mono" style="font-size: var(--text-xs); color: var(--color-text-muted)">{delta.commit_sha.slice(0, 7)}</code>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
         {/if}
       </div>
     </div>
@@ -1192,6 +1369,239 @@
 
   .ask-explanation { color: var(--color-text-secondary); }
   .ask-error { color: var(--color-danger); }
+
+  /* ── Architecture insights (deps + risks) ────────────────────────── */
+  .arch-insights-toggle {
+    border-top: 1px solid var(--color-border);
+    padding: var(--space-2) var(--space-6);
+    flex-shrink: 0;
+  }
+
+  .arch-insights-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: none;
+    border: none;
+    color: var(--color-text-secondary);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    padding: var(--space-1) 0;
+    font-family: var(--font-body);
+  }
+
+  .arch-insights-btn:hover {
+    color: var(--color-text);
+  }
+
+  .arch-toggle-icon {
+    display: inline-block;
+    font-size: 10px;
+    transition: transform 0.15s ease;
+  }
+
+  .arch-toggle-icon.open {
+    transform: rotate(90deg);
+  }
+
+  .arch-insights {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-6);
+    flex-shrink: 0;
+    overflow: hidden;
+    max-height: 600px;
+    transition: max-height 0.2s ease, padding 0.2s ease, opacity 0.2s ease;
+  }
+
+  .arch-insights.collapsed {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .arch-insight-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .arch-insight-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+
+  .arch-insight-desc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+
+  .arch-dep-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .arch-dep-label {
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text-muted);
+  }
+
+  .arch-dep-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .arch-dep-item {
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-text-secondary);
+  }
+
+  .arch-risk-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .arch-risk-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    font-size: var(--text-xs);
+  }
+
+  .arch-risk-name {
+    font-family: var(--font-mono);
+    color: var(--color-text);
+    font-weight: 500;
+  }
+
+  .arch-risk-score {
+    padding: 1px var(--space-2);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--color-warning) 15%, transparent);
+    color: var(--color-warning);
+    font-weight: 600;
+    font-size: var(--text-xs);
+  }
+
+  .arch-risk-reason {
+    color: var(--color-text-muted);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ── Graph types grid ──────────────────────────────────────────────── */
+  .arch-type-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--space-2);
+  }
+
+  .arch-type-card {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+  }
+
+  .arch-type-kind {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .arch-type-name {
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .arch-type-doc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    line-height: 1.3;
+  }
+
+  .arch-mod-doc {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin-left: var(--space-2);
+  }
+
+  .arch-more {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    padding: var(--space-2);
+  }
+
+  /* ── Architecture timeline ───────────────────────────────────────────── */
+  .arch-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .arch-timeline-entry {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-elevated);
+    font-size: var(--text-xs);
+  }
+
+  .arch-timeline-time {
+    color: var(--color-text-muted);
+    flex-shrink: 0;
+    min-width: 80px;
+  }
+
+  .arch-timeline-label {
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .arch-timeline-stats {
+    display: flex;
+    gap: var(--space-1);
+    font-family: var(--font-mono);
+  }
+
+  .diff-ins { color: var(--color-success); }
+  .diff-del { color: var(--color-danger); }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>

@@ -83,16 +83,17 @@ describe('WorkspaceSettings', () => {
     expect(tablist.getAttribute('role')).toBe('tablist');
   });
 
-  it('renders all 6 tabs', () => {
+  it('renders all 7 tabs', () => {
     const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(6);
+    expect(tabs.length).toBe(7);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('General');
     expect(labels).toContain('Trust & Policies');
     expect(labels).toContain('Teams');
     expect(labels).toContain('Budget');
     expect(labels).toContain('Compute');
+    expect(labels).toContain('LLM Config');
     expect(labels).toContain('Audit');
   });
 

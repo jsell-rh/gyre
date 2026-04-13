@@ -45,6 +45,17 @@ vi.mock('../lib/api.js', () => ({
   api: {
     agents: vi.fn().mockResolvedValue([]),
     repo: vi.fn().mockResolvedValue(null),
+    task: vi.fn().mockResolvedValue({ title: 'mock task' }),
+    tasks: vi.fn().mockResolvedValue([]),
+    agent: vi.fn().mockResolvedValue({ name: 'mock agent' }),
+    mergeRequest: vi.fn().mockResolvedValue({ title: 'mock MR' }),
+    mergeRequests: vi.fn().mockResolvedValue([]),
+    notificationCount: vi.fn().mockResolvedValue(0),
+    myNotifications: vi.fn().mockResolvedValue([]),
+    workspace: vi.fn().mockResolvedValue({ name: 'mock workspace' }),
+    mrGates: vi.fn().mockResolvedValue([]),
+    mrDiff: vi.fn().mockResolvedValue({ files_changed: 0, insertions: 0, deletions: 0 }),
+    mergeQueue: vi.fn().mockResolvedValue([]),
   },
   setAuthToken: vi.fn(),
 }));
@@ -280,7 +291,8 @@ describe('Agent panel', () => {
     await fireEvent.click(container.querySelector('[data-testid="agent-count-btn"]'));
     await waitFor(() => {
       const panel = container.querySelector('[data-testid="agent-panel"]');
-      expect(panel?.textContent).toContain('TASK-42');
+      // entityName resolves via api.task() or falls back to shortId
+      expect(panel?.textContent).toMatch(/TASK-42|mock task/);
     });
   });
 
@@ -316,12 +328,12 @@ describe('Agent panel', () => {
 // ── Tab bar ────────────────────────────────────────────────────────────
 
 describe('Tab bar', () => {
-  it('renders all 5 tabs', () => {
+  it('renders all 8 tabs', () => {
     const { container } = render(RepoMode, {
       props: { workspace: mockWorkspace, repo: mockRepo, activeTab: 'specs' },
     });
     const tabs = container.querySelectorAll('.tab-btn');
-    expect(tabs.length).toBe(5);
+    expect(tabs.length).toBe(8);
   });
 
   it('marks the active tab with aria-selected=true', () => {

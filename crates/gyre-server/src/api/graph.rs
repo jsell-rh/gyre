@@ -851,16 +851,29 @@ pub async fn get_workspace_briefing(
         })
         .collect();
 
-    // Stub summary string.
+    // Build human-readable summary string.
     let summary = {
-        use std::time::{Duration, UNIX_EPOCH};
-        let since_dt = UNIX_EPOCH + Duration::from_secs(since);
-        let since_str = format!("{:?}", since_dt);
+        let since_str = {
+            let now = now_secs();
+            let diff = now.saturating_sub(since);
+            if diff < 60 {
+                "just now".to_string()
+            } else if diff < 3600 {
+                let m = diff / 60;
+                format!("{m} minute{} ago", if m == 1 { "" } else { "s" })
+            } else if diff < 86400 {
+                let h = diff / 3600;
+                format!("{h} hour{} ago", if h == 1 { "" } else { "s" })
+            } else {
+                let d = diff / 86400;
+                format!("{d} day{} ago", if d == 1 { "" } else { "s" })
+            }
+        };
+        let mr_word = if mrs_merged == 1 { "MR" } else { "MRs" };
+        let task_count = in_progress.len();
+        let task_word = if task_count == 1 { "task" } else { "tasks" };
         format!(
-            "{} MR(s) merged, {} task(s) in progress since {}",
-            mrs_merged,
-            in_progress.len(),
-            since_str,
+            "{mrs_merged} {mr_word} merged, {task_count} {task_word} in progress since {since_str}",
         )
     };
 
@@ -1178,6 +1191,7 @@ fn _new_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         first_seen_at: now,
         last_seen_at: now,
         deleted_at: None,
+        test_node: false,
     }
 }
 

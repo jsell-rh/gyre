@@ -31,12 +31,16 @@
     edges = [],
     onSelectNode = undefined,
     showSpecLinkage = false,
+    // Exposed for FlowCanvas overlay synchronization
+    nodePositions = $bindable({}),
+    currentViewBox = $bindable({ x: 0, y: 0, w: 900, h: 600 }),
   } = $props();
 
   // Shell context API (S4.1)
   const navigate = getContext('navigate');
   const goToRepoTab = getContext('goToRepoTab');
   const openDetailPanel = getContext('openDetailPanel');
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
 
   // ── Layout engine ──────────────────────────────────────────────────────────
   let layoutEngine = $state('column');
@@ -44,6 +48,10 @@
 
   let nodePositionsMap = $state({});
   let layoutPending = $state(false);
+
+  // Sync internal positions/viewBox to bindable props for overlay consumers (FlowCanvas)
+  $effect(() => { nodePositions = nodePositionsMap; });
+  $effect(() => { currentViewBox = viewBox; });
 
   // ── Pan/zoom ───────────────────────────────────────────────────────────────
   let svgEl = $state(null);
@@ -1084,7 +1092,7 @@
             {/if}
             {#if selectedNode.spec_path}
               <div class="panel-row"><span class="panel-label">{$t('detail_panel.spec')}</span>
-                <button class="spec-link-btn" onclick={() => openDetailPanel?.({ type: 'spec', id: selectedNode.spec_path })} title={$t('explorer_canvas.navigate_to_spec')}>{selectedNode.spec_path}</button>
+                <button class="spec-link-btn" onclick={() => { if (goToEntityDetail) goToEntityDetail('spec', selectedNode.spec_path, { path: selectedNode.spec_path }); else openDetailPanel?.({ type: 'spec', id: selectedNode.spec_path }); }} title={$t('explorer_canvas.navigate_to_spec')}>{selectedNode.spec_path}</button>
               </div>
             {/if}
             {#if selectedNode.spec_confidence}
@@ -1141,7 +1149,7 @@
             {:else}
               <div class="spec-path-row">
                 <span class="spec-path-label">{$t('detail_panel.path')}</span>
-                <span class="spec-path-val mono">{specPanelNode.spec_path}</span>
+                <button class="spec-path-val mono spec-path-link" onclick={() => { if (goToEntityDetail) goToEntityDetail('spec', specPanelNode.spec_path, { path: specPanelNode.spec_path }); }} title="View spec details">{specPanelNode.spec_path.split('/').pop()?.replace(/\.md$/, '') ?? specPanelNode.spec_path}</button>
               </div>
 
               {#if specLoading}
@@ -1493,6 +1501,8 @@
   .spec-path-row { display: flex; align-items: flex-start; gap: var(--space-2); }
   .spec-path-label { font-size: var(--text-xs); color: var(--color-text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; min-width: 40px; }
   .spec-path-val { font-size: var(--text-xs); color: var(--color-text-secondary); font-family: var(--font-mono); word-break: break-all; }
+  .spec-path-link { background: none; border: none; cursor: pointer; padding: 0; text-align: left; color: var(--color-link, var(--color-primary)); }
+  .spec-path-link:hover { text-decoration: underline; }
   .spec-loading { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; }
   .spec-no-content { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; margin: 0; }
   .spec-editor-textarea {

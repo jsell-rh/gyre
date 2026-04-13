@@ -138,9 +138,17 @@ impl GitOpsPort for Git2OpsAdapter {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let status = format!("{:?}", delta.status());
-                let content = std::str::from_utf8(line.content())
+                let raw = std::str::from_utf8(line.content())
                     .unwrap_or("")
                     .to_string();
+                // Prepend origin char (+/-/space/header markers) so the patch
+                // text is valid unified diff that parse_patch_to_hunks can classify.
+                let origin = line.origin();
+                let content = match origin {
+                    '+' | '-' | ' ' => format!("{}{}", origin, raw),
+                    // Header / file-marker lines: keep as-is
+                    _ => raw,
+                };
                 if let Some(existing) = patches.iter_mut().find(|p: &&mut FileDiff| p.path == path)
                 {
                     if let Some(ref mut patch) = existing.patch {

@@ -17,7 +17,7 @@ use gyre_common::{
     Id,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -54,10 +54,17 @@ impl LanguageExtractor for RustExtractor {
             edges: Vec::new(),
             errors: Vec::new(),
             name_to_id: HashMap::new(),
+            import_aliases: HashMap::new(),
+            unresolved_calls: Vec::new(),
+            workspace_crates: HashSet::new(),
         };
 
         ctx.extract_packages();
+        // Record workspace crate names before file extraction so use-resolution
+        // can distinguish intra-workspace imports from external ones.
+        ctx.workspace_crates = ctx.name_to_id.keys().cloned().collect();
         ctx.extract_rust_files();
+        ctx.resolve_calls();
 
         ExtractionResult {
             nodes: ctx.nodes,
@@ -71,6 +78,18 @@ impl LanguageExtractor for RustExtractor {
 // Internal extraction context
 // ---------------------------------------------------------------------------
 
+/// An unresolved call site: the calling function's qualified name and the
+/// callee's short name (as written in source code).
+#[derive(Debug, Clone)]
+struct UnresolvedCall {
+    /// Qualified name of the calling function.
+    caller_qname: String,
+    /// Short name of the callee as it appears in source (e.g. `foo`, `bar`).
+    callee_name: String,
+    /// Whether this is a method call (`x.bar()`) vs a function call (`bar()`).
+    is_method: bool,
+}
+
 struct ExtractionContext {
     repo_root: PathBuf,
     commit_sha: String,
@@ -80,6 +99,12 @@ struct ExtractionContext {
     errors: Vec<ExtractionError>,
     /// Map qualified name → node Id for edge resolution.
     name_to_id: HashMap<String, Id>,
+    /// Per-module import aliases: (module_qname, short_name) → qualified_name.
+    import_aliases: HashMap<(String, String), String>,
+    /// Unresolved call sites collected during the first pass.
+    unresolved_calls: Vec<UnresolvedCall>,
+    /// Set of known workspace crate names (from Cargo.toml [package] names).
+    workspace_crates: HashSet<String>,
 }
 
 impl ExtractionContext {
@@ -132,6 +157,7 @@ impl ExtractionContext {
             first_seen_at: 0,
             last_seen_at: 0,
             deleted_at: None,
+            test_node: false,
         }
     }
 
@@ -321,7 +347,7 @@ impl ExtractionContext {
             .unwrap_or(&crate_name)
             .to_string();
 
-        let module_node = self.make_node(
+        let mut module_node = self.make_node(
             NodeType::Module,
             &module_short_name,
             &module_qname,
@@ -333,6 +359,10 @@ impl ExtractionContext {
             primary_spec,
             spec_confidence,
         );
+        // Tag modules in tests/ directories or named "tests" as test nodes.
+        if is_test_file_path(&rel_path) || module_short_name == "tests" {
+            module_node.test_node = true;
+        }
         let module_id = module_node.id.clone();
         self.name_to_id
             .insert(module_qname.clone(), module_id.clone());
@@ -352,6 +382,9 @@ impl ExtractionContext {
             self.edges.push(edge);
         }
 
+        // Extract use statements for import alias resolution.
+        self.extract_use_statements(&syntax, &crate_name, &module_qname);
+
         let mut visitor = ItemVisitor {
             ctx: self,
             rel_path: &rel_path,
@@ -369,6 +402,15 @@ impl ExtractionContext {
 
         self.nodes.extend(new_nodes);
         self.edges.extend(new_edges);
+
+        // Collect unresolved call sites from function bodies.
+        let mut call_collector = CallCollector {
+            module_qname: module_qname.clone(),
+            current_fn_qname: None,
+            calls: Vec::new(),
+        };
+        call_collector.visit_file(&syntax);
+        self.unresolved_calls.extend(call_collector.calls);
 
         self.extract_endpoints_from_text(&content, &rel_path, &module_id);
         self.extract_diesel_tables(&content, &rel_path, &module_id);
@@ -548,6 +590,322 @@ impl ExtractionContext {
             }
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Use statement extraction
+    // -----------------------------------------------------------------------
+
+    /// Walk all `use` items in a parsed file and record import aliases.
+    fn extract_use_statements(&mut self, syntax: &syn::File, crate_name: &str, module_qname: &str) {
+        for item in &syntax.items {
+            if let Item::Use(use_item) = item {
+                let mut aliases = Vec::new();
+                collect_use_tree(&use_item.tree, &[], &mut aliases);
+
+                for (short_name, segments) in aliases {
+                    // Resolve `crate::` and `super::` prefixes.
+                    let qualified = self.resolve_use_path(&segments, crate_name, module_qname);
+                    if let Some(qname) = qualified {
+                        self.import_aliases
+                            .insert((module_qname.to_string(), short_name), qname);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolve a use path's segments into a qualified name, or None if external.
+    fn resolve_use_path(
+        &self,
+        segments: &[String],
+        crate_name: &str,
+        module_qname: &str,
+    ) -> Option<String> {
+        if segments.is_empty() {
+            return None;
+        }
+
+        let first = &segments[0];
+
+        if first == "crate" {
+            // crate:: → replace with crate_name
+            let mut parts = vec![crate_name.to_string()];
+            parts.extend(segments[1..].iter().cloned());
+            return Some(parts.join("::"));
+        }
+
+        if first == "super" {
+            // super:: → go up one module from current module_qname
+            let parent = module_qname
+                .rsplit_once("::")
+                .map(|(p, _)| p)
+                .unwrap_or(crate_name);
+            let mut parts = vec![parent.to_string()];
+            // Handle chained super::super::
+            let mut remaining_start = 1;
+            for seg in &segments[1..] {
+                if seg == "super" {
+                    let p = parts.last().unwrap().clone();
+                    let grandparent = p
+                        .rsplit_once("::")
+                        .map(|(pp, _)| pp.to_string())
+                        .unwrap_or_else(|| crate_name.to_string());
+                    *parts.last_mut().unwrap() = grandparent;
+                    remaining_start += 1;
+                } else {
+                    break;
+                }
+            }
+            parts.extend(segments[remaining_start..].iter().cloned());
+            return Some(parts.join("::"));
+        }
+
+        if first == "self" {
+            // self:: → current module
+            let mut parts = vec![module_qname.to_string()];
+            parts.extend(segments[1..].iter().cloned());
+            return Some(parts.join("::"));
+        }
+
+        // Check if first segment is a workspace crate (using underscore-normalized name).
+        let normalized = first.replace('-', "_");
+        let is_workspace = self
+            .workspace_crates
+            .iter()
+            .any(|c| c == first || c.replace('-', "_") == normalized);
+
+        if is_workspace {
+            // Find the actual crate name (might be hyphenated).
+            let actual_crate = self
+                .workspace_crates
+                .iter()
+                .find(|c| *c == first || c.replace('-', "_") == normalized)
+                .cloned()
+                .unwrap_or_else(|| first.clone());
+            let mut parts = vec![actual_crate];
+            parts.extend(segments[1..].iter().cloned());
+            return Some(parts.join("::"));
+        }
+
+        // External crate (std, tokio, serde, etc.) — skip.
+        None
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-module call resolution (second pass)
+    // -----------------------------------------------------------------------
+
+    fn resolve_calls(&mut self) {
+        let calls = std::mem::take(&mut self.unresolved_calls);
+        let mut seen_edges: HashSet<(String, String)> = HashSet::new();
+
+        // Collect existing Calls edges to avoid duplicates.
+        for edge in &self.edges {
+            if edge.edge_type == EdgeType::Calls {
+                seen_edges.insert((edge.source_id.to_string(), edge.target_id.to_string()));
+            }
+        }
+
+        // Build a suffix index: last segment of qualified name → list of Ids.
+        // This helps resolve method calls where we only know the method name.
+        let mut suffix_index: HashMap<String, Vec<(String, Id)>> = HashMap::new();
+        for (qname, id) in &self.name_to_id {
+            if let Some(last) = qname.rsplit("::").next() {
+                suffix_index
+                    .entry(last.to_string())
+                    .or_default()
+                    .push((qname.clone(), id.clone()));
+            }
+        }
+
+        for call in &calls {
+            let caller_id = match self.name_to_id.get(&call.caller_qname) {
+                Some(id) => id.clone(),
+                None => continue,
+            };
+
+            // Extract the module from the caller's qualified name.
+            let caller_module = call
+                .caller_qname
+                .rsplit_once("::")
+                .map(|(m, _)| m.to_string())
+                .unwrap_or_default();
+
+            let callee_id = self.resolve_callee(
+                &call.callee_name,
+                &caller_module,
+                call.is_method,
+                &suffix_index,
+            );
+
+            if let Some(target_id) = callee_id {
+                let key = (caller_id.to_string(), target_id.to_string());
+                if seen_edges.insert(key) {
+                    let edge = self.make_edge(EdgeType::Calls, caller_id, target_id);
+                    self.edges.push(edge);
+                }
+            }
+        }
+    }
+
+    /// Try to resolve a callee name to a node Id.
+    fn resolve_callee(
+        &self,
+        callee_name: &str,
+        caller_module: &str,
+        is_method: bool,
+        suffix_index: &HashMap<String, Vec<(String, Id)>>,
+    ) -> Option<Id> {
+        // For path-qualified calls like `module::func`, try the last segment
+        // for suffix matching but also try the full path.
+        let short_name = callee_name.rsplit("::").next().unwrap_or(callee_name);
+
+        // 1. Try same-module lookup: caller_module::callee_name
+        if !caller_module.is_empty() {
+            let same_module_qname = format!("{caller_module}::{short_name}");
+            if let Some(id) = self.name_to_id.get(&same_module_qname) {
+                return Some(id.clone());
+            }
+        }
+
+        // 2. Try import alias resolution.
+        if !caller_module.is_empty() {
+            let alias_key = (caller_module.to_string(), short_name.to_string());
+            if let Some(resolved_qname) = self.import_aliases.get(&alias_key) {
+                if let Some(id) = self.name_to_id.get(resolved_qname) {
+                    return Some(id.clone());
+                }
+            }
+
+            // For path-qualified calls like `foo::bar`, try resolving `foo` as
+            // an alias and then appending `bar`.
+            if callee_name.contains("::") {
+                let parts: Vec<&str> = callee_name.splitn(2, "::").collect();
+                let prefix_alias_key = (caller_module.to_string(), parts[0].to_string());
+                if let Some(resolved_prefix) = self.import_aliases.get(&prefix_alias_key) {
+                    let full_qname = format!("{resolved_prefix}::{}", parts[1]);
+                    if let Some(id) = self.name_to_id.get(&full_qname) {
+                        return Some(id.clone());
+                    }
+                }
+            }
+        }
+
+        // 3. Direct global lookup.
+        if let Some(id) = self.name_to_id.get(callee_name) {
+            return Some(id.clone());
+        }
+
+        // 4. For method calls or simple names, try suffix match.
+        // Only match if exactly one candidate (to avoid ambiguity).
+        if is_method || !callee_name.contains("::") {
+            if let Some(candidates) = suffix_index.get(short_name) {
+                if candidates.len() == 1 {
+                    return Some(candidates[0].1.clone());
+                }
+            }
+        }
+
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Call site collector — walks function bodies to find calls
+// ---------------------------------------------------------------------------
+
+struct CallCollector {
+    module_qname: String,
+    /// Qualified name of the function we're currently inside.
+    current_fn_qname: Option<String>,
+    /// Collected unresolved calls.
+    calls: Vec<UnresolvedCall>,
+}
+
+impl<'ast> Visit<'ast> for CallCollector {
+    fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+        let name = f.sig.ident.to_string();
+        let prev = self.current_fn_qname.take();
+        self.current_fn_qname = Some(format!("{}::{}", self.module_qname, name));
+        syn::visit::visit_item_fn(self, f);
+        self.current_fn_qname = prev;
+    }
+
+    fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+        let name = f.sig.ident.to_string();
+        let prev = self.current_fn_qname.take();
+        self.current_fn_qname = Some(format!("{}::{}", self.module_qname, name));
+        syn::visit::visit_impl_item_fn(self, f);
+        self.current_fn_qname = prev;
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let Some(ref caller_qname) = self.current_fn_qname {
+            if let Some(callee_name) = extract_call_name(&call.func) {
+                self.calls.push(UnresolvedCall {
+                    caller_qname: caller_qname.clone(),
+                    callee_name,
+                    is_method: false,
+                });
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if let Some(ref caller_qname) = self.current_fn_qname {
+            self.calls.push(UnresolvedCall {
+                caller_qname: caller_qname.clone(),
+                callee_name: call.method.to_string(),
+                is_method: true,
+            });
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+/// Extract the callee name from a call expression's function position.
+fn extract_call_name(func: &syn::Expr) -> Option<String> {
+    match func {
+        syn::Expr::Path(ep) => Some(path_to_string(&ep.path)),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Use tree walker
+// ---------------------------------------------------------------------------
+
+/// Recursively collect all (short_name, full_path_segments) pairs from a use tree.
+fn collect_use_tree(tree: &syn::UseTree, prefix: &[String], out: &mut Vec<(String, Vec<String>)>) {
+    match tree {
+        syn::UseTree::Path(p) => {
+            let mut new_prefix = prefix.to_vec();
+            new_prefix.push(p.ident.to_string());
+            collect_use_tree(&p.tree, &new_prefix, out);
+        }
+        syn::UseTree::Name(n) => {
+            let name = n.ident.to_string();
+            let mut segments = prefix.to_vec();
+            segments.push(name.clone());
+            out.push((name, segments));
+        }
+        syn::UseTree::Rename(r) => {
+            let alias = r.rename.to_string();
+            let mut segments = prefix.to_vec();
+            segments.push(r.ident.to_string());
+            out.push((alias, segments));
+        }
+        syn::UseTree::Glob(_) => {
+            // `use foo::*;` — we skip glob imports as they're hard to resolve
+            // without type information.
+        }
+        syn::UseTree::Group(g) => {
+            for item in &g.items {
+                collect_use_tree(item, prefix, out);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -609,27 +967,122 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                 let name = s.ident.to_string();
                 let vis = syn_vis_to_visibility(&s.vis);
                 let doc = extract_doc_comment(&s.attrs);
-                let node = self.make_node(NodeType::Type, &name, 0, vis, doc);
+                let node = self.make_node(NodeType::Type, &name, 0, vis.clone(), doc);
                 let node_id = node.id.clone();
+                let struct_qname = self.qualified(&name);
                 self.ctx
                     .name_to_id
-                    .insert(self.qualified(&name), node_id.clone());
-                let edge = self.add_contains_edge(node_id);
+                    .insert(struct_qname.clone(), node_id.clone());
+                let edge = self.add_contains_edge(node_id.clone());
                 self.new_nodes.push(node);
                 self.new_edges.push(edge);
+
+                // Extract fields from public structs with named fields (skip >50 fields).
+                if matches!(vis, Visibility::Public) {
+                    if let syn::Fields::Named(fields) = &s.fields {
+                        if fields.named.len() <= 50 {
+                            for field in &fields.named {
+                                if let Some(ident) = &field.ident {
+                                    let field_name = ident.to_string();
+                                    let field_qname = format!("{struct_qname}::{field_name}");
+                                    let type_str = type_to_string(&field.ty);
+                                    let field_node = self.ctx.make_node(
+                                        NodeType::Field,
+                                        &field_name,
+                                        &field_qname,
+                                        self.rel_path,
+                                        0,
+                                        0,
+                                        Visibility::Public,
+                                        Some(type_str.clone()),
+                                        None,
+                                        SpecConfidence::None,
+                                    );
+                                    let field_id = field_node.id.clone();
+                                    self.ctx.name_to_id.insert(field_qname, field_id.clone());
+                                    self.new_nodes.push(field_node);
+
+                                    // FieldOf edge: field → parent struct
+                                    let field_edge = self.ctx.make_edge(
+                                        EdgeType::FieldOf,
+                                        field_id.clone(),
+                                        node_id.clone(),
+                                    );
+                                    self.new_edges.push(field_edge);
+
+                                    // DependsOn edge if field type refers to a known type
+                                    let bare_type = type_str
+                                        .trim_start_matches('&')
+                                        .trim_start_matches("mut ")
+                                        .to_string();
+                                    // Try the type as-is and also qualified in current module
+                                    let candidates = [
+                                        self.ctx.name_to_id.get(&bare_type).cloned(),
+                                        self.ctx
+                                            .name_to_id
+                                            .get(&self.qualified(&bare_type))
+                                            .cloned(),
+                                    ];
+                                    for candidate in candidates.iter().flatten() {
+                                        let dep_edge = self.ctx.make_edge(
+                                            EdgeType::DependsOn,
+                                            field_id.clone(),
+                                            candidate.clone(),
+                                        );
+                                        self.new_edges.push(dep_edge);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Item::Enum(e) => {
                 let name = e.ident.to_string();
                 let vis = syn_vis_to_visibility(&e.vis);
                 let doc = extract_doc_comment(&e.attrs);
+                let is_subcommand = has_derive_attr(&e.attrs, "Subcommand");
+
                 let node = self.make_node(NodeType::Type, &name, 0, vis, doc);
                 let node_id = node.id.clone();
+                let enum_qname = self.qualified(&name);
                 self.ctx
                     .name_to_id
-                    .insert(self.qualified(&name), node_id.clone());
+                    .insert(enum_qname.clone(), node_id.clone());
                 let edge = self.add_contains_edge(node_id);
                 self.new_nodes.push(node);
                 self.new_edges.push(edge);
+
+                // If this enum derives Subcommand, emit each variant as an Endpoint.
+                if is_subcommand {
+                    for variant in &e.variants {
+                        let variant_name = variant.ident.to_string();
+                        let variant_qname = format!("{}::{}", enum_qname, variant_name);
+                        let variant_doc = extract_doc_comment(&variant.attrs);
+                        // Convert CamelCase variant to kebab-case for the command name
+                        let cmd_name = camel_to_kebab(&variant_name);
+                        let ep_node = self.ctx.make_node(
+                            NodeType::Endpoint,
+                            &cmd_name,
+                            &variant_qname,
+                            self.rel_path,
+                            0,
+                            0,
+                            Visibility::Public,
+                            variant_doc,
+                            None,
+                            SpecConfidence::None,
+                        );
+                        let ep_id = ep_node.id.clone();
+                        self.ctx.name_to_id.insert(variant_qname, ep_id.clone());
+                        let ep_edge =
+                            self.ctx
+                                .make_edge(EdgeType::Contains, self.module_id.clone(), ep_id);
+                        self.new_nodes.push(ep_node);
+                        self.new_edges.push(ep_edge);
+                    }
+                }
             }
             Item::Trait(t) => {
                 let name = t.ident.to_string();
@@ -663,15 +1116,19 @@ impl<'ast, 'a> Visit<'ast> for ItemVisitor<'a> {
                 }
             }
             Item::Fn(f) => {
-                if matches!(f.vis, syn::Visibility::Public(_)) {
+                let is_test_fn = has_test_attr(&f.attrs);
+                let is_in_test_context =
+                    is_test_file_path(self.rel_path) || self.module_qname.contains("::tests");
+                if matches!(f.vis, syn::Visibility::Public(_)) || is_test_fn {
                     let name = f.sig.ident.to_string();
                     let doc = extract_doc_comment(&f.attrs);
                     let sig = format_fn_sig(&f.sig);
-                    let mut node =
-                        self.make_node(NodeType::Function, &name, 0, Visibility::Public, doc);
+                    let vis = syn_vis_to_visibility(&f.vis);
+                    let mut node = self.make_node(NodeType::Function, &name, 0, vis, doc);
                     if node.doc_comment.is_none() {
                         node.doc_comment = Some(sig);
                     }
+                    node.test_node = is_test_fn || is_in_test_context;
                     let node_id = node.id.clone();
                     self.ctx
                         .name_to_id
@@ -734,6 +1191,68 @@ fn extract_spec_comments(content: &str) -> Vec<String> {
             None
         })
         .collect()
+}
+
+/// Check if a function has a `#[test]` or `#[tokio::test]` attribute.
+fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        let path = attr.path();
+        // #[test]
+        if path.is_ident("test") {
+            return true;
+        }
+        // #[tokio::test], #[async_std::test], etc.
+        let segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        if segments.last().map(|s| s.as_str()) == Some("test") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a file path indicates a test file (in a `tests/` directory).
+fn is_test_file_path(rel_path: &str) -> bool {
+    let parts: Vec<&str> = rel_path.split('/').collect();
+    parts.iter().any(|&p| p == "tests")
+}
+
+/// Check if an item has a `#[derive(...)]` attribute containing the given trait name.
+fn has_derive_attr(attrs: &[syn::Attribute], trait_name: &str) -> bool {
+    for attr in attrs {
+        if attr.path().is_ident("derive") {
+            // Parse the derive list: #[derive(Foo, Bar)]
+            if let syn::Meta::List(list) = &attr.meta {
+                let tokens_str = list.tokens.to_string();
+                // Check each comma-separated token
+                for token in tokens_str.split(',') {
+                    let trimmed = token.trim();
+                    // Handle both `Subcommand` and `clap::Subcommand`
+                    let last_segment = trimmed.rsplit("::").next().unwrap_or(trimmed);
+                    if last_segment == trait_name {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Convert a CamelCase name to kebab-case for CLI command naming.
+/// e.g. `InitProject` → `init-project`, `Clone` → `clone`
+fn camel_to_kebab(name: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('-');
+            }
+            result.push(c.to_lowercase().next().unwrap());
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 /// Extract doc comment text from syn attributes.
@@ -1109,6 +1628,550 @@ diesel::table! {
                 .iter()
                 .any(|e| e.edge_type == EdgeType::GovernedBy),
             "should have GovernedBy edge"
+        );
+    }
+
+    #[test]
+    fn extract_intra_module_calls() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let code = r#"
+pub fn helper() -> String {
+    "hello".to_string()
+}
+
+pub fn caller() -> String {
+    helper()
+}
+"#;
+        fs::write(src_dir.join("lib.rs"), code).unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "abc123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // Both functions should exist as nodes.
+        let helper_node = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "helper");
+        let caller_node = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "caller");
+        assert!(helper_node.is_some(), "should have helper function node");
+        assert!(caller_node.is_some(), "should have caller function node");
+
+        // There should be a Calls edge from caller → helper.
+        let caller_id = &caller_node.unwrap().id;
+        let helper_id = &helper_node.unwrap().id;
+        let has_call_edge = result.edges.iter().any(|e| {
+            e.edge_type == EdgeType::Calls && e.source_id == *caller_id && e.target_id == *helper_id
+        });
+        assert!(
+            has_call_edge,
+            "should have Calls edge from caller to helper"
+        );
+    }
+
+    #[test]
+    fn extract_cross_crate_calls_via_use() {
+        // Simulate two crates: `crate-a` exports a function, `crate-b` imports and calls it.
+        let dir = make_tempdir();
+
+        // Workspace Cargo.toml
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/crate-a\", \"crates/crate-b\"]\n",
+        )
+        .unwrap();
+
+        // crate-a
+        let crate_a = dir.path().join("crates/crate-a");
+        fs::create_dir_all(crate_a.join("src")).unwrap();
+        fs::write(
+            crate_a.join("Cargo.toml"),
+            "[package]\nname = \"crate-a\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            crate_a.join("src/lib.rs"),
+            "pub fn shared_helper() -> u32 { 42 }\n",
+        )
+        .unwrap();
+
+        // crate-b depends on crate-a
+        let crate_b = dir.path().join("crates/crate-b");
+        fs::create_dir_all(crate_b.join("src")).unwrap();
+        fs::write(
+            crate_b.join("Cargo.toml"),
+            "[package]\nname = \"crate-b\"\nversion = \"0.1.0\"\n\n[dependencies]\ncrate-a = { path = \"../crate-a\" }\n",
+        )
+        .unwrap();
+        fs::write(
+            crate_b.join("src/lib.rs"),
+            "use crate_a::shared_helper;\n\npub fn consumer() -> u32 {\n    shared_helper()\n}\n",
+        )
+        .unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "cross123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // Both functions should exist.
+        let helper_node = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "shared_helper");
+        let consumer_node = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "consumer");
+        assert!(helper_node.is_some(), "should have shared_helper node");
+        assert!(consumer_node.is_some(), "should have consumer node");
+
+        // Calls edge from consumer → shared_helper.
+        let consumer_id = &consumer_node.unwrap().id;
+        let helper_id = &helper_node.unwrap().id;
+        let has_call = result.edges.iter().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == *consumer_id
+                && e.target_id == *helper_id
+        });
+        assert!(
+            has_call,
+            "should have Calls edge from consumer to shared_helper (cross-crate)"
+        );
+    }
+
+    #[test]
+    fn extract_group_use_imports() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/lib-a\", \"crates/lib-b\"]\n",
+        )
+        .unwrap();
+
+        // lib-a with two public functions
+        let lib_a = dir.path().join("crates/lib-a");
+        fs::create_dir_all(lib_a.join("src")).unwrap();
+        fs::write(
+            lib_a.join("Cargo.toml"),
+            "[package]\nname = \"lib-a\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            lib_a.join("src/lib.rs"),
+            "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { 2 }\n",
+        )
+        .unwrap();
+
+        // lib-b imports both via group use
+        let lib_b = dir.path().join("crates/lib-b");
+        fs::create_dir_all(lib_b.join("src")).unwrap();
+        fs::write(
+            lib_b.join("Cargo.toml"),
+            "[package]\nname = \"lib-b\"\nversion = \"0.1.0\"\n\n[dependencies]\nlib-a = { path = \"../lib-a\" }\n",
+        )
+        .unwrap();
+        fs::write(
+            lib_b.join("src/lib.rs"),
+            "use lib_a::{alpha, beta};\n\npub fn combined() -> u32 {\n    alpha() + beta()\n}\n",
+        )
+        .unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "group123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        let combined_node = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "combined");
+        assert!(combined_node.is_some(), "should have combined node");
+        let combined_id = &combined_node.unwrap().id;
+
+        let alpha_node = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "alpha");
+        let beta_node = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "beta");
+        assert!(alpha_node.is_some(), "should have alpha node");
+        assert!(beta_node.is_some(), "should have beta node");
+
+        // Should have Calls edges to both alpha and beta.
+        let calls_alpha = result.edges.iter().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == *combined_id
+                && e.target_id == alpha_node.unwrap().id
+        });
+        let calls_beta = result.edges.iter().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == *combined_id
+                && e.target_id == beta_node.unwrap().id
+        });
+        assert!(calls_alpha, "should have Calls edge to alpha");
+        assert!(calls_beta, "should have Calls edge to beta");
+    }
+
+    #[test]
+    fn calls_edges_are_deduplicated() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"dedup\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // Call helper() twice in the same function — should produce only one edge.
+        let code = r#"
+pub fn helper() -> u32 { 1 }
+
+pub fn caller() -> u32 {
+    helper() + helper()
+}
+"#;
+        fs::write(src_dir.join("lib.rs"), code).unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "dedup123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        let call_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .collect();
+        assert_eq!(
+            call_edges.len(),
+            1,
+            "should have exactly 1 Calls edge (deduplicated), got {}",
+            call_edges.len()
+        );
+    }
+
+    #[test]
+    fn crate_relative_use_resolves() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(src_dir.join("utils")).unwrap();
+
+        // Define a function in a submodule.
+        fs::write(
+            src_dir.join("utils/helpers.rs"),
+            "pub fn utility() -> u32 { 99 }\n",
+        )
+        .unwrap();
+
+        // Import it with `use crate::utils::helpers::utility;`
+        fs::write(
+            src_dir.join("lib.rs"),
+            "mod utils;\nuse crate::utils::helpers::utility;\n\npub fn main_fn() -> u32 {\n    utility()\n}\n",
+        )
+        .unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "crate-rel");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        let main_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "main_fn");
+        let utility_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "utility");
+        assert!(main_fn.is_some(), "should have main_fn node");
+        assert!(utility_fn.is_some(), "should have utility node");
+
+        let has_call = result.edges.iter().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source_id == main_fn.unwrap().id
+                && e.target_id == utility_fn.unwrap().id
+        });
+        assert!(
+            has_call,
+            "should have Calls edge from main_fn to utility via crate:: import"
+        );
+    }
+
+    #[test]
+    fn extract_struct_fields_as_field_of_edges() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let code = r#"
+pub struct Config {
+    pub host: String,
+    pub port: u16,
+}
+"#;
+        fs::write(src_dir.join("lib.rs"), code).unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "field123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // Should have Field nodes for host and port.
+        let host_field = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Field && n.name == "host");
+        let port_field = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Field && n.name == "port");
+        assert!(host_field.is_some(), "should extract host field");
+        assert!(port_field.is_some(), "should extract port field");
+
+        // doc_comment should contain the type annotation.
+        assert_eq!(
+            host_field.unwrap().doc_comment.as_deref(),
+            Some("String"),
+            "host field doc_comment should be the type"
+        );
+
+        // Should have FieldOf edges.
+        let field_of_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::FieldOf)
+            .collect();
+        assert_eq!(
+            field_of_edges.len(),
+            2,
+            "should have 2 FieldOf edges, got {}",
+            field_of_edges.len()
+        );
+    }
+
+    #[test]
+    fn external_crate_use_not_resolved() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let code = r#"
+use std::collections::HashMap;
+
+pub fn make_map() -> u32 {
+    let _m = HashMap::new();
+    42
+}
+"#;
+        fs::write(src_dir.join("lib.rs"), code).unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "ext123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // No Calls edges should be produced for std::HashMap::new.
+        let call_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .collect();
+        assert!(
+            call_edges.is_empty(),
+            "should not produce Calls edges for external crate functions, got {}",
+            call_edges.len()
+        );
+    }
+
+    #[test]
+    fn test_functions_tagged_as_test_nodes() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let code = r#"
+pub fn production_code() -> u32 { 42 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+        assert_eq!(2 + 2, 4);
+    }
+}
+"#;
+        fs::write(src_dir.join("lib.rs"), code).unwrap();
+
+        // Also add a file in tests/ directory.
+        let tests_dir = dir.path().join("tests");
+        fs::create_dir_all(&tests_dir).unwrap();
+        fs::write(
+            tests_dir.join("integration.rs"),
+            "pub fn integration_helper() {}\n",
+        )
+        .unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "test123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // The #[test] function should be tagged as test_node.
+        let test_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "it_works");
+        assert!(test_fn.is_some(), "should extract #[test] fn it_works");
+        assert!(
+            test_fn.unwrap().test_node,
+            "it_works should be tagged as test_node"
+        );
+
+        // The production function should NOT be tagged as test_node.
+        let prod_fn = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "production_code");
+        assert!(prod_fn.is_some(), "should extract production_code");
+        assert!(
+            !prod_fn.unwrap().test_node,
+            "production_code should NOT be tagged as test_node"
+        );
+
+        // Module in tests/ directory should be tagged.
+        let test_module = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Module && n.file_path.contains("tests/"));
+        assert!(
+            test_module.is_some(),
+            "should have module node for tests/ file"
+        );
+        assert!(
+            test_module.unwrap().test_node,
+            "module in tests/ should be tagged as test_node"
+        );
+    }
+
+    #[test]
+    fn extract_clap_subcommand_enum_variants_as_endpoints() {
+        let dir = make_tempdir();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-cli\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let src_dir = dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let code = r#"
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Initialize a new project
+    Init {
+        path: String,
+    },
+    /// Clone an existing repository
+    Clone {
+        url: String,
+    },
+}
+"#;
+        fs::write(src_dir.join("main.rs"), code).unwrap();
+
+        let result = RustExtractor.extract(dir.path(), "clap123");
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        // Should have Endpoint nodes for each variant.
+        let init_ep = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint && n.name == "init");
+        let clone_ep = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Endpoint && n.name == "clone");
+
+        assert!(
+            init_ep.is_some(),
+            "should extract Init variant as Endpoint with name 'init'"
+        );
+        assert!(
+            clone_ep.is_some(),
+            "should extract Clone variant as Endpoint with name 'clone'"
+        );
+
+        // Verify doc comments are preserved.
+        assert_eq!(
+            init_ep.unwrap().doc_comment.as_deref(),
+            Some("Initialize a new project"),
+            "Init endpoint should have doc comment"
         );
     }
 }

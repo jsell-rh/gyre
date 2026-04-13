@@ -59,9 +59,11 @@ struct SqliteCustomizer;
 impl CustomizeConnection<SqliteConnection, R2d2Error> for SqliteCustomizer {
     fn on_acquire(&self, conn: &mut SqliteConnection) -> Result<(), R2d2Error> {
         use diesel::RunQueryDsl;
-        diesel::sql_query("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .execute(conn)
-            .map_err(R2d2Error::QueryError)?;
+        diesel::sql_query(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+        )
+        .execute(conn)
+        .map_err(R2d2Error::QueryError)?;
         Ok(())
     }
 }

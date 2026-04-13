@@ -73,16 +73,18 @@ export const api = {
   repo: (id) => request(`/repos/${id}`),
   spawnAgent: (data) =>
     request('/agents/spawn', { method: 'POST', body: JSON.stringify(data) }),
-  tasks: ({ workspaceId, status, assigned_to, parent_task_id } = {}) => {
+  tasks: ({ workspaceId, repoId, status, assigned_to, parent_task_id } = {}) => {
     const p = new URLSearchParams();
     if (status) p.set('status', status);
     if (assigned_to) p.set('assigned_to', assigned_to);
     if (parent_task_id) p.set('parent_task_id', parent_task_id);
     if (workspaceId) p.set('workspace_id', workspaceId);
+    if (repoId) p.set('repo_id', repoId);
     const qs = p.toString();
     return request(`/tasks${qs ? '?' + qs : ''}`);
   },
   task: (id) => request(`/tasks/${id}`),
+  updateTaskStatus: (id, status) => request(`/tasks/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
   repos: ({ workspaceId } = {}) => {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/repos${qs}`);
@@ -150,6 +152,8 @@ export const api = {
   // Hot files & blame
   repoHotFiles: (id, limit = 20) => request(`/repos/${id}/hot-files?limit=${limit}`),
   repoBlame: (id, path) => request(`/repos/${id}/blame?path=${encodeURIComponent(path)}`),
+  // Review routing
+  repoReviewRouting: (id, path) => request(`/repos/${id}/review-routing${path ? '?path=' + encodeURIComponent(path) : ''}`),
   // Speculative merges
   repoSpeculative: (id) => request(`/repos/${id}/speculative`),
   // Agent commits
@@ -241,8 +245,24 @@ export const api = {
   // Agent logs
   agentLogs: (id, limit = 100, offset = 0) =>
     request(`/agents/${id}/logs?limit=${limit}&offset=${offset}`),
+  // Agent log SSE stream URL (for live tailing active agents)
+  agentLogStreamUrl: (id) =>
+    `${API_BASE}/agents/${id}/logs/stream`,
   appendAgentLog: (id, message) =>
     request(`/agents/${id}/logs`, { method: 'POST', body: JSON.stringify({ message }) }),
+  // Agent messages (distinct from logs — typed messages: TaskAssignment, ReviewRequest, etc.)
+  agentMessages: (id) => request(`/agents/${id}/messages`),
+  // Send message via workspace message bus (POST /workspaces/:wsId/messages)
+  // Server expects: { to: { agent: "<id>" }, kind: "FreeText", payload: {...} }
+  sendAgentMessage: (workspaceId, agentId, data) =>
+    request(`/workspaces/${workspaceId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({
+        to: { agent: agentId },
+        kind: data.kind ?? 'FreeText',
+        payload: data.payload ?? { content: data.content },
+      }),
+    }),
   // MR dependencies
   mrDependencies: (id) => request(`/merge-requests/${id}/dependencies`),
   setMrDependencies: (id, data) =>
@@ -302,6 +322,10 @@ export const api = {
   agentSpawnLog: (id) => request(`/agents/${id}/logs?limit=50&offset=0`),
   // Container audit record (M19.3) — 404 if agent was not container-spawned
   agentContainer: (id) => request(`/agents/${id}/container`),
+  // Agent workload attestation (G10) — pid, hostname, compute_target, stack_hash, alive
+  agentWorkload: (id) => request(`/agents/${id}/workload`),
+  // Agent touched paths (M13.4) — all branches and files written by this agent
+  agentTouchedPaths: (id) => request(`/agents/${id}/touched-paths`),
   // BCP (M23)
   bcpTargets: () => request('/admin/bcp/targets'),
   bcpDrill: () => request('/admin/bcp/drill', { method: 'POST' }),
@@ -344,6 +368,11 @@ export const api = {
     }),
   revokeSpec: (path, reason) =>
     request(`/specs/${encodeURIComponent(path)}/revoke`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  rejectSpec: (path, reason) =>
+    request(`/specs/${encodeURIComponent(path)}/reject`, {
       method: 'POST',
       body: JSON.stringify({ reason }),
     }),
@@ -502,6 +531,16 @@ export const api = {
   // Workspace admin (S4.7)
   updateWorkspace: (id, data) =>
     request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Tenant-level ABAC policies
+  policies: () => request('/policies'),
+  createPolicy: (data) =>
+    request('/policies', { method: 'POST', body: JSON.stringify(data) }),
+  deletePolicy: (id) =>
+    request(`/policies/${id}`, { method: 'DELETE' }),
+  policyDecisions: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/policies/decisions${qs ? '?' + qs : ''}`);
+  },
   workspaceAbacPolicies: (id) => request(`/policies?scope=Workspace&scope_id=${id}`),
   createWorkspaceAbacPolicy: (id, data) =>
     request('/policies', { method: 'POST', body: JSON.stringify({ ...data, scope: 'Workspace', scope_id: id }) }),
@@ -563,6 +602,59 @@ export const api = {
   // Presence
   workspacePresence: (workspaceId) =>
     request(`/workspaces/${workspaceId}/presence`),
+  // Release preparation
+  releasePrep: (repoId) =>
+    request('/release/prepare', { method: 'POST', body: JSON.stringify({ repo_id: repoId }) }),
+  // Conversation provenance
+  conversationProvenance: (sha) => request(`/conversations/${sha}`),
+  // Agent discovery
+  agentDiscovery: (capability) => {
+    const qs = capability ? `?capability=${encodeURIComponent(capability)}` : '';
+    return request(`/agents/discover${qs}`);
+  },
+  // ── LLM Configuration (per-workspace overrides) ────────────────────
+  llmConfigList: (workspaceId) =>
+    request(`/workspaces/${workspaceId}/llm/config`),
+  llmConfigGet: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/config/${encodeURIComponent(feature)}`),
+  llmConfigSet: (workspaceId, feature, data) =>
+    request(`/workspaces/${workspaceId}/llm/config/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  llmConfigDelete: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/config/${encodeURIComponent(feature)}`, { method: 'DELETE' }),
+  llmPromptGet: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/prompts/${encodeURIComponent(feature)}`),
+  llmPromptSet: (workspaceId, feature, data) =>
+    request(`/workspaces/${workspaceId}/llm/prompts/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  llmPromptDelete: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/prompts/${encodeURIComponent(feature)}`, { method: 'DELETE' }),
+  // Admin LLM defaults
+  adminLlmConfigGet: (feature) =>
+    request(`/admin/llm/config/${encodeURIComponent(feature)}`),
+  adminLlmConfigSet: (feature, data) =>
+    request(`/admin/llm/config/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  adminLlmPromptGet: (feature) =>
+    request(`/admin/llm/prompts/${encodeURIComponent(feature)}`),
+  adminLlmPromptSet: (feature, data) =>
+    request(`/admin/llm/prompts/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Graph diff (architecture delta between commits/branches)
+  repoGraphDiff: (id, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/repos/${id}/graph/diff${qs ? '?' + qs : ''}`);
+  },
+  // Workspace-scope concept search
+  workspaceGraphConcept: (wsId, name) =>
+    request(`/workspaces/${wsId}/graph/concept/${encodeURIComponent(name)}`),
+  // API token management
+  createApiToken: (data) =>
+    request('/users/me/tokens', { method: 'POST', body: JSON.stringify(data) }),
+  deleteApiToken: (id) =>
+    request(`/users/me/tokens/${id}`, { method: 'DELETE' }),
+  listApiTokens: () => request('/users/me/tokens'),
+  // Server version
+  serverVersion: () => request('/version'),
+  // Activity feed
+  activityFeed: (limit = 20) =>
+    request(`/activity?limit=${limit}`),
   // Graph predict — LLM-powered structural predictions (TASK-358)
   graphPredict: async (repoId, body) => {
     try {

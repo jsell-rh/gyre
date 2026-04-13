@@ -230,6 +230,21 @@ impl NotificationRepository for SqliteStorage {
         .await?
     }
 
+    async fn list_recent(&self, limit: usize) -> Result<Vec<Notification>> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<Vec<Notification>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows: Vec<NotificationRow> = notifications::table
+                .order(notifications::created_at.desc())
+                .limit(limit as i64)
+                .select(NotificationRow::as_select())
+                .load(&mut *conn)
+                .context("list_recent")?;
+            rows.into_iter().map(|r| r.into_notification()).collect()
+        })
+        .await?
+    }
+
     async fn has_recent_dismissal(
         &self,
         workspace_id: &Id,

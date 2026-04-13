@@ -68,6 +68,10 @@ pub struct CompleteAgentRequest {
     pub branch: String,
     pub title: String,
     pub target_branch: String,
+    /// SHA-256 of the agent's conversation blob (HSI §5 provenance).
+    /// Stored in KV so the merge attestation can include it.
+    #[serde(default)]
+    pub conversation_sha: Option<String>,
 }
 
 // ── Interrogation agent helpers ───────────────────────────────────────────────
@@ -567,13 +571,14 @@ pub async fn spawn_agent(
             "/workspace".to_string()
         };
         // Command is server-controlled only — never from user input (C-1 RCE fix).
-        // Use compute target's configured command, or fall back to /gyre/entrypoint.sh
+        // Use compute target's configured command, GYRE_AGENT_COMMAND env var, or /gyre/entrypoint.sh.
         let command = resolved_target_config
             .as_ref()
             .and_then(|cfg| cfg.config.get("command"))
             .and_then(|v| v.as_str())
-            .unwrap_or("/gyre/entrypoint.sh")
-            .to_string();
+            .map(String::from)
+            .or_else(|| std::env::var("GYRE_AGENT_COMMAND").ok())
+            .unwrap_or_else(|| "/gyre/entrypoint.sh".to_string());
         let args: Vec<String> = resolved_target_config
             .as_ref()
             .and_then(|cfg| cfg.config.get("args"))
@@ -627,6 +632,29 @@ pub async fn spawn_agent(
         );
         // Placeholder so the Anthropic SDK initialises; cred-proxy injects the real key per request.
         container_env.insert("ANTHROPIC_API_KEY".to_string(), "proxy-managed".to_string());
+
+        // Vertex AI: forward non-secret Vertex config env vars to the container.
+        // Secrets (GCP SA JSON) are handled by GYRE_CRED_GCP_SA_JSON above.
+        // CLAUDE_CODE_USE_VERTEX enables Vertex mode in the Claude Agent SDK.
+        for var_name in [
+            "CLAUDE_CODE_USE_VERTEX",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "CLOUD_ML_REGION",
+        ] {
+            if let Ok(val) = std::env::var(var_name) {
+                if !val.is_empty() {
+                    container_env.insert(var_name.to_string(), val);
+                }
+            }
+        }
+        // Also check GYRE_VERTEX_LOCATION as an alias for CLOUD_ML_REGION.
+        if !container_env.contains_key("CLOUD_ML_REGION") {
+            if let Ok(val) = std::env::var("GYRE_VERTEX_LOCATION") {
+                if !val.is_empty() {
+                    container_env.insert("CLOUD_ML_REGION".to_string(), val);
+                }
+            }
+        }
 
         let spawn_config = gyre_ports::SpawnConfig {
             name: agent.name.clone(),
@@ -1008,7 +1036,13 @@ pub async fn spawn_agent(
     Ok((
         StatusCode::CREATED,
         Json(SpawnAgentResponse {
-            agent: AgentResponse::from(agent),
+            agent: {
+                let mut r = AgentResponse::from(agent);
+                r.repo_id = Some(req.repo_id.clone());
+                r.branch = Some(req.branch.clone());
+                r.task_id = Some(req.task_id.clone());
+                r
+            },
             token,
             worktree_path,
             clone_url,
@@ -1088,6 +1122,29 @@ pub async fn complete_agent(
         }
     }
 
+    // Compute diff stats + conflict detection (like create_mr does).
+    if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
+        mr.workspace_id = repo.workspace_id.clone();
+        if let Ok(diff) = state
+            .git_ops
+            .diff(&repo.path, &mr.target_branch, &mr.source_branch)
+            .await
+        {
+            mr.diff_stats = Some(gyre_domain::DiffStats {
+                files_changed: diff.files_changed,
+                insertions: diff.insertions,
+                deletions: diff.deletions,
+            });
+        }
+        if let Ok(can_merge) = state
+            .git_ops
+            .can_merge(&repo.path, &mr.source_branch, &mr.target_branch)
+            .await
+        {
+            mr.has_conflicts = Some(!can_merge);
+        }
+    }
+
     state.merge_requests.create(&mr).await?;
 
     // Transition task to Review (navigate through intermediate states as needed)
@@ -1103,6 +1160,16 @@ pub async fn complete_agent(
             task.updated_at = now;
             let _ = state.tasks.update(&task).await;
         }
+    }
+
+    // Store conversation SHA in KV for merge attestation (HSI §5).
+    // The merge processor looks up `conv_sha:{agent_id}` in the `agent_provenance` bucket.
+    if let Some(ref sha) = req.conversation_sha {
+        let kv_key = format!("conv_sha:{}", id);
+        let _ = state
+            .kv_store
+            .kv_set("agent_provenance", &kv_key, sha.clone())
+            .await;
     }
 
     // Transition agent to Idle
@@ -1189,16 +1256,28 @@ pub async fn complete_agent(
 
     // Notify the spawning user that the agent completed and an MR is ready for review (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
-        crate::notifications::notify(
+        let body_json = serde_json::json!({
+            "agent_id": agent.id.as_str(),
+            "agent_name": &agent.name,
+            "mr_id": mr.id.as_str(),
+            "mr_title": &mr.title,
+            "spec_path": mr.spec_ref.as_ref().map(|s| s.split('@').next().unwrap_or(s)),
+        })
+        .to_string();
+
+        crate::notifications::notify_rich(
             state.as_ref(),
             mr.workspace_id.clone(),
             Id::new(spawned_by.clone()),
             gyre_common::NotificationType::AgentCompleted,
             format!(
-                "Agent '{}' completed — MR {} is ready for review",
-                agent.name, mr.id
+                "Agent '{}' completed — MR '{}' is ready for review",
+                agent.name, mr.title
             ),
             "default",
+            Some(body_json),
+            Some(mr.id.to_string()),
+            Some(mr.repository_id.to_string()),
         )
         .await;
     }
