@@ -34,6 +34,43 @@ pub async fn notify(
     }
 }
 
+/// Create and persist a notification with structured body and entity references.
+/// The `body` is a JSON string that the UI parses for quick-link buttons (agent_id, mr_id, spec_path).
+pub async fn notify_rich(
+    state: &AppState,
+    workspace_id: Id,
+    user_id: Id,
+    notification_type: NotificationType,
+    title: impl Into<String>,
+    tenant_id: impl Into<String>,
+    body: Option<String>,
+    entity_ref: Option<String>,
+    repo_id: Option<String>,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let id = Id::new(uuid::Uuid::new_v4().to_string());
+    let mut notif = Notification::new(
+        id,
+        workspace_id,
+        user_id,
+        notification_type,
+        title,
+        tenant_id,
+        now,
+    );
+    notif.body = body;
+    notif.entity_ref = entity_ref;
+    notif.repo_id = repo_id;
+
+    if let Err(e) = state.notifications.create(&notif).await {
+        tracing::warn!("Failed to create notification: {e}");
+    }
+}
+
 /// Notify the spawning user that a gate failed on their MR.
 ///
 /// Priority 3 (GateFailure) — created synchronously by the gate evaluation handler per HSI §2.
@@ -59,13 +96,33 @@ pub async fn notify_gate_failure(
         author_agent_id.clone()
     };
 
-    notify(
+    // Resolve MR title for human-friendly notification
+    let mr_label = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|mr| format!("'{}'", mr.title))
+        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+
+    let body_json = serde_json::json!({
+        "gate_name": gate_name,
+        "mr_id": mr_id,
+        "agent_id": author_agent_id.as_str(),
+    })
+    .to_string();
+
+    notify_rich(
         state,
         workspace_id.clone(),
         user_id,
         NotificationType::GateFailure,
-        format!("Gate '{gate_name}' failed on MR {mr_id}"),
+        format!("Gate '{gate_name}' failed on MR {mr_label}"),
         tenant_id,
+        Some(body_json),
+        Some(mr_id.to_string()),
+        None,
     )
     .await;
 }
@@ -92,15 +149,34 @@ pub async fn notify_mr_merged(
         return; // No human to notify
     };
 
-    // Use BudgetWarning as a low-priority informational notification.
+    // Resolve MR title for human-friendly notification
+    let mr_label = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|mr| format!("'{}'", mr.title))
+        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+
+    let body_json = serde_json::json!({
+        "mr_id": mr_id,
+        "agent_id": author_agent_id.as_str(),
+    })
+    .to_string();
+
+    // Use SuggestedSpecLink as a low-priority informational notification.
     // A dedicated MrMerged type can be added to NotificationType when needed.
-    notify(
+    notify_rich(
         state,
         workspace_id.clone(),
         user_id,
         NotificationType::SuggestedSpecLink,
-        format!("MR {mr_id} was merged"),
+        format!("MR {mr_label} was merged"),
         tenant_id,
+        Some(body_json),
+        Some(mr_id.to_string()),
+        None,
     )
     .await;
 }

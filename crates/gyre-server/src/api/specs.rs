@@ -50,6 +50,9 @@ pub struct SpecLedgerResponse {
     pub repo_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
+    /// Actual spec file content (populated by GET /specs/:path when repo is accessible).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 impl From<SpecLedgerEntry> for SpecLedgerResponse {
@@ -69,6 +72,7 @@ impl From<SpecLedgerEntry> for SpecLedgerResponse {
             updated_at: e.updated_at,
             repo_id: e.repo_id,
             workspace_id: e.workspace_id,
+            content: None,
         }
     }
 }
@@ -295,9 +299,16 @@ fn capitalize_dir(dir: &str) -> String {
 // The path parameter is URL-encoded, e.g. system%2Fdesign-principles.md
 // ---------------------------------------------------------------------------
 
+/// Optional query parameters for GET /api/v1/specs/:path
+#[derive(Deserialize, Default)]
+pub struct GetSpecQuery {
+    pub repo_id: Option<String>,
+}
+
 pub async fn get_spec(
     State(state): State<Arc<AppState>>,
     Path(encoded_path): Path<String>,
+    Query(query): Query<GetSpecQuery>,
 ) -> Result<Json<SpecLedgerResponse>, ApiError> {
     // axum already URL-decodes path segments.
     let spec_path = encoded_path;
@@ -335,7 +346,29 @@ pub async fn get_spec(
         .map(|mr| mr.id.to_string())
         .collect();
 
-    Ok(Json(entry.into()))
+    let mut resp: SpecLedgerResponse = entry.into();
+
+    // Read spec file content from git (best-effort).
+    // Use repo_id from query param or from the ledger entry itself.
+    let repo_id_str = query.repo_id.or_else(|| resp.repo_id.clone());
+    if let Some(repo_id) = repo_id_str {
+        if let Ok(Some(repo)) = state
+            .repos
+            .find_by_id(&gyre_common::Id::new(&repo_id))
+            .await
+        {
+            let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+            let git_file_path = format!("specs/{spec_path}");
+            if let Some(content) =
+                crate::spec_registry::read_git_file(&git_bin, &repo.path, "HEAD", &git_file_path)
+                    .await
+            {
+                resp.content = Some(content);
+            }
+        }
+    }
+
+    Ok(Json(resp))
 }
 
 // ---------------------------------------------------------------------------

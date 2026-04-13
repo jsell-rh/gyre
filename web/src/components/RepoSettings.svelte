@@ -5,22 +5,32 @@
    * Tabs: General | Gates | Policies | Budget | Audit | Danger Zone
    * Rendered inside RepoMode when the ⚙ tab is active.
    */
-  import { untrack } from 'svelte';
+  import { getContext, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { toastError } from '../lib/toast.svelte.js';
+  import { shortId, entityName } from '../lib/entityNames.svelte.js';
+
+  const openDetailPanel = getContext('openDetailPanel') ?? null;
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+  function nav(type, id, data) {
+    if (goToEntityDetail) goToEntityDetail(type, id, data ?? {});
+    else if (openDetailPanel) openDetailPanel({ type, id, data: data ?? {} });
+  }
 
   let {
     workspace = null,
     repo = null,
   } = $props();
 
-  const TAB_IDS = ['general', 'gates', 'policies', 'budget', 'audit', 'danger-zone'];
+  const TAB_IDS = ['general', 'gates', 'policies', 'budget', 'dependencies', 'release', 'audit', 'danger-zone'];
   const TAB_KEYS = {
     'general': 'repo_settings.tabs.general',
     'gates': 'repo_settings.tabs.gates',
     'policies': 'repo_settings.tabs.policies',
     'budget': 'repo_settings.tabs.budget',
+    'dependencies': 'Dependencies',
+    'release': 'Release',
     'audit': 'repo_settings.tabs.audit',
     'danger-zone': 'repo_settings.tabs.danger_zone',
   };
@@ -49,6 +59,8 @@
   let gates = $state([]);
   let gatesLoading = $state(false);
   let gatesError = $state(null);
+  let recentGateResults = $state([]);
+  let gateResultsLoading = $state(false);
   let addGateOpen = $state(false);
   let newGateName = $state('');
   let newGateType = $state('test_command');
@@ -57,6 +69,12 @@
   let gateCreating = $state(false);
   let gateCreateError = $state(null);
   let deletingGateId = $state(null);
+
+  // ── Push Gates ────────────────────────────────────────────────────────
+  let pushGates = $state([]);
+  let pushGatesLoading = $state(false);
+  let newPushGate = $state('');
+  let pushGatesSaving = $state(false);
 
   // ── Policies ──────────────────────────────────────────────────────────
   let specPolicy = $state(null);
@@ -69,6 +87,18 @@
   let repoBudget = $state(null);
   let repoBudgetLoading = $state(false);
   let repoBudgetError = $state(null);
+
+  // ── Dependencies ───────────────────────────────────────────────────────
+  let repoDeps = $state([]);
+  let repoDependents = $state([]);
+  let blastRadius = $state([]);
+  let depsLoading = $state(false);
+  let depsError = $state(null);
+
+  // ── Release ───────────────────────────────────────────────────────────
+  let releaseData = $state(null);
+  let releaseLoading = $state(false);
+  let releaseError = $state(null);
 
   // ── Audit ─────────────────────────────────────────────────────────────
   let auditEvents = $state([]);
@@ -120,12 +150,19 @@
 
     if (activeTab === 'gates') {
       if (untrack(() => gates.length === 0 && !gatesLoading)) loadGates(repoId);
+      if (untrack(() => pushGates.length === 0 && !pushGatesLoading)) loadPushGates(repoId);
     }
     if (activeTab === 'policies') {
       if (untrack(() => !specPolicy && !specPolicyLoading)) loadSpecPolicy(repoId);
     }
     if (activeTab === 'budget') {
       if (untrack(() => !repoBudget && !repoBudgetLoading)) loadRepoBudget(repoId);
+    }
+    if (activeTab === 'dependencies') {
+      if (untrack(() => repoDeps.length === 0 && repoDependents.length === 0 && !depsLoading)) loadDependencies(repoId);
+    }
+    if (activeTab === 'release') {
+      // Don't auto-load — user initiates preparation
     }
     if (activeTab === 'audit') {
       // Track auditFilterType so changes trigger a reload
@@ -139,11 +176,37 @@
     gatesError = null;
     try {
       gates = await api.repoGates(repoId) ?? [];
+      // Load recent gate results from MRs (best-effort)
+      loadRecentGateResults(repoId);
     } catch (e) {
       gatesError = e.message;
       gates = [];
     }
     finally { gatesLoading = false; }
+  }
+
+  async function loadRecentGateResults(repoId) {
+    gateResultsLoading = true;
+    try {
+      const mrs = await api.mergeRequests({ repository_id: repoId });
+      const mrList = (Array.isArray(mrs) ? mrs : []).slice(0, 5);
+      const gateDefMap = Object.fromEntries(gates.map(g => [g.id, g]));
+      const results = await Promise.all(mrList.map(async (mr) => {
+        const gateData = await api.mrGates(mr.id).catch(() => []);
+        const arr = Array.isArray(gateData) ? gateData : (gateData?.gates ?? []);
+        return arr.map(g => ({
+          ...g,
+          mr_id: mr.id,
+          mr_title: mr.title,
+          mr_status: mr.status,
+          gate_name: g.gate_name ?? gateDefMap[g.gate_id]?.name ?? g.name,
+          gate_type: g.gate_type ?? gateDefMap[g.gate_id]?.gate_type,
+          required: g.required ?? gateDefMap[g.gate_id]?.required,
+        }));
+      }));
+      recentGateResults = results.flat().sort((a, b) => (b.finished_at ?? b.started_at ?? 0) - (a.finished_at ?? a.started_at ?? 0)).slice(0, 15);
+    } catch { recentGateResults = []; }
+    finally { gateResultsLoading = false; }
   }
 
   async function createGate() {
@@ -179,6 +242,41 @@
     } finally { deletingGateId = null; }
   }
 
+  async function loadPushGates(repoId) {
+    pushGatesLoading = true;
+    try {
+      const resp = await api.repoPushGates(repoId);
+      pushGates = Array.isArray(resp?.gates ?? resp) ? (resp?.gates ?? resp) : [];
+    } catch {
+      pushGates = [];
+    } finally { pushGatesLoading = false; }
+  }
+
+  async function addPushGate() {
+    if (!repo?.id || !newPushGate.trim()) return;
+    pushGatesSaving = true;
+    try {
+      const updated = [...pushGates, newPushGate.trim()];
+      await api.setRepoPushGates(repo.id, { gates: updated });
+      pushGates = updated;
+      newPushGate = '';
+    } catch (e) {
+      toastError('Failed to add push gate: ' + (e.message ?? e));
+    } finally { pushGatesSaving = false; }
+  }
+
+  async function removePushGate(gate) {
+    if (!repo?.id) return;
+    pushGatesSaving = true;
+    try {
+      const updated = pushGates.filter(g => g !== gate);
+      await api.setRepoPushGates(repo.id, { gates: updated });
+      pushGates = updated;
+    } catch (e) {
+      toastError('Failed to remove push gate: ' + (e.message ?? e));
+    } finally { pushGatesSaving = false; }
+  }
+
   async function loadSpecPolicy(repoId) {
     specPolicyLoading = true;
     specPolicyError = null;
@@ -206,6 +304,39 @@
       repoBudget = null;
     }
     finally { repoBudgetLoading = false; }
+  }
+
+  async function loadDependencies(repoId) {
+    depsLoading = true;
+    depsError = null;
+    try {
+      const [deps, dependents, blast] = await Promise.all([
+        api.repoDependencies(repoId).catch(() => []),
+        api.repoDependents(repoId).catch(() => []),
+        api.repoBlastRadius(repoId).catch(() => []),
+      ]);
+      repoDeps = Array.isArray(deps) ? deps : (deps?.dependencies ?? []);
+      repoDependents = Array.isArray(dependents) ? dependents : (dependents?.dependents ?? []);
+      blastRadius = Array.isArray(blast) ? blast : (blast?.repos ?? blast?.affected ?? []);
+    } catch (e) {
+      depsError = e.message ?? 'Failed to load dependencies';
+    } finally {
+      depsLoading = false;
+    }
+  }
+
+  async function prepareRelease() {
+    if (!repo?.id || releaseLoading) return;
+    releaseLoading = true;
+    releaseError = null;
+    try {
+      releaseData = await api.releasePrep(repo.id);
+    } catch (e) {
+      releaseError = e.message ?? 'Release preparation failed';
+      releaseData = null;
+    } finally {
+      releaseLoading = false;
+    }
   }
 
   async function loadAudit(repoId) {
@@ -301,6 +432,49 @@
   function fmtDate(ts) {
     if (!ts) return '—';
     return new Date(typeof ts === 'number' ? ts * 1000 : ts).toLocaleString();
+  }
+
+  /** Format audit event details — handles objects, strings, and null */
+  function fmtAuditDetail(detail) {
+    if (!detail) return '';
+    if (typeof detail === 'string') return detail;
+    if (typeof detail !== 'object') return String(detail);
+    // Extract human-readable summary from common audit detail shapes
+    const parts = [];
+    if (detail.path) parts.push(detail.path);
+    if (detail.branch) parts.push(`branch: ${detail.branch}`);
+    if (detail.sha) parts.push(detail.sha.slice(0, 7));
+    if (detail.address || detail.remote_addr) parts.push(detail.address ?? detail.remote_addr);
+    if (detail.reason) parts.push(detail.reason);
+    if (detail.name) parts.push(detail.name);
+    if (detail.gate) parts.push(`gate: ${detail.gate}`);
+    if (detail.status) parts.push(detail.status);
+    if (parts.length > 0) return parts.join(' · ');
+    // Fallback: compact JSON
+    return JSON.stringify(detail);
+  }
+
+  /** Extract clickable entity references from audit event */
+  function auditEntityRefs(evt) {
+    const refs = [];
+    const d = evt.details ?? {};
+    if (typeof d === 'object') {
+      if (d.agent_id) refs.push({ type: 'agent', id: d.agent_id });
+      if (d.mr_id) refs.push({ type: 'mr', id: d.mr_id });
+      if (d.task_id) refs.push({ type: 'task', id: d.task_id });
+      if (d.spec_path) refs.push({ type: 'spec', id: d.spec_path });
+    }
+    if (evt.entity_type && evt.entity_id) {
+      const existing = refs.find(r => r.id === evt.entity_id);
+      if (!existing) refs.push({ type: evt.entity_type, id: evt.entity_id });
+    }
+    return refs;
+  }
+
+  /** Entity name cache for audit */
+  // Use shared entity name resolution (global singleton cache)
+  function auditEntityName(type, id) {
+    return entityName(type, id);
   }
 
   const repoBudgetPct = $derived.by(() => {
@@ -427,7 +601,7 @@
               {#each gates as gate}
                 <div class="gate-card" data-testid="gate-card">
                   <div class="gate-header">
-                    <span class="gate-name">{gate.name ?? gate.id}</span>
+                    <span class="gate-name">{gate.name ?? shortId(gate.id)}</span>
                     {#if gate.gate_type}
                       <span class="gate-kind">{gate.gate_type}</span>
                     {/if}
@@ -507,6 +681,90 @@
               </div>
             </div>
           {/if}
+        {/if}
+
+        <!-- Recent Gate Results -->
+        <h3 class="section-title">Recent Gate Results</h3>
+        <p class="tab-desc">Results from the most recent merge request gate checks.</p>
+        {#if gateResultsLoading}
+          <p class="loading-text">Loading recent results...</p>
+        {:else if recentGateResults.length === 0}
+          <p class="empty-text">No gate results yet. Results appear after MRs are enqueued for merge.</p>
+        {:else}
+          <div class="gate-results-list">
+            {#each recentGateResults as result}
+              {@const passed = result.status === 'Passed' || result.status === 'passed'}
+              {@const failed = result.status === 'Failed' || result.status === 'failed'}
+              <div class="gate-result-row" class:gate-result-pass={passed} class:gate-result-fail={failed}>
+                <span class="gate-result-icon">{passed ? '✓' : failed ? '✗' : '○'}</span>
+                <span class="gate-result-name">{result.gate_name ?? 'Gate'}</span>
+                {#if result.gate_type}
+                  <span class="gate-kind">{result.gate_type.replace(/_/g, ' ')}</span>
+                {/if}
+                {#if result.required !== undefined}
+                  <span class="gate-required" class:required={result.required}>{result.required ? 'required' : 'advisory'}</span>
+                {/if}
+                <button class="gate-result-mr" onclick={() => nav('mr', result.mr_id, { _openTab: 'gates' })} title="View MR: {result.mr_title}">
+                  {result.mr_title ?? 'MR'}
+                  <span class="gate-result-mr-status status-badge status-{result.mr_status}">{result.mr_status}</span>
+                </button>
+                {#if result.duration_ms || (result.started_at && result.finished_at)}
+                  {@const dur = result.duration_ms ?? Math.round((result.finished_at - result.started_at) * 1000)}
+                  <span class="gate-result-duration">{dur < 1000 ? dur + 'ms' : (dur / 1000).toFixed(1) + 's'}</span>
+                {/if}
+                {#if result.output && failed}
+                  <details class="gate-result-output">
+                    <summary>Output</summary>
+                    <pre class="gate-output-pre">{result.output}</pre>
+                  </details>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- Push Gates Section -->
+        <h3 class="section-title">Push Gates</h3>
+        <p class="tab-desc">Push gates validate commits before they are accepted. Rejected pushes show the gate name to the user.</p>
+
+        {#if pushGatesLoading}
+          <p class="loading-text">Loading push gates...</p>
+        {:else}
+          {#if pushGates.length === 0}
+            <p class="empty-text">No push gates configured. Commits are accepted without pre-receive checks.</p>
+          {:else}
+            <div class="gates-list" data-testid="push-gates-list">
+              {#each pushGates as gate}
+                <div class="gate-card">
+                  <div class="gate-header">
+                    <span class="gate-name">{gate}</span>
+                    <span class="gate-kind">push gate</span>
+                    <button
+                      class="btn-gate-delete"
+                      onclick={() => removePushGate(gate)}
+                      disabled={pushGatesSaving}
+                      aria-label="Remove push gate {gate}"
+                    >
+                      {pushGatesSaving ? 'Removing...' : 'Remove'}
+                    </button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+          <div class="action-row action-row-left" style="display: flex; gap: var(--space-2); align-items: center;">
+            <input
+              class="field-input field-input-sm"
+              type="text"
+              placeholder="e.g., conventional-commit"
+              bind:value={newPushGate}
+              onkeydown={(e) => e.key === 'Enter' && addPushGate()}
+              style="max-width: 240px;"
+            />
+            <button class="btn-secondary" onclick={addPushGate} disabled={pushGatesSaving || !newPushGate.trim()}>
+              Add Push Gate
+            </button>
+          </div>
         {/if}
       </div>
 
@@ -642,6 +900,176 @@
         {/if}
       </div>
 
+    <!-- Dependencies tab -->
+    {:else if activeTab === 'dependencies'}
+      <div class="tab-body" data-testid="repo-dependencies-tab">
+        <h2 class="tab-title">Cross-Repo Dependencies</h2>
+        <p class="tab-desc">View this repository's dependency relationships and blast radius — which other repos are affected when this one changes.</p>
+
+        {#if depsLoading}
+          <div class="loading-row">Loading dependencies...</div>
+        {:else if depsError}
+          <div class="error-row" role="alert">
+            <p>{depsError}</p>
+            <button class="btn-secondary" onclick={() => loadDependencies(repo?.id)}>Retry</button>
+          </div>
+        {:else}
+          <div class="deps-grid">
+            <div class="deps-section">
+              <h3 class="deps-section-title">Depends On ({repoDeps.length})</h3>
+              <p class="deps-section-hint">Repositories this repo imports or references.</p>
+              {#if repoDeps.length === 0}
+                <p class="empty-text">No outgoing dependencies detected.</p>
+              {:else}
+                <ul class="deps-list">
+                  {#each repoDeps as dep}
+                    <li class="dep-item">
+                      <span class="dep-name">{dep.target_repo_name ?? dep.name ?? dep.target_repo_id ?? dep.repo_id ?? 'Unknown'}</span>
+                      {#if dep.dep_type ?? dep.dependency_type}
+                        <span class="dep-type-tag">{(dep.dep_type ?? dep.dependency_type).replace(/_/g, ' ')}</span>
+                      {/if}
+                      {#if dep.detection_method}
+                        <span class="dep-method-tag">{dep.detection_method}</span>
+                      {/if}
+                      {#if dep.notes}
+                        <span class="dep-notes">{dep.notes}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+
+            <div class="deps-section">
+              <h3 class="deps-section-title">Dependents ({repoDependents.length})</h3>
+              <p class="deps-section-hint">Repositories that depend on this repo.</p>
+              {#if repoDependents.length === 0}
+                <p class="empty-text">No incoming dependencies detected.</p>
+              {:else}
+                <ul class="deps-list">
+                  {#each repoDependents as dep}
+                    <li class="dep-item">
+                      <span class="dep-name">{dep.source_repo_name ?? dep.name ?? dep.source_repo_id ?? dep.repo_id ?? 'Unknown'}</span>
+                      {#if dep.dep_type ?? dep.dependency_type}
+                        <span class="dep-type-tag">{(dep.dep_type ?? dep.dependency_type).replace(/_/g, ' ')}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+
+            <div class="deps-section">
+              <h3 class="deps-section-title">Blast Radius</h3>
+              <p class="deps-section-hint">If this repo changes, these repos may be affected (transitive dependents).</p>
+              {#if blastRadius.length === 0}
+                <p class="empty-text">No transitive dependents — changes to this repo are self-contained.</p>
+              {:else}
+                <ul class="deps-list">
+                  {#each blastRadius as affected}
+                    <li class="dep-item blast-item">
+                      <span class="dep-name">{affected.name ?? affected.repo_name ?? affected.repo_id ?? affected.id ?? affected}</span>
+                      {#if affected.depth != null}
+                        <span class="dep-depth-tag">depth {affected.depth}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          </div>
+        {/if}
+      </div>
+
+    <!-- Release tab -->
+    {:else if activeTab === 'release'}
+      <div class="tab-body" data-testid="repo-release-tab">
+        <h2 class="tab-title">Release Preparation</h2>
+        <p class="tab-desc">Generate a release summary with changelog, version recommendation, and attestation status for all merged changes.</p>
+
+        {#if !releaseData && !releaseLoading}
+          <div class="action-row action-row-left">
+            <button class="btn-primary" onclick={prepareRelease} disabled={releaseLoading}>
+              Prepare Release
+            </button>
+          </div>
+        {/if}
+
+        {#if releaseLoading}
+          <p class="loading-text">Analyzing commits and generating changelog...</p>
+        {:else if releaseError}
+          <div class="error-text" role="alert">{releaseError}</div>
+          <div class="action-row action-row-left">
+            <button class="btn-secondary" onclick={prepareRelease}>Retry</button>
+          </div>
+        {:else if releaseData}
+          <div class="release-result">
+            {#if !releaseData.has_release}
+              <p class="tab-desc">No releasable changes found since the last tag.</p>
+            {/if}
+            <dl class="release-meta">
+              <dt>Suggested version</dt>
+              <dd class="release-version">{releaseData.next_version ?? 'N/A'}</dd>
+              {#if releaseData.current_tag}
+                <dt>Current tag</dt>
+                <dd class="mono">{releaseData.current_tag}</dd>
+              {/if}
+              {#if releaseData.current_version}
+                <dt>Current version</dt>
+                <dd class="mono">{releaseData.current_version}</dd>
+              {/if}
+              {#if releaseData.bump_type}
+                <dt>Bump type</dt>
+                <dd>{releaseData.bump_type}</dd>
+              {/if}
+              {#if releaseData.commit_count != null}
+                <dt>Commits since last release</dt>
+                <dd>{releaseData.commit_count}</dd>
+              {/if}
+              {#if releaseData.branch}
+                <dt>Branch analyzed</dt>
+                <dd class="mono">{releaseData.branch}</dd>
+              {/if}
+            </dl>
+            {#if releaseData.sections?.length > 0}
+              <div class="release-changelog">
+                <h3 class="release-section-title">Changes by Category</h3>
+                {#each releaseData.sections as section}
+                  <details class="release-section-group" open>
+                    <summary class="release-section-summary">{section.title ?? section.kind ?? 'Other'} ({section.entries?.length ?? 0})</summary>
+                    <ul class="release-entry-list">
+                      {#each (section.entries ?? []) as entry}
+                        <li class="release-entry">
+                          <span class="release-entry-msg">{entry.description ?? entry.message ?? entry.summary ?? entry}</span>
+                          {#if entry.sha}<code class="mono release-entry-sha">{entry.sha.slice(0, 7)}</code>{/if}
+                          {#if entry.scope}<span class="release-entry-scope">({entry.scope})</span>{/if}
+                          {#if entry.is_breaking}<span class="release-breaking-badge">BREAKING</span>{/if}
+                          {#if entry.agent_name}
+                            <span class="release-entry-agent" title={entry.agent_id ?? ''}>by {entry.agent_name}</span>
+                          {/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  </details>
+                {/each}
+              </div>
+            {/if}
+            {#if releaseData.changelog}
+              <div class="release-changelog">
+                <h3 class="release-section-title">Full Changelog</h3>
+                <pre class="release-changelog-pre">{releaseData.changelog}</pre>
+              </div>
+            {/if}
+            {#if releaseData.mr_id}
+              <p class="tab-desc">Release MR created: <code class="mono">{entityName('mr', releaseData.mr_id)}</code></p>
+            {/if}
+            <div class="action-row action-row-left">
+              <button class="btn-secondary" onclick={prepareRelease}>Regenerate</button>
+            </div>
+          </div>
+        {/if}
+      </div>
+
     <!-- Audit tab -->
     {:else if activeTab === 'audit'}
       <div class="tab-body" data-testid="repo-audit-tab">
@@ -684,10 +1112,22 @@
               <button class="audit-sort-btn" aria-label="{$t('repo_settings.audit.sort_by_time')} {auditSortCol === 'timestamp' ? (auditSortDir === 1 ? $t('repo_settings.audit.ascending') : $t('repo_settings.audit.descending')) : ''}" onclick={() => toggleAuditSort('timestamp')}>{$t('repo_settings.audit.col_time')}{auditSortCol === 'timestamp' ? (auditSortDir === 1 ? ' ↑' : ' ↓') : ''}</button>
             </div>
             {#each sortedAuditEvents as evt}
+              {@const refs = auditEntityRefs(evt)}
               <div class="audit-row" data-testid="audit-row">
                 <span class="audit-type">{evt.event_type ?? evt.type ?? '—'}</span>
                 <span class="audit-actor">{evt.actor ?? evt.user_id ?? '—'}</span>
-                <span class="audit-detail">{evt.details ?? evt.message ?? ''}</span>
+                <span class="audit-detail">
+                  {fmtAuditDetail(evt.details ?? evt.message)}
+                  {#if refs.length > 0}
+                    <span class="audit-refs">
+                      {#each refs as ref}
+                        <button class="audit-ref-link" onclick={() => nav(ref.type, ref.id, ref.type === 'spec' ? { path: ref.id, repo_id: repo?.id } : {})} title="View {ref.type}: {ref.id}">
+                          {auditEntityName(ref.type, ref.id)}
+                        </button>
+                      {/each}
+                    </span>
+                  {/if}
+                </span>
                 <span class="audit-time">{fmtDate(evt.timestamp ?? evt.created_at)}</span>
               </div>
             {/each}
@@ -915,6 +1355,16 @@
     margin-top: calc(-1 * var(--space-3));
   }
 
+  .section-title {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--color-border);
+  }
+
   /* ── Fields ───────────────────────────────────────────────────────── */
   .field-card {
     display: flex;
@@ -1094,6 +1544,90 @@
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     margin: 0;
+  }
+
+  .gate-results-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: var(--space-4);
+  }
+
+  .gate-result-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    flex-wrap: wrap;
+  }
+
+  .gate-result-pass { border-left: 3px solid var(--color-success); }
+  .gate-result-fail { border-left: 3px solid var(--color-danger); }
+
+  .gate-result-icon {
+    font-weight: 700;
+    width: 16px;
+    text-align: center;
+  }
+
+  .gate-result-pass .gate-result-icon { color: var(--color-success); }
+  .gate-result-fail .gate-result-icon { color: var(--color-danger); }
+
+  .gate-result-name {
+    font-weight: 500;
+  }
+
+  .gate-result-mr {
+    background: none;
+    border: none;
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  .gate-result-mr:hover { text-decoration: underline; }
+
+  .gate-result-mr-status {
+    font-size: 10px;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  .gate-result-duration {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .gate-result-output {
+    width: 100%;
+    margin-top: 4px;
+  }
+
+  .gate-result-output summary {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    cursor: pointer;
+  }
+
+  .gate-output-pre {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2);
+    overflow-x: auto;
+    white-space: pre-wrap;
+    max-height: 200px;
   }
 
   .btn-gate-delete {
@@ -1287,6 +1821,29 @@
     white-space: nowrap;
   }
 
+  .audit-refs {
+    display: inline-flex;
+    gap: 4px;
+    margin-left: 6px;
+  }
+
+  .audit-ref-link {
+    background: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: 1px 6px;
+    font-size: var(--text-xs);
+    font-family: var(--font-mono);
+    color: var(--color-primary);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .audit-ref-link:hover {
+    background: var(--color-surface-elevated);
+    border-color: var(--color-primary);
+  }
+
   .audit-time {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
@@ -1296,6 +1853,83 @@
 
   /* ── Danger Zone ──────────────────────────────────────────────────── */
   .danger-title { color: var(--color-danger); }
+
+  /* Release tab */
+  .release-result {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .release-meta {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: var(--space-1) var(--space-4);
+    font-size: var(--text-sm);
+  }
+
+  .release-meta dt {
+    color: var(--color-text-muted);
+    font-weight: 600;
+  }
+
+  .release-version {
+    font-size: var(--text-lg);
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--color-primary);
+  }
+
+  .release-section-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    margin: 0 0 var(--space-2);
+  }
+
+  .release-entry {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  .release-entry-sha {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .release-entry-scope {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .release-breaking-badge {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--color-danger);
+    background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+    border-radius: var(--radius-sm);
+    padding: 0 4px;
+  }
+
+  .release-entry-agent {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .release-changelog-pre {
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    white-space: pre-wrap;
+    max-height: 300px;
+    overflow-y: auto;
+  }
 
   .danger-card {
     background: var(--color-surface);
@@ -1484,5 +2118,74 @@
     .field-textarea,
     .filter-select,
     .confirm-input { transition: none; }
+  }
+
+  /* ── Dependencies tab ─────────────────────────────────────────────── */
+  .deps-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: var(--space-6);
+  }
+
+  .deps-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .deps-section-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--color-text);
+    margin: 0;
+  }
+
+  .deps-section-hint {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    margin: 0;
+  }
+
+  .deps-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .dep-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--color-surface-elevated, var(--color-bg));
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+  }
+
+  .dep-name {
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .dep-type-tag, .dep-method-tag, .dep-depth-tag {
+    font-size: var(--text-xs);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--color-border);
+    color: var(--color-text-secondary);
+  }
+
+  .dep-notes {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+
+  .blast-item {
+    border-left: 3px solid var(--color-warning);
   }
 </style>

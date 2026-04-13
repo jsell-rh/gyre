@@ -1,5 +1,5 @@
 <script>
-  let { value = '', variant = 'default', role: roleAttr = 'status', 'aria-label': ariaLabel = undefined } = $props();
+  let { value = '', variant = 'default', role: roleAttr = 'status', 'aria-label': ariaLabel = undefined, title = undefined } = $props();
 
   /* Map common status strings to badge variants */
   const STATUS_MAP = {
@@ -38,7 +38,7 @@
   );
 </script>
 
-<span class="badge badge-{resolvedVariant}" role={roleAttr} aria-label={ariaLabel}>{label}</span>
+<span class="badge badge-{resolvedVariant}" role={roleAttr} aria-label={ariaLabel} {title}>{label}</span>
 
 <style>
   .badge {

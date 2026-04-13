@@ -1712,6 +1712,14 @@ impl NotificationRepository for MemNotificationRepository {
             .count() as u64)
     }
 
+    async fn list_recent(&self, limit: usize) -> Result<Vec<Notification>> {
+        let store = self.store.lock().await;
+        let mut items: Vec<Notification> = store.iter().cloned().collect();
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items.truncate(limit);
+        Ok(items)
+    }
+
     async fn has_recent_dismissal(
         &self,
         workspace_id: &Id,

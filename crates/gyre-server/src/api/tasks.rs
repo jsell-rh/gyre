@@ -58,6 +58,7 @@ pub struct ListTasksQuery {
     pub assigned_to: Option<String>,
     pub parent_task_id: Option<String>,
     pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -82,6 +83,8 @@ pub struct TaskResponse {
     pub order: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    pub workspace_id: String,
+    pub repo_id: String,
 }
 
 impl From<Task> for TaskResponse {
@@ -103,6 +106,8 @@ impl From<Task> for TaskResponse {
             task_type: t.task_type.map(|tt| task_type_str(&tt)),
             order: t.order,
             depends_on: t.depends_on.into_iter().map(|id| id.to_string()).collect(),
+            workspace_id: t.workspace_id.to_string(),
+            repo_id: t.repo_id.to_string(),
         }
     }
 }
@@ -230,7 +235,9 @@ pub async fn list_tasks(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListTasksQuery>,
 ) -> Result<Json<Vec<TaskResponse>>, ApiError> {
-    let tasks = if let Some(ws_id) = params.workspace_id {
+    let tasks = if let Some(repo_id) = params.repo_id {
+        state.tasks.list_by_repo(&Id::new(repo_id)).await?
+    } else if let Some(ws_id) = params.workspace_id {
         state.tasks.list_by_workspace(&Id::new(ws_id)).await?
     } else {
         match (params.status, params.assigned_to, params.parent_task_id) {

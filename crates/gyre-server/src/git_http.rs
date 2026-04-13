@@ -1393,9 +1393,17 @@ async fn notify_cross_workspace_dependents(
             let notif_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
             let display = link.target_display.as_deref().unwrap_or(changed_spec_path);
             let title = format!("Cross-workspace spec changed: {display}");
+            let source_repo_name = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(source_repo_id))
+                .await
+                .ok()
+                .flatten()
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| source_repo_id[..8.min(source_repo_id.len())].to_string());
             let body = format!(
-                "{display} changed in repo {}. Your spec {} depends on it. Review for impact.",
-                source_repo_id, link.source_path
+                "{display} changed in repo {source_repo_name}. Your spec {} depends on it. Review for impact.",
+                link.source_path
             );
             let mut notif = gyre_common::Notification::new(
                 notif_id,

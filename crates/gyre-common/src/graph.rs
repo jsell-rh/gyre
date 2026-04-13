@@ -4,7 +4,7 @@ use crate::Id;
 use serde::{Deserialize, Serialize};
 
 /// Universal node types in the knowledge graph.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeType {
     Package,
@@ -16,6 +16,7 @@ pub enum NodeType {
     Component,
     Table,
     Constant,
+    Field,
 }
 
 /// Typed relationship between two graph nodes.
@@ -84,6 +85,9 @@ pub struct GraphNode {
     pub last_seen_at: u64,
     /// Set when a node is no longer present in extraction (soft-delete). `None` = active.
     pub deleted_at: Option<u64>,
+    /// Whether this node is a test function/class (for structural test coverage analysis).
+    #[serde(default)]
+    pub test_node: bool,
 }
 
 /// A directed edge between two graph nodes.

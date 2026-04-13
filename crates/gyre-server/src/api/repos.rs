@@ -475,6 +475,54 @@ pub async fn sync_mirror(
     repo.updated_at = now;
     state.repos.update(&repo).await?;
 
+    // Run post-fetch processing: spec ledger sync + knowledge graph extraction.
+    let repo_id_str = repo.id.to_string();
+    let workspace_id_str = repo.workspace_id.to_string();
+    let default_ref = format!("refs/heads/{}", repo.default_branch);
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+
+    if let Ok(output) = tokio::process::Command::new(&git_bin)
+        .args(["-C", &repo.path, "rev-parse", &default_ref])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            let new_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+            let workspace_tenant_id = state
+                .workspaces
+                .find_by_id(&repo.workspace_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|ws| ws.tenant_id);
+            crate::spec_registry::sync_spec_ledger(
+                &state.spec_ledger,
+                &state.spec_links_store,
+                &repo.path,
+                &new_sha,
+                now,
+                Some(&repo_id_str),
+                Some(&workspace_id_str),
+                Some(&state.workspaces),
+                Some(&state.repos),
+                workspace_tenant_id.as_ref(),
+            )
+            .await;
+
+            crate::graph_extraction::extract_and_store_graph(
+                &repo.path,
+                &repo_id_str,
+                &new_sha,
+                state.graph_store.as_ref(),
+                &git_bin,
+                None,
+                None,
+            )
+            .await;
+        }
+    }
+
     Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 

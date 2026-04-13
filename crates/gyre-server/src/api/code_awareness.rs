@@ -28,70 +28,146 @@ pub struct BlamePath {
 
 #[derive(Serialize)]
 pub struct BlameEntry {
-    pub line_start: usize,
-    pub line_end: usize,
-    pub commit_sha: String,
+    pub line_number: usize,
+    pub content: String,
+    pub sha: String,
+    pub author: Option<String>,
     pub agent_id: Option<String>,
     pub task_id: Option<String>,
+    pub spec_ref: Option<String>,
 }
 
 /// GET /api/v1/repos/:id/blame?path={file}
 ///
-/// Returns per-line agent attribution from agent_commits data.
-/// Falls back to a placeholder entry for commits without provenance.
+/// Runs `git blame` on the file and cross-references with agent_commits to
+/// produce per-line entries with actual code content and agent attribution.
 pub async fn get_blame(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
     Query(params): Query<BlamePath>,
 ) -> Result<(StatusCode, Json<Vec<BlameEntry>>), ApiError> {
-    // Verify the repo exists.
-    state
+    let repo = state
         .repos
         .find_by_id(&Id::new(&repo_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
 
     let path = params.path.unwrap_or_default();
+    if path.is_empty() {
+        return Ok((StatusCode::OK, Json(vec![])));
+    }
 
-    // Get all agent commits for this repo.
-    let commits = state.agent_commits.find_by_repo(&Id::new(&repo_id)).await?;
+    // Build a SHA → agent mapping from agent_commits for this repo.
+    let agent_commits = state.agent_commits.find_by_repo(&Id::new(&repo_id)).await?;
+    let mut sha_to_agent: HashMap<String, (String, Option<String>)> = HashMap::new();
+    for ac in &agent_commits {
+        sha_to_agent
+            .entry(ac.commit_sha.clone())
+            .or_insert_with(|| (ac.agent_id.to_string(), ac.task_id.clone()));
+    }
 
-    // Build blame entries from agent commits that match the path.
-    // In a real implementation, we'd run git blame and cross-reference with
-    // agent_commits by SHA. Here we synthesize entries from recorded commits.
-    let entries: Vec<BlameEntry> = commits
-        .into_iter()
-        .enumerate()
-        .map(|(i, ac)| {
-            let line_start = i * 10 + 1;
-            let line_end = line_start + 9;
-            BlameEntry {
-                line_start,
-                line_end,
-                commit_sha: ac.commit_sha.clone(),
-                agent_id: Some(ac.agent_id.to_string()),
-                task_id: ac.task_id.clone(),
+    // Try `git blame --porcelain` on the bare repo to get per-line attribution
+    // with actual file content.
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let blame_output = std::process::Command::new(&git_bin)
+        .args(["blame", "--porcelain", "HEAD", "--", &path])
+        .current_dir(&repo.path)
+        .output();
+
+    match blame_output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let entries = parse_porcelain_blame(&stdout, &sha_to_agent);
+            Ok((StatusCode::OK, Json(entries)))
+        }
+        _ => {
+            // Fallback: read the file content directly and return lines without
+            // blame attribution. This handles repos where git blame fails (e.g.
+            // single-commit repos or files not yet committed).
+            let show_output = std::process::Command::new(&git_bin)
+                .args(["show", &format!("HEAD:{path}")])
+                .current_dir(&repo.path)
+                .output();
+
+            match show_output {
+                Ok(output) if output.status.success() => {
+                    let content = String::from_utf8_lossy(&output.stdout);
+                    let entries: Vec<BlameEntry> = content
+                        .lines()
+                        .enumerate()
+                        .map(|(i, line)| BlameEntry {
+                            line_number: i + 1,
+                            content: line.to_string(),
+                            sha: "HEAD".to_string(),
+                            author: None,
+                            agent_id: None,
+                            task_id: None,
+                            spec_ref: None,
+                        })
+                        .collect();
+                    Ok((StatusCode::OK, Json(entries)))
+                }
+                _ => Ok((StatusCode::OK, Json(vec![]))),
             }
-        })
-        .collect();
+        }
+    }
+}
 
-    // If the path filter is provided and there are no matching commits,
-    // return a single fallback entry indicating git blame fallback.
-    if entries.is_empty() {
-        let fallback = BlameEntry {
-            line_start: 1,
-            line_end: 1,
-            commit_sha: "HEAD".to_string(),
-            agent_id: None,
-            task_id: None,
-        };
-        // Only include fallback when a specific path was requested.
-        if !path.is_empty() {
-            return Ok((StatusCode::OK, Json(vec![fallback])));
+/// Parse `git blame --porcelain` output into BlameEntry records.
+///
+/// Porcelain format emits blocks like:
+/// ```text
+/// <sha> <orig-line> <final-line> [<num-lines>]
+/// author <name>
+/// ...header lines...
+/// \t<content line>
+/// ```
+fn parse_porcelain_blame(
+    output: &str,
+    sha_to_agent: &HashMap<String, (String, Option<String>)>,
+) -> Vec<BlameEntry> {
+    let mut entries = Vec::new();
+    let mut current_sha = String::new();
+    let mut current_author: Option<String> = None;
+    let mut current_line_num: usize = 0;
+
+    for line in output.lines() {
+        if line.starts_with('\t') {
+            // Content line — the actual source code (tab-prefixed)
+            let content = &line[1..];
+            let (agent_id, task_id) = sha_to_agent
+                .get(&current_sha)
+                .map(|(a, t)| (Some(a.clone()), t.clone()))
+                .unwrap_or((None, None));
+
+            entries.push(BlameEntry {
+                line_number: current_line_num,
+                content: content.to_string(),
+                sha: current_sha.clone(),
+                author: current_author.clone(),
+                agent_id,
+                task_id,
+                spec_ref: None,
+            });
+        } else if line.starts_with("author ") {
+            current_author = Some(line[7..].to_string());
+        } else {
+            // Header line: "<sha> <orig-line> <final-line> [<count>]"
+            let parts: Vec<&str> = line.splitn(4, ' ').collect();
+            if parts.len() >= 3 {
+                let maybe_sha = parts[0];
+                // SHA is 40 hex chars
+                if maybe_sha.len() == 40 && maybe_sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                    current_sha = maybe_sha.to_string();
+                    current_line_num = parts[2].parse().unwrap_or(0);
+                    // Author will be set by subsequent "author " line; keep previous
+                    // for continuation lines of the same commit.
+                }
+            }
         }
     }
 
-    Ok((StatusCode::OK, Json(entries)))
+    entries
 }
 
 // ── Hot Files ─────────────────────────────────────────────────────────────────
@@ -397,7 +473,9 @@ mod tests {
     async fn blame_empty_repo() {
         let app = app();
         let repo_id = create_repo(&app).await;
+        // No path param → empty result
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/repos/{repo_id}/blame"))
@@ -409,6 +487,17 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(json.as_array().unwrap().is_empty());
+        // With path param → also empty (no git repo on disk in tests)
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/blame?path=src/lib.rs"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
     }
 
     #[tokio::test]

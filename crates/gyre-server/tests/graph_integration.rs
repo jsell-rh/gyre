@@ -131,6 +131,7 @@ fn make_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         first_seen_at: now,
         last_seen_at: now,
         deleted_at: None,
+        test_node: false,
     }
 }
 
@@ -532,7 +533,7 @@ async fn test_workspace_briefing_empty() {
     assert!(body["cross_workspace"].as_array().unwrap().is_empty());
     assert!(body["exceptions"].as_array().unwrap().is_empty());
     assert_eq!(body["metrics"]["mrs_merged"], 0);
-    assert!(body["summary"].as_str().unwrap().contains("MR(s) merged"));
+    assert!(body["summary"].as_str().unwrap().contains("MRs merged"));
 }
 
 /// POST /api/v1/workspaces/{id}/briefing/ask — SSE streaming Q&A (HSI §9).

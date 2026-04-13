@@ -31,6 +31,7 @@ fn node_type_to_str(nt: &NodeType) -> &'static str {
         NodeType::Component => "component",
         NodeType::Table => "table",
         NodeType::Constant => "constant",
+        NodeType::Field => "field",
     }
 }
 
@@ -45,6 +46,7 @@ fn str_to_node_type(s: &str) -> Result<NodeType> {
         "component" => Ok(NodeType::Component),
         "table" => Ok(NodeType::Table),
         "constant" => Ok(NodeType::Constant),
+        "field" => Ok(NodeType::Field),
         other => Err(anyhow!("unknown node type: {other}")),
     }
 }
@@ -175,6 +177,7 @@ impl GraphNodeRow {
             first_seen_at: self.first_seen_at as u64,
             last_seen_at: self.last_seen_at as u64,
             deleted_at: self.deleted_at.map(|t| t as u64),
+            test_node: false,
         })
     }
 }
@@ -682,6 +685,7 @@ mod tests {
             first_seen_at: 1000,
             last_seen_at: 1000,
             deleted_at: None,
+            test_node: false,
         }
     }
 
@@ -1016,6 +1020,7 @@ mod tests {
             first_seen_at: 100,
             last_seen_at: 9999,
             deleted_at: None,
+            test_node: false,
         };
         GraphPort::create_node(&s, node.clone()).await.unwrap();
         let found = GraphPort::get_node(&s, &node.id).await.unwrap().unwrap();
