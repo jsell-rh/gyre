@@ -832,10 +832,10 @@ Before marking a task `ready-for-review`, verify:
 ## Workflow
 
 1. Read the relevant system specs. These are your source of truth and overarching vision.
-2. Read `specs/tasks/*`. See what work has been done, and determine the next task to complete. Valid progress is `not-started` | `in-progress` | `ready-for-review` | `complete` | `needs-revision`. You should pick the task with the lowest number that is either `not-started` or `needs-revision`. Prioritize `needs-revision` tasks over `not-started` ALWAYS.
+2. Read `specs/tasks/*`. See what work has been done, and determine the next task to complete. Task files use YAML frontmatter — read the `progress` field. Valid progress is `not-started` | `in-progress` | `ready-for-review` | `complete` | `needs-revision`. You should pick the task with the lowest number that is either `not-started` or `needs-revision`. Prioritize `needs-revision` tasks over `not-started` ALWAYS.
 3. **If the task is `needs-revision`**, follow the Needs-Revision Workflow below instead of step 4. Otherwise, complete the task normally. Completion criteria is alignment with the task & relevant portion of the spec. A separate team is working in competition with you trying to find bugs & inconsistencies with your work. Your job is to make them not have anything to find.
 4. Before marking the task `ready-for-review`, run the self-verification checklist above.
-5. Update the task status to `ready-for-review`.
+5. Update the task file: set the `progress` field in the YAML frontmatter to `ready-for-review`. Add git commit SHAs to the `commits` list.
 6. Commit your work, using conventional commits, and author: "Implementation <implementation@redhat.com>"
 7. Call `kill $PPID` — this will transfer control to the verifier.
 
