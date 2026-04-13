@@ -1,18 +1,18 @@
 # Coverage: Platform Model
 
 **Spec:** [`system/platform-model.md`](../../system/platform-model.md)
-**Last audited:** 2026-04-13 (full audit — bulk reclassification from not-started)
-**Coverage:** 32/56 (3 n/a)
+**Last audited:** 2026-04-13 (full audit — bulk reclassification from not-started; §1 verified 2026-04-13)
+**Coverage:** 28/53 (3 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
 | 1 | 1. Ownership Hierarchy | 2 | n/a | - | Context/rationale — section heading only. |
 | 2 | Entities | 3 | n/a | - | Context/rationale — entity tree diagram, no implementable requirement. |
-| 3 | Tenant | 3 | implemented | - | Tenant entity (gyre-domain/src/tenant.rs): id, name, slug, oidc_issuer, budget, max_workspaces. TenantRepository port. SQLite adapter. CRUD endpoints. |
-| 4 | Workspace | 3 | implemented | - | Workspace entity (gyre-domain/src/workspace.rs): tenant_id, trust_level (Supervised/Guided/Autonomous/Custom), compute_target_id, budget, max_repos, max_agents_per_repo, llm_model. CRUD endpoints. |
-| 5 | Repository | 3 | implemented | - | Repository entity (gyre-domain/src/repository.rs): workspace_id, mirror support, status (Active/Archived). CRUD endpoints. POST /api/v1/repos. |
-| 6 | Scoping Rules | 3 | implemented | - | ABAC middleware enforces workspace-scoped agent authorization. Tenant isolation via tenant_id on all entities. workspace-membership-required policy. |
-| 7 | Token Scoping | 3 | implemented | - | AuthenticatedAgent validates workspace scope. Agent JWTs scoped to workspace+repo. System tokens bypass scoping. API key + OIDC JWT support. |
+| 3 | Tenant | 3 | implemented | - | Partial — Core entity, port, adapter, REST API (5 endpoints), admin panel genuine. CLI commands (tenant create/list/set-budget) and tenant switcher UI not implemented. |
+| 4 | Workspace | 3 | implemented | - | Partial — Core entity (all spec fields + compute_target_id), port, adapter, REST API (CRUD + slug filtering), UI (WorkspaceCards, WorkspaceSettings) genuine. CLI commands (workspace create/list/set-budget) not implemented. |
+| 5 | Repository | 3 | implemented | - | Partial — Core entity + CRUD API + mirror support + archive genuine. Missing spec-required fields: budget (BudgetConfig) and max_agents (Option<u32>) absent from struct and DB. CLI commands (repo create/list/set-budget) not implemented. |
+| 6 | Scoping Rules | 3 | verified | - | ABAC middleware on every authenticated request. Workspace membership enforced (check_workspace_membership). Budget cascade at spawn (check_spawn_budget). Agent workspace_id scoping genuine. Orchestrator rows depend on §3. |
+| 7 | Token Scoping | 3 | not-started | - | Hollow — AgentJwtClaims missing spec-required claims: tenant_id, workspace_id, repo_id, persona, attestation_level. AuthenticatedAgent lacks workspace/repo fields. MCP scope validation on gyre_create_mr only. Auth infra (API keys, OIDC, system tokens) exists but token SCOPING per spec not implemented. |
 | 8 | 2. Persona Model | 2 | implemented | - | Full persona model: CRUD, scope resolution, approval lifecycle, content hashing, versioning. |
 | 9 | Persona Entity | 3 | implemented | - | Persona struct: name, slug, system_prompt, capabilities[], protocols[], llm_config (model/temperature/max_tokens), budget, approval_status (Pending/Approved/Deprecated), content_hash, version. |
 | 10 | Scope Resolution | 3 | implemented | - | resolve_persona() with 3-level fallback: Repo → Workspace → Tenant. PersonaScope enum. GET /api/v1/personas/resolve endpoint. |
