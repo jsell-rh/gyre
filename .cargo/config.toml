@@ -6,6 +6,11 @@
 #   Fedora: sudo dnf install mold
 #   Ubuntu: sudo apt install mold
 #   NixOS/nix devShell: mold is included in devShells.default
+# Share one target dir across all git worktrees to avoid redundant
+# copies of build artifacts (~20GB each).
+[build]
+target-dir = "/home/jsell/code/gyre/target"
+
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
