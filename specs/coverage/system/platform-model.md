@@ -1,8 +1,8 @@
 # Coverage: Platform Model
 
 **Spec:** [`system/platform-model.md`](../../system/platform-model.md)
-**Last audited:** 2026-04-13 (full audit — bulk reclassification from not-started; §1 verified 2026-04-13)
-**Coverage:** 28/53 (3 n/a)
+**Last audited:** 2026-04-13 (full audit — bulk reclassification from not-started; §1 verified 2026-04-13; §2 audited 2026-04-13)
+**Coverage:** 25/52 (4 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -13,13 +13,13 @@
 | 5 | Repository | 3 | implemented | - | Partial — Core entity + CRUD API + mirror support + archive genuine. Missing spec-required fields: budget (BudgetConfig) and max_agents (Option<u32>) absent from struct and DB. CLI commands (repo create/list/set-budget) not implemented. |
 | 6 | Scoping Rules | 3 | verified | - | ABAC middleware on every authenticated request. Workspace membership enforced (check_workspace_membership). Budget cascade at spawn (check_spawn_budget). Agent workspace_id scoping genuine. Orchestrator rows depend on §3. |
 | 7 | Token Scoping | 3 | task-assigned | task-130 | Hollow — AgentJwtClaims missing spec-required claims: tenant_id, workspace_id, repo_id, persona, attestation_level. AuthenticatedAgent lacks workspace/repo fields. MCP scope validation on gyre_create_mr only. Auth infra (API keys, OIDC, system tokens) exists but token SCOPING per spec not implemented. |
-| 8 | 2. Persona Model | 2 | implemented | - | Full persona model: CRUD, scope resolution, approval lifecycle, content hashing, versioning. |
-| 9 | Persona Entity | 3 | implemented | - | Persona struct: name, slug, system_prompt, capabilities[], protocols[], llm_config (model/temperature/max_tokens), budget, approval_status (Pending/Approved/Deprecated), content_hash, version. |
-| 10 | Scope Resolution | 3 | implemented | - | resolve_persona() with 3-level fallback: Repo → Workspace → Tenant. PersonaScope enum. GET /api/v1/personas/resolve endpoint. |
-| 11 | Persona Lifecycle | 3 | implemented | - | Create (Pending) → Approve (approved_by, approved_at) → Update (version increment, content_hash refresh) → Deprecate. Full lifecycle management. |
-| 12 | Repo-Defined Personas | 3 | implemented | - | Personas can be scoped to repo via PersonaScope::Repo(id). Repo-level persona overrides workspace defaults. |
-| 13 | Built-In Personas | 3 | implemented | - | builtin_policies() factory in policy.rs creates immutable built-in policies. Persona approval workflow enforced. |
-| 14 | API | 3 | implemented | - | POST/GET/PATCH/DELETE /api/v1/personas. POST /api/v1/personas/:id/approve. GET /api/v1/personas/resolve. Scope filtering. |
+| 8 | 2. Persona Model | 2 | n/a | - | Context/rationale — section heading only. |
+| 9 | Persona Entity | 3 | verified | - | Persona struct (gyre-domain/src/workspace.rs:107-175): all spec fields present (id, name, scope, system_prompt, version, content_hash via SHA-256, owner, approval_status, approved_by/at, created_at, updated_at). Extra fields beyond spec (capabilities, protocols, llm_config, budget). PersonaScope::Tenant(Id) instead of Global — functionally equivalent. DB migration, port trait, SQLite+Postgres adapters all genuine. |
+| 10 | Scope Resolution | 3 | implemented | - | Partial — resolve_persona() (personas.rs:269-304) has correct 3-level fallback structure (Repo → Workspace → Tenant → error). GET /api/v1/personas/resolve endpoint registered. Bug: reuses same scope_id for all fallback levels — multi-level resolution won't find workspace/tenant personas since their scope_id differs from the repo_id. Only single-level matches work. |
+| 11 | Persona Lifecycle | 3 | implemented | - | Partial — Create (Pending) ✓, Approve (approved_by, approved_at) ✓, Update (version++, content_hash refresh) ✓. Missing: update does NOT reset approval_status to Pending (spec requires it). No deprecation handler. Delete is hard-delete, not soft-delete (spec requires preservation for audit). |
+| 12 | Repo-Defined Personas | 3 | not-started | - | Hollow — PersonaScope::Repo exists (that's the Entity, row 9) but spec requires push-detection of persona file changes: detect change on push, update entity with new content+hash, reset approval to Pending, create approval task, notify owner. None implemented; specs/personas/ is explicitly ignored in spec-lifecycle processing. |
+| 13 | Built-In Personas | 3 | not-started | - | Hollow — builtin_policies() in policy.rs creates ABAC policies, not personas. No factory/seed creates pre-approved built-in personas (workspace-orchestrator, repo-orchestrator, accountability, security) at tenant level. Persona spec files exist for 3 of 4 (repo-orchestrator missing) but no code auto-creates them as DB entities. |
+| 14 | API | 3 | implemented | - | Partial — 6 of 7 spec endpoints exist: GET/POST /personas, GET/PUT/DELETE /personas/{id}, POST /personas/{id}/approve, plus GET /personas/resolve (bonus). Missing: GET /personas/{id}/versions (version history). CLI commands (persona create/list/approve/show/edit) and UI (persona management page, prompt editor, version diff, approval workflow) not implemented. |
 | 15 | 3. Two-Level Orchestration | 2 | task-assigned | task-093 | Core framework present (Escalation MessageKind, Delegation/Coordination task types) but explicit workspace/repo orchestrator lifecycle not implemented. |
 | 16 | Workspace Orchestrator | 3 | task-assigned | task-093 | References exist in comments/agent naming but no explicit workspace orchestrator spawning protocol or lifecycle management. |
 | 17 | Repo Orchestrator | 3 | task-assigned | task-093 | Delegation task type triggers repo orchestrator concept but no explicit orchestrator agent spawning or decomposition protocol. |
