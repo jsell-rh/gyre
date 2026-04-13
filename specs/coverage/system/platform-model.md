@@ -1,13 +1,13 @@
 # Coverage: Platform Model
 
 **Spec:** [`system/platform-model.md`](../../system/platform-model.md)
-**Last audited:** -
-**Coverage:** 0/56
+**Last audited:** 2026-04-13 (§1 only)
+**Coverage:** 0/56 (2 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
-| 1 | 1. Ownership Hierarchy | 2 | not-started | - | |
-| 2 | Entities | 3 | not-started | - | |
+| 1 | 1. Ownership Hierarchy | 2 | n/a | - | Context/rationale — section heading only. |
+| 2 | Entities | 3 | n/a | - | Context/rationale — entity tree diagram, no implementable requirement. |
 | 3 | Tenant | 3 | not-started | - | |
 | 4 | Workspace | 3 | not-started | - | |
 | 5 | Repository | 3 | not-started | - | |
