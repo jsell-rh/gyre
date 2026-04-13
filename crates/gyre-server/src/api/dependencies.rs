@@ -2487,15 +2487,14 @@ import "google/protobuf/empty.proto";
         crate::git_http::reconcile_dependencies(&state, repo_a.as_str(), &detected, &ran).await;
 
         // Verify domain event was broadcast.
-        let msg = rx.try_recv().expect("expected a domain event to be broadcast");
+        let msg = rx
+            .try_recv()
+            .expect("expected a domain event to be broadcast");
         assert_eq!(
             msg.kind,
             gyre_common::MessageKind::Custom("dependency_detected".to_string())
         );
-        assert_eq!(
-            msg.workspace_id,
-            Some(gyre_common::Id::new("proj-1"))
-        );
+        assert_eq!(msg.workspace_id, Some(gyre_common::Id::new("proj-1")));
 
         // Verify payload fields.
         let payload = msg.payload.expect("event should have a payload");

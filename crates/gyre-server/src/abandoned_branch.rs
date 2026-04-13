@@ -330,21 +330,9 @@ mod tests {
         let admin = make_membership("admin_user", "ws2", WorkspaceRole::Admin);
         let dev = make_membership("dev_user", "ws2", WorkspaceRole::Developer);
         let viewer = make_membership("viewer_user", "ws2", WorkspaceRole::Viewer);
-        state
-            .workspace_memberships
-            .create(&admin)
-            .await
-            .unwrap();
-        state
-            .workspace_memberships
-            .create(&dev)
-            .await
-            .unwrap();
-        state
-            .workspace_memberships
-            .create(&viewer)
-            .await
-            .unwrap();
+        state.workspace_memberships.create(&admin).await.unwrap();
+        state.workspace_memberships.create(&dev).await.unwrap();
+        state.workspace_memberships.create(&viewer).await.unwrap();
 
         let mr = make_mr(
             "mr2",
@@ -654,7 +642,7 @@ mod tests {
             repo_id: None,
             resolved_at: None,
             dismissed_at: Some(now_i64 - 86400), // dismissed 1 day ago
-            created_at: now_i64 - 172800,         // created 2 days ago
+            created_at: now_i64 - 172800,        // created 2 days ago
             tenant_id: "tenant1".to_string(),
         };
         state.notifications.create(&dismissed_notif).await.unwrap();
@@ -678,9 +666,7 @@ mod tests {
 
         let active_abandoned = notifs
             .iter()
-            .filter(|n| {
-                n.notification_type == NotificationType::AbandonedBranch && n.is_active()
-            })
+            .filter(|n| n.notification_type == NotificationType::AbandonedBranch && n.is_active())
             .count();
 
         assert_eq!(
