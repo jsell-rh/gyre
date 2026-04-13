@@ -2,7 +2,7 @@
 
 **Spec:** [`system/authorization-provenance.md`](../../system/authorization-provenance.md)
 **Last audited:** 2026-04-13
-**Coverage:** 40/40 (7 n/a, 2 verified, 38 implemented)
+**Coverage:** 40/40 (7 n/a, 6 verified, 34 implemented)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -11,11 +11,11 @@
 | 3 | 1 Trust Model | 2 | verified | - | TrustAnchor type (gyre-common/src/attestation.rs:29-42), TrustAnchorRepository port (gyre-ports/src/trust_anchor.rs), SQLite adapter (gyre-adapters/src/sqlite/trust_anchor.rs), CRUD endpoints (gyre-server/src/api/trust_anchors.rs). Routes registered in api/mod.rs, wired into AppState. |
 | 4 | 1.1 Trust Anchors | 3 | verified | - | Full CRUD: POST/GET/PUT/DELETE /api/v1/tenants/:id/trust-anchors. Tenant-scoped with cross-tenant 403. Admin role enforced. TrustAnchorType enum (User/Agent/Addon). Anchor-level constraints. 9 test cases including lifecycle, duplicates, 404, tenant isolation, constraint roundtrip. |
 | 5 | 1.2 Residual Risk | 3 | n/a | - | Design/rationale — threat model, no implementable requirement. |
-| 6 | 2 Signed Input: The Authorization Root | 2 | implemented | - | SignedInput type in gyre-common/src/attestation.rs with InputContent, ScopeConstraint, PersonaRef. |
-| 7 | 2.1 When a Signed Input Is Created | 3 | implemented | - | Produced on spec approval (gyre-server/src/api/specs.rs:652). Tests: approve_spec_creates_signed_input_when_key_binding_exists. |
-| 8 | 2.2 Structure | 3 | implemented | - | All structs defined with serde roundtrip tests. InputContent includes spec_path, spec_sha, workspace_id, repo_id, persona_constraints, meta_spec_set_sha, scope. |
-| 9 | 2.3 Key Binding | 3 | implemented | - | KeyBinding type (gyre-common/src/key_binding.rs). Exchange endpoint POST /api/v1/auth/key-binding (gyre-server/src/api/key_binding.rs). Ed25519 verification via ring. Revoke endpoints. |
-| 10 | 2.4 Context Binding (Replay Prevention) | 3 | implemented | - | SignedInput includes workspace_id, repo_id, spec_sha, expected_generation, valid_until. All fields enforced. |
+| 6 | 2 Signed Input: The Authorization Root | 2 | verified | - | SignedInput type (gyre-common/src/attestation.rs:92) with InputContent, ScopeConstraint, PersonaRef. All types fully defined and wired into spec approval, attestation chain, and verification. |
+| 7 | 2.1 When a Signed Input Is Created | 3 | verified | - | Produced on spec approval (specs.rs:606) when KeyBinding exists AND user_content_signature provided. Tests: approve_spec_creates_signed_input_when_key_binding_exists, without_key_binding_skips, no_user_signature_skips. Attestation stored via chain_attestations.save(). |
+| 8 | 2.2 Structure | 3 | verified | - | All struct fields match spec: SignedInput{content, output_constraints, valid_until, expected_generation, signature, key_binding}. InputContent{spec_path, spec_sha, workspace_id, repo_id, persona_constraints, meta_spec_set_sha, scope}. ScopeConstraint{allowed_paths, forbidden_paths}. Serde roundtrip tested. |
+| 9 | 2.3 Key Binding | 3 | verified | - | KeyBinding type (gyre-common/src/key_binding.rs:19) with all 8 spec fields. POST /api/v1/auth/key-binding exchange (key_binding.rs:69). Ed25519 proof-of-possession via ring. Platform countersign. DELETE /key-binding/:id and /key-bindings revocation. 12+ tests covering creation, signature verification, TTL capping, revocation, authorization. |
+| 10 | 2.4 Context Binding (Replay Prevention) | 3 | implemented | - | Partial — valid_until checked in verify_chain (git_http.rs:3108). spec_sha tamper-proof via signature. But workspace_id/repo_id are signed into InputContent without being compared against actual push target at verification time (no strategy-implied constraint). expected_generation field exists (Option<u32>) but always None and never verified. Consider splitting missing enforcement into separate task. |
 | 11 | 3 Output Constraints | 2 | implemented | - | OutputConstraint type. CEL evaluation engine (gyre-domain/src/constraint_evaluator.rs). |
 | 12 | 3.1 Structure | 3 | implemented | - | OutputConstraint { name, expression } struct with serde tests. |
 | 13 | 3.2 Constraint Sources | 3 | implemented | - | derive_strategy_constraints() implements persona, meta-spec, scope, trust level, attestation level constraints. GateConstraint type for gate-produced constraints. |
