@@ -45,9 +45,9 @@ deps_satisfied() {
     [ -z "$dep" ] && continue
     # Normalize: strip "task-" prefix and leading zeros
     local num
-    num=$(echo "$dep" | sed 's/task-//' | sed 's/^0*//')
+    num=$(echo "$dep" | sed 's/task-//' | sed 's/^0*//' | tr -cd '0-9')
     [ -z "$num" ] && continue
-    num=$(printf "%03d" "$((10#$num))")
+    num=$(printf "%03d" "$num")
     if ! task_is_complete "$num"; then
       return 1
     fi
