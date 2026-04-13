@@ -14,8 +14,8 @@
 | business-continuity.md | 10 | 0 | 10 | 0 | 0 | 0 | 0% |
 | dependency-graph.md | 19 | 0 | 19 | 0 | 0 | 0 | 0% |
 | design-principles.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
-| explorer-canvas.md | 10 | 0 | 10 | 0 | 0 | 0 | 0% |
-| explorer-implementation.md | 33 | 0 | 33 | 0 | 0 | 0 | 0% |
+| explorer-canvas.md | 10 | 0 | 4 | 6 | 0 | 0 | 0% |
+| explorer-implementation.md | 33 | 0 | 12 | 21 | 0 | 0 | 0% |
 | forge-advantages.md | 10 | 0 | 10 | 0 | 0 | 0 | 0% |
 | hierarchy-enforcement.md | 29 | 0 | 29 | 0 | 0 | 0 | 0% |
 | human-system-interface.md | 55 | 0 | 55 | 0 | 0 | 0 | 0% |
@@ -42,6 +42,6 @@
 | ui-layout.md | 42 | 0 | 42 | 0 | 0 | 0 | 0% |
 | ui-navigation.md | 33 | 0 | 33 | 0 | 0 | 0 | 0% |
 | user-management.md | 36 | 0 | 36 | 0 | 0 | 0 | 0% |
-| view-query-grammar.md | 16 | 0 | 16 | 0 | 0 | 0 | 0% |
+| view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 0 | 14 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **2** | **800** | **0** | **0** | **0** | **0%** |
+| **TOTAL** | **802** | **2** | **757** | **43** | **0** | **0** | **0%** |
