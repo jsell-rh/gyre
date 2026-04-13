@@ -2,7 +2,7 @@
 
 **Spec:** [`system/agent-runtime.md`](../../system/agent-runtime.md)
 **Last audited:** 2026-04-13
-**Coverage:** 0/33
+**Coverage:** 0/33 (1 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -38,4 +38,4 @@
 | 30 | What's Tracked | 3 | task-assigned | task-119 | |
 | 31 | Budget Reset | 3 | task-assigned | task-119 | |
 | 32 | 5. Agent Prompt Structure | 2 | task-assigned | task-119 | |
-| 33 | Relationship to Existing Specs | 2 | not-started | - | |
+| 33 | Relationship to Existing Specs | 2 | n/a | - | Cross-reference/amendment section — no implementable requirement. |
