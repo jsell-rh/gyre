@@ -1,8 +1,8 @@
 # Coverage: Human-System Interface
 
 **Spec:** [`system/human-system-interface.md`](../../system/human-system-interface.md)
-**Last audited:** 2026-04-13 (§1 verified prior cycle; §3 audited this cycle; §2,4-12 classified prior cycle)
-**Coverage:** 5/37
+**Last audited:** 2026-04-13 (full audit — §4-12 reclassified from not-started)
+**Coverage:** 19/36 (19 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -33,31 +33,31 @@
 | 25 | The Problem | 3 | n/a | - | Context/rationale — no implementable requirement. |
 | 26 | Scoped Inline Chat | 3 | task-assigned | task-091 | Chat scoped to agent/orchestrator/briefing/MR contexts |
 | 27 | Hard Interrupt | 3 | task-assigned | task-091 | Pause/Stop/Message buttons on agent detail panel |
-| 28 | Agent Completion Summaries | 3 | not-started | - | Extends agent.complete with summary; AgentCompleted MessageKind |
-| 29 | Interrogation Agents | 3 | not-started | - | "Ask why" spawns restricted interrogation agent with ABAC |
+| 28 | Agent Completion Summaries | 3 | implemented | - | AgentCompletionSummary type (gyre-common/src/completion.rs). AgentCompleted MessageKind (Event tier). agent.complete MCP tool accepts summary field. Stored in MR attestation bundle. Notifications for uncertainties. |
+| 29 | Interrogation Agents | 3 | implemented | - | spawn.rs: agent_type="interrogation", conversation_sha loading, 30-min JWT TTL. ABAC policies (migration 000026). Stale agent cleanup deletes policies. ConversationRepository::get for context. |
 | 30 | 5. Conversation-to-Code Provenance | 2 | n/a | - | Section heading only — no implementable requirement. |
 | 31 | The Problem | 3 | n/a | - | Context/rationale — no implementable requirement. |
-| 32 | Design | 3 | not-started | - | ConversationRepository, TurnCommitLink, conversation.upload MCP tool |
+| 32 | Design | 3 | implemented | - | ConversationRepository port (gyre-ports/src/conversation.rs). SQLite adapter. conversations + turn_commit_links tables (migration 000021). conversation.upload MCP tool. X-Gyre-Conversation-Turn header. GET /api/v1/conversations/:sha endpoint. |
 | 33 | 6. Cross-Workspace Spec Dependencies | 2 | n/a | - | Section heading only — no implementable requirement. |
 | 34 | The Problem | 3 | n/a | - | Context/rationale — no implementable requirement. |
-| 35 | Design | 3 | not-started | - | @workspace_slug/repo_name/spec_path format, resolution |
-| 36 | What the System Does With Cross-Workspace Links | 3 | not-started | - | Notifications, briefing integration, explorer visualization, orchestrator awareness |
-| 37 | Cross-Workspace Change Notification | 3 | not-started | - | Spec link watcher, SpecChanged events, dependent workspace notifications |
+| 35 | Design | 3 | implemented | - | Cross-workspace spec links with @workspace_slug/repo_name/spec_path format. Resolution via spec_registry.rs and domain_events.rs. Slug-based lookup tenant-scoped. |
+| 36 | What the System Does With Cross-Workspace Links | 3 | implemented | - | SpecChanged Event-tier messages emitted on cross-workspace link changes. Inbox notifications for dependent workspace members. Briefing integration. Explorer dashed-line visualization. Orchestrator receives events. |
+| 37 | Cross-Workspace Change Notification | 3 | implemented | - | Spec lifecycle push handler queries spec_links for inbound cross-workspace links. Creates notifications for dependent workspace members. SpecChanged events to workspace orchestrators. |
 | 38 | 7. Multi-Human Collaboration | 2 | n/a | - | Section heading only — no implementable requirement. |
-| 39 | Presence Awareness | 3 | not-started | - | UserPresence WsMessage, presence map, GET /workspaces/:id/presence |
-| 40 | Conflict Prevention | 3 | not-started | - | Concurrent spec edit warning, optimistic concurrency |
-| 41 | Shared Views | 3 | not-started | - | Explorer views shared across workspace members |
+| 39 | Presence Awareness | 3 | implemented | - | UserPresence WsMessage variant (gyre-common/src/protocol.rs). In-memory presence map in ws.rs. GET /api/v1/workspaces/:id/presence endpoint. session_id per tab, 5-cap eviction, PresenceEvicted, 60s timeout. |
+| 40 | Conflict Prevention | 3 | task-assigned | task-092 | Concurrent spec edit warning, optimistic concurrency |
+| 41 | Shared Views | 3 | implemented | - | Explorer views shared by default — all workspace members can read. PUT/DELETE restricted to creator or Admin (per-handler auth). CRUD at /api/v1/workspaces/:id/explorer-views. |
 | 42 | 8. Inbox Detail | 2 | n/a | - | Section heading only — no implementable requirement. |
-| 43 | Action Types (Priority Order) | 3 | not-started | - | 10 notification action types with inline actions; notification infrastructure exists |
+| 43 | Action Types (Priority Order) | 3 | implemented | - | All 10 NotificationType variants defined (gyre-common/src/notification.rs). Priority ordering 1-10. Creation paths for each type (synchronous/async). Inline actions in Inbox UI. Filtering by priority range. |
 | 44 | 9. Briefing Detail | 2 | n/a | - | Section heading only — no implementable requirement. |
-| 45 | Structure | 3 | not-started | - | Briefing response schema: completed, in_progress, cross_workspace, exceptions, metrics |
-| 46 | Data Sources | 3 | not-started | - | Data source mapping per briefing section |
-| 47 | Briefing Q&A | 3 | not-started | - | POST /workspaces/:id/briefing/ask endpoint exists; need spec compliance |
+| 45 | Structure | 3 | implemented | - | GET /api/v1/workspaces/:id/briefing with sections: completed, in_progress, cross_workspace, exceptions, metrics. LLM-synthesized summary. repo_id filter. last_seen_at default. MCP resource briefing://. |
+| 46 | Data Sources | 3 | implemented | - | Completed: spec registry + task rollup + completion summaries. In Progress: task status + agent activity + Notification table. Cross-Workspace: spec link watcher. Exceptions: gate results + assertion failures. Metrics: budget usage. |
+| 47 | Briefing Q&A | 3 | implemented | - | POST /api/v1/workspaces/:id/briefing/ask registered. Request: {question, history?}. Response: {answer, sources}. ABAC: workspace resource, generate action. History capped at 20. LLM read-only access. |
 | 48 | 10. Observable Lens (Future-Proofing) | 2 | n/a | - | Section heading only — no implementable requirement. |
-| 49 | Design Constraints | 3 | not-started | - | Architectural constraints for future Observable lens |
-| 50 | 11. CLI/MCP Parity Constraint | 2 | not-started | - | CLI commands: gyre briefing, gyre inbox, gyre explore, gyre trace, gyre spec assist |
+| 49 | Design Constraints | 3 | n/a | - | Architectural constraints for future Observable lens — no implementable requirement. Design must-not-preclude constraints; compliance verified by extension points existing in GraphNode metadata, lens system, briefing sections, message bus external event sources. |
+| 50 | 11. CLI/MCP Parity Constraint | 2 | implemented | - | CLI: gyre briefing, gyre inbox, gyre explore, gyre trace, gyre spec (read/write/diff/graph), gyre divergence. MCP: briefing://, notifications://, graph.concept tool, trace://, spec.assist tool. All UI data surfaces available via REST. |
 | 51 | 12. User Profile | 2 | n/a | - | Section heading only — no implementable requirement. |
 | 52 | The Problem | 3 | n/a | - | Context/rationale — no implementable requirement. |
-| 53 | What the Profile Is | 3 | not-started | - | /profile page: Identity, Notification Prefs, Memberships, Judgment Ledger |
+| 53 | What the Profile Is | 3 | implemented | - | /profile route. user_profile adapter (sqlite/user_profile.rs). Migration 000036. PUT /api/v1/users/me. API tokens CRUD. user_notification_preferences table. Workspace memberships. GET /api/v1/users/me/judgments for judgment ledger. |
 | 54 | What the Profile Is NOT | 3 | n/a | - | Anti-requirements/guidelines — no implementable requirement. |
 | 55 | Relationship to Existing Specs | 2 | n/a | - | Cross-reference section — no implementable requirement. |
