@@ -1,9 +1,12 @@
-# TASK-010: MCP HSI Parity — Resources and Tools
-
-**Spec reference:** `human-system-interface.md` §11 (CLI/MCP Parity Constraint)  
-**Depends on:** None (consumes existing REST endpoints and domain logic)  
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-010.md`](../reviews/task-010.md)
+---
+title: "MCP HSI Parity — Resources and Tools"
+spec_ref: "human-system-interface.md §11 (CLI/MCP Parity Constraint)"
+depends_on: []
+progress: complete
+review: specs/reviews/task-010.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

@@ -1,9 +1,12 @@
-# TASK-013: Briefing Data Assembly — Cross-Workspace & Exceptions
-
-**Spec reference:** `human-system-interface.md` §9 (Briefing Detail)
-**Depends on:** None (consumes existing notification, gate result, and spec link data)
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-013.md`](../reviews/task-013.md)
+---
+title: "Briefing Data Assembly — Cross-Workspace & Exceptions"
+spec_ref: "human-system-interface.md §9 (Briefing Detail)"
+depends_on: []
+progress: complete
+review: specs/reviews/task-013.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

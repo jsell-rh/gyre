@@ -1,8 +1,13 @@
-# TASK-047: Authorization Provenance — Key Binding Revocation Endpoint and Audit Event
-
-**Spec reference:** `authorization-provenance.md` §2.3, §7.7  
-**Depends on:** TASK-006 (key binding creation — complete)  
-**Progress:** `complete`
+---
+title: "Authorization Provenance — Key Binding Revocation Endpoint and Audit Event"
+spec_ref: "authorization-provenance.md §2.3, §7.7"
+depends_on: 
+  - task-006
+progress: complete
+coverage_sections: []
+commits: 
+  - cf33a793
+---
 
 ## Spec Excerpt
 

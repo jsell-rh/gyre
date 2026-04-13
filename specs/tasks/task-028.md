@@ -1,9 +1,12 @@
-# TASK-028: Merge Dependencies — Dependency Metadata and Creation-Time Binding
-
-**Spec reference:** `merge-dependencies.md` §Three Ways Dependencies Are Established, §Speculative Merge Integration  
-**Depends on:** None (extends data model and API, independent of queue algorithm)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-028.md`](../reviews/task-028.md)
+---
+title: "Merge Dependencies — Dependency Metadata and Creation-Time Binding"
+spec_ref: "merge-dependencies.md §Three Ways Dependencies Are Established, §Speculative Merge Integration"
+depends_on: []
+progress: complete
+review: specs/reviews/task-028.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

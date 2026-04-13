@@ -1,9 +1,14 @@
-# TASK-008: Authorization Provenance — Phase 3: Enforcement
+---
+title: "Authorization Provenance — Phase 3: Enforcement"
+spec_ref: "authorization-provenance.md §6, §7.2, §8 Phase 3"
+depends_on: 
+  - task-007
+progress: complete
+review: specs/reviews/task-008.md
+coverage_sections: []
+commits: []
+---
 
-**Spec reference:** `authorization-provenance.md` §6, §7.2, §8 Phase 3  
-**Depends on:** TASK-007  
-**Progress:** `complete`  
-**Review:** [specs/reviews/task-008.md](../reviews/task-008.md)  
 **Note:** R6 — all findings resolved. Verification complete.
 
 ## Spec Excerpt

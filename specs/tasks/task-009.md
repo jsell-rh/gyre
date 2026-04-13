@@ -1,9 +1,14 @@
-# TASK-009: Authorization Provenance — Phase 4: Full Chains and AIBOM Integration
+---
+title: "Authorization Provenance — Phase 4: Full Chains and AIBOM Integration"
+spec_ref: "authorization-provenance.md §4, §5.2, §7.3, §8 Phase 4"
+depends_on: 
+  - task-008
+progress: complete
+review: specs/reviews/task-009.md
+coverage_sections: []
+commits: []
+---
 
-**Spec reference:** `authorization-provenance.md` §4, §5.2, §7.3, §8 Phase 4  
-**Depends on:** TASK-008  
-**Progress:** `complete`  
-**Review:** [specs/reviews/task-009.md](../reviews/task-009.md)  
 **Note:** R2 — all 4 R1 findings resolved. Complete.
 
 ## Spec Excerpt

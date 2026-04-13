@@ -1,8 +1,12 @@
-# TASK-032: Causal Flow Trace Mode
-
-**Spec reference:** `explorer-canvas.md` §Causal Flow Trace, `system-explorer.md` §5  
-**Depends on:** TASK-029 (lens toggle — traces use structural lens)  
-**Progress:** `complete`
+---
+title: "Causal Flow Trace Mode"
+spec_ref: "explorer-canvas.md §Causal Flow Trace, system-explorer.md §5"
+depends_on: 
+  - task-029
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

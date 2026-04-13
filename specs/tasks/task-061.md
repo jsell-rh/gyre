@@ -1,11 +1,14 @@
-# TASK-061: Populate Attestation-Chain ABAC Subject Attributes
+---
+title: "Populate Attestation-Chain ABAC Subject Attributes"
+spec_ref: "authorization-provenance.md §7.2"
+depends_on: []
+progress: complete
+review: specs/reviews/task-061.md
+coverage_sections: []
+commits: 
+  - 07a1f928
+---
 
-**Spec reference:** `authorization-provenance.md` §7.2
-
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-061.md`](../reviews/task-061.md)
-
-**Git commits:**
 - `07a1f928` feat(abac): populate attestation-chain subject attributes (TASK-061)
 
 ---

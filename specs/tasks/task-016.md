@@ -1,9 +1,12 @@
-# TASK-016: Spec Links — Staleness Job & Approval Gate Enforcement
-
-**Spec reference:** `spec-links.md` §Link Types, §Forge-Maintained Spec Graph  
-**Depends on:** None (spec links store and approval flow already exist)  
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-016.md`](../reviews/task-016.md)
+---
+title: "Spec Links — Staleness Job & Approval Gate Enforcement"
+spec_ref: "spec-links.md §Link Types, §Forge-Maintained Spec Graph"
+depends_on: []
+progress: complete
+review: specs/reviews/task-016.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

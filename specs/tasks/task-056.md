@@ -1,9 +1,12 @@
-# TASK-056: Abandoned Branch Detection Job
-
-**Spec reference:** `human-system-interface.md` §8 (Inbox Detail, priority 9: Abandoned Branch)
-**Depends on:** None (notification system, MR port, job registry all exist)
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-056.md`](../reviews/task-056.md) — R1, complete (0 findings)
+---
+title: "Abandoned Branch Detection Job"
+spec_ref: "human-system-interface.md §8 (Inbox Detail, priority 9: Abandoned Branch)"
+depends_on: []
+progress: complete
+review: specs/reviews/task-056.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

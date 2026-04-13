@@ -1,8 +1,11 @@
-# TASK-040: LSP Call Graph — Python Extractor
-
-**Spec reference:** `lsp-call-graph.md` §Phase 3: Python  
-**Depends on:** None (independent; follows the same pattern as Rust/Go extractors)  
-**Progress:** `complete`
+---
+title: "LSP Call Graph — Python Extractor"
+spec_ref: "lsp-call-graph.md §Phase 3: Python"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

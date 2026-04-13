@@ -1,9 +1,12 @@
-# TASK-049: Merge Queue Dependency Graph UI
-
-**Spec reference:** `merge-dependencies.md` §Merge Queue Integration > Visualization
-**Depends on:** None (backend endpoint `GET /api/v1/merge-queue/graph` already exists)
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-049.md`](../reviews/task-049.md)
+---
+title: "Merge Queue Dependency Graph UI"
+spec_ref: "merge-dependencies.md §Merge Queue Integration > Visualization"
+depends_on: []
+progress: complete
+review: specs/reviews/task-049.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

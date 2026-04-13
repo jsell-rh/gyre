@@ -1,9 +1,12 @@
-# TASK-017: Spec Registry — Manifest Enforcement on Push
-
-**Spec reference:** `spec-registry.md` §The Manifest  
-**Depends on:** None (manifest parsing and push-time spec registry hook already exist)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-017.md`](../reviews/task-017.md)
+---
+title: "Spec Registry — Manifest Enforcement on Push"
+spec_ref: "spec-registry.md §The Manifest"
+depends_on: []
+progress: complete
+review: specs/reviews/task-017.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

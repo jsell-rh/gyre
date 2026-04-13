@@ -1,9 +1,15 @@
-# TASK-012: Specs Assist Real LLM Integration
-
-**Spec reference:** `ui-layout.md` §3 (LLM-Assisted Spec Editing), `human-system-interface.md` §3 (Explorer)
-**Depends on:** None (LlmPort infrastructure exists; TASK-011 is for save, not assist)
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-012.md`](../reviews/task-012.md)
+---
+title: "Specs Assist Real LLM Integration"
+spec_ref: "ui-layout.md §3 (LLM-Assisted Spec Editing), human-system-interface.md §3 (Explorer)"
+depends_on: 
+  - task-011
+progress: complete
+review: specs/reviews/task-012.md
+coverage_sections: []
+commits: 
+  - 2bc7f950
+  - 6cde0c8e
+---
 
 ## Spec Excerpt
 

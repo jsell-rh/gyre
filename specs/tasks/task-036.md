@@ -1,8 +1,11 @@
-# TASK-036: Explorer Chat Streaming & Status Indicators
-
-**Spec reference:** `explorer-implementation.md` §Phase 4: Polish  
-**Depends on:** None (WebSocket handler already sends status messages)  
-**Progress:** `complete`
+---
+title: "Explorer Chat Streaming & Status Indicators"
+spec_ref: "explorer-implementation.md §Phase 4: Polish"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

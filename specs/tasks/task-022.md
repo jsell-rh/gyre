@@ -1,9 +1,15 @@
-# TASK-022: Dep Graph — Cascade Testing
-
-**Spec reference:** `dependency-graph.md` §Cascade Testing  
-**Depends on:** TASK-020 (breaking change detection must be operational)  
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-022.md`](../reviews/task-022.md)
+---
+title: "Dep Graph — Cascade Testing"
+spec_ref: "dependency-graph.md §Cascade Testing"
+depends_on: 
+  - task-020
+progress: complete
+review: specs/reviews/task-022.md
+coverage_sections: []
+commits: 
+  - bfb1ef58
+  - 7159eece
+---
 
 ## Spec Excerpt
 

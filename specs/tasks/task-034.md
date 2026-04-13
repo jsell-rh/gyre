@@ -1,8 +1,11 @@
-# TASK-034: Explorer Agent Self-Check Dry-Run Loop
-
-**Spec reference:** `explorer-implementation.md` §Self-Check Loop  
-**Depends on:** None (MCP tools `graph_summary` and `graph_query_dryrun` already exist)  
-**Progress:** `complete`
+---
+title: "Explorer Agent Self-Check Dry-Run Loop"
+spec_ref: "explorer-implementation.md §Self-Check Loop"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

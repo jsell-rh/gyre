@@ -1,9 +1,13 @@
-# TASK-018: Authorization Provenance — Git Notes Attestation Storage
-
-**Spec reference:** `authorization-provenance.md` §5.3  
-**Depends on:** TASK-008 (Phase 3: attestation chains are produced)  
-**Progress:** `complete`  
-**Review:** [R1–R3](../reviews/task-018.md) — R3: 0 findings
+---
+title: "Authorization Provenance — Git Notes Attestation Storage"
+spec_ref: "authorization-provenance.md §5.3"
+depends_on: 
+  - task-008
+progress: complete
+review: specs/reviews/task-018.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

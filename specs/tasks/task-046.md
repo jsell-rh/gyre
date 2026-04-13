@@ -1,13 +1,15 @@
-# TASK-046: Cross-Repo Dependency Graph — Visualization UI
-
-**Spec reference:** `dependency-graph.md` §UI (lines 228–232)
-
-**Progress:** `complete`
-
-**Review:** [`specs/reviews/task-046.md`](../reviews/task-046.md)
-
-**Depends on:** TASK-020 (breaking change detection), TASK-021 (version drift tracking)
-
+---
+title: "Cross-Repo Dependency Graph — Visualization UI"
+spec_ref: "dependency-graph.md §UI (lines 228–232)"
+depends_on: 
+  - task-020
+  - task-021
+progress: complete
+review: specs/reviews/task-046.md
+coverage_sections: []
+commits: 
+  - c3853572
+  - 7ebb0131
 ---
 
 ## Spec Excerpt

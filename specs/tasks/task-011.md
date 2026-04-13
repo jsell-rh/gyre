@@ -1,9 +1,12 @@
-# TASK-011: Spec Save Git Write-Through
-
-**Spec reference:** `ui-layout.md` §3 (LLM-Assisted Spec Editing, Save workflow), `human-system-interface.md` §3 (Explorer: Inline Spec Editing)
-**Depends on:** None (consumes existing git_ops port and notification system)
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-011.md`](../reviews/task-011.md)
+---
+title: "Spec Save Git Write-Through"
+spec_ref: "ui-layout.md §3 (LLM-Assisted Spec Editing, Save workflow), human-system-interface.md §3 (Explorer: Inline Spec Editing)"
+depends_on: []
+progress: complete
+review: specs/reviews/task-011.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

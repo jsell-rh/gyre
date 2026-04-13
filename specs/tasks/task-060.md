@@ -1,8 +1,12 @@
-# TASK-060: Remove Dead `MoldableViewNodeTypeFilter` Test File
-
-**Spec reference:** `development/frontend-testing.md` (tests must pass), `explorer-canvas.md` (MoldableView superseded by ExplorerCanvas)  
-**Depends on:** None  
-**Progress:** `complete`
+---
+title: "Remove Dead `MoldableViewNodeTypeFilter` Test File"
+spec_ref: "development/frontend-testing.md (tests must pass), explorer-canvas.md (MoldableView superseded by ExplorerCanvas)"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: 
+  - 1bd337c5
+---
 
 ## Problem
 

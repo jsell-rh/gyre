@@ -1,9 +1,13 @@
-# TASK-054: Conversations Endpoint Integration Test
-
-**Spec reference:** `human-system-interface.md` §5 (Conversation-to-Code Provenance)  
-**Depends on:** None (handler and route already implemented)  
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-054.md`](../reviews/task-054.md)
+---
+title: "Conversations Endpoint Integration Test"
+spec_ref: "human-system-interface.md §5 (Conversation-to-Code Provenance)"
+depends_on: []
+progress: complete
+review: specs/reviews/task-054.md
+coverage_sections: []
+commits: 
+  - 6e752e6d
+---
 
 ## Spec Excerpt
 

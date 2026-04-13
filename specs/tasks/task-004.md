@@ -1,9 +1,14 @@
-# TASK-004: Authorization Provenance — Storage Adapters and Migration
-
-**Spec reference:** `authorization-provenance.md` §5.3–5.4  
-**Depends on:** TASK-003 (domain types and ports)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-004.md`](../reviews/task-004.md)
+---
+title: "Authorization Provenance — Storage Adapters and Migration"
+spec_ref: "authorization-provenance.md §5.3–5.4"
+depends_on: 
+  - task-003
+progress: complete
+review: specs/reviews/task-004.md
+coverage_sections: []
+commits: 
+  - 085e5584
+---
 
 ## Spec Excerpt
 

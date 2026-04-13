@@ -1,9 +1,16 @@
-# TASK-048: Cross-Repo Dependency Auto-Detection Pipeline
-
-**Spec reference:** `dependency-graph.md` §Automatic Detection
-**Depends on:** None (builds on M22.4 base dep-graph infrastructure — done)
-**Progress:** `complete`
-**Review:** [R4](../reviews/task-048.md) — 0 findings (all 5 prior findings resolved)
+---
+title: "Cross-Repo Dependency Auto-Detection Pipeline"
+spec_ref: "dependency-graph.md §Automatic Detection"
+depends_on: []
+progress: complete
+review: specs/reviews/task-048.md
+coverage_sections: []
+commits: 
+  - 9db04e6a
+  - 2909df15
+  - 7bb6e99d
+  - 99cbfe0c
+---
 
 ## Spec Excerpt
 

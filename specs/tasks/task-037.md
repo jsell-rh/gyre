@@ -1,9 +1,14 @@
-# TASK-037: Frontend ViewQuery TypeScript Types & Validation
-
-**Spec reference:** `view-query-grammar.md`  
-**Depends on:** None (Rust types in `gyre-common/src/view_query.rs` are the source of truth)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-037.md`](../reviews/task-037.md)
+---
+title: "Frontend ViewQuery TypeScript Types & Validation"
+spec_ref: "view-query-grammar.md"
+depends_on: []
+progress: complete
+review: specs/reviews/task-037.md
+coverage_sections: []
+commits: 
+  - e9b13077
+  - 35d45dac
+---
 
 ## Spec Excerpt
 

@@ -1,8 +1,11 @@
-# TASK-039: LSP Call Graph — Go Extractor
-
-**Spec reference:** `lsp-call-graph.md` §Phase 1: Go  
-**Depends on:** None (independent of frontend tasks; Rust LSP extractor already proves the pattern)  
-**Progress:** `complete`
+---
+title: "LSP Call Graph — Go Extractor"
+spec_ref: "lsp-call-graph.md §Phase 1: Go"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

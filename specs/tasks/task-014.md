@@ -1,8 +1,11 @@
-# TASK-014: Spec Assertion Real Validation
-
-**Spec reference:** `system-explorer.md` §9 (Executable Spec Assertions)
-**Depends on:** None (consumes existing knowledge graph and spec content)
-**Progress:** `complete`
+---
+title: "Spec Assertion Real Validation"
+spec_ref: "system-explorer.md §9 (Executable Spec Assertions)"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

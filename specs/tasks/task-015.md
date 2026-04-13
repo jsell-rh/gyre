@@ -1,8 +1,11 @@
-# TASK-015: Flow Canvas — Animated Trace Visualization
-
-**Spec reference:** `ui-layout.md` §4 (Flow Layout), `system-explorer.md` §5 (Flow Traces), `human-system-interface.md` §3a (Test-Time Trace Capture — Explorer Visualization)
-**Depends on:** None (TraceCapture gate, OTLP receiver, trace types, and PlaybackControls already exist)
-**Progress:** `complete`
+---
+title: "Flow Canvas — Animated Trace Visualization"
+spec_ref: "ui-layout.md §4 (Flow Layout), system-explorer.md §5 (Flow Traces), human-system-interface.md §3a (Test-Time Trace Capture — Explorer Visualization)"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

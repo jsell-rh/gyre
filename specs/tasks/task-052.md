@@ -1,9 +1,15 @@
-# TASK-052: Breaking Change Impact Analysis Modal
-
-**Spec reference:** `dependency-graph.md` §UI (line 232), §Impact Analysis  
-**Depends on:** TASK-020 (breaking change detection + endpoints), TASK-022 (cascade testing)  
-**Progress:** `complete`  
-**Review:** [specs/reviews/task-052.md](../reviews/task-052.md)
+---
+title: "Breaking Change Impact Analysis Modal"
+spec_ref: "dependency-graph.md §UI (line 232), §Impact Analysis"
+depends_on: 
+  - task-020
+  - task-022
+progress: complete
+review: specs/reviews/task-052.md
+coverage_sections: []
+commits: 
+  - 3cd4d3e9
+---
 
 ## Spec Excerpt
 

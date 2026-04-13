@@ -1,9 +1,15 @@
-# TASK-021: Dep Graph — Version Drift Tracking & Stale Dependencies
-
-**Spec reference:** `dependency-graph.md` §Version Drift Tracking, API (`GET /api/v1/deps/stale`)  
-**Depends on:** None (builds on M22.4 dependency graph infrastructure)  
-**Progress:** `complete`
-**Review:** [specs/reviews/task-021.md](../reviews/task-021.md) — R3 complete, 0 findings (R1-R2 resolved)
+---
+title: "Dep Graph — Version Drift Tracking & Stale Dependencies"
+spec_ref: "dependency-graph.md §Version Drift Tracking, API (GET /api/v1/deps/stale)"
+depends_on: []
+progress: complete
+review: specs/reviews/task-021.md
+coverage_sections: []
+commits: 
+  - e36336eb
+  - a17b5201
+  - 11966ac4
+---
 
 ## Spec Excerpt
 

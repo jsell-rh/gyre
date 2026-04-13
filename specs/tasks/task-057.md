@@ -1,9 +1,19 @@
-# TASK-057: Explorer Visual Regression Tests
-
-**Spec reference:** `explorer-implementation.md` §Migration Plan > Phase 4: Polish; §Testing > Visual Tests  
-**Depends on:** TASK-029 (lens toggle, complete), TASK-030 (structural coloring, complete), TASK-031 (drill-down, complete), TASK-032 (causal flow trace, complete), TASK-033 (evaluative heat map, complete), TASK-037 (view query types, complete), TASK-053 (performance + responsive, complete)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-057.md`](../reviews/task-057.md)
+---
+title: "Explorer Visual Regression Tests"
+spec_ref: "explorer-implementation.md §Migration Plan > Phase 4: Polish; §Testing > Visual Tests"
+depends_on: 
+  - task-029
+  - task-030
+  - task-031
+  - task-032
+  - task-033
+  - task-037
+  - task-053
+progress: complete
+review: specs/reviews/task-057.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

@@ -1,9 +1,14 @@
-# TASK-007: Authorization Provenance — Phase 2: Strategy-Implied Constraints (non-enforcing)
+---
+title: "Authorization Provenance — Phase 2: Strategy-Implied Constraints (non-enforcing)"
+spec_ref: "authorization-provenance.md §3.2, §8 Phase 2"
+depends_on: 
+  - task-006
+progress: complete
+review: specs/reviews/task-007.md
+coverage_sections: []
+commits: []
+---
 
-**Spec reference:** `authorization-provenance.md` §3.2, §8 Phase 2  
-**Depends on:** TASK-006  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-007.md`](../reviews/task-007.md)  
 **Note:** R6 — all findings resolved, no new findings. Verified complete.
 
 ## Spec Excerpt

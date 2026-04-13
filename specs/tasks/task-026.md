@@ -1,9 +1,14 @@
-# TASK-026: Merge Dependencies — Topological Sort and Priority Ordering
-
-**Spec reference:** `merge-dependencies.md` §Merge Queue Integration (Processing Algorithm, Priority Within Dependency Tiers)  
-**Depends on:** None (refines existing merge processor)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-026.md`](../reviews/task-026.md)
+---
+title: "Merge Dependencies — Topological Sort and Priority Ordering"
+spec_ref: "merge-dependencies.md §Merge Queue Integration (Processing Algorithm, Priority Within Dependency Tiers)"
+depends_on: []
+progress: complete
+review: specs/reviews/task-026.md
+coverage_sections: []
+commits: 
+  - fc7db38e
+  - 66d68539
+---
 
 ## Spec Excerpt
 

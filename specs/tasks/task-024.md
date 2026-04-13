@@ -1,9 +1,15 @@
-# TASK-024: Dep Graph — CLI Commands
-
-**Spec reference:** `dependency-graph.md` §CLI  
-**Depends on:** TASK-020 (breaking change endpoints), TASK-021 (stale endpoint)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-024.md`](../reviews/task-024.md)
+---
+title: "Dep Graph — CLI Commands"
+spec_ref: "dependency-graph.md §CLI"
+depends_on: 
+  - task-020
+  - task-021
+progress: complete
+review: specs/reviews/task-024.md
+coverage_sections: []
+commits: 
+  - bb7ff9d7
+---
 
 ## Spec Excerpt
 

@@ -1,9 +1,14 @@
-# TASK-055: Explorer Architectural Timeline — Time Scrubber & History Navigation
-
-**Spec reference:** `system-explorer.md` §6 (Architectural Timeline)  
-**Depends on:** TASK-029 (lens toggle, complete), TASK-031 (drill-down, complete)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-055.md`](../reviews/task-055.md) — R3, complete (0 findings; 5 total resolved)
+---
+title: "Explorer Architectural Timeline — Time Scrubber & History Navigation"
+spec_ref: "system-explorer.md §6 (Architectural Timeline)"
+depends_on: 
+  - task-029
+  - task-031
+progress: complete
+review: specs/reviews/task-055.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

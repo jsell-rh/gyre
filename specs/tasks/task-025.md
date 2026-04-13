@@ -1,9 +1,14 @@
-# TASK-025: Spec Links — CLI Commands
-
-**Spec reference:** `spec-links.md` §Querying the Graph (CLI)  
-**Depends on:** TASK-019 (query endpoints: dependents, dependencies, stale-links, conflicts)  
-**Progress:** `complete`  
-**Review:** [specs/reviews/task-025.md](../reviews/task-025.md)
+---
+title: "Spec Links — CLI Commands"
+spec_ref: "spec-links.md §Querying the Graph (CLI)"
+depends_on: 
+  - task-019
+progress: complete
+review: specs/reviews/task-025.md
+coverage_sections: []
+commits: 
+  - dde17a05
+---
 
 ## Spec Excerpt
 

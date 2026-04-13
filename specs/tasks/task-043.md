@@ -1,8 +1,11 @@
-# TASK-043: LSP Call Graph — Rust Extractor
-
-**Spec reference:** `lsp-call-graph.md` §Phase 2: Rust
-
-**Progress:** `complete`
+---
+title: "LSP Call Graph — Rust Extractor"
+spec_ref: "lsp-call-graph.md §Phase 2: Rust"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 **Commits:**
 (implemented in feat/explorer-canvas branch — lsp_call_graph.rs fully built with rust-analyzer LSP subprocess, 22 unit tests, wired into graph_extraction.rs extraction pipeline)

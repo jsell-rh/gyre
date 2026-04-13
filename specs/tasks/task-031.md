@@ -1,8 +1,11 @@
-# TASK-031: Progressive Drill-Down with Zoom Transitions
-
-**Spec reference:** `explorer-canvas.md` §Progressive Drill-Down  
-**Depends on:** None (builds on existing double-click drill-down in ExplorerCanvas)  
-**Progress:** `complete`
+---
+title: "Progressive Drill-Down with Zoom Transitions"
+spec_ref: "explorer-canvas.md §Progressive Drill-Down"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

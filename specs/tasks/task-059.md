@@ -1,9 +1,15 @@
-# TASK-059: Derive `attestation_level` from Repo Stack Policy
-
-**Spec reference:** `authorization-provenance.md` §3.2 (strategy-implied constraint from attestation level policy)  
-**Depends on:** TASK-008 (enforcement — complete), TASK-003 (domain types — complete)  
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-059.md`](../reviews/task-059.md)
+---
+title: "Derive `attestation_level` from Repo Stack Policy"
+spec_ref: "authorization-provenance.md §3.2 (strategy-implied constraint from attestation level policy)"
+depends_on: 
+  - task-008
+  - task-003
+progress: complete
+review: specs/reviews/task-059.md
+coverage_sections: []
+commits: 
+  - 7ec53ae0
+---
 
 ## Spec Excerpt
 

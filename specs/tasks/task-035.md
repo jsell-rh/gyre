@@ -1,8 +1,11 @@
-# TASK-035: System Default Views Seeding
-
-**Spec reference:** `explorer-implementation.md` §System Default Views  
-**Depends on:** None (saved_views table and SavedViewRepository already exist)  
-**Progress:** `complete`
+---
+title: "System Default Views Seeding"
+spec_ref: "explorer-implementation.md §System Default Views"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

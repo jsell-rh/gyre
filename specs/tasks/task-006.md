@@ -1,9 +1,20 @@
-# TASK-006: Authorization Provenance — Phase 1: Key Binding and Signed Input (non-enforcing)
+---
+title: "Authorization Provenance — Phase 1: Key Binding and Signed Input (non-enforcing)"
+spec_ref: "authorization-provenance.md §2, §7.1, §8 Phase 1"
+depends_on: 
+  - task-003
+  - task-004
+  - task-005
+progress: complete
+review: specs/reviews/task-006.md
+coverage_sections: []
+commits: 
+  - aa3e6fbe
+  - 28e517d7
+  - d71a15fe
+  - 314c604b
+---
 
-**Spec reference:** `authorization-provenance.md` §2, §7.1, §8 Phase 1  
-**Depends on:** TASK-003, TASK-004, TASK-005  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-006.md`](../reviews/task-006.md)  
 **Note:** R5 — all 4 findings resolved, no new findings. Verified complete.
 
 ## Spec Excerpt

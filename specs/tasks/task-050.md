@@ -1,9 +1,14 @@
-# TASK-050: Repo Detail — Cross-Repo Dependency Section
-
-**Spec reference:** `dependency-graph.md` §UI (lines 230–232)  
-**Depends on:** TASK-020 (breaking change detection, for alerts), TASK-021 (version drift, for drift indicators)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-050.md`](../reviews/task-050.md)
+---
+title: "Repo Detail — Cross-Repo Dependency Section"
+spec_ref: "dependency-graph.md §UI (lines 230–232)"
+depends_on: 
+  - task-020
+  - task-021
+progress: complete
+review: specs/reviews/task-050.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

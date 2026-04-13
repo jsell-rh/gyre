@@ -1,8 +1,11 @@
-# TASK-029: Lens Toggle UI + Observable Placeholder
-
-**Spec reference:** `explorer-canvas.md` §Lens Definitions, §Component Architecture  
-**Depends on:** None  
-**Progress:** `complete`
+---
+title: "Lens Toggle UI + Observable Placeholder"
+spec_ref: "explorer-canvas.md §Lens Definitions, §Component Architecture"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

@@ -1,13 +1,14 @@
-# TASK-045: Spec Links — Interactive DAG Visualization
-
-**Spec reference:** `spec-links.md` §UI (lines 186–189)
-
-**Progress:** `complete`
-
-**Review:** [`specs/reviews/task-045.md`](../reviews/task-045.md)
-
-**Depends on:** TASK-016 (staleness data), TASK-019 (query endpoints, conflict data)
-
+---
+title: "Spec Links — Interactive DAG Visualization"
+spec_ref: "spec-links.md §UI (lines 186–189)"
+depends_on: 
+  - task-016
+  - task-019
+progress: complete
+review: specs/reviews/task-045.md
+coverage_sections: []
+commits: 
+  - cc256081
 ---
 
 ## Spec Excerpt

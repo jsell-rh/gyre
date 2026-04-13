@@ -1,9 +1,16 @@
-# TASK-051: Spec Links — Impact Analysis View
-
-**Spec reference:** `spec-links.md` §UI (line 189)  
-**Depends on:** TASK-019 (spec dependents endpoint), TASK-045 (spec DAG visualization)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-051.md`](../reviews/task-051.md)
+---
+title: "Spec Links — Impact Analysis View"
+spec_ref: "spec-links.md §UI (line 189)"
+depends_on: 
+  - task-019
+  - task-045
+progress: complete
+review: specs/reviews/task-051.md
+coverage_sections: []
+commits: 
+  - 798a0647
+  - de992204
+---
 
 ## Spec Excerpt
 

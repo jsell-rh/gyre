@@ -1,9 +1,12 @@
-# TASK-020: Dep Graph — Breaking Change Detection & Enforcement Policies
-
-**Spec reference:** `dependency-graph.md` §Breaking Change Detection, §Enforcement Policies  
-**Depends on:** None (builds on M22.4 dependency graph infrastructure)  
-**Progress:** `complete`  
-**Review:** [specs/reviews/task-020.md](../reviews/task-020.md) — R6 complete, 0 findings
+---
+title: "Dep Graph — Breaking Change Detection & Enforcement Policies"
+spec_ref: "dependency-graph.md §Breaking Change Detection, §Enforcement Policies"
+depends_on: []
+progress: complete
+review: specs/reviews/task-020.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

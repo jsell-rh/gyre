@@ -1,9 +1,13 @@
-# TASK-019: Spec Links — Merge Gates, Query Endpoints, and Cycle Detection
-
-**Spec reference:** `spec-links.md` §Mechanical Gates (Merge Gates), §Querying the Graph, §Cycle Detection  
-**Depends on:** TASK-016 (staleness job and approval gates must be operational)  
-**Progress:** `complete`  
-**Review:** [specs/reviews/task-019.md](../reviews/task-019.md) — R4 complete (0 findings)
+---
+title: "Spec Links — Merge Gates, Query Endpoints, and Cycle Detection"
+spec_ref: "spec-links.md §Mechanical Gates (Merge Gates), §Querying the Graph, §Cycle Detection"
+depends_on: 
+  - task-016
+progress: complete
+review: specs/reviews/task-019.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

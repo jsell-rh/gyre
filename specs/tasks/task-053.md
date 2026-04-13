@@ -1,9 +1,16 @@
-# TASK-053: Explorer Phase 4 — Large Graph Performance & Responsive Layout
-
-**Spec reference:** `explorer-implementation.md` §Migration Plan > Phase 4: Polish  
-**Depends on:** TASK-029 (lens toggle, complete), TASK-031 (drill-down, complete), TASK-036 (streaming, complete), TASK-038 (keyboard shortcuts, complete)  
-**Progress:** `complete`
-**Review:** [`specs/reviews/task-053.md`](../reviews/task-053.md)
+---
+title: "Explorer Phase 4 — Large Graph Performance & Responsive Layout"
+spec_ref: "explorer-implementation.md §Migration Plan > Phase 4: Polish"
+depends_on: 
+  - task-029
+  - task-031
+  - task-036
+  - task-038
+progress: complete
+review: specs/reviews/task-053.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

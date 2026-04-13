@@ -1,9 +1,13 @@
-# TASK-005: Authorization Provenance — CEL Constraint Evaluator
-
-**Spec reference:** `authorization-provenance.md` §3  
-**Depends on:** TASK-003 (domain types)  
-**Progress:** `complete`  
-**Review:** [specs/reviews/task-005.md](../reviews/task-005.md)
+---
+title: "Authorization Provenance — CEL Constraint Evaluator"
+spec_ref: "authorization-provenance.md §3"
+depends_on: 
+  - task-003
+progress: complete
+review: specs/reviews/task-005.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

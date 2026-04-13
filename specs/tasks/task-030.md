@@ -1,8 +1,12 @@
-# TASK-030: Structural Lens — Spec Coverage Coloring & Complexity Sizing
-
-**Spec reference:** `explorer-canvas.md` §Structural (default)  
-**Depends on:** TASK-029 (lens toggle — structural lens must be selectable)  
-**Progress:** `complete`
+---
+title: "Structural Lens — Spec Coverage Coloring & Complexity Sizing"
+spec_ref: "explorer-canvas.md §Structural (default)"
+depends_on: 
+  - task-029
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

@@ -1,9 +1,12 @@
-# TASK-058: Populate `meta_spec_set_sha` in `InputContent` at Spec Approval Time
-
-**Spec reference:** `authorization-provenance.md` §2.2 (`InputContent.meta_spec_set_sha`), §3.2 (strategy-implied constraint: `agent.meta_spec_set_sha == input.meta_spec_set_sha`)  
-**Depends on:** TASK-006 (key binding + signed input — complete)  
-**Progress:** `complete`
-**Review:** `specs/reviews/task-058.md`
+---
+title: "Populate `meta_spec_set_sha` in `InputContent` at Spec Approval Time"
+spec_ref: "authorization-provenance.md §2.2 (InputContent.meta_spec_set_sha), §3.2 (strategy-implied constraint: agent.meta_spec_set_sha == input.meta_spec_set_sha)"
+depends_on: 
+  - task-006
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

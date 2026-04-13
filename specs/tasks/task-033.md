@@ -1,8 +1,12 @@
-# TASK-033: Evaluative Heat Map & Span Badges
-
-**Spec reference:** `explorer-canvas.md` §Evaluative  
-**Depends on:** TASK-029 (lens toggle — evaluative lens must be selectable)  
-**Progress:** `complete`
+---
+title: "Evaluative Heat Map & Span Badges"
+spec_ref: "explorer-canvas.md §Evaluative"
+depends_on: 
+  - task-029
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

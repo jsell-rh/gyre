@@ -1,9 +1,14 @@
-# TASK-042: Evaluative Node Detail Tab — Per-Node Span List
-
-**Spec reference:** `explorer-canvas.md` §Evaluative (Interaction)  
-**Depends on:** TASK-029 (lens toggle, complete), TASK-033 (evaluative heat map, complete)  
-**Progress:** `complete`  
-**Review:** [specs/reviews/task-042.md](../reviews/task-042.md)
+---
+title: "Evaluative Node Detail Tab — Per-Node Span List"
+spec_ref: "explorer-canvas.md §Evaluative (Interaction)"
+depends_on: 
+  - task-029
+  - task-033
+progress: complete
+review: specs/reviews/task-042.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

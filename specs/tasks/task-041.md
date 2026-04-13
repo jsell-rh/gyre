@@ -1,8 +1,11 @@
-# TASK-041: LSP Call Graph — TypeScript Extractor
-
-**Spec reference:** `lsp-call-graph.md` §Phase 4: TypeScript  
-**Depends on:** None (independent; follows the same pattern as Rust/Python extractors)  
-**Progress:** `complete`
+---
+title: "LSP Call Graph — TypeScript Extractor"
+spec_ref: "lsp-call-graph.md §Phase 4: TypeScript"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

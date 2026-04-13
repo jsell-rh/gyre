@@ -1,9 +1,13 @@
-# TASK-027: Merge Dependencies — Atomic Group Transactional Merge
-
-**Spec reference:** `merge-dependencies.md` §Atomic Groups, §Atomic Group Rules, §Failure Handling  
-**Depends on:** TASK-026 (topological sort processes groups in correct order)  
-**Progress:** `complete`  
-**Review:** [`specs/reviews/task-027.md`](../reviews/task-027.md)
+---
+title: "Merge Dependencies — Atomic Group Transactional Merge"
+spec_ref: "merge-dependencies.md §Atomic Groups, §Atomic Group Rules, §Failure Handling"
+depends_on: 
+  - task-026
+progress: complete
+review: specs/reviews/task-027.md
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 

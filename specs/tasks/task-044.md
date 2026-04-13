@@ -1,8 +1,11 @@
-# TASK-044: Authorization Provenance — HSI Constraint Editing UI and Provenance Chain Visualization
-
-**Spec reference:** `authorization-provenance.md` §7.6 (Human-System Interface amendments)
-
-**Progress:** `complete`
+---
+title: "Authorization Provenance — HSI Constraint Editing UI and Provenance Chain Visualization"
+spec_ref: "authorization-provenance.md §7.6 (Human-System Interface amendments)"
+depends_on: []
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 **Commits:**
 (implemented in feat/explorer-canvas branch — ConstraintEditor.svelte (379 lines) and ProvenanceChain.svelte (262 lines) fully built and integrated into DetailPanel.svelte)

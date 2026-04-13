@@ -1,8 +1,12 @@
-# TASK-038: Explorer Keyboard Shortcuts
-
-**Spec reference:** `explorer-implementation.md` §Phase 4: Polish, `system-explorer.md` §1  
-**Depends on:** TASK-029 (lens toggle — Escape clears active query)  
-**Progress:** `complete`
+---
+title: "Explorer Keyboard Shortcuts"
+spec_ref: "explorer-implementation.md §Phase 4: Polish, system-explorer.md §1"
+depends_on: 
+  - task-029
+progress: complete
+coverage_sections: []
+commits: []
+---
 
 ## Spec Excerpt
 
