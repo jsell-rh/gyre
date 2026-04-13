@@ -88,12 +88,17 @@ spawn_worker() {
     return 1
   fi
 
-  ACTIVE_WORKERS[$task_name]="$worktree"
   log ">>> Spawning worker: $task_name (worktree: $worktree)"
 
-  tmux new-window -t "$TMUX_SESSION" -n "$task_name" \
-    "bash '$REPO_ROOT/scripts/worker.sh' '$task_file' '$worktree'; echo 'Worker $task_name exited'; sleep 5"
+  if ! tmux new-window -t "$TMUX_SESSION" -n "$task_name" \
+    "bash '$REPO_ROOT/scripts/worker.sh' '$task_file' '$worktree'; echo 'Worker $task_name exited'; sleep 5"; then
+    log "!!! Failed to spawn tmux window for $task_name (session '$TMUX_SESSION' exists?)"
+    git worktree remove "$worktree" --force 2>/dev/null
+    git branch -D "worker/$task_name" 2>/dev/null
+    return 1
+  fi
 
+  ACTIVE_WORKERS[$task_name]="$worktree"
   return 0
 }
 
@@ -142,11 +147,12 @@ merge_worker() {
 }
 
 cleanup_all() {
-  log "Cleaning up all worktrees..."
+  log "Loop exiting — detaching worktrees (branches preserved for recovery)"
   for task_name in "${!ACTIVE_WORKERS[@]}"; do
     local worktree="${ACTIVE_WORKERS[$task_name]}"
     git worktree remove "$worktree" --force 2>/dev/null
-    git branch -D "worker/$task_name" 2>/dev/null
+    # Intentionally NOT deleting worker branches — commits are preserved
+    log "    Detached worktree for $task_name (branch worker/$task_name intact)"
   done
   rm -rf "$WORKTREE_BASE" 2>/dev/null
 }

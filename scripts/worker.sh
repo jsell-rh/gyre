@@ -37,9 +37,10 @@ while [ $ROUND -lt $MAX_ROUNDS ]; do
 
   case "$status" in
     not-started|needs-revision)
-      # Rebase onto main to pick up merged work from other workers
-      log "--- Rebasing onto main (round $ROUND)"
-      git fetch origin main 2>/dev/null && git rebase origin/main 2>/dev/null || \
+      # Rebase onto the explorer worktree root to pick up merged work from other workers
+      log "--- Rebasing onto explorer HEAD (round $ROUND)"
+      EXPLORER_ROOT="$(cd "$WORKTREE/../.." && pwd)"
+      git fetch "$EXPLORER_ROOT" HEAD 2>/dev/null && git rebase FETCH_HEAD 2>/dev/null || \
         log "!!! Rebase failed (may need manual resolution)"
 
       log ">>> Implementation (round $ROUND, status=$status)"
