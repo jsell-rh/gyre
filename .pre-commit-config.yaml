@@ -374,6 +374,21 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: non-atomic-creation
+        name: non-atomic entity creation lint
+        description: Detect handlers with multi-repository creation without transaction wrapping
+        entry: scripts/check-non-atomic-creation.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: exhaustive-ui-state
+        name: exhaustive UI state derivation lint
+        description: Detect Svelte state derivations with fallthrough defaults that misclassify values
+        entry: scripts/check-exhaustive-ui-state.sh
+        language: script
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

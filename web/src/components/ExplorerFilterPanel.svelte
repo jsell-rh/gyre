@@ -205,7 +205,7 @@
   function getGovernanceStatus(node) {
     if (governedBy.has(node.id)) return 'governed';
     if (node.spec_path) return 'governed';
-    return 'ungoverned';
+    return 'ungoverned'; // exhaustive-state:ok — binary governed/ungoverned classification
   }
 
   function getNodeTypeIcon(nt) {
