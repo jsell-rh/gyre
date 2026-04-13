@@ -1,19 +1,19 @@
 # Coverage: Human-System Interface
 
 **Spec:** [`system/human-system-interface.md`](../../system/human-system-interface.md)
-**Last audited:** 2026-04-13 (§1 audited; §2+ classified this cycle)
-**Coverage:** 4/53
+**Last audited:** 2026-04-13 (§1 verified this cycle; §2+ classified prior cycle)
+**Coverage:** 4/37
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
 | 1 | The Novel Problem | 2 | n/a | - | Context/rationale — no implementable requirement. |
 | 2 | 1. Navigation Model | 2 | n/a | - | Section heading only — no implementable requirement. |
 | 3 | Stable Sidebar, Adaptive Content | 3 | task-assigned | task-082 | No desktop sidebar exists (App.svelte:1032 "no sidebar"). Mobile drawer only with 5 items. Spec requires permanent 6-item sidebar. |
-| 4 | Scope Indicator (Breadcrumb) | 3 | implemented | - | Persistent clickable breadcrumb in App.svelte topbar. Minor deviation: tenant shown as "All Workspaces" vs tenant name. |
+| 4 | Scope Indicator (Breadcrumb) | 3 | implemented | - | Partial — breadcrumb exists in repo/settings modes (App.svelte:1056-1139) but: (1) no tenant segment shown (only workspace > repo, spec requires tenant > workspace > repo), (2) not always present (missing from workspace home, profile, cross-workspace home), (3) repo segment not always clickable (static span when no entity detail open). Consider splitting into separate task. |
 | 5 | What Each Nav Item Shows at Each Scope | 3 | task-assigned | task-083 | No sidebar nav items exist. Content uses modes/tabs/sections instead of spec's 6-item × 3-scope matrix. |
-| 6 | Workspace Attribution on Items | 3 | implemented | - | Partial — workspace badges at tenant scope, status bar (trust, budget, WS, presence) implemented. Detailed presence mechanics (debounce, graceful disconnect, session cap, PresenceEvicted) not verified. Consider splitting. |
-| 7 | Deep Links | 3 | implemented | - | URL routing, user_workspace_state table, last_seen_at Axum middleware (middleware.rs:104), briefing time dropdown all exist. URL patterns differ from spec examples. |
-| 8 | Keyboard Navigation | 3 | implemented | - | Cmd+K, /, ?, Esc all match spec. Uses g-key sequences (g h, g s, g 1-8) instead of spec's Cmd+1-6. |
+| 6 | Workspace Attribution on Items | 3 | implemented | - | Partial — workspace name badges exist (CrossWorkspaceHome.svelte:938) but NOT clickable (spec requires link to workspace view; decision badges ARE clickable at :675). Status bar fully implemented (App.svelte:1565-1619: trust, budget, WS status, presence). Presence backend complete (ws.rs:182-295: session_id, 5-cap eviction, PresenceEvicted). Frontend presence sending NOT implemented: no client-side UserPresence messages, no session_id generation, no debounce, no view-change triggers. beforeunload handler exists but doesn't send disconnect message. Consider splitting UI badges vs presence mechanics. |
+| 7 | Deep Links | 3 | implemented | - | Partial — Backend solid: user_workspace_state table (migration 000027), last_seen_at middleware (middleware.rs:104-175, 60s debounce, async upsert), briefing time dropdown (Briefing.svelte:25-56, all 5 options). URL routing partial: routes exist but patterns differ from spec (/workspaces/:slug/r/:repo/... vs spec's /repos/:id/...), missing /inbox and /workspaces/:id/inbox routes, no query param support for explorer filters/lens or specs path. Entrypoint diverges: goes to workspace home, not explorer→inbox flow per spec. |
+| 8 | Keyboard Navigation | 3 | implemented | - | Partial — 4/10 shortcuts match spec: Cmd+K (App.svelte:380), Esc (:388), / (:400), ? (:408). Cmd+1-6 for global nav (Inbox/Briefing/Explorer/Specs/Meta-specs/Admin) NOT implemented. Instead uses g-key sequences (:417-470) for repo tab switching (different purpose). SearchBar.svelte:16-24 defines nav items with numeric icons 1-6 but no keyboard binding. |
 | 9 | 2. Trust Gradient | 2 | task-assigned | task-077 | |
 | 10 | The Problem | 3 | task-assigned | task-077 | |
 | 11 | Trust Levels | 3 | task-assigned | task-077 | |
