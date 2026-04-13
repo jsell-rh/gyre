@@ -14,13 +14,13 @@
 | business-continuity.md | 10 | 0 | 10 | 0 | 0 | 0 | 0% |
 | dependency-graph.md | 19 | 0 | 19 | 0 | 0 | 0 | 0% |
 | design-principles.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
-| explorer-canvas.md | 10 | 0 | 4 | 6 | 0 | 0 | 0% |
-| explorer-implementation.md | 33 | 0 | 12 | 21 | 0 | 0 | 0% |
+| explorer-canvas.md | 10 | 3 | 0 | 7 | 0 | 0 | 0% |
+| explorer-implementation.md | 33 | 3 | 0 | 25 | 0 | 5 | 16% |
 | forge-advantages.md | 10 | 0 | 10 | 0 | 0 | 0 | 0% |
 | hierarchy-enforcement.md | 29 | 0 | 29 | 0 | 0 | 0 | 0% |
-| human-system-interface.md | 55 | 2 | 49 | 0 | 4 | 0 | 7% |
+| human-system-interface.md | 55 | 2 | 44 | 5 | 4 | 0 | 7% |
 | identity-security.md | 12 | 0 | 12 | 0 | 0 | 0 | 0% |
-| lsp-call-graph.md | 12 | 0 | 12 | 0 | 0 | 0 | 0% |
+| lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | merge-dependencies.md | 20 | 0 | 20 | 0 | 0 | 0 | 0% |
 | message-bus.md | 17 | 0 | 17 | 0 | 0 | 0 | 0% |
 | meta-spec-reconciliation.md | 18 | 0 | 18 | 0 | 0 | 0 | 0% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 0 | 36 | 0 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 0 | 14 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **4** | **751** | **43** | **4** | **0** | **0%** |
+| **TOTAL** | **802** | **10** | **718** | **65** | **4** | **5** | **1%** |
