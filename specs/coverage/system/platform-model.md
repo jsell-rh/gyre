@@ -1,8 +1,8 @@
 # Coverage: Platform Model
 
 **Spec:** [`system/platform-model.md`](../../system/platform-model.md)
-**Last audited:** 2026-04-13 (full audit — bulk reclassification from not-started; §1 verified 2026-04-13; §2 audited 2026-04-13)
-**Coverage:** 25/52 (4 n/a)
+**Last audited:** 2026-04-13 (full audit — bulk reclassification from not-started; §1 verified 2026-04-13; §2 audited 2026-04-13; §4 audited 2026-04-13)
+**Coverage:** 24/52 (4 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -24,12 +24,12 @@
 | 16 | Workspace Orchestrator | 3 | task-assigned | task-093 | References exist in comments/agent naming but no explicit workspace orchestrator spawning protocol or lifecycle management. |
 | 17 | Repo Orchestrator | 3 | task-assigned | task-093 | Delegation task type triggers repo orchestrator concept but no explicit orchestrator agent spawning or decomposition protocol. |
 | 18 | Cross-Repo Spec Escalation Protocol | 3 | task-assigned | task-094 | Escalation MessageKind exists but cross-repo spec escalation handlers not implemented as separate protocol. |
-| 19 | 4. Agent Coordination Protocol (MCP-Based) | 2 | implemented | - | Comprehensive MCP server (gyre-server/src/mcp.rs, 4595 lines). JSON-RPC protocol. |
-| 20 | MCP Server | 3 | implemented | - | Full MCP server: initialize, tools/list, tools/call, resources/list, resources/read. JSON-RPC over stdio. |
-| 21 | MCP Tools (Agent-Facing) | 3 | implemented | - | 14+ tools: gyre_create_task, gyre_list_tasks, gyre_update_task, gyre_create_mr, gyre_list_mrs, gyre_record_activity, gyre_agent_heartbeat, gyre_agent_complete, gyre_analytics_query, gyre_search, gyre_message_send/poll/ack, graph_*, spec_assist. |
-| 22 | MCP Resources (Read-Only Context) | 3 | implemented | - | 6+ resources: spec://, agents://, queue://, briefing://, notifications://, trace://. Read-only context for agents. |
-| 23 | MCP Prompts (Injected at Agent Startup) | 3 | implemented | - | Persona system_prompt + meta-spec set injected at agent spawn. MCP prompts available via agent context. |
-| 24 | Token Validation on Every Call | 3 | implemented | - | AuthenticatedAgent wrapper on all MCP tool calls. Workspace-scoped JWT validated. System tokens have admin access. |
+| 19 | 4. Agent Coordination Protocol (MCP-Based) | 2 | verified | - | Genuine 4595-line MCP server (crates/gyre-server/src/mcp.rs). JSON-RPC 2.0 protocol over POST /mcp with SSE stream at GET /mcp/sse. AuthenticatedAgent wrapper on every request. |
+| 20 | MCP Server | 3 | verified | - | Full JSON-RPC 2.0: initialize, notifications/initialized, tools/list, tools/call, resources/list, resources/read. HTTP transport (not stdio). Single endpoint with auth-based scoping (not per-repo servers). AuthenticatedAgent validates token on every call. |
+| 21 | MCP Tools (Agent-Facing) | 3 | implemented | - | Partial — 21 tools registered, 12/22 spec tools present (task create/list/update, mr create/list, activity.record, agent heartbeat/complete, message send/poll/ack, conversation.upload). Missing spec tools: task.take, review.submit, review.comment, spec.get/list (as tools), agent.escalate, agent.budget_remaining, git.push/status, worktree.create/cleanup. Has extras beyond spec: analytics_query, search, graph_*, spec_assist. |
+| 22 | MCP Resources (Read-Only Context) | 3 | implemented | - | Partial — 3/6 spec resources present: agents://{workspace_id}, queue://{repo_id}, conversation://context. spec:// exists but without @{sha} versioning. Missing: manifest://, budget://. Has 3 extras beyond spec: briefing://, notifications://, trace://. |
+| 23 | MCP Prompts (Injected at Agent Startup) | 3 | not-started | - | Hollow — No prompts/list or prompts/get handler in MCP server. Spawn handler (spawn.rs) does NOT resolve persona or inject system_prompt. meta_spec_set_sha explicitly set to None. Container env vars include GYRE_SERVER_URL/AUTH_TOKEN/CLONE_URL/BRANCH/AGENT_ID/TASK_ID/REPO_ID but no persona prompt, protocol norms, context, or constraints injection. None of the 4 spec-required prompts (system://persona, system://protocol, system://context, system://constraints) are implemented. |
+| 24 | Token Validation on Every Call | 3 | implemented | - | Partial — AuthenticatedAgent wrapper on every MCP request (token expiry validated by jsonwebtoken). RBAC role check on write tools (Agent role required). Repo-scope enforcement only on gyre_create_mr (not every tool). Missing spec-required checks: repo_id/workspace_id claim matching (AgentJwtClaims lacks these fields), attestation_level minimum, budget-exceeded check per tool call. |
 | 25 | 5. Resource Governance | 2 | implemented | - | Complete budget model: config, usage tracking, spawn enforcement, cascade rules, daily reset job. |
 | 26 | Budget Model | 3 | implemented | - | BudgetConfig: max_tokens_per_day, max_cost_per_day, max_concurrent_agents, max_agent_lifetime_secs. BudgetUsage: tokens_used_today, cost_today, active_agents. BudgetCallRecord per-call audit. |
 | 27 | Cascade Rules | 3 | implemented | - | Workspace limits cannot exceed tenant limits. cascade_validation_rejects_workspace_exceeding_tenant() test. Validation at workspace budget update time. |
