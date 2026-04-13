@@ -1,0 +1,48 @@
+# Assertionless Test Exemptions (Legacy Baseline)
+#
+# These tests predate the assertionless-test lint. Each should be reviewed
+# and either given proper assertions or documented with // assertionless:ok.
+#
+# Do NOT add new tests to this file. Fix the test or add // assertionless:ok.
+#
+# See: specs/reviews/task-019.md F4
+
+# jj_ops smoke tests — verify jujutsu CLI operations don't error
+jj_init_in_git_repo
+jj_describe_change
+jj_undo_last_op
+jj_bookmark_create
+jj_squash_into_parent
+
+# LLM mock factory
+mock_factory_for_model_ignores_model_name
+
+# SQLite initialization smoke tests
+health_check_ok
+migrations_create_tables
+migration_is_idempotent
+
+# CLI compile/parse check
+cli_verify
+
+# External tool availability probes (may not be installed)
+test_rust_analyzer_availability
+language_tool_availability_checks
+
+# Rust extractor
+extract_diesel_table_macro
+
+# Infrastructure initialization smoke tests
+metrics_new_succeeds
+run_once_with_no_mirrors_succeeds
+cleanup_runs_without_error
+telemetry_init_no_panic
+telemetry_guard_drops_cleanly
+
+# Explorer WebSocket integration tests
+explorer_ws_save_and_load_view
+explorer_ws_delete_view
+explorer_ws_rate_limiting
+
+# Merge queue graph test
+queue_graph_reflects_enqueued_mrs_and_deps

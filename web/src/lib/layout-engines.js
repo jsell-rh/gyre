@@ -132,8 +132,9 @@ export async function elkLayout(nodes, edges, direction = 'DOWN') {
       };
     }
     return positions;
-  } catch {
+  } catch (err) {
     // ELK failed (e.g., in test env without WASM) — fall back to column layout
+    console.warn('[layout-engines] ELK layout failed, falling back to column layout:', err?.message ?? err);
     return columnLayout(nodes);
   }
 }

@@ -6,16 +6,27 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
+  import { shortId, entityName } from '../lib/entityNames.svelte.js';
   import { getContext } from 'svelte';
 
   const navigate = getContext('navigate');
   const goToWorkspaceHome = getContext('goToWorkspaceHome');
+  const openDetailPanel = getContext('openDetailPanel');
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+
+  function nav(type, id, data) {
+    if (goToEntityDetail) goToEntityDetail(type, id, data ?? {});
+    else if (openDetailPanel) openDetailPanel({ type, id, data: data ?? {} });
+  }
 
   // ── State ──────────────────────────────────────────────────────────────────
   let me = $state(null);
   let notifications = $state([]);
   let judgments = $state([]);
   let workspaces = $state([]);
+  let myAgents = $state([]);
+  let myTasks = $state([]);
+  let myMrs = $state([]);
   let loading = $state(true);
   let editing = $state(false);
   let saving = $state(false);
@@ -69,8 +80,58 @@
     prefsSaving = false;
   }
 
+  // ── API Tokens ─────────────────────────────────────────────────────────
+  let apiTokens = $state([]);
+  let tokensLoading = $state(false);
+  let newTokenName = $state('');
+  let newTokenScopes = $state('read');
+  let creatingToken = $state(false);
+  let createdTokenValue = $state(null); // shown once after creation
+
+  async function loadTokens() {
+    tokensLoading = true;
+    try {
+      const data = await api.listApiTokens();
+      apiTokens = Array.isArray(data) ? data : [];
+    } catch {
+      apiTokens = [];
+    } finally {
+      tokensLoading = false;
+    }
+  }
+
+  async function createToken() {
+    if (!newTokenName.trim() || creatingToken) return;
+    creatingToken = true;
+    try {
+      const result = await api.createApiToken({ name: newTokenName.trim(), scopes: newTokenScopes.split(',').map(s => s.trim()).filter(Boolean) });
+      createdTokenValue = result?.token ?? result?.value ?? null;
+      newTokenName = '';
+      showToast('API token created', { type: 'success' });
+      await loadTokens();
+    } catch (e) {
+      showToast('Failed to create token: ' + (e?.message ?? e), { type: 'error' });
+    } finally {
+      creatingToken = false;
+    }
+  }
+
+  async function revokeToken(id) {
+    try {
+      await api.deleteApiToken(id);
+      apiTokens = apiTokens.filter(t => t.id !== id);
+      showToast('Token revoked', { type: 'success' });
+    } catch (e) {
+      showToast('Failed to revoke token: ' + (e?.message ?? e), { type: 'error' });
+    }
+  }
+
   const tabs = $derived([
     { id: 'info',        label: $t('user_profile.tabs.info') },
+    { id: 'my-agents',   label: `Agents${myAgents.length > 0 ? ` (${myAgents.length})` : ''}` },
+    { id: 'my-tasks',    label: `Tasks${myTasks.length > 0 ? ` (${myTasks.length})` : ''}` },
+    { id: 'my-mrs',      label: `MRs${myMrs.length > 0 ? ` (${myMrs.length})` : ''}` },
+    { id: 'tokens',      label: 'API Tokens' },
     { id: 'memberships', label: $t('user_profile.tabs.memberships') },
     { id: 'ledger',      label: $t('user_profile.tabs.ledger') },
     { id: 'notif-prefs', label: $t('user_profile.tabs.notif_prefs') },
@@ -79,14 +140,24 @@
 
   $effect(() => { loadAll(); });
 
+  // Load API tokens when tab is selected
+  $effect(() => {
+    if (activeTab === 'tokens' && apiTokens.length === 0 && !tokensLoading) {
+      loadTokens();
+    }
+  });
+
   async function loadAll() {
     loading = true;
     try {
-      const [meR, ntR, jdR, wsR] = await Promise.allSettled([
+      const [meR, ntR, jdR, wsR, agR, tkR, mrR] = await Promise.allSettled([
         api.me(),
         api.myNotifications(),
         api.myJudgments(),
         api.workspaces(),
+        api.myAgents(),
+        api.myTasks(),
+        api.myMrs(),
       ]);
       if (meR.status === 'fulfilled') {
         me = meR.value;
@@ -95,6 +166,15 @@
           timezone: me.timezone ?? '',
           locale: me.locale ?? '',
         };
+      }
+      if (agR.status === 'fulfilled') {
+        myAgents = Array.isArray(agR.value) ? agR.value : [];
+      }
+      if (tkR.status === 'fulfilled') {
+        myTasks = Array.isArray(tkR.value) ? tkR.value : [];
+      }
+      if (mrR.status === 'fulfilled') {
+        myMrs = Array.isArray(mrR.value) ? mrR.value : [];
       }
       if (ntR.status === 'fulfilled') {
         const raw = ntR.value;
@@ -259,6 +339,130 @@
         <EmptyState title={$t('user_profile.no_profile')} description={$t('user_profile.no_profile_desc')} />
       {/if}
 
+    {:else if activeTab === 'my-agents'}
+      {#if myAgents.length === 0}
+        <EmptyState title="No agents" description="You haven't spawned any agents yet." />
+      {:else}
+        <div class="entity-list">
+          {#each myAgents as agent}
+            {@const statusColor = agent.status === 'active' ? 'success' : agent.status === 'idle' || agent.status === 'completed' ? 'info' : agent.status === 'failed' || agent.status === 'dead' ? 'danger' : 'muted'}
+            <button class="entity-list-item" onclick={() => nav('agent', agent.id, agent)}>
+              <Badge value={agent.status ?? 'unknown'} variant={statusColor} />
+              <div class="entity-list-main">
+                <span class="entity-list-title">{agent.name ?? entityName('agent', agent.id)}</span>
+                {#if agent.branch}
+                  <span class="entity-list-sub mono">{agent.branch}</span>
+                {/if}
+              </div>
+              <span class="entity-list-time muted">{rel(agent.created_at ?? agent.spawned_at)}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+    {:else if activeTab === 'my-tasks'}
+      {#if myTasks.length === 0}
+        <EmptyState title="No tasks" description="No tasks assigned to you." />
+      {:else}
+        <div class="entity-list">
+          {#each myTasks as task}
+            {@const statusColor = task.status === 'completed' || task.status === 'done' ? 'success' : task.status === 'in_progress' || task.status === 'assigned' ? 'warning' : task.status === 'failed' ? 'danger' : 'muted'}
+            <button class="entity-list-item" onclick={() => nav('task', task.id, task)}>
+              <Badge value={task.status ?? 'backlog'} variant={statusColor} />
+              <div class="entity-list-main">
+                <span class="entity-list-title">{task.title ?? entityName('task', task.id)}</span>
+                {#if task.spec_path}
+                  <span class="entity-list-sub mono">{task.spec_path.split('/').pop()}</span>
+                {/if}
+              </div>
+              {#if task.priority}
+                <Badge value={task.priority} variant={task.priority === 'high' || task.priority === 'critical' ? 'danger' : task.priority === 'low' ? 'muted' : 'warning'} />
+              {/if}
+              <span class="entity-list-time muted">{rel(task.created_at)}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+    {:else if activeTab === 'my-mrs'}
+      {#if myMrs.length === 0}
+        <EmptyState title="No merge requests" description="You haven't authored any merge requests." />
+      {:else}
+        <div class="entity-list">
+          {#each myMrs as mr}
+            {@const statusColor = mr.status === 'merged' ? 'success' : mr.status === 'open' ? 'info' : mr.status === 'closed' ? 'danger' : 'muted'}
+            <button class="entity-list-item" onclick={() => nav('mr', mr.id, mr)}>
+              <Badge value={mr.status ?? 'open'} variant={statusColor} />
+              <div class="entity-list-main">
+                <span class="entity-list-title">{mr.title ?? entityName('mr', mr.id)}</span>
+                {#if mr.source_branch}
+                  <span class="entity-list-sub mono">{mr.source_branch} → {mr.target_branch ?? 'main'}</span>
+                {/if}
+              </div>
+              {#if mr.diff_stats}
+                <span class="entity-list-diff">
+                  <span class="diff-ins">+{mr.diff_stats.insertions ?? 0}</span>
+                  <span class="diff-del">-{mr.diff_stats.deletions ?? 0}</span>
+                </span>
+              {/if}
+              <span class="entity-list-time muted">{rel(mr.created_at)}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+    {:else if activeTab === 'tokens'}
+      <!-- API Tokens management -->
+      <div class="tokens-section">
+        <p class="tokens-desc">API tokens allow programmatic access to the Gyre API. Tokens are scoped and can be revoked at any time.</p>
+
+        {#if createdTokenValue}
+          <div class="token-created-banner">
+            <p class="token-created-title">Token created — copy it now, it won't be shown again</p>
+            <div class="token-created-value">
+              <code class="token-value mono">{createdTokenValue}</code>
+              <button class="token-copy-btn" onclick={async () => { try { await navigator.clipboard.writeText(createdTokenValue); showToast('Token copied', { type: 'success' }); } catch {} }}>Copy</button>
+            </div>
+            <button class="token-dismiss-btn" onclick={() => { createdTokenValue = null; }}>Dismiss</button>
+          </div>
+        {/if}
+
+        <form class="token-create-form" onsubmit={(e) => { e.preventDefault(); createToken(); }}>
+          <input class="token-input" type="text" placeholder="Token name (e.g. ci-pipeline)" bind:value={newTokenName} required />
+          <select class="token-scope-select" bind:value={newTokenScopes}>
+            <option value="read">Read only</option>
+            <option value="read,write">Read + Write</option>
+            <option value="read,write,admin">Full access</option>
+          </select>
+          <button class="token-create-btn" type="submit" disabled={creatingToken || !newTokenName.trim()}>
+            {creatingToken ? 'Creating...' : 'Create Token'}
+          </button>
+        </form>
+
+        {#if tokensLoading}
+          <Skeleton width="100%" height="2rem" />
+        {:else if apiTokens.length === 0}
+          <p class="tokens-empty">No API tokens. Create one above to get started.</p>
+        {:else}
+          <div class="tokens-list">
+            {#each apiTokens as token}
+              <div class="token-item">
+                <div class="token-item-info">
+                  <span class="token-item-name">{token.name ?? 'Unnamed'}</span>
+                  {#if token.scopes?.length > 0}
+                    <span class="token-item-scopes">{token.scopes.join(', ')}</span>
+                  {/if}
+                  {#if token.created_at}
+                    <span class="token-item-created">Created {shortId(token.id)}</span>
+                  {/if}
+                </div>
+                <button class="token-revoke-btn" onclick={() => revokeToken(token.id)} title="Revoke this token">Revoke</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
     {:else if activeTab === 'memberships'}
       <!-- Workspace memberships with quick-switch -->
       {#if workspaces.length === 0}
@@ -268,7 +472,7 @@
           {#each workspaces as ws}
             <div class="membership-item">
               <div class="membership-info">
-                <span class="membership-name" title={ws.name ?? ws.slug ?? ws.id}>{ws.name ?? ws.slug ?? ws.id}</span>
+                <span class="membership-name" title={ws.name ?? ws.slug ?? ws.id}>{ws.name ?? ws.slug ?? shortId(ws.id)}</span>
                 {#if ws.role}
                   <Badge value={ws.role} variant="muted" />
                 {/if}
@@ -506,6 +710,31 @@
   .info-val { color: var(--color-text); }
 
   /* Workspace memberships */
+  /* ── API Tokens ───────────────────────────────────────────────────────── */
+  .tokens-section { display: flex; flex-direction: column; gap: var(--space-3); }
+  .tokens-desc { margin: 0; font-size: var(--text-sm); color: var(--color-text-muted); }
+  .token-created-banner { background: color-mix(in srgb, var(--color-success) 8%, var(--color-surface)); border: 1px solid color-mix(in srgb, var(--color-success) 30%, var(--color-border)); border-radius: var(--radius); padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
+  .token-created-title { margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--color-success); }
+  .token-created-value { display: flex; gap: var(--space-2); align-items: center; }
+  .token-value { font-size: var(--text-sm); background: var(--color-surface-elevated); padding: var(--space-2); border-radius: var(--radius-sm); overflow-x: auto; flex: 1; user-select: all; word-break: break-all; }
+  .token-copy-btn, .token-dismiss-btn { background: transparent; border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); font-size: var(--text-xs); cursor: pointer; color: var(--color-link); font-family: var(--font-body); }
+  .token-copy-btn:hover, .token-dismiss-btn:hover { border-color: var(--color-primary); }
+  .token-dismiss-btn { align-self: flex-start; color: var(--color-text-muted); }
+  .token-create-form { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
+  .token-input { flex: 1; min-width: 180px; padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); font-family: var(--font-body); font-size: var(--text-sm); }
+  .token-scope-select { padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); color: var(--color-text); font-family: var(--font-body); font-size: var(--text-sm); }
+  .token-create-btn { padding: var(--space-2) var(--space-3); background: var(--color-primary); color: white; border: none; border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: 600; cursor: pointer; font-family: var(--font-body); white-space: nowrap; }
+  .token-create-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .tokens-empty { font-size: var(--text-sm); color: var(--color-text-muted); font-style: italic; text-align: center; padding: var(--space-4) 0; }
+  .tokens-list { display: flex; flex-direction: column; gap: var(--space-1); }
+  .token-item { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); }
+  .token-item-info { display: flex; align-items: center; gap: var(--space-2); flex: 1; min-width: 0; }
+  .token-item-name { font-weight: 600; font-size: var(--text-sm); color: var(--color-text); }
+  .token-item-scopes { font-size: var(--text-xs); color: var(--color-text-muted); font-family: var(--font-mono); }
+  .token-item-created { font-size: var(--text-xs); color: var(--color-text-muted); }
+  .token-revoke-btn { background: transparent; border: 1px solid color-mix(in srgb, var(--color-danger) 30%, var(--color-border)); border-radius: var(--radius-sm); padding: var(--space-1) var(--space-2); font-size: var(--text-xs); cursor: pointer; color: var(--color-danger); font-family: var(--font-body); font-weight: 600; }
+  .token-revoke-btn:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+
   .memberships-list { display: flex; flex-direction: column; gap: var(--space-2); }
   .membership-item {
     display: flex;
@@ -550,6 +779,37 @@
   .ledger-meta { display: flex; align-items: center; gap: var(--space-3); }
   .ledger-ws { font-size: var(--text-xs); }
   .ledger-sha { font-size: var(--text-xs); }
+
+  /* Entity list (agents, tasks, MRs) */
+  .entity-list { display: flex; flex-direction: column; gap: var(--space-2); }
+  .entity-list-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+    text-align: left;
+    width: 100%;
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+  .entity-list-item:hover {
+    border-color: var(--color-border-strong);
+    background: color-mix(in srgb, var(--color-surface-elevated) 80%, var(--color-focus));
+  }
+  .entity-list-item:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .entity-list-main { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .entity-list-title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entity-list-sub { font-size: var(--text-xs); color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entity-list-time { font-size: var(--text-xs); flex-shrink: 0; }
+  .entity-list-diff { display: flex; gap: var(--space-1); font-size: var(--text-xs); font-family: var(--font-mono); flex-shrink: 0; }
+  .diff-ins { color: var(--color-success); }
+  .diff-del { color: var(--color-danger); }
 
   /* Notification Preferences */
   .prefs-section { display: flex; flex-direction: column; gap: var(--space-4); max-width: 480px; }

@@ -291,12 +291,11 @@ pub async fn archive_repo(
             .as_ref()
             .map(|tid| repo_task_ids.contains(tid.as_str()))
             .unwrap_or(false);
-        let stoppable = matches!(
-            agent.status,
-            AgentStatus::Active | AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::Paused
-        );
+        let stoppable = matches!(agent.status, AgentStatus::Active | AgentStatus::Idle);
         if is_repo_task && stoppable {
-            agent.status = AgentStatus::Dead;
+            // Stopped (not Dead): repo archive is operator-initiated shutdown,
+            // not heartbeat expiration (agent-runtime.md §1 AgentStatus enum).
+            let _ = agent.transition_status(AgentStatus::Stopped);
             state.agents.update(&agent).await?;
         }
     }
@@ -357,6 +356,16 @@ pub async fn delete_repo(
     }
 
     state.repos.delete(&repo.id).await?;
+
+    // Clean up the git directory on disk to prevent stale directories from
+    // blocking future repo/mirror creation with the same workspace + name.
+    let path = std::path::Path::new(&repo.path);
+    if path.exists() {
+        if let Err(e) = tokio::fs::remove_dir_all(path).await {
+            tracing::warn!(repo_id = %id, path = %repo.path, "Failed to remove repo directory on delete: {e}");
+        }
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -445,9 +454,48 @@ pub async fn create_mirror_repo(
     };
     state.repos.create(&repo).await?;
 
+    // Clean up any stale directory left by a previously deleted repo with the same
+    // workspace + name. Without this, `git clone --mirror` fails with "already exists".
+    let path = std::path::Path::new(&repo_path);
+    if path.exists() {
+        tracing::info!("Removing stale repo directory before mirror clone: {repo_path}");
+        if let Err(e) = tokio::fs::remove_dir_all(path).await {
+            tracing::warn!("Failed to remove stale directory {repo_path}: {e}");
+        }
+    }
+
     // Clone the remote as a bare mirror; log on failure but don't block the response.
     if let Err(e) = state.git_ops.clone_mirror(&url, &repo_path).await {
         tracing::warn!("clone_mirror failed for {repo_path}: {e}");
+    } else {
+        // Trigger immediate graph extraction after successful clone so the
+        // architecture tab is populated without waiting for the 60s sync cycle.
+        let extract_repo_id = repo.id.to_string();
+        let extract_path = repo_path.clone();
+        let graph_store = Arc::clone(&state.graph_store);
+        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+        let default_ref = format!("refs/heads/{}", repo.default_branch);
+        tokio::spawn(async move {
+            if let Ok(output) = tokio::process::Command::new(&git_bin)
+                .args(["-C", &extract_path, "rev-parse", &default_ref])
+                .output()
+                .await
+            {
+                if output.status.success() {
+                    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    crate::graph_extraction::extract_and_store_graph(
+                        &extract_path,
+                        &extract_repo_id,
+                        &sha,
+                        graph_store,
+                        &git_bin,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+            }
+        });
     }
 
     Ok((
@@ -475,6 +523,55 @@ pub async fn sync_mirror(
     repo.last_mirror_sync = Some(now);
     repo.updated_at = now;
     state.repos.update(&repo).await?;
+
+    // Run post-fetch processing: spec ledger sync + knowledge graph extraction.
+    let repo_id_str = repo.id.to_string();
+    let workspace_id_str = repo.workspace_id.to_string();
+    let default_ref = format!("refs/heads/{}", repo.default_branch);
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+
+    if let Ok(output) = tokio::process::Command::new(&git_bin)
+        .args(["-C", &repo.path, "rev-parse", &default_ref])
+        .output()
+        .await
+    {
+        if output.status.success() {
+            let new_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+            let workspace_tenant_id = state
+                .workspaces
+                .find_by_id(&repo.workspace_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|ws| ws.tenant_id);
+            crate::spec_registry::sync_spec_ledger(
+                &state.spec_ledger,
+                &state.spec_links_store,
+                &repo.path,
+                &new_sha,
+                now,
+                Some(&repo_id_str),
+                Some(&workspace_id_str),
+                Some(&state.workspaces),
+                Some(&state.repos),
+                workspace_tenant_id.as_ref(),
+                Some(&state.tasks),
+            )
+            .await;
+
+            crate::graph_extraction::extract_and_store_graph(
+                &repo.path,
+                &repo_id_str,
+                &new_sha,
+                Arc::clone(&state.graph_store),
+                &git_bin,
+                None,
+                None,
+            )
+            .await;
+        }
+    }
 
     Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
@@ -947,14 +1044,14 @@ mod tests {
         // Archive
         archive_via_api(&app, &repo_id).await;
 
-        // Agent 1 should be Dead
+        // Agent 1 should be Stopped (repo archive is operator-initiated shutdown)
         let a1 = state
             .agents
             .find_by_id(&Id::new("agent-1"))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(a1.status, AgentStatus::Dead);
+        assert_eq!(a1.status, AgentStatus::Stopped);
 
         // Agent 2 still Idle
         let a2 = state

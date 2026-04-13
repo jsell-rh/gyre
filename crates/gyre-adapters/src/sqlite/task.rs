@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{Task, TaskPriority, TaskStatus};
+use gyre_domain::{Task, TaskPriority, TaskStatus, TaskType};
 use gyre_ports::TaskRepository;
 use std::sync::Arc;
 
@@ -29,6 +29,23 @@ fn str_to_status(s: &str) -> Result<TaskStatus> {
         "Blocked" => Ok(TaskStatus::Blocked),
         "Cancelled" => Ok(TaskStatus::Cancelled),
         other => Err(anyhow!("unknown task status: {}", other)),
+    }
+}
+
+fn task_type_to_str(t: &TaskType) -> &'static str {
+    match t {
+        TaskType::Implementation => "Implementation",
+        TaskType::Delegation => "Delegation",
+        TaskType::Coordination => "Coordination",
+    }
+}
+
+fn str_to_task_type(s: &str) -> Result<TaskType> {
+    match s {
+        "Implementation" => Ok(TaskType::Implementation),
+        "Delegation" => Ok(TaskType::Delegation),
+        "Coordination" => Ok(TaskType::Coordination),
+        other => Err(anyhow!("unknown task type: {}", other)),
     }
 }
 
@@ -74,6 +91,9 @@ struct TaskRow {
     repo_id: String,
     cancelled_at: Option<i64>,
     cancelled_reason: Option<String>,
+    task_type: Option<String>,
+    order: Option<i32>,
+    depends_on: String,
 }
 
 impl TaskRow {
@@ -97,6 +117,17 @@ impl TaskRow {
             spec_path: self.spec_path,
             cancelled_at: self.cancelled_at.map(|v| v as u64),
             cancelled_reason: self.cancelled_reason,
+            task_type: self
+                .task_type
+                .as_deref()
+                .map(str_to_task_type)
+                .transpose()?,
+            order: self.order.map(|v| v as u32),
+            depends_on: serde_json::from_str::<Vec<String>>(&self.depends_on)
+                .unwrap_or_default()
+                .into_iter()
+                .map(Id::new)
+                .collect(),
         })
     }
 }
@@ -122,6 +153,9 @@ struct NewTaskRow<'a> {
     repo_id: &'a str,
     cancelled_at: Option<i64>,
     cancelled_reason: Option<&'a str>,
+    task_type: Option<&'a str>,
+    order: Option<i32>,
+    depends_on: &'a str,
 }
 
 #[async_trait]
@@ -133,6 +167,13 @@ impl TaskRepository for SqliteStorage {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let labels_json = serde_json::to_string(&t.labels)?;
+            let depends_on_json = serde_json::to_string(
+                &t.depends_on
+                    .iter()
+                    .map(|id| id.as_str())
+                    .collect::<Vec<_>>(),
+            )?;
+            let task_type_str = t.task_type.as_ref().map(task_type_to_str);
             let row = NewTaskRow {
                 id: t.id.as_str(),
                 title: &t.title,
@@ -152,6 +193,9 @@ impl TaskRepository for SqliteStorage {
                 repo_id: t.repo_id.as_str(),
                 cancelled_at: t.cancelled_at.map(|v| v as i64),
                 cancelled_reason: t.cancelled_reason.as_deref(),
+                task_type: task_type_str,
+                order: t.order.map(|v| v as i32),
+                depends_on: &depends_on_json,
             };
             diesel::insert_into(tasks::table)
                 .values(&row)
@@ -173,6 +217,9 @@ impl TaskRepository for SqliteStorage {
                     tasks::repo_id.eq(row.repo_id),
                     tasks::cancelled_at.eq(row.cancelled_at),
                     tasks::cancelled_reason.eq(row.cancelled_reason),
+                    tasks::task_type.eq(row.task_type),
+                    tasks::order.eq(row.order),
+                    tasks::depends_on.eq(row.depends_on),
                 ))
                 .execute(&mut *conn)
                 .context("insert task")?;
@@ -271,6 +318,13 @@ impl TaskRepository for SqliteStorage {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let labels_json = serde_json::to_string(&t.labels)?;
+            let depends_on_json = serde_json::to_string(
+                &t.depends_on
+                    .iter()
+                    .map(|id| id.as_str())
+                    .collect::<Vec<_>>(),
+            )?;
+            let task_type_str = t.task_type.as_ref().map(task_type_to_str);
             diesel::update(
                 tasks::table
                     .find(t.id.as_str())
@@ -292,6 +346,9 @@ impl TaskRepository for SqliteStorage {
                 tasks::repo_id.eq(t.repo_id.as_str()),
                 tasks::cancelled_at.eq(t.cancelled_at.map(|v| v as i64)),
                 tasks::cancelled_reason.eq(t.cancelled_reason.as_deref()),
+                tasks::task_type.eq(task_type_str),
+                tasks::order.eq(t.order.map(|v| v as i32)),
+                tasks::depends_on.eq(&depends_on_json),
             ))
             .execute(&mut *conn)
             .context("update task")?;

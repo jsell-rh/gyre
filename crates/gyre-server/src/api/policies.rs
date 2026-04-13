@@ -250,6 +250,12 @@ pub struct SubjectAttrs {
     pub persona: Option<String>,
     pub repo_scope: Option<String>,
     pub attestation_level: Option<i64>,
+    /// Attestation chain depth (0 = root SignedInput, increments per derivation).
+    pub chain_depth: Option<i64>,
+    /// Root signer identity from the chain's root SignedInput key_binding.
+    pub root_signer: Option<String>,
+    /// Total accumulated constraint count (explicit + gate).
+    pub constraint_count: Option<i64>,
     /// Additional arbitrary JWT claims.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -299,6 +305,15 @@ pub async fn evaluate_policy(
     }
     if let Some(level) = req.subject.attestation_level {
         ctx.set_number("subject.attestation_level", level);
+    }
+    if let Some(depth) = req.subject.chain_depth {
+        ctx.set_number("subject.chain_depth", depth);
+    }
+    if let Some(signer) = &req.subject.root_signer {
+        ctx.set("subject.root_signer", signer);
+    }
+    if let Some(count) = req.subject.constraint_count {
+        ctx.set_number("subject.constraint_count", count);
     }
     // Extra claims.
     let extra_claims = serde_json::Value::Object(req.subject.extra);
@@ -782,5 +797,255 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // --- TASK-061: Attestation chain ABAC subject attribute tests ---
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dry_run_accepts_chain_depth_root_signer_constraint_count() {
+        let app = app();
+        // Create a blanket allow policy for attestation resources.
+        let policy_body = serde_json::json!({
+            "name": "allow-attested-push",
+            "scope": "tenant",
+            "priority": 50,
+            "effect": "allow",
+            "conditions": [],
+            "actions": ["push"],
+            "resource_types": ["attestation"]
+        });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&policy_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Evaluate with attestation chain attributes.
+        let eval_body = serde_json::json!({
+            "subject": {
+                "type": "agent",
+                "id": "worker-42",
+                "chain_depth": 2,
+                "root_signer": "user:jsell",
+                "constraint_count": 5
+            },
+            "action": "push",
+            "resource": { "type": "attestation", "repo_id": "repo-1" }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies/evaluate")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&eval_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["decision"], "allow");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn custom_policy_denies_deep_chains_via_chain_depth() {
+        let app = app();
+        // Create a deny policy for chain_depth > 5.
+        let deny_body = serde_json::json!({
+            "name": "deny-deep-chains",
+            "scope": "tenant",
+            "priority": 100,
+            "effect": "deny",
+            "conditions": [{
+                "attribute": "subject.chain_depth",
+                "operator": "greater_than",
+                "value": 5
+            }],
+            "actions": ["push", "merge"],
+            "resource_types": ["attestation"]
+        });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&deny_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Also create a blanket allow so non-deep chains pass.
+        let allow_body = serde_json::json!({
+            "name": "allow-attestation",
+            "scope": "tenant",
+            "priority": 10,
+            "effect": "allow",
+            "conditions": [],
+            "actions": ["push", "merge"],
+            "resource_types": ["attestation"]
+        });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&allow_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Evaluate with chain_depth = 6 (> 5) → should be denied.
+        let eval_deep = serde_json::json!({
+            "subject": {
+                "type": "agent",
+                "chain_depth": 6,
+                "root_signer": "user:alice",
+                "constraint_count": 10
+            },
+            "action": "push",
+            "resource": { "type": "attestation" }
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies/evaluate")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&eval_deep).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["decision"], "deny");
+
+        // Evaluate with chain_depth = 3 (≤ 5) → should be allowed.
+        let eval_shallow = serde_json::json!({
+            "subject": {
+                "type": "agent",
+                "chain_depth": 3,
+                "root_signer": "user:bob",
+                "constraint_count": 4
+            },
+            "action": "push",
+            "resource": { "type": "attestation" }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies/evaluate")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&eval_shallow).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["decision"], "allow");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn custom_policy_matches_root_signer() {
+        let app = app();
+        // Create policy: only allow pushes where root_signer is "user:trusted".
+        let allow_body = serde_json::json!({
+            "name": "allow-trusted-signer",
+            "scope": "tenant",
+            "priority": 50,
+            "effect": "allow",
+            "conditions": [{
+                "attribute": "subject.root_signer",
+                "operator": "equals",
+                "value": "user:trusted"
+            }],
+            "actions": ["push"],
+            "resource_types": ["attestation"]
+        });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&allow_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Trusted signer → allow.
+        let eval_body = serde_json::json!({
+            "subject": {
+                "type": "agent",
+                "chain_depth": 1,
+                "root_signer": "user:trusted",
+                "constraint_count": 3
+            },
+            "action": "push",
+            "resource": { "type": "attestation" }
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies/evaluate")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&eval_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["decision"], "allow");
+
+        // Untrusted signer → default deny (no matching policy).
+        let eval_body2 = serde_json::json!({
+            "subject": {
+                "type": "agent",
+                "chain_depth": 1,
+                "root_signer": "user:untrusted",
+                "constraint_count": 3
+            },
+            "action": "push",
+            "resource": { "type": "attestation" }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/policies/evaluate")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&eval_body2).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["decision"], "deny");
     }
 }

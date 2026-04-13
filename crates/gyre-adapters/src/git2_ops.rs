@@ -4,6 +4,46 @@ use git2::{BranchType, Repository};
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
 use gyre_ports::GitOpsPort;
 
+/// Recursively insert a blob into a tree at a nested path.
+///
+/// For "specs/system/vision.md", this builds:
+///   root tree → specs/ subtree → system/ subtree → vision.md blob
+fn insert_blob_at_path(
+    repo: &Repository,
+    base_tree: &git2::Tree,
+    path: &str,
+    blob_oid: git2::Oid,
+) -> Result<git2::Oid> {
+    let parts: Vec<&str> = path.splitn(2, '/').collect();
+    if parts.len() == 1 {
+        // Leaf: insert/replace the blob directly in this tree
+        let mut builder = repo.treebuilder(Some(base_tree))?;
+        builder.insert(parts[0], blob_oid, 0o100644)?;
+        let tree_oid = builder.write()?;
+        Ok(tree_oid)
+    } else {
+        let dir_name = parts[0];
+        let rest = parts[1];
+
+        // Get existing subtree or create empty one
+        let sub_tree = match base_tree.get_name(dir_name) {
+            Some(entry) => repo.find_tree(entry.id())?,
+            None => {
+                let empty_builder = repo.treebuilder(None)?;
+                let empty_oid = empty_builder.write()?;
+                repo.find_tree(empty_oid)?
+            }
+        };
+
+        let new_sub_oid = insert_blob_at_path(repo, &sub_tree, rest, blob_oid)?;
+
+        let mut builder = repo.treebuilder(Some(base_tree))?;
+        builder.insert(dir_name, new_sub_oid, 0o040000)?;
+        let tree_oid = builder.write()?;
+        Ok(tree_oid)
+    }
+}
+
 pub struct Git2OpsAdapter;
 
 impl Git2OpsAdapter {
@@ -138,9 +178,17 @@ impl GitOpsPort for Git2OpsAdapter {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let status = format!("{:?}", delta.status());
-                let content = std::str::from_utf8(line.content())
+                let raw = std::str::from_utf8(line.content())
                     .unwrap_or("")
                     .to_string();
+                // Prepend origin char (+/-/space/header markers) so the patch
+                // text is valid unified diff that parse_patch_to_hunks can classify.
+                let origin = line.origin();
+                let content = match origin {
+                    '+' | '-' | ' ' => format!("{}{}", origin, raw),
+                    // Header / file-marker lines: keep as-is
+                    _ => raw,
+                };
                 if let Some(existing) = patches.iter_mut().find(|p: &&mut FileDiff| p.path == path)
                 {
                     if let Some(ref mut patch) = existing.patch {
@@ -418,6 +466,146 @@ impl GitOpsPort for Git2OpsAdapter {
                 anyhow::bail!("git fetch --all failed: {stderr}");
             }
             Ok(())
+        })
+        .await?
+    }
+
+    async fn branch_exists(&self, repo_path: &str, branch_name: &str) -> Result<bool> {
+        let repo_path = repo_path.to_string();
+        let branch_name = branch_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+            let exists = repo.find_branch(&branch_name, BranchType::Local).is_ok();
+            Ok(exists)
+        })
+        .await?
+    }
+
+    async fn create_branch(
+        &self,
+        repo_path: &str,
+        branch_name: &str,
+        from_ref: &str,
+    ) -> Result<()> {
+        let repo_path = repo_path.to_string();
+        let branch_name = branch_name.to_string();
+        let from_ref = from_ref.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+            let commit = repo
+                .revparse_single(&from_ref)
+                .context("failed to resolve from_ref")?
+                .peel_to_commit()
+                .context("from_ref is not a commit")?;
+            repo.branch(&branch_name, &commit, false)
+                .context("failed to create branch")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn write_file(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        file_path: &str,
+        content: &[u8],
+        message: &str,
+    ) -> Result<String> {
+        let repo_path = repo_path.to_string();
+        let branch = branch.to_string();
+        let file_path = file_path.to_string();
+        let content = content.to_vec();
+        let message = message.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+
+            // Resolve branch tip commit
+            let branch_ref = repo
+                .find_branch(&branch, BranchType::Local)
+                .context("branch not found")?;
+            let parent_commit = branch_ref.get().peel_to_commit()?;
+            let parent_tree = parent_commit.tree()?;
+
+            // Write blob
+            let blob_oid = repo.blob(&content)?;
+
+            // Build new tree by inserting/replacing the file.
+            // For nested paths (e.g. "specs/system/vision.md"), we need to
+            // recursively build sub-trees.
+            let new_tree_oid = insert_blob_at_path(&repo, &parent_tree, &file_path, blob_oid)?;
+            let new_tree = repo.find_tree(new_tree_oid)?;
+
+            let sig = git2::Signature::now("Gyre", "gyre@local")?;
+            let refname = format!("refs/heads/{}", branch);
+            let commit_oid = repo.commit(
+                Some(&refname),
+                &sig,
+                &sig,
+                &message,
+                &new_tree,
+                &[&parent_commit],
+            )?;
+
+            Ok(commit_oid.to_string())
+        })
+        .await?
+    }
+
+    async fn reset_branch(&self, repo_path: &str, branch: &str, target_sha: &str) -> Result<()> {
+        let repo_path = repo_path.to_string();
+        let branch = branch.to_string();
+        let target_sha = target_sha.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+            let target_oid = git2::Oid::from_str(&target_sha).context("invalid target SHA")?;
+            let target_commit = repo
+                .find_commit(target_oid)
+                .context("target SHA is not a valid commit")?;
+            let refname = format!("refs/heads/{branch}");
+            repo.reference(
+                &refname,
+                target_oid,
+                true,
+                &format!("reset to {target_sha}"),
+            )
+            .context("failed to update branch reference")?;
+            // If a working directory exists, reset the index and workdir too.
+            if !repo.is_bare() {
+                repo.reset(target_commit.as_object(), git2::ResetType::Hard, None)
+                    .context("failed to reset working directory")?;
+            }
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn read_file(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let repo_path = repo_path.to_string();
+        let branch = branch.to_string();
+        let file_path = file_path.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+
+            let branch_ref = match repo.find_branch(&branch, BranchType::Local) {
+                Ok(b) => b,
+                Err(_) => return Ok(None),
+            };
+            let commit = branch_ref.get().peel_to_commit()?;
+            let tree = commit.tree()?;
+
+            match tree.get_path(std::path::Path::new(&file_path)) {
+                Ok(entry) => {
+                    let blob = repo.find_blob(entry.id())?;
+                    Ok(Some(blob.content().to_vec()))
+                }
+                Err(_) => Ok(None),
+            }
         })
         .await?
     }
@@ -930,5 +1118,307 @@ mod tests {
             std::path::Path::new(&worktree_path).exists(),
             "worktree directory should exist"
         );
+    }
+
+    // ── branch_exists tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_branch_exists_true_for_existing_branch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        assert!(adapter
+            .branch_exists(path.to_str().unwrap(), "main")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_branch_exists_false_for_missing_branch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        assert!(!adapter
+            .branch_exists(path.to_str().unwrap(), "no-such-branch")
+            .await
+            .unwrap());
+    }
+
+    // ── create_branch tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_branch_from_existing_ref() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        adapter
+            .create_branch(path.to_str().unwrap(), "feature-x", "main")
+            .await
+            .unwrap();
+
+        assert!(adapter
+            .branch_exists(path.to_str().unwrap(), "feature-x")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_create_branch_from_invalid_ref_fails() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        let result = adapter
+            .create_branch(path.to_str().unwrap(), "feature-y", "nonexistent")
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ── write_file tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_write_file_creates_commit_on_branch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        let sha = adapter
+            .write_file(
+                path.to_str().unwrap(),
+                "main",
+                "README.md",
+                b"# Hello",
+                "Add README",
+            )
+            .await
+            .unwrap();
+
+        assert!(!sha.is_empty());
+        assert_eq!(sha.len(), 40);
+
+        // Verify the commit log shows the new commit
+        let log = adapter
+            .commit_log(path.to_str().unwrap(), "main", 1)
+            .await
+            .unwrap();
+        assert_eq!(log[0].sha, sha);
+        assert_eq!(log[0].message, "Add README");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_nested_path() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        let sha = adapter
+            .write_file(
+                path.to_str().unwrap(),
+                "main",
+                "specs/system/vision.md",
+                b"# Vision\n\nContent here.",
+                "Add vision spec",
+            )
+            .await
+            .unwrap();
+
+        assert!(!sha.is_empty());
+
+        // Verify blob content by reading the tree
+        let repo = Repository::open_bare(&path).unwrap();
+        let commit = repo
+            .find_commit(git2::Oid::from_str(&sha).unwrap())
+            .unwrap();
+        let tree = commit.tree().unwrap();
+        let entry = tree
+            .get_path(std::path::Path::new("specs/system/vision.md"))
+            .unwrap();
+        let blob = repo.find_blob(entry.id()).unwrap();
+        assert_eq!(blob.content(), b"# Vision\n\nContent here.");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_overwrites_existing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        // Write first version
+        adapter
+            .write_file(path.to_str().unwrap(), "main", "doc.md", b"version 1", "v1")
+            .await
+            .unwrap();
+
+        // Overwrite with second version
+        let sha2 = adapter
+            .write_file(path.to_str().unwrap(), "main", "doc.md", b"version 2", "v2")
+            .await
+            .unwrap();
+
+        // Verify latest content
+        let repo = Repository::open_bare(&path).unwrap();
+        let commit = repo
+            .find_commit(git2::Oid::from_str(&sha2).unwrap())
+            .unwrap();
+        let tree = commit.tree().unwrap();
+        let entry = tree.get_path(std::path::Path::new("doc.md")).unwrap();
+        let blob = repo.find_blob(entry.id()).unwrap();
+        assert_eq!(blob.content(), b"version 2");
+
+        // Two commits total (initial + v1 + v2)
+        let log = adapter
+            .commit_log(path.to_str().unwrap(), "main", 10)
+            .await
+            .unwrap();
+        assert_eq!(log.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_write_file_on_feature_branch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        // Create a feature branch and write to it
+        adapter
+            .create_branch(path.to_str().unwrap(), "spec-edit/vision-a1b2", "main")
+            .await
+            .unwrap();
+
+        let sha = adapter
+            .write_file(
+                path.to_str().unwrap(),
+                "spec-edit/vision-a1b2",
+                "specs/system/vision.md",
+                b"# New Vision",
+                "Edit vision spec",
+            )
+            .await
+            .unwrap();
+
+        // Feature branch should have the commit
+        let feature_log = adapter
+            .commit_log(path.to_str().unwrap(), "spec-edit/vision-a1b2", 10)
+            .await
+            .unwrap();
+        assert_eq!(feature_log[0].sha, sha);
+        assert_eq!(feature_log[0].message, "Edit vision spec");
+
+        // Main branch should NOT have the commit
+        let main_log = adapter
+            .commit_log(path.to_str().unwrap(), "main", 10)
+            .await
+            .unwrap();
+        assert_eq!(main_log.len(), 1); // only initial commit
+    }
+
+    // ── read_file tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_read_file_returns_content() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        adapter
+            .write_file(
+                path.to_str().unwrap(),
+                "main",
+                "specs/system/vision.md",
+                b"# Vision\n\nContent here.",
+                "Add vision spec",
+            )
+            .await
+            .unwrap();
+
+        let content = adapter
+            .read_file(path.to_str().unwrap(), "main", "specs/system/vision.md")
+            .await
+            .unwrap();
+        assert_eq!(content, Some(b"# Vision\n\nContent here.".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_returns_none_for_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        let content = adapter
+            .read_file(path.to_str().unwrap(), "main", "specs/no-such-file.md")
+            .await
+            .unwrap();
+        assert_eq!(content, None);
+    }
+
+    #[tokio::test]
+    async fn test_read_file_returns_none_for_missing_branch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        let content = adapter
+            .read_file(path.to_str().unwrap(), "no-branch", "README.md")
+            .await
+            .unwrap();
+        assert_eq!(content, None);
     }
 }

@@ -20,6 +20,54 @@ pub struct ExtractionError {
     pub line: Option<u32>,
 }
 
+/// Scan immediate subdirectories (up to depth 2) for a language marker.
+/// Handles monorepo layouts like `src/api/pyproject.toml` or `services/backend/Cargo.toml`.
+/// Skips hidden dirs, node_modules, __pycache__, etc.
+pub fn shallow_scan_for_marker(root: &Path, check: fn(&Path) -> bool) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.')
+            || name_str == "node_modules"
+            || name_str == "__pycache__"
+            || name_str == "target"
+            || name_str == "vendor"
+        {
+            continue;
+        }
+        if check(&path) {
+            return true;
+        }
+        // One more level (e.g., src/api/)
+        if let Ok(sub_entries) = std::fs::read_dir(&path) {
+            for sub_entry in sub_entries.flatten() {
+                let sub_path = sub_entry.path();
+                if sub_path.is_dir() {
+                    let sub_name = sub_entry.file_name();
+                    let sub_name_str = sub_name.to_string_lossy();
+                    if !sub_name_str.starts_with('.')
+                        && sub_name_str != "node_modules"
+                        && sub_name_str != "__pycache__"
+                        && sub_name_str != "target"
+                        && sub_name_str != "vendor"
+                        && check(&sub_path)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Trait for language-specific extraction of architectural knowledge.
 ///
 /// Each extractor:

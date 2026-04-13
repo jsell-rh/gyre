@@ -4,18 +4,31 @@ use crate::Id;
 use serde::{Deserialize, Serialize};
 
 /// Universal node types in the knowledge graph.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeType {
     Package,
     Module,
     Type,
+    /// A trait or interface definition (distinct from Type for trait-level granularity).
+    Trait,
     Interface,
     Function,
+    /// A method on a type or trait (carries parent context).
+    Method,
+    /// A class definition (Python, TypeScript, Go struct with methods).
+    Class,
+    /// An enum definition.
+    Enum,
+    /// An enum variant.
+    EnumVariant,
     Endpoint,
     Component,
     Table,
     Constant,
+    Field,
+    /// A specification document — first-class artifact per Vision Principle 3.
+    Spec,
 }
 
 /// Typed relationship between two graph nodes.
@@ -68,6 +81,10 @@ pub struct GraphNode {
     pub visibility: Visibility,
     pub doc_comment: Option<String>,
     pub spec_path: Option<String>,
+    /// Additional spec paths when a node is governed by multiple specs (N:M mapping).
+    /// The primary spec is in `spec_path`; extras here. GovernedBy edges are canonical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spec_paths: Vec<String>,
     pub spec_confidence: SpecConfidence,
     pub last_modified_sha: String,
     pub last_modified_by: Option<Id>,
@@ -84,6 +101,15 @@ pub struct GraphNode {
     pub last_seen_at: u64,
     /// Set when a node is no longer present in extraction (soft-delete). `None` = active.
     pub deleted_at: Option<u64>,
+    /// Whether this node is a test function/class (for structural test coverage analysis).
+    #[serde(default)]
+    pub test_node: bool,
+    /// When a spec was approved for this node (epoch seconds), if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_approved_at: Option<u64>,
+    /// When a milestone was completed for this node (epoch seconds), if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone_completed_at: Option<u64>,
 }
 
 /// A directed edge between two graph nodes.

@@ -2,13 +2,13 @@
 
 ## Problem
 
-When multiple agents work in parallel, their outputs have implicit ordering constraints that nobody tracks. Agent B's code calls a function Agent A hasn't merged yet. The merge queue processes B first because it finished faster. B breaks main. The queue retries, fails, creates a task, the CEO intervenes. All preventable - we knew B depended on A.
+When multiple agents work in parallel, their outputs have implicit ordering constraints that nobody tracks. Agent B's code calls a function Agent A hasn't merged yet. The merge queue processes B first because it finished faster. B breaks main. The queue retries, fails, creates a task, the repo orchestrator intervenes. All preventable - we knew B depended on A.
 
 With 8+ concurrent agents, this happens constantly. The merge queue becomes a trial-and-error serializer instead of an intelligent pipeline.
 
 ## Solution
 
-MRs can declare dependencies on other MRs. The merge queue respects the dependency graph, processing MRs in topological order. Dependencies can be explicit (declared by agents or CEO), auto-detected (from branch lineage), or atomic (must merge together).
+MRs can declare dependencies on other MRs. The merge queue respects the dependency graph, processing MRs in topological order. Dependencies can be explicit (declared by agents or the repo orchestrator), auto-detected (from branch lineage), or atomic (must merge together).
 
 ## Dependency Model
 
@@ -31,9 +31,9 @@ pub struct MergeRequest {
 
 ## Three Ways Dependencies Are Established
 
-### 1. Explicit: CEO or Agent Declares
+### 1. Explicit: Orchestrator or Agent Declares
 
-When the CEO dispatches related work, it declares dependencies upfront:
+When the repo orchestrator dispatches related work, it declares dependencies upfront:
 
 ```json
 POST /api/v1/merge-requests
@@ -54,7 +54,7 @@ PUT /api/v1/merge-requests/{id}/dependencies
 }
 ```
 
-This is the primary mechanism. The CEO knows the task decomposition and can declare ordering at dispatch time.
+This is the primary mechanism. The repo orchestrator knows the task decomposition and can declare ordering at dispatch time.
 
 ### 2. Auto-Detected: Branch Lineage
 
@@ -68,7 +68,7 @@ main
 
 The forge detects that `feat/use-storage-port` is based on `feat/add-storage-port` (not on main) and auto-creates: MR-042 depends_on MR-041.
 
-Auto-detected dependencies are marked as `source: "branch-lineage"` in the dependency record. Agents or the CEO can override or remove them.
+Auto-detected dependencies are marked as `source: "branch-lineage"` in the dependency record. Agents or the repo orchestrator can override or remove them.
 
 ### 3. Agent-Declared: Runtime Discovery
 
@@ -82,7 +82,7 @@ PUT /api/v1/merge-requests/MR-042/dependencies
 }
 ```
 
-The reason is recorded for audit and helps the CEO understand the dependency graph.
+The reason is recorded for audit and helps the repo orchestrator understand the dependency graph.
 
 ## Atomic Groups
 
@@ -152,18 +152,18 @@ The speculative merge system (from forge-advantages spec) uses the dependency gr
 | Scenario | Forge Action |
 |---|---|
 | Dependency MR is Closed/abandoned | Flag dependent MR, create task: "dependency MR-041 was closed, reassess MR-042" |
-| Dependency MR fails gates repeatedly | Escalate to CEO: "MR-042 is blocked because its dependency MR-041 can't pass gates" |
+| Dependency MR fails gates repeatedly | Escalate to repo orchestrator: "MR-042 is blocked because its dependency MR-041 can't pass gates" |
 | Circular dependency detected at declaration | Reject with error: "cycle detected: MR-041 -> MR-042 -> MR-041" |
 | Atomic group member fails merge | Roll back all group members, requeue, notify all authors |
-| Dependency chain too deep (>10 levels) | Warning to CEO. Not rejected, but flagged as a decomposition smell. |
+| Dependency chain too deep (>10 levels) | Warning to repo orchestrator. Not rejected, but flagged as a decomposition smell. |
 
-## CEO Agent Integration
+## Orchestrator Integration
 
-Dependencies reduce CEO workload:
+Dependencies reduce orchestrator workload:
 
-**Before:** CEO serializes dependent work by only dispatching Agent B after Agent A's MR merges. This blocks parallelism.
+**Before:** Repo orchestrator serializes dependent work by only dispatching Agent B after Agent A's MR merges. This blocks parallelism.
 
-**After:** CEO dispatches both agents in parallel with `depends_on` declared. Both agents work simultaneously. The merge queue handles ordering. CEO's DISPATCH step includes dependency declarations alongside task descriptions.
+**After:** Repo orchestrator dispatches both agents in parallel with `depends_on` declared. Both agents work simultaneously. The merge queue handles ordering. The orchestrator's decomposition step includes dependency declarations alongside task descriptions.
 
 The Manager Agent spec (`development/manager-agent.md`) should be updated: when dispatching parallel tasks with dependencies, include `depends_on` in the dispatch parameters.
 
@@ -182,5 +182,5 @@ The Manager Agent spec (`development/manager-agent.md`) should be updated: when 
 - **Source Control** (`source-control.md`): Merge queue gains dependency-aware ordering. MR domain model gets `depends_on` and `atomic_group` fields.
 - **Forge Advantages** (`forge-advantages.md`): Dependency-aware merge queue is a forge-native capability. External forges rely on third-party tools (Mergify) for basic dependency holds.
 - **Agent Gates** (`agent-gates.md`): Gates run per-MR, but the queue only processes an MR after its dependencies pass their gates too.
-- **Manager Agent** (`development/manager-agent.md`): DISPATCH step gains `depends_on` parameter. CEO declares dependencies at dispatch time instead of serializing work.
+- **Manager Agent** (`development/manager-agent.md`): DISPATCH step gains `depends_on` parameter. Repo orchestrator declares dependencies at dispatch time instead of serializing work.
 - **Database Migrations** (`development/database-migrations.md`): Migration MRs and their consuming code MRs are a natural atomic group.

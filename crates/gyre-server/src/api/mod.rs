@@ -23,6 +23,7 @@ pub mod federation;
 pub mod gates;
 pub mod graph;
 pub mod jj;
+pub mod key_binding;
 pub mod llm_config;
 pub mod llm_prompts;
 pub mod merge_deps;
@@ -38,9 +39,11 @@ pub mod provenance;
 pub mod push_gates;
 pub mod release;
 pub mod repos;
+pub mod saved_views;
 pub mod scim;
 pub mod search;
 pub mod spawn;
+pub mod spec_assertions;
 pub mod spec_policy;
 pub mod specs;
 pub mod specs_assist;
@@ -49,6 +52,7 @@ pub mod stack_attest;
 pub mod tasks;
 pub mod tenants;
 pub mod traces;
+pub mod trust_anchors;
 pub mod users;
 pub mod version;
 pub mod workload;
@@ -106,6 +110,21 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/provenance",
             get(provenance::get_provenance),
+        )
+        // Attestation verification (TASK-008, §6.4)
+        .route(
+            "/api/v1/repos/:id/attestations/:commit_sha/verification",
+            get(provenance::get_verification),
+        )
+        // Attestation bundle export (TASK-008, §6.3)
+        .route(
+            "/api/v1/repos/:id/attestations/:commit_sha/bundle",
+            get(provenance::get_attestation_bundle),
+        )
+        // Attestation chain visualization (TASK-009, §7.6)
+        .route(
+            "/api/v1/repos/:id/attestations/:commit_sha/chain",
+            get(provenance::get_attestation_chain),
         )
         // AI Bill of Materials (M14.3)
         .route("/api/v1/repos/:id/aibom", get(aibom::get_aibom))
@@ -324,6 +343,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/specs/drifted", get(specs::list_drifted_specs))
         .route("/api/v1/specs/index", get(specs::spec_index))
         .route("/api/v1/specs/graph", get(specs::get_spec_graph))
+        // TASK-019: Spec link query endpoints (spec-links.md §Querying the Graph)
+        // These fixed-path routes must be registered before `:path` routes.
+        .route("/api/v1/specs/stale-links", get(specs::get_stale_links))
+        .route("/api/v1/specs/conflicts", get(specs::get_conflicts))
+        // TASK-023: Accountability agent patrol (spec-links.md §Accountability Agent Integration)
+        .route("/api/v1/patrol/spec-links", post(specs::patrol_spec_links))
         .route("/api/v1/specs/:path", get(specs::get_spec))
         .route("/api/v1/specs/:path/approve", post(specs::approve_spec))
         .route(
@@ -337,8 +362,31 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/api/v1/specs/:path/links", get(specs::get_spec_links))
         .route(
+            "/api/v1/specs/:path/dependents",
+            get(specs::get_spec_dependents),
+        )
+        .route(
+            "/api/v1/specs/:path/dependencies",
+            get(specs::get_spec_dependencies),
+        )
+        .route(
             "/api/v1/specs/:path/progress",
             get(specs::get_spec_progress),
+        )
+        // Constraint validation dry-run (authorization-provenance.md §7.6)
+        .route(
+            "/api/v1/constraints/validate",
+            post(specs::validate_constraints),
+        )
+        // Constraint dry-run evaluation (authorization-provenance.md §7.6)
+        .route(
+            "/api/v1/constraints/dry-run",
+            post(specs::dry_run_constraints),
+        )
+        // Strategy-implied constraints preview (authorization-provenance.md §7.6)
+        .route(
+            "/api/v1/constraints/strategy",
+            get(specs::get_strategy_constraints),
         )
         // Spec editing backend (S3.3 — HSI §11 CLI/MCP parity)
         .route(
@@ -364,6 +412,19 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // Auth / API keys / token introspection (M18)
         .route("/api/v1/auth/api-keys", post(auth::create_api_key))
         .route("/api/v1/auth/token-info", get(auth::token_info))
+        // Key binding (TASK-006, TASK-047, authorization-provenance.md §2.3)
+        .route(
+            "/api/v1/auth/key-binding",
+            post(key_binding::create_key_binding),
+        )
+        .route(
+            "/api/v1/auth/key-binding/:id",
+            delete(key_binding::revoke_key_binding),
+        )
+        .route(
+            "/api/v1/auth/key-bindings",
+            delete(key_binding::revoke_all_key_bindings),
+        )
         // Analytics
         .route(
             "/api/v1/analytics/events",
@@ -496,6 +557,30 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(dependencies::blast_radius),
         )
         .route("/api/v1/dependencies/graph", get(dependencies::get_graph))
+        // Workspace-scoped dependency graph (TASK-046)
+        .route(
+            "/api/v1/workspaces/:id/dependency-graph",
+            get(dependencies::get_workspace_dependency_graph),
+        )
+        // Stale dependencies (TASK-021)
+        .route(
+            "/api/v1/dependencies/stale",
+            get(dependencies::list_stale_dependencies),
+        )
+        // Breaking change detection & enforcement (TASK-020)
+        .route(
+            "/api/v1/dependencies/breaking",
+            get(dependencies::list_breaking_changes),
+        )
+        .route(
+            "/api/v1/dependencies/breaking/:id/acknowledge",
+            post(dependencies::acknowledge_breaking_change),
+        )
+        // Per-workspace dependency enforcement policy (TASK-020)
+        .route(
+            "/api/v1/workspaces/:id/dependency-policy",
+            get(dependencies::get_dependency_policy).put(dependencies::set_dependency_policy),
+        )
         // Federation (G11)
         .route(
             "/api/v1/federation/trusted-issuers",
@@ -519,6 +604,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(tenants::get_tenant)
                 .put(tenants::update_tenant)
                 .delete(tenants::delete_tenant),
+        )
+        // Trust anchors (TASK-006, authorization-provenance.md §1.1)
+        .route(
+            "/api/v1/tenants/:id/trust-anchors",
+            get(trust_anchors::list_trust_anchors).post(trust_anchors::create_trust_anchor),
+        )
+        .route(
+            "/api/v1/tenants/:id/trust-anchors/:aid",
+            get(trust_anchors::get_trust_anchor)
+                .put(trust_anchors::update_trust_anchor)
+                .delete(trust_anchors::delete_trust_anchor),
         )
         // Workspaces (M22.1)
         .route(
@@ -772,6 +868,15 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(graph::predict_graph).post(graph::predict_graph),
         )
         .route(
+            "/api/v1/repos/:id/graph/query-dryrun",
+            post(graph::view_query_dryrun),
+        )
+        // ── Spec assertions (system-explorer S9) ─────────────────────────
+        .route(
+            "/api/v1/repos/:id/spec-assertions/check",
+            post(spec_assertions::check_spec_assertions),
+        )
+        .route(
             "/api/v1/workspaces/:id/graph",
             get(graph::get_workspace_graph),
         )
@@ -786,6 +891,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/briefing/ask",
             post(graph::briefing_ask),
+        )
+        // Saved views (per-repo, explorer-implementation.md)
+        .route(
+            "/api/v1/repos/:id/views",
+            get(saved_views::list_views).post(saved_views::create_view),
+        )
+        .route(
+            "/api/v1/repos/:id/views/:view_id",
+            get(saved_views::get_view)
+                .put(saved_views::update_view)
+                .delete(saved_views::delete_view),
         )
         // Explorer views CRUD + LLM generation (S3.1)
         // NOTE: /generate must be registered BEFORE /:view_id to avoid "generate"

@@ -2,7 +2,7 @@
 
 Gyre is an autonomous software development platform built in Rust.
 Humans design (specs), orchestrators decompose (tasks), agents implement (Ralph loops).
-See [specs/system/ralph-loop.md](specs/system/ralph-loop.md) for the canonical loop definition.
+See [specs/system/agent-runtime.md](specs/system/agent-runtime.md) §1 for the canonical agent lifecycle definition.
 
 **This file is the map. Follow the links below for detail.**
 
@@ -66,7 +66,7 @@ See [docs/server-config.md](docs/server-config.md) for all configuration options
 | Topic | Spec |
 |---|---|
 | Tech stack + hexagonal invariants | [specs/development/architecture.md](specs/development/architecture.md) |
-| Ralph Loop (agent/session model, message inbox, terminal conditions) | [specs/system/ralph-loop.md](specs/system/ralph-loop.md) |
+| Agent Runtime (lifecycle, signal chain, compute targets, budget, prompts) | [specs/system/agent-runtime.md](specs/system/agent-runtime.md) |
 | Platform model (tenant/workspace/repo hierarchy, personas, orchestration) | [specs/system/platform-model.md](specs/system/platform-model.md) |
 | Vision (7 principles: judgment not generation, right context, specs as artifact...) | [specs/system/vision.md](specs/system/vision.md) |
 | Realized Model (knowledge graph extracted from code) | [specs/system/realized-model.md](specs/system/realized-model.md) |
@@ -80,6 +80,6 @@ See [docs/server-config.md](docs/server-config.md) for all configuration options
 
 ## Milestone Status
 
-M0 through M32 are all **Done**. See [specs/index.md](specs/index.md) for the full milestone table.
+M0 through M35 and HSI are all **Done**. See [specs/index.md](specs/index.md) for the full milestone table.
 
-Current milestone: **M32** (Meta-Spec Reconciliation -- spec kind field, workspace meta-spec-set bindings, blast-radius endpoint).
+Current work: **Authorization Provenance** (`authorization-provenance.md`) -- cryptographic work authorization chain. See `specs/tasks/` for decomposed tasks.

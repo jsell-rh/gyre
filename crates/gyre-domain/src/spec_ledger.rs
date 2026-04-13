@@ -49,6 +49,10 @@ pub struct SpecLedgerEntry {
     pub drift_status: String,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Repo that owns this spec (for SpecApproved signal chain routing).
+    pub repo_id: Option<String>,
+    /// Workspace scope (for SpecApproved Destination::Workspace routing).
+    pub workspace_id: Option<String>,
 }
 
 /// An event in the approval history for a spec.

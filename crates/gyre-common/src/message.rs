@@ -102,6 +102,11 @@ pub enum MessageKind {
     PushRejected,
     PushAccepted,
     SpecChanged,
+    /// Emitted when a human approves a spec (`POST /api/v1/specs/:path/approve`).
+    /// server_only = true. Payload: `{repo_id, spec_path, spec_sha, approved_by, approval_id}`.
+    /// Distinct from `SpecChanged` (which fires on push, before approval).
+    /// Destination: Workspace(workspace_id) — consumed by workspace orchestrator.
+    SpecApproved,
     GateFailure,
     StaleSpecWarning,
     SpeculativeConflict,
@@ -111,6 +116,14 @@ pub enum MessageKind {
     BudgetWarning,
     BudgetExhausted,
     AgentError,
+    /// Emitted when a constraint evaluation fails at push or merge time (§7.5).
+    /// server_only = true. Tier: Event (signed, TTL).
+    /// Broadcast to workspace and directed to the author agent.
+    ConstraintViolation,
+    /// Emitted when an atomic group merge fails and is rolled back (merge-dependencies.md §Failure Handling).
+    /// server_only = true. Tier: Event (signed, TTL).
+    /// Broadcast to workspace — all group members rolled back and requeued.
+    AtomicGroupFailed,
 
     // ── Tier 3: Telemetry (unsigned + in-memory only) ──────────────────
     ToolCallStart,
@@ -147,6 +160,7 @@ impl MessageKind {
             MessageKind::PushRejected => "push_rejected",
             MessageKind::PushAccepted => "push_accepted",
             MessageKind::SpecChanged => "spec_changed",
+            MessageKind::SpecApproved => "spec_approved",
             MessageKind::GateFailure => "gate_failure",
             MessageKind::StaleSpecWarning => "stale_spec_warning",
             MessageKind::SpeculativeConflict => "speculative_conflict",
@@ -156,6 +170,8 @@ impl MessageKind {
             MessageKind::BudgetWarning => "budget_warning",
             MessageKind::BudgetExhausted => "budget_exhausted",
             MessageKind::AgentError => "agent_error",
+            MessageKind::ConstraintViolation => "constraint_violation",
+            MessageKind::AtomicGroupFailed => "atomic_group_failed",
             MessageKind::ToolCallStart => "tool_call_start",
             MessageKind::ToolCallEnd => "tool_call_end",
             MessageKind::TextMessageContent => "text_message_content",
@@ -185,6 +201,7 @@ impl MessageKind {
                 | MessageKind::PushRejected
                 | MessageKind::PushAccepted
                 | MessageKind::SpecChanged
+                | MessageKind::SpecApproved
                 | MessageKind::GateFailure
                 | MessageKind::StaleSpecWarning
                 | MessageKind::SpeculativeConflict
@@ -194,6 +211,8 @@ impl MessageKind {
                 | MessageKind::BudgetWarning
                 | MessageKind::BudgetExhausted
                 | MessageKind::AgentError
+                | MessageKind::ConstraintViolation
+                | MessageKind::AtomicGroupFailed
         )
     }
 
@@ -220,6 +239,7 @@ impl MessageKind {
             | MessageKind::PushRejected
             | MessageKind::PushAccepted
             | MessageKind::SpecChanged
+            | MessageKind::SpecApproved
             | MessageKind::GateFailure
             | MessageKind::StaleSpecWarning
             | MessageKind::SpeculativeConflict
@@ -229,6 +249,8 @@ impl MessageKind {
             | MessageKind::BudgetWarning
             | MessageKind::BudgetExhausted
             | MessageKind::AgentError
+            | MessageKind::ConstraintViolation
+            | MessageKind::AtomicGroupFailed
             | MessageKind::Custom(_) => MessageTier::Event,
 
             MessageKind::ToolCallStart
@@ -261,6 +283,7 @@ impl MessageKind {
             "push_rejected" => MessageKind::PushRejected,
             "push_accepted" => MessageKind::PushAccepted,
             "spec_changed" => MessageKind::SpecChanged,
+            "spec_approved" => MessageKind::SpecApproved,
             "gate_failure" => MessageKind::GateFailure,
             "stale_spec_warning" => MessageKind::StaleSpecWarning,
             "speculative_conflict" => MessageKind::SpeculativeConflict,
@@ -270,6 +293,8 @@ impl MessageKind {
             "budget_warning" => MessageKind::BudgetWarning,
             "budget_exhausted" => MessageKind::BudgetExhausted,
             "agent_error" => MessageKind::AgentError,
+            "constraint_violation" => MessageKind::ConstraintViolation,
+            "atomic_group_failed" => MessageKind::AtomicGroupFailed,
             "tool_call_start" => MessageKind::ToolCallStart,
             "tool_call_end" => MessageKind::ToolCallEnd,
             "text_message_content" => MessageKind::TextMessageContent,
@@ -530,6 +555,7 @@ mod tests {
             MessageKind::PushRejected,
             MessageKind::PushAccepted,
             MessageKind::SpecChanged,
+            MessageKind::SpecApproved,
             MessageKind::GateFailure,
             MessageKind::StaleSpecWarning,
             MessageKind::SpeculativeConflict,
@@ -539,6 +565,8 @@ mod tests {
             MessageKind::BudgetWarning,
             MessageKind::BudgetExhausted,
             MessageKind::AgentError,
+            MessageKind::ConstraintViolation,
+            MessageKind::AtomicGroupFailed,
             MessageKind::ToolCallStart,
             MessageKind::ToolCallEnd,
             MessageKind::TextMessageContent,

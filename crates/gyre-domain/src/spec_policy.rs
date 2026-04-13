@@ -16,4 +16,9 @@ pub struct SpecPolicy {
     /// If true, block merging when an MR's spec_ref SHA is not the current HEAD blob SHA.
     #[serde(default)]
     pub require_current_spec: bool,
+    /// If true, reject pushes that add spec files under `specs/` without a
+    /// corresponding entry in `specs/manifest.yaml`.
+    /// spec-registry.md §Manifest Rules rule 1 + §Ledger Sync on Push step 4.
+    #[serde(default)]
+    pub enforce_manifest: bool,
 }

@@ -14,11 +14,13 @@ pub mod analytics;
 pub mod attestation;
 pub mod audit;
 pub mod budget;
+pub mod chain_attestation;
 pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
 pub mod dependency;
 pub mod graph;
+pub mod key_binding;
 pub mod kv_store;
 pub mod llm_config;
 pub mod merge_queue;
@@ -34,6 +36,7 @@ pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
+pub mod saved_view;
 pub mod spawn_log;
 pub mod spec_approval;
 pub mod spec_approval_event;
@@ -43,6 +46,7 @@ pub mod task;
 pub mod team;
 pub mod tenant;
 pub mod trace;
+pub mod trust_anchor;
 pub mod user;
 pub mod user_profile;
 pub mod user_workspace_state;
@@ -59,9 +63,11 @@ struct SqliteCustomizer;
 impl CustomizeConnection<SqliteConnection, R2d2Error> for SqliteCustomizer {
     fn on_acquire(&self, conn: &mut SqliteConnection) -> Result<(), R2d2Error> {
         use diesel::RunQueryDsl;
-        diesel::sql_query("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .execute(conn)
-            .map_err(R2d2Error::QueryError)?;
+        diesel::sql_query(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+        )
+        .execute(conn)
+        .map_err(R2d2Error::QueryError)?;
         Ok(())
     }
 }
@@ -227,6 +233,10 @@ mod tests {
             "meta_specs",
             "meta_spec_versions",
             "meta_spec_bindings",
+            // Authorization provenance (migration 000047)
+            "trust_anchors",
+            "key_bindings",
+            "chain_attestations",
             // Raw-SQL tables (not in schema.rs but created by migrations)
             "explorer_views",
             "prompt_templates",

@@ -24,6 +24,7 @@ pub struct CreateAgentRequest {
 pub struct ListAgentsQuery {
     pub status: Option<String>,
     pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -40,6 +41,22 @@ pub struct AgentResponse {
     pub current_task_id: Option<String>,
     pub spawned_at: u64,
     pub last_heartbeat: Option<u64>,
+    pub workspace_id: String,
+    /// Fields enriched from agent worktree tracking (populated when available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<u64>,
+    /// Spec path resolved from the agent's task (enriched at query time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_path: Option<String>,
+    /// MR ID created by this agent (enriched at query time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mr_id: Option<String>,
 }
 
 /// Returned only from POST /api/v1/agents — includes a one-time auth token.
@@ -60,17 +77,39 @@ impl From<Agent> for AgentResponse {
             current_task_id: a.current_task_id.map(|id| id.to_string()),
             spawned_at: a.spawned_at,
             last_heartbeat: a.last_heartbeat,
+            workspace_id: a.workspace_id.to_string(),
+            repo_id: None,
+            branch: None,
+            task_id: None,
+            completed_at: None,
+            spec_path: None,
+            mr_id: None,
         }
+    }
+}
+
+impl AgentResponse {
+    /// Enrich this response with worktree tracking data (repo_id, branch, task_id).
+    pub fn with_worktree(mut self, wt: &gyre_domain::AgentWorktree) -> Self {
+        self.repo_id = Some(wt.repository_id.to_string());
+        self.branch = Some(wt.branch.clone());
+        if self.task_id.is_none() {
+            self.task_id = wt.task_id.as_ref().map(|id| id.to_string());
+        }
+        self
     }
 }
 
 fn parse_agent_status(s: &str) -> Result<AgentStatus, ApiError> {
     match s.to_lowercase().as_str() {
-        "idle" => Ok(AgentStatus::Idle),
         "active" => Ok(AgentStatus::Active),
-        "blocked" => Ok(AgentStatus::Blocked),
-        "error" => Ok(AgentStatus::Error),
+        "idle" => Ok(AgentStatus::Idle),
+        "failed" => Ok(AgentStatus::Failed),
+        "stopped" => Ok(AgentStatus::Stopped),
         "dead" => Ok(AgentStatus::Dead),
+        // Legacy status mappings.
+        "blocked" | "error" => Ok(AgentStatus::Failed),
+        "paused" => Ok(AgentStatus::Stopped),
         _ => Err(ApiError::InvalidInput(format!("unknown agent status: {s}"))),
     }
 }
@@ -135,7 +174,24 @@ pub async fn list_agents(
     } else {
         state.agents.list().await?
     };
-    Ok(Json(agents.into_iter().map(AgentResponse::from).collect()))
+    let mut results: Vec<AgentResponse> = agents.into_iter().map(AgentResponse::from).collect();
+    // Batch-enrich with worktree data
+    for resp in &mut results {
+        if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(&resp.id)).await {
+            if let Some(wt) = worktrees.first() {
+                resp.repo_id = Some(wt.repository_id.to_string());
+                resp.branch = Some(wt.branch.clone());
+                if resp.task_id.is_none() {
+                    resp.task_id = wt.task_id.as_ref().map(|id| id.to_string());
+                }
+            }
+        }
+    }
+    // Apply repo_id filter after enrichment (agents are indexed by workspace, not repo).
+    if let Some(ref filter_repo) = params.repo_id {
+        results.retain(|r| r.repo_id.as_deref() == Some(filter_repo.as_str()));
+    }
+    Ok(Json(results))
 }
 
 /// GET /api/v1/workspaces/:workspace_id/agents — list agents scoped to a workspace.
@@ -148,7 +204,19 @@ pub async fn list_workspace_agents(
         .agents
         .list_by_workspace(&Id::new(workspace_id))
         .await?;
-    Ok(Json(agents.into_iter().map(AgentResponse::from).collect()))
+    let mut results: Vec<AgentResponse> = agents.into_iter().map(AgentResponse::from).collect();
+    for resp in &mut results {
+        if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(&resp.id)).await {
+            if let Some(wt) = worktrees.first() {
+                resp.repo_id = Some(wt.repository_id.to_string());
+                resp.branch = Some(wt.branch.clone());
+                if resp.task_id.is_none() {
+                    resp.task_id = wt.task_id.as_ref().map(|id| id.to_string());
+                }
+            }
+        }
+    }
+    Ok(Json(results))
 }
 
 pub async fn get_agent(
@@ -160,7 +228,38 @@ pub async fn get_agent(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
-    Ok(Json(AgentResponse::from(agent)))
+    let mut resp = AgentResponse::from(agent);
+    // Enrich with worktree tracking data (repo_id, branch, task_id)
+    if let Ok(worktrees) = state.worktrees.find_by_agent(&Id::new(&id)).await {
+        if let Some(wt) = worktrees.first() {
+            resp = resp.with_worktree(wt);
+        }
+    }
+    // Resolve spec_path from the linked task
+    let task_id_str = resp
+        .task_id
+        .clone()
+        .or_else(|| resp.current_task_id.clone());
+    if let Some(ref tid) = task_id_str {
+        if let Ok(Some(task)) = state.tasks.find_by_id(&Id::new(tid)).await {
+            resp.spec_path = task.spec_path;
+        }
+    }
+    // Resolve mr_id from MRs authored by this agent
+    if let Some(ref repo_id) = resp.repo_id {
+        if let Ok(mrs) = state.merge_requests.list_by_repo(&Id::new(repo_id)).await {
+            if let Some(mr) = mrs.iter().find(|m| {
+                m.author_agent_id
+                    .as_ref()
+                    .map(|id| id.to_string())
+                    .as_deref()
+                    == Some(&id)
+            }) {
+                resp.mr_id = Some(mr.id.to_string());
+            }
+        }
+    }
+    Ok(Json(resp))
 }
 
 pub async fn update_agent_status(
@@ -336,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn create_agent_and_get() {
         let app = app();
-        let (app, id) = create_test_agent(app, "ceo").await;
+        let (app, id) = create_test_agent(app, "workspace-orchestrator").await;
 
         let resp = app
             .oneshot(
@@ -349,7 +448,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["name"], "ceo");
+        assert_eq!(json["name"], "workspace-orchestrator");
         assert_eq!(json["status"], "idle");
     }
 
@@ -380,8 +479,24 @@ mod tests {
         let app = app();
         let (app, id) = create_test_agent(app, "worker2").await;
 
-        // Idle -> Blocked is invalid
-        let body = serde_json::json!({ "status": "blocked" });
+        // First move to Dead (terminal state).
+        let body = serde_json::json!({ "status": "dead" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/agents/{id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Dead -> Active is invalid (Dead is terminal).
+        let body = serde_json::json!({ "status": "active" });
         let resp = app
             .oneshot(
                 Request::builder()

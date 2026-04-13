@@ -6,6 +6,7 @@ vi.mock('../components/ExplorerView.svelte', () => ({ default: function Stub() {
 vi.mock('../components/SpecDashboard.svelte', () => ({ default: function Stub() {} }));
 vi.mock('../components/Inbox.svelte', () => ({ default: function Stub() {} }));
 vi.mock('../components/ExplorerCodeTab.svelte', () => ({ default: function Stub() {} }));
+vi.mock('../components/RepoDependencies.svelte', () => ({ default: function Stub() {} }));
 vi.mock('../components/RepoSettings.svelte', () => ({
   default: function RepoSettingsStub(opts) {
     const el = document.createElement('div');
@@ -25,15 +26,19 @@ describe('RepoMode', () => {
     expect(() => render(RepoMode, { props: { workspace: ws, repo } })).not.toThrow();
   });
 
-  it('renders tab bar with all five tabs', () => {
+  it('renders tab bar with all nine tabs', () => {
     const { container } = render(RepoMode, { props: { workspace: ws, repo } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(5);
+    expect(tabs.length).toBe(9);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('Specs');
+    expect(labels).toContain('Tasks');
+    expect(labels).toContain('MRs');
+    expect(labels).toContain('Agents');
     expect(labels).toContain('Architecture');
+    expect(labels).toContain('Dependencies');
     expect(labels).toContain('Decisions');
-    expect(labels).toContain('Code');
+    expect(labels).toContain('Code & Blame');
   });
 
   it('marks active tab with aria-selected=true', () => {
@@ -102,7 +107,7 @@ describe('RepoMode', () => {
     });
     const tablist = container.querySelector('[role="tablist"]');
     await fireEvent.keyDown(tablist, { key: 'ArrowRight' });
-    expect(onTabChange).toHaveBeenCalledWith('architecture');
+    expect(onTabChange).toHaveBeenCalledWith('tasks');
   });
 
   it('ArrowLeft wraps around to last tab from first', async () => {

@@ -2,6 +2,7 @@
   import { getContext } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { entityName } from '../lib/entityNames.svelte.js';
   import Badge from '../lib/Badge.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -22,6 +23,12 @@
 
   // Shell context API (S4.1 App Shell) — falls back gracefully when not mounted in shell
   const openDetailPanel = getContext('openDetailPanel') ?? ((entity) => {});
+  const goToEntityDetail = getContext('goToEntityDetail') ?? null;
+
+  // Entity name resolution uses shared singleton cache
+  function resolveEntityName(type, id) {
+    return entityName(type, id);
+  }
 
   // --- Time range ---
   const TIME_RANGE_VALUES = ['last_visit', '24h', '7d', '30d', 'custom'];
@@ -160,7 +167,8 @@
   }
 
   function openEntity(type, id, data = {}) {
-    openDetailPanel({ type, id, data });
+    if (goToEntityDetail) goToEntityDetail(type, id, data);
+    else openDetailPanel({ type, id, data });
   }
 
   function handleViewSpec(specRef) {
@@ -358,7 +366,7 @@
                         data-testid="agent-ref-link"
                         aria-label={$t('briefing.view_agent_label', { values: { id: u.agent_id } })}
                       >
-                        {u.agent_id}
+                        {resolveEntityName('agent', u.agent_id)}
                       </button>
                       <span class="uncertainty-text">{$t('briefing.uncertain', { values: { text: u.text } })}</span>
                     </div>
@@ -373,7 +381,7 @@
                       onclick={() => openEntity('agent', u.agent_id, { name: u.agent_id })}
                       data-testid="respond-to-agent-btn"
                     >
-                      {$t('briefing.respond_to', { values: { agent: u.agent_id } })}
+                      {$t('briefing.respond_to', { values: { agent: resolveEntityName('agent', u.agent_id) } })}
                     </button>
                   {/each}
                 {/if}
@@ -463,7 +471,7 @@
                       data-testid="mr-ref-link"
                       aria-label={$t('briefing.view_mr_label', { values: { id: item.mr_id, repo: item.repo } })}
                     >
-                      {item.repo} MR #{item.mr_id}
+                      {item.repo} — {resolveEntityName('mr', item.mr_id)}
                     </button>
                   {:else}
                     {item.description}

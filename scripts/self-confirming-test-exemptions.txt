@@ -1,0 +1,6 @@
+# Self-confirming test exemptions — one test function name per line.
+# Tests listed here are exempt from the self-confirming test check.
+# Each exemption should include a comment explaining why the test
+# is intentionally a simulation rather than a production code invocation.
+#
+# Format: test_function_name  # reason for exemption

@@ -117,8 +117,8 @@ specs:
     auto_create_tasks: false
 
   # Personas (not implementation contracts)
-  - path: personas/ceo.md
-    title: CEO Agent Persona
+  - path: personas/workspace-orchestrator.md
+    title: Workspace Orchestrator Persona
     owner: user:jsell
     approval:
       mode: human_only  # Personas define agent behavior - human must approve

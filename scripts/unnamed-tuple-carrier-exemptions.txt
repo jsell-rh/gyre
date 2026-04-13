@@ -1,0 +1,12 @@
+# Pre-existing unnamed tuple carriers (4+ elements).
+# These predate the check and should be refactored to named structs when touched.
+# Do NOT add new entries — use a named struct instead.
+crates/gyre-domain/src/typescript_extractor.rs:809
+crates/gyre-domain/src/typescript_extractor.rs:818
+crates/gyre-domain/src/typescript_extractor.rs:840
+crates/gyre-server/src/api/aibom.rs:178
+crates/gyre-server/src/spec_registry.rs:643
+crates/gyre-server/src/spec_registry.rs:1701
+crates/gyre-server/src/spec_registry.rs:1883
+crates/gyre-server/src/mem.rs:2720
+crates/gyre-server/src/git_http.rs:3246

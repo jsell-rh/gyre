@@ -6,6 +6,32 @@
 
 use tree_sitter::{Language, Parser, Tree};
 
+/// Scan file content for `// spec: <path>` or `# spec: <path>` annotations.
+/// Works across languages: `//` for C-family, `#` for Python/Ruby.
+pub fn extract_spec_comments(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            // C-family: // spec: <path>
+            if let Some(rest) = trimmed.strip_prefix("// spec:") {
+                let path = rest.trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+            // Python/Ruby: # spec: <path>
+            if let Some(rest) = trimmed.strip_prefix("# spec:") {
+                let path = rest.trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+            None
+        })
+        .collect()
+}
+
 /// Parse source bytes with the given tree-sitter grammar.
 ///
 /// Returns `Ok(Tree)` on success, or an `Err` string describing the failure.

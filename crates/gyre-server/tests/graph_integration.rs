@@ -119,6 +119,7 @@ fn make_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         visibility: Visibility::Public,
         doc_comment: None,
         spec_path: None,
+        spec_paths: vec![],
         spec_confidence: SpecConfidence::None,
         last_modified_sha: "deadbeef".to_string(),
         last_modified_by: None,
@@ -131,6 +132,9 @@ fn make_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
         first_seen_at: now,
         last_seen_at: now,
         deleted_at: None,
+        test_node: false,
+        spec_approved_at: None,
+        milestone_completed_at: None,
     }
 }
 
@@ -532,7 +536,7 @@ async fn test_workspace_briefing_empty() {
     assert!(body["cross_workspace"].as_array().unwrap().is_empty());
     assert!(body["exceptions"].as_array().unwrap().is_empty());
     assert_eq!(body["metrics"]["mrs_merged"], 0);
-    assert!(body["summary"].as_str().unwrap().contains("MR(s) merged"));
+    assert!(body["summary"].as_str().unwrap().contains("MRs merged"));
 }
 
 /// POST /api/v1/workspaces/{id}/briefing/ask — SSE streaming Q&A (HSI §9).
@@ -1146,7 +1150,7 @@ async fn test_divergence_detection_creates_notifications() {
     let admin_notifs = ctx
         .state
         .notifications
-        .list_for_user(&admin_user, None, None, None, 10, 0)
+        .list_for_user(&admin_user, None, None, None, None, 10, 0)
         .await
         .unwrap();
     assert_eq!(
@@ -1164,7 +1168,7 @@ async fn test_divergence_detection_creates_notifications() {
     let dev_notifs = ctx
         .state
         .notifications
-        .list_for_user(&dev_user, None, None, None, 10, 0)
+        .list_for_user(&dev_user, None, None, None, None, 10, 0)
         .await
         .unwrap();
     assert_eq!(dev_notifs.len(), 1, "Developer should have 1 notification");
@@ -1172,7 +1176,7 @@ async fn test_divergence_detection_creates_notifications() {
     let viewer_notifs = ctx
         .state
         .notifications
-        .list_for_user(&viewer_user, None, None, None, 10, 0)
+        .list_for_user(&viewer_user, None, None, None, None, 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1287,7 +1291,7 @@ async fn test_divergence_below_threshold_no_notifications() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, 10, 0)
+        .list_for_user(&user_id, None, None, None, None, 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1399,7 +1403,7 @@ async fn test_divergence_skips_reconciliation_agents() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, 10, 0)
+        .list_for_user(&user_id, None, None, None, None, 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1512,7 +1516,7 @@ async fn test_divergence_skips_same_agent() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, 10, 0)
+        .list_for_user(&user_id, None, None, None, None, 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1626,7 +1630,7 @@ async fn test_divergence_skips_human_pushed_deltas() {
     let notifs = ctx
         .state
         .notifications
-        .list_for_user(&user_id, None, None, None, 10, 0)
+        .list_for_user(&user_id, None, None, None, None, 10, 0)
         .await
         .unwrap();
     assert!(
@@ -1635,4 +1639,225 @@ async fn test_divergence_skips_human_pushed_deltas() {
     );
 
     std::env::remove_var("GYRE_DIVERGENCE_THRESHOLD");
+}
+
+// ── Saved Views Integration Tests ────────────────────────────────────────────
+
+/// POST + GET /api/v1/repos/{id}/views — create and list saved views.
+#[tokio::test]
+async fn test_saved_views_crud() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-views").await;
+
+    // List — system defaults are seeded on first access
+    let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
+    assert_eq!(resp.status(), 200);
+    let views: Vec<Value> = resp.json().await.unwrap();
+    let system_count = views
+        .iter()
+        .filter(|v| v["is_system"].as_bool() == Some(true))
+        .count();
+    assert!(
+        system_count >= 4,
+        "Expected at least 4 system default views, got {system_count}"
+    );
+
+    // Create a view
+    let resp = ctx
+        .post_json(
+            &format!("/api/v1/repos/{repo_id}/views"),
+            json!({
+                "name": "Test View",
+                "description": "A test saved view",
+                "query": {
+                    "scope": { "type": "all" },
+                    "emphasis": { "dim_unmatched": 0.3 },
+                    "annotation": { "title": "All nodes" }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201);
+    let view: Value = resp.json().await.unwrap();
+    let view_id = view["id"].as_str().unwrap();
+    assert_eq!(view["name"].as_str().unwrap(), "Test View");
+    assert!(view["query"]["scope"]["type"].as_str().unwrap() == "all");
+
+    // List — should have system defaults + our new view
+    let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
+    let views: Vec<Value> = resp.json().await.unwrap();
+    let user_views: Vec<&Value> = views
+        .iter()
+        .filter(|v| v["is_system"].as_bool() != Some(true))
+        .collect();
+    assert_eq!(user_views.len(), 1);
+
+    // Get by ID
+    let resp = ctx
+        .get(&format!("/api/v1/repos/{repo_id}/views/{view_id}"))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let fetched: Value = resp.json().await.unwrap();
+    assert_eq!(fetched["name"].as_str().unwrap(), "Test View");
+
+    // Update
+    let resp = ctx
+        .client
+        .put(ctx.url(&format!("/api/v1/repos/{repo_id}/views/{view_id}")))
+        .bearer_auth(TOKEN)
+        .json(&json!({
+            "name": "Updated View",
+            "query": { "scope": { "type": "test_gaps" } }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let updated: Value = resp.json().await.unwrap();
+    assert_eq!(updated["name"].as_str().unwrap(), "Updated View");
+
+    // Delete
+    let resp = ctx
+        .client
+        .delete(ctx.url(&format!("/api/v1/repos/{repo_id}/views/{view_id}")))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    // List — user view deleted, only system defaults remain
+    let resp = ctx.get(&format!("/api/v1/repos/{repo_id}/views")).await;
+    let views: Vec<Value> = resp.json().await.unwrap();
+    let user_views: Vec<&Value> = views
+        .iter()
+        .filter(|v| v["is_system"].as_bool() != Some(true))
+        .collect();
+    assert!(user_views.is_empty(), "Expected no user views after delete");
+}
+
+/// MCP graph_summary tool returns valid summary.
+#[tokio::test]
+async fn test_mcp_graph_summary() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-mcp-summary").await;
+
+    // Populate some nodes
+    let n1 = make_node(&repo_id, "TaskService", NodeType::Type);
+    let n2 = make_node(&repo_id, "create_task", NodeType::Function);
+    let n3 = make_node(&repo_id, "main_mod", NodeType::Module);
+    ctx.state.graph_store.create_node(n1.clone()).await.unwrap();
+    ctx.state.graph_store.create_node(n2.clone()).await.unwrap();
+    ctx.state.graph_store.create_node(n3.clone()).await.unwrap();
+
+    let e1 = make_edge(&repo_id, &n2.id, &n1.id, EdgeType::Calls);
+    ctx.state.graph_store.create_edge(e1).await.unwrap();
+
+    let resp = ctx
+        .post_json(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_summary",
+                    "arguments": { "repo_id": repo_id }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        content.contains("type"),
+        "summary should include type counts"
+    );
+    assert!(
+        content.contains("function"),
+        "summary should include function counts"
+    );
+    assert!(
+        content.contains("calls"),
+        "summary should include edge counts"
+    );
+}
+
+/// MCP graph_query_dryrun tool validates view queries.
+#[tokio::test]
+async fn test_mcp_graph_query_dryrun() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-mcp-dryrun").await;
+
+    // Populate nodes
+    let n1 = make_node(&repo_id, "Alpha", NodeType::Function);
+    let n2 = make_node(&repo_id, "Beta", NodeType::Function);
+    ctx.state.graph_store.create_node(n1.clone()).await.unwrap();
+    ctx.state.graph_store.create_node(n2.clone()).await.unwrap();
+
+    let e = make_edge(&repo_id, &n1.id, &n2.id, EdgeType::Calls);
+    ctx.state.graph_store.create_edge(e).await.unwrap();
+
+    let resp = ctx
+        .post_json(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": repo_id,
+                        "query": {
+                            "scope": { "type": "focus", "node": "Alpha", "edges": ["calls"], "direction": "outgoing", "depth": 5 },
+                            "emphasis": { "dim_unmatched": 0.12 },
+                            "zoom": "fit",
+                            "annotation": { "title": "Test" }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        content.contains("matched_nodes"),
+        "dryrun should return matched_nodes"
+    );
+    // Parse the dry-run result
+    let dryrun: Value = serde_json::from_str(content).unwrap();
+    assert!(dryrun["matched_nodes"].as_u64().unwrap() >= 1);
+}
+
+/// MCP graph_nodes tool returns nodes by pattern.
+#[tokio::test]
+async fn test_mcp_graph_nodes() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-mcp-nodes").await;
+
+    let n1 = make_node(&repo_id, "AuthService", NodeType::Type);
+    ctx.state.graph_store.create_node(n1).await.unwrap();
+
+    let resp = ctx
+        .post_json(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_nodes",
+                    "arguments": { "repo_id": repo_id, "name_pattern": "auth" }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(content.contains("AuthService"));
 }

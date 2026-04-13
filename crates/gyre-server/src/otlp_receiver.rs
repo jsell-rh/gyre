@@ -391,7 +391,62 @@ pub async fn run_trace_capture(
 /// - Database spans → adapter nodes (matched by `db.system` + service_name)
 ///
 /// Unresolved spans are stored as-is (graph_node_id remains None).
+/// Resolve span-to-graph-node linkage by querying the knowledge graph directly.
+///
+/// Loads all graph nodes for the MR's repo once, builds lookup maps, then
+/// matches spans using heuristics:
+/// - HTTP Server spans → Endpoint/Function nodes (matched by `http.route`)
+/// - Internal spans → Function/Type nodes (matched by `code.function` qualified name)
+/// - Database spans → Module nodes (matched by `db.system`)
+/// - Unmatched spans → fuzzy match by operation_name against any node name
+///
+/// Previously this used the search index, but graph nodes are not indexed there.
 pub async fn resolve_graph_linkage(state: &Arc<AppState>, mut trace: GateTrace) -> GateTrace {
+    // Resolve repo_id from the MR.
+    let repo_id = match state.merge_requests.find_by_id(&trace.mr_id).await {
+        Ok(Some(mr)) => mr.repository_id,
+        _ => {
+            tracing::warn!(mr_id = %trace.mr_id, "cannot resolve repo for graph linkage");
+            return trace;
+        }
+    };
+
+    // Load all graph nodes for this repo (typically hundreds, not millions).
+    let all_nodes = match state.graph_store.list_nodes(&repo_id, None).await {
+        Ok(nodes) => nodes,
+        Err(e) => {
+            tracing::warn!(repo_id = %repo_id, error = %e, "failed to load graph nodes for linkage");
+            return trace;
+        }
+    };
+
+    if all_nodes.is_empty() {
+        return trace;
+    }
+
+    // Build lookup maps by different matching strategies.
+    use gyre_common::graph::NodeType;
+    use std::collections::HashMap;
+
+    // qualified_name (lowercase) → node_id
+    let mut by_qualified: HashMap<String, Id> = HashMap::new();
+    // name (lowercase) → node_id
+    let mut by_name: HashMap<String, Id> = HashMap::new();
+    // node_type → Vec<(name_lower, qualified_lower, id)>
+    let mut by_type: HashMap<NodeType, Vec<(String, String, Id)>> = HashMap::new();
+
+    for node in &all_nodes {
+        let name_lc = node.name.to_lowercase();
+        let qual_lc = node.qualified_name.to_lowercase();
+        by_qualified.insert(qual_lc.clone(), node.id.clone());
+        by_name.insert(name_lc.clone(), node.id.clone());
+        by_type.entry(node.node_type.clone()).or_default().push((
+            name_lc,
+            qual_lc,
+            node.id.clone(),
+        ));
+    }
+
     for span in &mut trace.spans {
         if span.graph_node_id.is_some() {
             continue;
@@ -399,36 +454,62 @@ pub async fn resolve_graph_linkage(state: &Arc<AppState>, mut trace: GateTrace) 
 
         let node_id = match &span.kind {
             SpanKind::Server => {
-                // Match HTTP server spans to Endpoint nodes by http.route.
+                // Match HTTP server spans by http.route against Endpoint or Function nodes.
                 let route = span
                     .attributes
                     .get("http.route")
                     .or_else(|| span.attributes.get("http.target"))
                     .cloned();
                 if let Some(route) = route {
-                    find_endpoint_node(state, &route).await
+                    // Try exact match on endpoint nodes first, then functions.
+                    let route_lc = route.to_lowercase();
+                    let route_name = route.rsplit('/').next().unwrap_or(&route).to_lowercase();
+                    find_in_types(
+                        &by_type,
+                        &[NodeType::Endpoint, NodeType::Function],
+                        &route_lc,
+                        &route_name,
+                    )
                 } else {
                     None
                 }
             }
             SpanKind::Internal => {
-                // Match internal spans to Function nodes by code.function.
+                // Match by code.function qualified name.
                 let qualified = span
                     .attributes
                     .get("code.function")
                     .or_else(|| span.attributes.get("code.namespace"))
                     .cloned();
                 if let Some(q) = qualified {
-                    find_function_node(state, &q).await
+                    let q_lc = q.to_lowercase();
+                    // Exact qualified_name match first.
+                    by_qualified.get(&q_lc).cloned().or_else(|| {
+                        // Try matching the last segment (function name).
+                        let short = q.rsplit("::").next().unwrap_or(&q).to_lowercase();
+                        find_in_types(
+                            &by_type,
+                            &[NodeType::Function, NodeType::Type],
+                            &q_lc,
+                            &short,
+                        )
+                    })
                 } else {
                     None
                 }
             }
             SpanKind::Database => {
-                // Match DB spans to adapter nodes by db.system + service_name.
+                // Match DB spans to module/type nodes by db.system or operation name.
                 let db_system = span.attributes.get("db.system").cloned();
-                if let Some(sys) = db_system {
-                    find_adapter_node(state, &sys, &span.service_name).await
+                if let Some(_sys) = db_system {
+                    // Try matching the table name from the operation.
+                    let op_lc = span.operation_name.to_lowercase();
+                    find_in_types(
+                        &by_type,
+                        &[NodeType::Module, NodeType::Type],
+                        &op_lc,
+                        &op_lc,
+                    )
                 } else {
                     None
                 }
@@ -436,53 +517,67 @@ pub async fn resolve_graph_linkage(state: &Arc<AppState>, mut trace: GateTrace) 
             _ => None,
         };
 
-        span.graph_node_id = node_id;
+        // Fallback: fuzzy match operation_name against any node name.
+        span.graph_node_id = node_id.or_else(|| {
+            let op_lc = span.operation_name.to_lowercase();
+            // Check if any node name appears in the operation name.
+            for node in &all_nodes {
+                let name_lc = node.name.to_lowercase();
+                if name_lc.len() >= 3 && op_lc.contains(&name_lc) {
+                    return Some(node.id.clone());
+                }
+            }
+            None
+        });
     }
+
+    let linked = trace
+        .spans
+        .iter()
+        .filter(|s| s.graph_node_id.is_some())
+        .count();
+    tracing::info!(
+        mr_id = %trace.mr_id,
+        total = trace.spans.len(),
+        linked,
+        "graph linkage resolved"
+    );
 
     trace
 }
 
-async fn find_endpoint_node(state: &Arc<AppState>, route: &str) -> Option<Id> {
-    let query = gyre_ports::search::SearchQuery {
-        query: route.to_string(),
-        entity_type: Some("Endpoint".to_string()),
-        workspace_id: None,
-        limit: 1,
-    };
-    match state.search.search(query).await {
-        Ok(results) => results.into_iter().next().map(|r| Id::new(r.entity_id)),
-        Err(_) => None,
-    }
-}
-
-async fn find_function_node(state: &Arc<AppState>, qualified_name: &str) -> Option<Id> {
-    let query = gyre_ports::search::SearchQuery {
-        query: qualified_name.to_string(),
-        entity_type: Some("Function".to_string()),
-        workspace_id: None,
-        limit: 1,
-    };
-    match state.search.search(query).await {
-        Ok(results) => results.into_iter().next().map(|r| Id::new(r.entity_id)),
-        Err(_) => None,
-    }
-}
-
-async fn find_adapter_node(
-    state: &Arc<AppState>,
-    db_system: &str,
-    service_name: &str,
+/// Search typed node lists for a match by qualified name or short name.
+fn find_in_types(
+    by_type: &std::collections::HashMap<gyre_common::graph::NodeType, Vec<(String, String, Id)>>,
+    types: &[gyre_common::graph::NodeType],
+    qualified_lc: &str,
+    short_lc: &str,
 ) -> Option<Id> {
-    let query = gyre_ports::search::SearchQuery {
-        query: format!("{db_system} {service_name}"),
-        entity_type: Some("Module".to_string()),
-        workspace_id: None,
-        limit: 1,
-    };
-    match state.search.search(query).await {
-        Ok(results) => results.into_iter().next().map(|r| Id::new(r.entity_id)),
-        Err(_) => None,
+    for node_type in types {
+        if let Some(entries) = by_type.get(node_type) {
+            // Exact qualified match.
+            for (_, qual, id) in entries {
+                if qual == qualified_lc {
+                    return Some(id.clone());
+                }
+            }
+            // Short name match.
+            for (name, _, id) in entries {
+                if name == short_lc {
+                    return Some(id.clone());
+                }
+            }
+            // Substring match (e.g., route "/api/greet" contains "greet").
+            for (name, _, id) in entries {
+                if name.len() >= 3
+                    && (qualified_lc.contains(name.as_str()) || short_lc.contains(name.as_str()))
+                {
+                    return Some(id.clone());
+                }
+            }
+        }
     }
+    None
 }
 
 // ── OTlp config from server env vars ─────────────────────────────────────────

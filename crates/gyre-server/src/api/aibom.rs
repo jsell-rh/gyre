@@ -58,6 +58,10 @@ pub struct AibomCommit {
     pub task_id: Option<String>,
     pub timestamp: u64,
     pub attestation_level: String,
+    /// Full attestation chain for this commit (§7.3, Phase 4).
+    /// Replaces the flat `stack_attestation` field with chain attestation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_attestation: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -69,6 +73,8 @@ pub struct AibomResponse {
     pub commits: Vec<AibomCommit>,
     pub total_commits: usize,
     pub attested_percentage: f64,
+    /// Total attestation chains found for commits in range.
+    pub chain_attested_count: usize,
 }
 
 /// Resolve attestation level: prefer the stored value (M14.2), fall back to heuristic.
@@ -224,23 +230,52 @@ pub async fn get_aibom(
     // Sort agents by commit_count descending for consistent output.
     aibom_agents.sort_by(|a, b| b.commit_count.cmp(&a.commit_count));
 
-    // Build per-commit list.
-    let aibom_commits: Vec<AibomCommit> = commits
-        .iter()
-        .map(|ac| {
-            let level = resolve_attestation_level(
-                ac.attestation_level.as_deref(),
-                ac.model_context.as_deref(),
-            );
-            AibomCommit {
-                sha: ac.commit_sha.clone(),
-                agent_id: ac.agent_id.to_string(),
-                task_id: ac.task_id.clone(),
-                timestamp: ac.timestamp,
-                attestation_level: level.to_string(),
+    // Build per-commit list with chain attestation data (§7.3, Phase 4).
+    let mut chain_attested_count = 0usize;
+    let mut aibom_commits: Vec<AibomCommit> = Vec::with_capacity(commits.len());
+    for ac in &commits {
+        let level =
+            resolve_attestation_level(ac.attestation_level.as_deref(), ac.model_context.as_deref());
+
+        // Look up chain attestation for this commit.
+        let chain_attestation = match state
+            .chain_attestations
+            .find_by_commit(&ac.commit_sha)
+            .await
+        {
+            Ok(Some(att)) => {
+                // Load the full chain for this attestation.
+                let chain = state
+                    .chain_attestations
+                    .load_chain(&att.id)
+                    .await
+                    .unwrap_or_default();
+                if !chain.is_empty() {
+                    chain_attested_count += 1;
+                    // Include the full attestation chain per commit (§7.3, supply-chain.md §5).
+                    // The full chain is required for offline verification — a summary
+                    // cannot be used to reconstruct or verify the attestation chain.
+                    Some(serde_json::json!({
+                        "attestation_id": att.id,
+                        "chain_depth": att.metadata.chain_depth,
+                        "chain": chain,
+                    }))
+                } else {
+                    None
+                }
             }
-        })
-        .collect();
+            _ => None,
+        };
+
+        aibom_commits.push(AibomCommit {
+            sha: ac.commit_sha.clone(),
+            agent_id: ac.agent_id.to_string(),
+            task_id: ac.task_id.clone(),
+            timestamp: ac.timestamp,
+            attestation_level: level.to_string(),
+            chain_attestation,
+        });
+    }
 
     let total = aibom_commits.len();
     let attested = aibom_commits
@@ -254,7 +289,7 @@ pub async fn get_aibom(
     };
 
     Ok(Json(AibomResponse {
-        aibom_version: "1.0".to_string(),
+        aibom_version: "1.1".to_string(),
         repo_id: repo_id.clone(),
         range: AibomRange {
             from: params.from,
@@ -264,6 +299,7 @@ pub async fn get_aibom(
         commits: aibom_commits,
         total_commits: total,
         attested_percentage,
+        chain_attested_count,
     }))
 }
 
@@ -322,7 +358,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["aibom_version"], "1.0");
+        assert_eq!(json["aibom_version"], "1.1");
         assert_eq!(json["total_commits"], 0);
         assert_eq!(json["attested_percentage"], 0.0);
         assert!(json["agents"].as_array().unwrap().is_empty());

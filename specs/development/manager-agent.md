@@ -2,7 +2,7 @@
 
 > **Superseded.** The Manager Agent concept has been split into two specs:
 > - **Orchestration**: [`specs/system/platform-model.md`](../system/platform-model.md) (Two-Level Orchestration -- workspace orchestrator + repo orchestrator)
-> - **Implementation loop**: [`specs/system/ralph-loop.md`](../system/ralph-loop.md) (Ralph loop as agent/session primitive)
+> - **Implementation loop**: [`specs/system/agent-runtime.md`](../system/agent-runtime.md) §1 (agent lifecycle, signal chain, Ralph loop)
 >
 > This file is kept for historical context only.
 

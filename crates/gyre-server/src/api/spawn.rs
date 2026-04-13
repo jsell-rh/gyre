@@ -68,6 +68,10 @@ pub struct CompleteAgentRequest {
     pub branch: String,
     pub title: String,
     pub target_branch: String,
+    /// SHA-256 of the agent's conversation blob (HSI §5 provenance).
+    /// Stored in KV so the merge attestation can include it.
+    #[serde(default)]
+    pub conversation_sha: Option<String>,
 }
 
 // ── Interrogation agent helpers ───────────────────────────────────────────────
@@ -282,6 +286,35 @@ pub async fn spawn_agent(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {} not found", req.task_id)))?;
 
+    // Agent-runtime §1 Phase 4: Only Implementation tasks trigger worker agent spawning.
+    // Delegation and Coordination tasks trigger orchestrator spawning (different path).
+    // Tasks without a task_type (pre-approval push-hook tasks) do NOT trigger agent spawning.
+    // Exception: interrogation agents bypass this check (they are system-initiated, not task-driven).
+    let is_interrogation = req.agent_type.as_deref() == Some("interrogation");
+    if !is_interrogation {
+        match &task.task_type {
+            Some(gyre_domain::TaskType::Implementation) => { /* allowed */ }
+            Some(gyre_domain::TaskType::Delegation) => {
+                return Err(ApiError::InvalidInput(
+                    "delegation tasks trigger orchestrator spawning, not worker agent spawning"
+                        .to_string(),
+                ));
+            }
+            Some(gyre_domain::TaskType::Coordination) => {
+                return Err(ApiError::InvalidInput(
+                    "coordination tasks trigger orchestrator spawning, not worker agent spawning"
+                        .to_string(),
+                ));
+            }
+            None => {
+                return Err(ApiError::InvalidInput(
+                    "tasks without a task_type (pre-approval push-hook tasks) cannot trigger agent spawning; set task_type to 'implementation' first"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
     // Fetch workspace for compute target resolution and clone URL.
     let workspace = state
         .workspaces
@@ -352,8 +385,6 @@ pub async fn spawn_agent(
         .transition_status(AgentStatus::Active)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     state.agents.create(&agent).await?;
-
-    let is_interrogation = req.agent_type.as_deref() == Some("interrogation");
 
     // HSI §4: Interrogation agents get a short-lived 30-minute JWT.
     let jwt_ttl = if is_interrogation {
@@ -540,13 +571,14 @@ pub async fn spawn_agent(
             "/workspace".to_string()
         };
         // Command is server-controlled only — never from user input (C-1 RCE fix).
-        // Use compute target's configured command, or fall back to /gyre/entrypoint.sh
+        // Use compute target's configured command, GYRE_AGENT_COMMAND env var, or /gyre/entrypoint.sh.
         let command = resolved_target_config
             .as_ref()
             .and_then(|cfg| cfg.config.get("command"))
             .and_then(|v| v.as_str())
-            .unwrap_or("/gyre/entrypoint.sh")
-            .to_string();
+            .map(String::from)
+            .or_else(|| std::env::var("GYRE_AGENT_COMMAND").ok())
+            .unwrap_or_else(|| "/gyre/entrypoint.sh".to_string());
         let args: Vec<String> = resolved_target_config
             .as_ref()
             .and_then(|cfg| cfg.config.get("args"))
@@ -600,6 +632,29 @@ pub async fn spawn_agent(
         );
         // Placeholder so the Anthropic SDK initialises; cred-proxy injects the real key per request.
         container_env.insert("ANTHROPIC_API_KEY".to_string(), "proxy-managed".to_string());
+
+        // Vertex AI: forward non-secret Vertex config env vars to the container.
+        // Secrets (GCP SA JSON) are handled by GYRE_CRED_GCP_SA_JSON above.
+        // CLAUDE_CODE_USE_VERTEX enables Vertex mode in the Claude Agent SDK.
+        for var_name in [
+            "CLAUDE_CODE_USE_VERTEX",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "CLOUD_ML_REGION",
+        ] {
+            if let Ok(val) = std::env::var(var_name) {
+                if !val.is_empty() {
+                    container_env.insert(var_name.to_string(), val);
+                }
+            }
+        }
+        // Also check GYRE_VERTEX_LOCATION as an alias for CLOUD_ML_REGION.
+        if !container_env.contains_key("CLOUD_ML_REGION") {
+            if let Ok(val) = std::env::var("GYRE_VERTEX_LOCATION") {
+                if !val.is_empty() {
+                    container_env.insert("CLOUD_ML_REGION".to_string(), val);
+                }
+            }
+        }
 
         let spawn_config = gyre_ports::SpawnConfig {
             name: agent.name.clone(),
@@ -960,6 +1015,21 @@ pub async fn spawn_agent(
     // Workload attestation claims are stored in state.workload_attestations
     // and queryable via GET /api/v1/agents/{id}/workload.
 
+    // Phase 3 (TASK-008, §7.4): Create workload KeyBinding and DerivedInput
+    // from the parent task's attestation chain, then inject into the agent's
+    // environment via KV store. The agent uses the KeyBinding to sign its
+    // output attestation at push time.
+    if !is_interrogation {
+        create_derived_input_for_agent(
+            &state,
+            &agent.id.to_string(),
+            &req.task_id,
+            &auth.agent_id,
+            now,
+        )
+        .await;
+    }
+
     // Auto-track agent spawn
     let ev = AnalyticsEvent::new(
         new_id(),
@@ -981,7 +1051,13 @@ pub async fn spawn_agent(
     Ok((
         StatusCode::CREATED,
         Json(SpawnAgentResponse {
-            agent: AgentResponse::from(agent),
+            agent: {
+                let mut r = AgentResponse::from(agent);
+                r.repo_id = Some(req.repo_id.clone());
+                r.branch = Some(req.branch.clone());
+                r.task_id = Some(req.task_id.clone());
+                r
+            },
             token,
             worktree_path,
             clone_url,
@@ -1044,6 +1120,46 @@ pub async fn complete_agent(
         now,
     );
     mr.author_agent_id = Some(agent.id.clone());
+
+    // Propagate spec_ref from the task to the MR for provenance linkage.
+    // If the task has a spec_path, build a spec_ref in "path@sha" format
+    // by looking up the current SHA from the spec ledger.
+    if let Some(task_id) = &agent.current_task_id {
+        if let Ok(Some(task)) = state.tasks.find_by_id(task_id).await {
+            if let Some(ref spec_path) = task.spec_path {
+                if let Ok(Some(entry)) = state.spec_ledger.find_by_path(spec_path).await {
+                    mr.spec_ref = Some(format!("{}@{}", spec_path, entry.current_sha));
+                } else {
+                    // Spec not in ledger — use path without SHA.
+                    mr.spec_ref = Some(spec_path.clone());
+                }
+            }
+        }
+    }
+
+    // Compute diff stats + conflict detection (like create_mr does).
+    if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
+        mr.workspace_id = repo.workspace_id.clone();
+        if let Ok(diff) = state
+            .git_ops
+            .diff(&repo.path, &mr.target_branch, &mr.source_branch)
+            .await
+        {
+            mr.diff_stats = Some(gyre_domain::DiffStats {
+                files_changed: diff.files_changed,
+                insertions: diff.insertions,
+                deletions: diff.deletions,
+            });
+        }
+        if let Ok(can_merge) = state
+            .git_ops
+            .can_merge(&repo.path, &mr.source_branch, &mr.target_branch)
+            .await
+        {
+            mr.has_conflicts = Some(!can_merge);
+        }
+    }
+
     state.merge_requests.create(&mr).await?;
 
     // Transition task to Review (navigate through intermediate states as needed)
@@ -1059,6 +1175,16 @@ pub async fn complete_agent(
             task.updated_at = now;
             let _ = state.tasks.update(&task).await;
         }
+    }
+
+    // Store conversation SHA in KV for merge attestation (HSI §5).
+    // The merge processor looks up `conv_sha:{agent_id}` in the `agent_provenance` bucket.
+    if let Some(ref sha) = req.conversation_sha {
+        let kv_key = format!("conv_sha:{}", id);
+        let _ = state
+            .kv_store
+            .kv_set("agent_provenance", &kv_key, sha.clone())
+            .await;
     }
 
     // Transition agent to Idle
@@ -1084,6 +1210,7 @@ pub async fn complete_agent(
             {
                 tracing::debug!(agent_id = %agent.id, "jj bookmark skipped: {e}");
             } else {
+                // domain-event:ok — jj bookmark is an internal VCS operation, not a spec-required activity event
                 tracing::debug!(
                     agent_id = %agent.id,
                     branch = %mr.source_branch,
@@ -1145,18 +1272,40 @@ pub async fn complete_agent(
 
     // Notify the spawning user that the agent completed and an MR is ready for review (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
-        crate::notifications::notify(
+        let body_json = serde_json::json!({
+            "agent_id": agent.id.as_str(),
+            "agent_name": &agent.name,
+            "mr_id": mr.id.as_str(),
+            "mr_title": &mr.title,
+            "spec_path": mr.spec_ref.as_ref().map(|s| s.split('@').next().unwrap_or(s)),
+        })
+        .to_string();
+
+        crate::notifications::notify_rich(
             state.as_ref(),
             mr.workspace_id.clone(),
             Id::new(spawned_by.clone()),
             gyre_common::NotificationType::AgentCompleted,
             format!(
-                "Agent '{}' completed — MR {} is ready for review",
-                agent.name, mr.id
+                "Agent '{}' completed — MR '{}' is ready for review",
+                agent.name, mr.title
             ),
             "default",
+            Some(body_json),
+            Some(mr.id.to_string()),
+            Some(mr.repository_id.to_string()),
         )
         .await;
+    }
+
+    // TASK-022: If this agent's task was a cascade test, report the result.
+    // Agent completion means the cascade test passed (tests ran successfully).
+    if let Some(task_id) = &agent.current_task_id {
+        if let Ok(Some(task)) = state.tasks.find_by_id(task_id).await {
+            if task.labels.iter().any(|l| l == "cascade-test") {
+                crate::merge_processor::report_cascade_test_result(&state, &task, true, None).await;
+            }
+        }
     }
 
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
@@ -1250,6 +1399,24 @@ pub async fn fail_agent(
         .await;
     }
 
+    // TASK-022: If this agent's task was a cascade test, report failure.
+    if let Some(ref task_id) = agent.current_task_id {
+        if let Ok(Some(task)) = state.tasks.find_by_id(task_id).await {
+            if task.labels.iter().any(|l| l == "cascade-test") {
+                crate::merge_processor::report_cascade_test_result(
+                    &state,
+                    &task,
+                    false,
+                    Some(&format!(
+                        "Agent '{}' failed during cascade testing",
+                        agent.name
+                    )),
+                )
+                .await;
+            }
+        }
+    }
+
     Ok(StatusCode::OK)
 }
 
@@ -1284,6 +1451,289 @@ pub async fn stop_agent(
     super::budget::decrement_active_agents(&state, &workspace_id).await;
 
     Ok(StatusCode::OK)
+}
+
+// ── Derived Input (Phase 3, §7.4) ─────────────────────────────────────────────
+
+/// Create a workload `KeyBinding` and `DerivedInput` for a newly spawned agent
+/// from the parent task's attestation chain. Stored in KV so the agent can use
+/// the key to sign its output attestation at push time.
+///
+/// Best-effort: if no attestation chain exists for the task, skips silently
+/// (the agent may be for a task that predates the provenance system).
+///
+/// This function CREATES (generates + signs) crypto material — it does not
+/// consume/verify externally-submitted crypto material.
+async fn create_derived_input_for_agent(
+    state: &crate::AppState,
+    agent_id: &str,
+    task_id: &str,
+    spawner_id: &str,
+    now: u64,
+) {
+    // crypto-verify:ok — this function generates+signs new keys, not verifying external input.
+    // Look up parent attestation chain for this task.
+    let attestations = match state.chain_attestations.find_by_task(task_id).await {
+        Ok(atts) if !atts.is_empty() => atts,
+        _ => {
+            tracing::debug!(
+                agent_id = %agent_id,
+                task_id = %task_id,
+                "no attestation chain for task — skipping DerivedInput creation"
+            );
+            return;
+        }
+    };
+
+    // Find the leaf attestation (highest chain_depth) to derive from.
+    let parent_att = match attestations.iter().max_by_key(|a| a.metadata.chain_depth) {
+        Some(a) => a,
+        None => return,
+    };
+
+    // Chain depth limit check (§4.6): hard limit 10, configurable per workspace.
+    if parent_att.metadata.chain_depth >= 10 {
+        tracing::warn!(
+            agent_id = %agent_id,
+            task_id = %task_id,
+            chain_depth = parent_att.metadata.chain_depth,
+            "chain depth limit reached (max 10) — skipping DerivedInput creation"
+        );
+        return;
+    }
+
+    // ── Step 1: Generate the CHILD agent's keypair (unconditional) ──
+    // The child agent ALWAYS needs its own keypair to sign output attestations
+    // at push time, regardless of whether the spawner has a key. This must
+    // happen before any conditional logic that might skip DerivedInput creation,
+    // otherwise the delegation chain cannot bootstrap (§7.4).
+    let rng = ring::rand::SystemRandom::new();
+    let child_pkcs8 = match ring::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, "failed to generate agent keypair: {e}");
+            return;
+        }
+    };
+    let child_key_pair = match ring::signature::Ed25519KeyPair::from_pkcs8(child_pkcs8.as_ref()) {
+        Ok(kp) => kp,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, "failed to parse agent keypair: {e}");
+            return;
+        }
+    };
+    use ring::signature::KeyPair;
+    let child_public_key = child_key_pair.public_key().as_ref().to_vec();
+
+    // Build the child agent's own workload KeyBinding (for push-time signing).
+    let child_kb = gyre_common::KeyBinding {
+        public_key: child_public_key,
+        user_identity: format!("agent:{agent_id}"),
+        issuer: state.base_url.clone(),
+        trust_anchor_id: "gyre-oidc".to_string(),
+        issued_at: now,
+        expires_at: now + state.agent_jwt_ttl_secs,
+        user_signature: vec![],       // workload-bound — no user signature
+        platform_countersign: vec![], // placeholder:ok — workload-bound key bindings use agent key, not platform countersign
+    };
+
+    // Store the child agent's own private key so it can sign output attestations.
+    let _ = state
+        .kv_store
+        .kv_set(
+            "agent_signing_keys",
+            agent_id,
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                child_pkcs8.as_ref(),
+            ),
+        )
+        .await;
+
+    // Store the child agent's own KeyBinding separately so that when this agent
+    // later acts as a spawner, its KeyBinding can be attached to the DerivedInput
+    // it signs. Uses a separate namespace to avoid overwriting the actual
+    // DerivedInput stored above (which carries the spawner's KeyBinding).
+    if let Ok(kb_json) = serde_json::to_string(&child_kb) {
+        let _ = state
+            .kv_store
+            .kv_set("agent_key_bindings", agent_id, kb_json)
+            .await;
+    }
+
+    // ── Step 2: Load the SPAWNER's (orchestrator's) signing key (§4.1, §4.5) ──
+    // The DerivedInput must be signed by the spawner (parent/orchestrator), NOT
+    // the child agent being spawned. This proves that a specific orchestrator
+    // authorized the delegation. The spawner's key was stored when the spawner
+    // itself was spawned (or when the orchestrator first received its key).
+    // If the spawner has no key, we skip DerivedInput creation but the child's
+    // keypair (stored above) is preserved so the delegation chain can bootstrap.
+    let spawner_key_b64 = match state
+        .kv_store
+        .kv_get("agent_signing_keys", spawner_id)
+        .await
+    {
+        Ok(Some(k)) => k,
+        _ => {
+            tracing::warn!(
+                agent_id = %agent_id,
+                spawner_id = %spawner_id,
+                "spawner has no signing key in KV — skipping DerivedInput creation \
+                 (child keypair already stored)"
+            );
+            return; // early-return:ok — child keypair already generated and stored above
+        }
+    };
+    let spawner_pkcs8 = match base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &spawner_key_b64,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::warn!(spawner_id = %spawner_id, "failed to decode spawner key: {e}");
+            return; // early-return:ok — child keypair already generated and stored above
+        }
+    };
+    let spawner_key_pair = match ring::signature::Ed25519KeyPair::from_pkcs8(&spawner_pkcs8) {
+        Ok(kp) => kp,
+        Err(e) => {
+            tracing::warn!(spawner_id = %spawner_id, "failed to parse spawner keypair: {e}");
+            return; // early-return:ok — child keypair already generated and stored above
+        }
+    };
+
+    // Load the spawner's own KeyBinding. Check `agent_key_bindings` first (the
+    // canonical location), then fall back to extracting from `agent_derived_inputs`
+    // (backward compatibility). If neither exists, the spawner is the root agent —
+    // build a KeyBinding from its public key.
+    let spawner_kb = {
+        // Try the canonical key binding store first.
+        let from_kb_store = state
+            .kv_store
+            .kv_get("agent_key_bindings", spawner_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str::<gyre_common::KeyBinding>(&json).ok());
+        if let Some(kb) = from_kb_store {
+            kb
+        } else {
+            // Fall back to extracting from the spawner's DerivedInput (backward compat).
+            let from_di = state
+                .kv_store
+                .kv_get("agent_derived_inputs", spawner_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|json| {
+                    serde_json::from_str::<gyre_common::DerivedInput>(&json)
+                        .ok()
+                        .map(|di| di.key_binding)
+                });
+            match from_di {
+                Some(kb) => kb,
+                None => {
+                    // Spawner is the root agent — build a KeyBinding from its public key.
+                    let spawner_pub = spawner_key_pair.public_key().as_ref().to_vec();
+                    gyre_common::KeyBinding {
+                        public_key: spawner_pub,
+                        user_identity: format!("agent:{spawner_id}"),
+                        issuer: state.base_url.clone(),
+                        trust_anchor_id: "gyre-oidc".to_string(),
+                        issued_at: now,
+                        expires_at: now + state.agent_jwt_ttl_secs,
+                        user_signature: vec![],
+                        platform_countersign: vec![],
+                    }
+                }
+            }
+        }
+    };
+
+    // ── Step 3: Sign the DerivedInput with the SPAWNER's key (§4.1, §4.5) ──
+    // Compute parent_ref as content hash of parent attestation.
+    let parent_bytes = serde_json::to_vec(parent_att).unwrap_or_default();
+    let parent_hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&parent_bytes);
+        hasher.finalize().to_vec()
+    };
+
+    // Sign the derivation with the spawner's (orchestrator's) key.
+    let derivation_content = serde_json::json!({
+        "parent_ref": hex::encode(&parent_hash),
+        "agent_id": agent_id,
+        "task_id": task_id,
+    });
+    let derivation_bytes = serde_json::to_vec(&derivation_content).unwrap_or_default();
+    let content_hash = {
+        use ring::digest;
+        digest::digest(&digest::SHA256, &derivation_bytes)
+    };
+    let sig = spawner_key_pair
+        .sign(content_hash.as_ref())
+        .as_ref()
+        .to_vec();
+
+    // Build the DerivedInput (§4.1) — signed by the spawner, with the spawner's
+    // KeyBinding. This proves the orchestrator authorized this delegation.
+    let derived_input = gyre_common::DerivedInput {
+        parent_ref: parent_hash,
+        preconditions: vec![],
+        update: format!("agent:{agent_id} spawned for task:{task_id}"),
+        output_constraints: vec![], // inherited from parent (additive only)
+        signature: sig,
+        key_binding: spawner_kb.clone(),
+    };
+
+    // Store the DerivedInput in KV so the child agent can retrieve it.
+    if let Ok(di_json) = serde_json::to_string(&derived_input) {
+        let _ = state
+            .kv_store
+            .kv_set("agent_derived_inputs", agent_id, di_json)
+            .await;
+    }
+
+    // Create an attestation record for this derivation.
+    let new_att = gyre_common::Attestation {
+        id: uuid::Uuid::new_v4().to_string(),
+        input: gyre_common::AttestationInput::Derived(derived_input),
+        output: gyre_common::AttestationOutput {
+            content_hash: vec![],
+            commit_sha: String::new(),
+            agent_signature: None,
+            gate_results: vec![],
+        },
+        metadata: gyre_common::AttestationMetadata {
+            created_at: now,
+            workspace_id: parent_att.metadata.workspace_id.clone(),
+            repo_id: parent_att.metadata.repo_id.clone(),
+            task_id: task_id.to_string(),
+            agent_id: agent_id.to_string(),
+            chain_depth: parent_att.metadata.chain_depth + 1,
+        },
+    };
+
+    if let Err(e) = state.chain_attestations.save(&new_att).await {
+        tracing::warn!(
+            agent_id = %agent_id,
+            error = %e,
+            "failed to save derived attestation for agent"
+        );
+    } else {
+        // domain-event:ok — §7.7 audit-mode: attestation.created is a structured audit log entry, not a broadcast event
+        tracing::info!(
+            agent_id = %agent_id,
+            task_id = %task_id,
+            spawner = %spawner_id,
+            chain_depth = new_att.metadata.chain_depth,
+            category = "Provenance",
+            event = "attestation.created",
+            "attestation.created: DerivedInput signed by spawner {spawner_id} for agent {agent_id} (depth {})",
+            new_att.metadata.chain_depth
+        );
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1326,7 +1776,7 @@ mod tests {
     }
 
     async fn create_task(app: Router, title: &str) -> (Router, String) {
-        let body = serde_json::json!({"title": title});
+        let body = serde_json::json!({"title": title, "task_type": "implementation"});
         let resp = app
             .clone()
             .oneshot(
@@ -2198,6 +2648,178 @@ mod tests {
             json["compute_target_id"].as_str().unwrap_or(""),
             &ct_id,
             "spawn should fall back to tenant-default compute target: {json}"
+        );
+    }
+
+    // ── Signal chain: task_type filtering tests (agent-runtime §1 Phase 4) ───
+
+    /// Helper: create a task with a specific task_type via the API.
+    async fn create_task_with_type(
+        app: Router,
+        title: &str,
+        task_type: Option<&str>,
+    ) -> (Router, String) {
+        let mut body = serde_json::json!({"title": title});
+        if let Some(tt) = task_type {
+            body["task_type"] = serde_json::Value::String(tt.to_string());
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Helper: attempt spawn and return the response (without asserting status).
+    async fn try_spawn(
+        app: Router,
+        name: &str,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+    ) -> (Router, axum::response::Response) {
+        let body = serde_json::json!({
+            "name": name,
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (app, resp)
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_delegation_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Delegation task", Some("delegation")).await;
+        let (_, resp) = try_spawn(app, "worker-deleg", &repo_id, &task_id, "feat/deleg").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "delegation tasks must not trigger worker agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("delegation"),
+            "error should mention delegation: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_coordination_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Coordination task", Some("coordination")).await;
+        let (_, resp) = try_spawn(app, "worker-coord", &repo_id, &task_id, "feat/coord").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "coordination tasks must not trigger worker agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("coordination"),
+            "error should mention coordination: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_tasks_without_task_type() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        // Create task without task_type (simulates push-hook pre-approval task).
+        let (app, task_id) = create_task_with_type(app, "Pre-approval push-hook task", None).await;
+        let (_, resp) = try_spawn(app, "worker-none", &repo_id, &task_id, "feat/no-type").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "tasks without task_type must not trigger agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("task_type"),
+            "error should mention task_type: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_allows_implementation_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Implementation task", Some("implementation")).await;
+        let (_, resp) = try_spawn(app, "worker-impl", &repo_id, &task_id, "feat/impl").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "implementation tasks should spawn agents"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrogation_agents_bypass_task_type_check() {
+        // Interrogation agents are system-initiated and should work with any task_type,
+        // including delegation tasks that would normally be rejected.
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Delegation for interrogation", Some("delegation")).await;
+
+        let body = serde_json::json!({
+            "name": "interrogation-bypass",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "interrogation/bypass",
+            "agent_type": "interrogation",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "interrogation agents should bypass task_type filtering"
         );
     }
 }

@@ -18,7 +18,7 @@ What Gyre does - the product.
 |---|---|---|
 | **Vision** | [`system/vision.md`](system/vision.md) | **Root spec:** Gyre amplifies human judgment across the SDLC. Seven principles: judgment not generation, right context, specs as primary artifact, structure is discovered, feedback loop, challenge every ceremony, human differentiation compounds |
 | **Platform Model** | [`system/platform-model.md`](system/platform-model.md) | **Foundational spec:** tenant/workspace/repo hierarchy, persona model, orchestration, MCP coordination, budgets, rollback, secrets, bootstrap |
-| **Ralph Loop** | [`system/ralph-loop.md`](system/ralph-loop.md) | **Core implementation primitive:** agent/session model, message inbox, fresh context per session, gates + agent review as terminal conditions, provenance integration |
+| **Ralph Loop** | [`system/agent-runtime.md`](system/agent-runtime.md) §1 | **Core implementation primitive:** agent/session model, message inbox, fresh context per session, gates + agent review as terminal conditions, provenance integration |
 | User Management & Notifications | [`system/user-management.md`](system/user-management.md) | User profiles, workspace membership, teams, invitations, sessions, notification channels, "my stuff" views |
 | Search | [`system/search.md`](system/search.md) | Full-text search across tenant, access-scoped, faceted, MCP-queryable, Cmd+K |
 | ABAC Policy Engine | [`system/abac-policy-engine.md`](system/abac-policy-engine.md) | Attribute-based access control with declarative policies, scope cascade, dry-run evaluation, audit logging |
@@ -36,6 +36,7 @@ What Gyre does - the product.
 | SDLC Philosophy | [`system/sdlc.md`](system/sdlc.md) | Challenge every ceremony, engineer the need away |
 | Business Continuity | [`system/business-continuity.md`](system/business-continuity.md) | BCP primitives, snapshot/restore, retention |
 | Supply Chain Security | [`system/supply-chain.md`](system/supply-chain.md) | Agent stack attestation, gyre-stack.lock, AIBOM, SLSA provenance, attestation levels |
+| **Authorization Provenance** | [`system/authorization-provenance.md`](system/authorization-provenance.md) | **Cryptographic work authorization:** signed inputs, CEL output constraints, derived input delegation chains, key binding, constraint propagation, offline verification. Amends agent-gates, supply-chain, identity-security, ABAC, agent-runtime, message-bus, HSI, observability |
 | Agent Gates & Spec Binding | [`system/agent-gates.md`](system/agent-gates.md) | Agents as merge gates, composable gate chains, spec-to-code cryptographic binding, spec approval ledger |
 | Spec Lifecycle | [`system/spec-lifecycle.md`](system/spec-lifecycle.md) | Auto-task on spec change, approval invalidation, drift detection, forge-native hooks |
 | Merge Dependencies | [`system/merge-dependencies.md`](system/merge-dependencies.md) | MR dependency DAG, atomic groups, auto-detection from branch lineage, dependency-aware merge queue |
@@ -48,6 +49,10 @@ What Gyre does - the product.
 | UI Journeys & Navigation | [`system/ui-journeys.md`](system/ui-journeys.md) | (Superseded by Human-System Interface) Journey-oriented navigation |
 | **Human-System Interface** | [`system/human-system-interface.md`](system/human-system-interface.md) | **How humans interact with autonomous development:** trust gradient, progressive Explorer (C4 + LLM views), agent interrogation, conversation-to-code provenance, scoped chat, cross-workspace spec links, completion summaries |
 | UI Layout & Interactions | [`system/ui-layout.md`](system/ui-layout.md) | Spatial structure, view specification grammar (data/layout/encoding), interaction patterns (scope transitions, drill-down, inline chat), rendering technology (SVG + ELK/dagre) |
+| Explorer Canvas | [`system/explorer-canvas.md`](system/explorer-canvas.md) | Unified canvas replacing Graph + Flow tabs: three-lens architecture (Structural/Evaluative/Observable), progressive drill-down, causal flow traces, evaluative heat maps |
+| View Query Grammar | [`system/view-query-grammar.md`](system/view-query-grammar.md) | Declarative grammar for LLM-generated visualizations: computed references ($callers, $test_reachable), scope/emphasis/edge/zoom primitives, interactive bindings |
+| LSP-Powered Call Graph | [`system/lsp-call-graph.md`](system/lsp-call-graph.md) | Two-pass extraction: tree-sitter/syn for declarations, LSP/type-checker for complete call resolution (rust-analyzer, pyright, Go callgraph, tsserver) |
+| Explorer Implementation | [`system/explorer-implementation.md`](system/explorer-implementation.md) | Implementation plan: WebSocket protocol, Claude Agent SDK explorer agent, dry-run self-check loop, saved views DB schema, component architecture |
 | Trusted Foundry (Future) | [`system/trusted-foundry-integration.md`](system/trusted-foundry-integration.md) | Reference pattern: IR-first development with audited components, deterministic compilation, reduced review surface. Not scheduled for implementation. |
 
 ## Development of This System
@@ -59,11 +64,11 @@ How Gyre gets built - process and standards for the agent team.
 | Architecture & Standards | [`development/architecture.md`](development/architecture.md) | Rust, Svelte, DDD, hexagonal, storage, API |
 | API Design Conventions | [`development/api-conventions.md`](development/api-conventions.md) | URL structure, naming rules, parameter conventions, auth contract, deprecation protocol, mechanical enforcement |
 | Database & Migrations | [`development/database-migrations.md`](development/database-migrations.md) | Diesel ORM, paired up/down migrations, multi-tenant row isolation, startup behavior |
-| Ralph Loops (superseded) | [`development/ralph-loops.md`](development/ralph-loops.md) | Superseded by [`system/ralph-loop.md`](system/ralph-loop.md) |
+| Ralph Loops (superseded) | [`development/ralph-loops.md`](development/ralph-loops.md) | Superseded by [`system/agent-runtime.md`](system/agent-runtime.md) §1 |
 | Agent Experience (Day One) | [`development/agent-experience.md`](development/agent-experience.md) | Testing, observability, repo as system of record, cache hits, entropy management |
 | Speed & Backpressure | [`development/speed-backpressure.md`](development/speed-backpressure.md) | The wheel, pre-commit hooks, quality gates |
 | CI, Docs & Release | [`development/ci-docs-release.md`](development/ci-docs-release.md) | GitHub Actions, Starlight docs, semver, conventional commits |
-| Manager Agent (superseded) | [`development/manager-agent.md`](development/manager-agent.md) | Superseded -- split into [`system/platform-model.md`](system/platform-model.md) + [`system/ralph-loop.md`](system/ralph-loop.md) |
+| Manager Agent (superseded) | [`development/manager-agent.md`](development/manager-agent.md) | Superseded -- split into [`system/platform-model.md`](system/platform-model.md) + [`system/agent-runtime.md`](system/agent-runtime.md) §1 |
 | Agent Development Workflow | [`development/agent-workflow.md`](development/agent-workflow.md) | Immediate feedback, worktrees, PRs, fix the environment |
 | Dogfooding | [`development/dogfooding.md`](development/dogfooding.md) | Building Gyre with agent-boss |
 | Development Philosophy | [`development/philosophy.md`](development/philosophy.md) | Speed, failure domains, humans steer / agents execute |
@@ -80,7 +85,7 @@ How Gyre gets built - process and standards for the agent team.
 
 | Persona | Path | Summary |
 |---|---|---|
-| CEO Agent | [`personas/ceo.md`](personas/ceo.md) | Top-level orchestrator, spawns all work |
+| Workspace Orchestrator | [`personas/workspace-orchestrator.md`](personas/workspace-orchestrator.md) | Top-level orchestrator, delegates to repo orchestrators |
 | Accountability Agent | [`personas/accountability.md`](personas/accountability.md) | Spec integrity guardian, detects implementation drift |
 | Security Agent | [`personas/security.md`](personas/security.md) | Continuous security review, threat detection, OWASP + agent-specific threats |
 
@@ -134,7 +139,7 @@ How Gyre gets built - process and standards for the agent team.
 | jj (Jujutsu) vs. Git | **Resolved** - jj adds value for agent workflows (atomic changes, auto-rebase, undo) |
 | Agent collaboration model (hierarchy + ?) | **Resolved** - hierarchy (spawn tree) + typed peer messages (A2A) + cross-agent code awareness (M13.4) |
 | Coordination primitives (blackboard vs. event stream vs. persistent work chains) | **Resolved** - event stream (domain events via WebSocket) + persistent work chains (task ref tree) |
-| Persistent loop state (NDI pattern) | **Resolved** - Custom ref namespaces (M13.6): `refs/tasks/{task-id}` survives agent crash. Agent message inbox persists state between sessions. See [`system/ralph-loop.md`](system/ralph-loop.md). |
+| Persistent loop state (NDI pattern) | **Resolved** - Custom ref namespaces (M13.6): `refs/tasks/{task-id}` survives agent crash. Agent message inbox persists state between sessions. See [`system/agent-runtime.md`](system/agent-runtime.md) §1. |
 | Decision library for learned interrupt resolutions | Open |
 | Cost tracking model | **Resolved** - cost entries table, per-agent aggregation, dashboard cost view (M6.1) |
 | CI as separate concept vs. emergent property | **Resolved** - emergent: pre-accept gates (M13.1) + merge queue gates (M12.1) = CI without a separate concept |

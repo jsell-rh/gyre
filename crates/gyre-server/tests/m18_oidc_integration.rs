@@ -113,7 +113,7 @@ async fn spawn_returns_jwt_token() {
     let task: serde_json::Value = client
         .post(format!("{base}/api/v1/tasks"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"title": "M18 task", "description": "", "priority": "medium", "status": "todo"}))
+        .json(&serde_json::json!({"title": "M18 task", "description": "", "priority": "medium", "status": "todo", "task_type": "implementation"}))
         .send()
         .await
         .unwrap()
@@ -171,7 +171,7 @@ async fn jwt_token_authenticates_api_calls() {
     let task: serde_json::Value = client
         .post(format!("{base}/api/v1/tasks"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"title": "jwt auth task", "description": "", "priority": "medium", "status": "todo"}))
+        .json(&serde_json::json!({"title": "jwt auth task", "description": "", "priority": "medium", "status": "todo", "task_type": "implementation"}))
         .send()
         .await
         .unwrap()
@@ -234,7 +234,7 @@ async fn token_info_for_jwt_agent_token() {
     let task: serde_json::Value = client
         .post(format!("{base}/api/v1/tasks"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"title": "info task", "description": "", "priority": "low", "status": "todo"}))
+        .json(&serde_json::json!({"title": "info task", "description": "", "priority": "low", "status": "todo", "task_type": "implementation"}))
         .send()
         .await
         .unwrap()
@@ -327,7 +327,7 @@ async fn jwt_revoked_after_agent_complete() {
     let task: serde_json::Value = client
         .post(format!("{base}/api/v1/tasks"))
         .header("Authorization", format!("Bearer {GLOBAL_TOKEN}"))
-        .json(&serde_json::json!({"title": "revoke task", "description": "", "priority": "medium", "status": "todo"}))
+        .json(&serde_json::json!({"title": "revoke task", "description": "", "priority": "medium", "status": "todo", "task_type": "implementation"}))
         .send()
         .await
         .unwrap()

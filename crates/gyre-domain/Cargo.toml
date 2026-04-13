@@ -23,6 +23,9 @@ tree-sitter = { workspace = true }
 tree-sitter-go = "0.23"
 tree-sitter-python = "0.25"
 tree-sitter-typescript = "0.23"
+libc = "0.2"
+cel-interpreter = { workspace = true }
+cel-parser = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

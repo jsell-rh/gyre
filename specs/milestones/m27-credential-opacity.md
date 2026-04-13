@@ -226,7 +226,7 @@ Immediate config change (no code): reduce `GYRE_AGENT_JWT_TTL` default from `360
 
 ---
 
-## Open Questions for CEO Review
+## Open Questions for Review
 
 1. Should the proxy allowlist destination hosts by default (secure) or denylist (flexible)?
 2. Should M27 ship before or concurrently with M26 WireGuard?

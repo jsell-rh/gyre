@@ -46,9 +46,9 @@ Links are declared in the spec's manifest entry:
       reason: "Split into workspace + repo orchestrators"
 
     - type: supersedes
-      target: personas/ceo.md
+      target: personas/workspace-orchestrator.md
       target_sha: def456
-      reason: "Evolved into repo-orchestrator persona"
+      reason: "Evolved into workspace-orchestrator persona"
 
     - type: depends_on
       target: system/source-control.md

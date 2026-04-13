@@ -109,7 +109,7 @@ async fn full_ralph_loop_via_gyre() {
     let task: serde_json::Value = client
         .post(format!("{api}/tasks"))
         .header("Authorization", &auth_hdr)
-        .json(&serde_json::json!({"title": "Implement E2E feature for Ralph loop"}))
+        .json(&serde_json::json!({"title": "Implement E2E feature for Ralph loop", "task_type": "implementation"}))
         .send()
         .await
         .unwrap()

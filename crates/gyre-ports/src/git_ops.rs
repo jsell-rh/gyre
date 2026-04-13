@@ -60,4 +60,44 @@ pub trait GitOpsPort: Send + Sync {
     /// Fetch all refs for a mirror repository.
     /// Equivalent to `git fetch --all` in the mirror repo directory.
     async fn fetch_mirror(&self, path: &str) -> Result<()>;
+
+    /// Check if a branch exists in the repository.
+    async fn branch_exists(&self, repo_path: &str, branch_name: &str) -> Result<bool>;
+
+    /// Create a new branch from `from_ref` (a branch name, tag, or commit SHA).
+    async fn create_branch(&self, repo_path: &str, branch_name: &str, from_ref: &str)
+        -> Result<()>;
+
+    /// Write (or overwrite) a file at `file_path` on `branch`, creating a commit
+    /// with the given `message`. Returns the new commit SHA.
+    ///
+    /// Works on bare repositories: builds a new tree from the branch tip,
+    /// inserts/replaces the blob at `file_path`, and commits to `refs/heads/<branch>`.
+    async fn write_file(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        file_path: &str,
+        content: &[u8],
+        message: &str,
+    ) -> Result<String>;
+
+    /// Force-reset a branch to point at a specific commit SHA.
+    ///
+    /// Used for atomic group rollback: when a group member fails to merge,
+    /// the target branch is reset to the pre-group HEAD to undo already-merged
+    /// members.
+    async fn reset_branch(&self, repo_path: &str, branch: &str, target_sha: &str) -> Result<()>;
+
+    /// Read a file's content from the tip of a branch.
+    ///
+    /// Returns `Ok(None)` if the file does not exist at the given path on the
+    /// branch. Returns `Ok(Some(bytes))` with the blob content if found.
+    /// Works on bare repositories.
+    async fn read_file(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        file_path: &str,
+    ) -> Result<Option<Vec<u8>>>;
 }

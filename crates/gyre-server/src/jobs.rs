@@ -302,14 +302,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 interval_secs: 86400,
                 enabled: true,
             },
-            |_state| async move {
-                // Stub: real impl queries open MRs where source_branch starts with
-                // "spec-edit/" and updated_at < now - 604800 (7 days in seconds),
-                // then creates priority-9 notifications for workspace Admin/Developer
-                // members per the HSI §8 Inbox priority table.
-                tracing::debug!("abandoned_branch_check: stub, no-op");
-                Ok(())
-            },
+            |state| async move { crate::abandoned_branch::run_once(&state).await },
         )
         .await;
 
@@ -324,13 +317,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 interval_secs: 86400,
                 enabled: true,
             },
-            |_state| async move {
-                // Stub: real impl iterates spec_links_store entries where target_display
-                // starts with '@', re-resolves workspace slug → repo UUID, and updates
-                // target_repo_id + status ("unresolved" if slug no longer found).
-                tracing::debug!("cross_workspace_link_staleness_check: stub, no-op");
-                Ok(())
-            },
+            |state| async move { crate::spec_link_staleness::run_once(&state).await },
         )
         .await;
 
@@ -347,6 +334,21 @@ pub async fn start_job_registry(state: Arc<AppState>) {
                 enabled: true,
             },
             |state| async move { crate::trust_suggestion::run_once(&state).await },
+        )
+        .await;
+
+    // Register dep_staleness_check job (runs daily, dependency-graph.md §Version Drift)
+    registry
+        .register(
+            JobDefinition {
+                name: "dep_staleness_check".to_string(),
+                description:
+                    "Scans dependency edges for version drift and time-based staleness (TASK-021)"
+                        .to_string(),
+                interval_secs: 86400,
+                enabled: true,
+            },
+            |state| async move { crate::dep_staleness::run_once(&state).await },
         )
         .await;
 

@@ -5,6 +5,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use gyre_common::attestation::GateAttestation;
 use gyre_common::Id;
 use gyre_domain::{GateResult, GateStatus, GateType, Review, ReviewDecision};
 
@@ -13,6 +14,9 @@ use crate::AppState;
 
 /// Default timeout for agent-based gates (5 minutes).
 const AGENT_GATE_TIMEOUT_SECS: u64 = 300;
+
+/// Maximum output length to include in gate attestation hash.
+const GATE_ATTESTATION_OUTPUT_LIMIT: usize = 4096;
 
 /// Create pending GateResult records for all gates belonging to the MR's repo,
 /// then spawn a background task that runs each gate and updates the result.
@@ -140,16 +144,179 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         }
     }
 
-    let _ = state
-        .gate_results
-        .update_status(
-            result_id.as_str(),
-            status,
-            None,
-            Some(finished_at),
-            Some(output),
-        )
-        .await;
+    // Retry up to 3 times with backoff — concurrent gate writers can
+    // contend on the SQLite write lock even with busy_timeout set.
+    let mut last_err = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt))).await;
+        }
+        match state
+            .gate_results
+            .update_status(
+                result_id.as_str(),
+                status.clone(),
+                None,
+                Some(finished_at),
+                Some(output.clone()),
+            )
+            .await
+        {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                warn!(
+                    gate_id = %gate.id,
+                    result_id = %result_id,
+                    attempt,
+                    error = format!("{e:#}"),
+                    "gate result update failed, retrying"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        warn!(
+            gate_id = %gate.id,
+            result_id = %result_id,
+            error = format!("{e:#}"),
+            "failed to persist final gate result status after retries"
+        );
+    }
+
+    // Produce a GateAttestation record (§3.2, §5.1) and store it
+    // alongside the chain attestation for the MR's task.
+    produce_gate_attestation(&state, &gate, &mr_id, &status, &output).await;
+}
+
+/// Produce a signed `GateAttestation` record for a completed gate (§3.2, §5.1).
+///
+/// The gate attestation is signed with the server's Ed25519 key and stored in
+/// the chain attestation repository alongside the MR's task attestation chain.
+/// Gate attestations enable merge-time verification to include gate constraints.
+async fn produce_gate_attestation(
+    state: &Arc<AppState>,
+    gate: &gyre_domain::QualityGate,
+    mr_id: &Id,
+    status: &GateStatus,
+    output: &str,
+) {
+    // Look up the MR to find the task and workspace.
+    let mr = match state.merge_requests.find_by_id(mr_id).await.ok().flatten() {
+        Some(m) => m,
+        None => return,
+    };
+
+    let agent_id = mr
+        .author_agent_id
+        .as_ref()
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+
+    // Resolve the agent's task_id.
+    let task_id = if !agent_id.is_empty() {
+        state
+            .agents
+            .find_by_id(&Id::new(&agent_id))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|a| a.current_task_id.map(|id| id.to_string()))
+    } else {
+        None
+    };
+
+    let Some(task_id) = task_id else {
+        return; // No task — cannot attach gate attestation to chain
+    };
+
+    // Find the existing attestation chain for this task.
+    let attestations = match state.chain_attestations.find_by_task(&task_id).await {
+        Ok(atts) if !atts.is_empty() => atts,
+        _ => return, // No attestation chain — skip gate attestation
+    };
+
+    // Find the leaf attestation (highest chain_depth).
+    let leaf = attestations.iter().max_by_key(|a| a.metadata.chain_depth);
+
+    let Some(leaf) = leaf else {
+        return;
+    };
+
+    // Build the output hash from the gate output text.
+    let output_truncated = if output.len() > GATE_ATTESTATION_OUTPUT_LIMIT {
+        &output[..GATE_ATTESTATION_OUTPUT_LIMIT]
+    } else {
+        output
+    };
+    let output_hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(output_truncated.as_bytes());
+        hasher.finalize().to_vec()
+    };
+
+    // Build the key binding for the gate signer (platform key).
+    let key_binding = gyre_common::KeyBinding {
+        public_key: state.agent_signing_key.public_key_bytes.clone(),
+        user_identity: format!("gate-agent:{}", gate.id),
+        issuer: state.base_url.clone(),
+        trust_anchor_id: "gyre-platform".to_string(),
+        issued_at: now_secs(),
+        expires_at: now_secs() + 3600,
+        user_signature: vec![], // Platform gates don't have user signatures
+        platform_countersign: vec![],
+    };
+
+    // Build the GateAttestation record first, then sign using the shared
+    // signable_bytes() helper to ensure sign/verify message parity (checklist §44).
+    // GateType and GateStatus in gyre_domain are re-exported from gyre_common,
+    // so they are the same type — no conversion needed.
+    let mut gate_attestation = GateAttestation {
+        gate_id: gate.id.to_string(),
+        gate_name: gate.name.clone(),
+        gate_type: gate.gate_type.clone(),
+        status: status.clone(),
+        output_hash,
+        constraint: None, // Gate constraints are attached by review/validation agents
+        signature: vec![], // Populated below after signing
+        key_binding,
+    };
+
+    // Sign the gate attestation content using the shared signable_bytes() helper.
+    let sign_bytes = gate_attestation.signable_bytes();
+    gate_attestation.signature = state.agent_signing_key.sign_bytes(&sign_bytes);
+
+    // Update the leaf attestation with this gate result appended.
+    let mut updated_leaf = leaf.clone();
+    updated_leaf.output.gate_results.push(gate_attestation);
+
+    // Re-save the updated leaf attestation.
+    if let Err(e) = state.chain_attestations.save(&updated_leaf).await {
+        warn!(
+            gate_id = %gate.id,
+            mr_id = %mr_id,
+            error = %e,
+            "failed to persist gate attestation"
+        );
+    } else {
+        // §5.3 location 2: write chain attestation as git note.
+        crate::attestation::write_chain_note_if_committed(state, &updated_leaf).await;
+
+        // §7.7: attestation.created audit event for gate attestation.
+        info!(
+            gate_id = %gate.id,
+            mr_id = %mr_id,
+            task_id = %task_id,
+            category = "Provenance",
+            event = "attestation.created",
+            "attestation.created: gate attestation produced for gate {} (task {})",
+            gate.name, task_id
+        );
+    }
 }
 
 /// Run an AgentReview gate.

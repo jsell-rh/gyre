@@ -269,7 +269,7 @@ One per workspace. Sees all repos. Handles cross-repo concerns. Uses the `worksp
 
 ### Repo Orchestrator
 
-One per repo. Manages the Ralph loop for its repo. Uses the `repo-orchestrator` persona (evolved from the current CEO persona).
+One per repo. Manages the Ralph loop for its repo. Uses the `repo-orchestrator` persona.
 
 **Responsibilities:**
 - Run the Ralph loop: observe, plan, dispatch, monitor, reconcile
@@ -838,7 +838,8 @@ This spec **supersedes or refines** the following:
 - **Admin Panel** (`admin-panel.md`): admin panel gains tenant-level scope, persona management, budget dashboards
 - **Spec Lifecycle** (`spec-lifecycle.md`): cross-repo spec escalation protocol defined here
 - **Manager Agent** (`development/manager-agent.md`): split into workspace orchestrator + repo orchestrator
-- **CEO Persona** (`personas/ceo.md`): evolved into repo-orchestrator persona
+- **Workspace Orchestrator Persona** (`personas/workspace-orchestrator.md`): workspace orchestrator persona
+- **Repo Orchestrator Persona** (`personas/repo-orchestrator.md`): repo orchestrator persona
 
 This spec **depends on:**
 - **Source Control** (`source-control.md`): repos, MRs, merge queue

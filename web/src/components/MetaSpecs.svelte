@@ -19,6 +19,7 @@
   import { getContext, onDestroy } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
+  import { entityName, shortId } from '../lib/entityNames.svelte.js';
   import Badge from '../lib/Badge.svelte';
   import Button from '../lib/Button.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
@@ -31,6 +32,11 @@
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
   const navigate = getContext('navigate');
+
+  // Entity name resolution uses shared singleton cache
+  function resolveEntityName(type, id) {
+    return entityName(type, id);
+  }
 
   // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -999,7 +1005,7 @@
                       <div class="binding-list">
                         {#each blastResult.affected_workspaces as ws}
                           <div class="binding-row">
-                            <span class="mono">{ws.id}</span>
+                            <span class="mono">{ws.name ?? shortId(ws.id)}</span>
                             <Badge value={$t('meta_specs.impact.active')} variant="success" />
                           </div>
                         {/each}
@@ -1015,9 +1021,9 @@
                       <div class="binding-list">
                         {#each blastResult.affected_repos as repo}
                           <div class="binding-row">
-                            <span class="mono">{repo.id}</span>
+                            <span class="mono">{resolveEntityName('repo', repo.id)}</span>
                             <Badge value={repo.reason} variant="muted" />
-                            <span class="mono text-muted">{repo.workspace_id}</span>
+                            <span class="mono text-muted">{resolveEntityName('workspace', repo.workspace_id)}</span>
                           </div>
                         {/each}
                       </div>
@@ -1040,7 +1046,7 @@
                             data-testid="arch-nav-link"
                             aria-label={$t('meta_specs.impact.view_repo_arch_aria', { values: { repoId: repo.id } })}
                           >
-                            <span class="mono">{repo.id}</span>
+                            <span class="mono">{resolveEntityName('repo', repo.id)}</span>
                             <span class="arch-nav-hint">{$t('meta_specs.impact.architecture_link_hint')}</span>
                           </a>
                         {/each}

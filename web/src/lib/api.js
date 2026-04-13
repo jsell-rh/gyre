@@ -16,7 +16,11 @@ export function safeHref(url) {
 }
 
 function getAuthToken() {
-  return localStorage.getItem(AUTH_TOKEN_KEY) || 'gyre-dev-token';
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token && typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+    console.warn('[api] No auth token in localStorage and not on localhost — API calls may fail');
+  }
+  return token || 'gyre-dev-token';
 }
 
 export function setAuthToken(token) {
@@ -73,16 +77,18 @@ export const api = {
   repo: (id) => request(`/repos/${id}`),
   spawnAgent: (data) =>
     request('/agents/spawn', { method: 'POST', body: JSON.stringify(data) }),
-  tasks: ({ workspaceId, status, assigned_to, parent_task_id } = {}) => {
+  tasks: ({ workspaceId, repoId, status, assigned_to, parent_task_id } = {}) => {
     const p = new URLSearchParams();
     if (status) p.set('status', status);
     if (assigned_to) p.set('assigned_to', assigned_to);
     if (parent_task_id) p.set('parent_task_id', parent_task_id);
     if (workspaceId) p.set('workspace_id', workspaceId);
+    if (repoId) p.set('repo_id', repoId);
     const qs = p.toString();
     return request(`/tasks${qs ? '?' + qs : ''}`);
   },
   task: (id) => request(`/tasks/${id}`),
+  updateTaskStatus: (id, status) => request(`/tasks/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
   repos: ({ workspaceId } = {}) => {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
     return request(`/repos${qs}`);
@@ -98,8 +104,15 @@ export const api = {
   mergeRequest: (id) => request(`/merge-requests/${id}`),
   mrReviews: (id) => request(`/merge-requests/${id}/reviews`),
   mrComments: (id) => request(`/merge-requests/${id}/comments`),
+  submitComment: (mrId, data) =>
+    request(`/merge-requests/${mrId}/comments`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   mrDiff: (id) => request(`/merge-requests/${id}/diff`),
   mrGates: (id) => request(`/merge-requests/${id}/gates`),
+  mrAttestation: (id) => request(`/merge-requests/${id}/attestation`),
+  mrTimeline: (id) => request(`/merge-requests/${id}/timeline`),
   submitReview: (mrId, data) =>
     request(`/merge-requests/${mrId}/reviews`, {
       method: 'POST',
@@ -143,6 +156,8 @@ export const api = {
   // Hot files & blame
   repoHotFiles: (id, limit = 20) => request(`/repos/${id}/hot-files?limit=${limit}`),
   repoBlame: (id, path) => request(`/repos/${id}/blame?path=${encodeURIComponent(path)}`),
+  // Review routing
+  repoReviewRouting: (id, path) => request(`/repos/${id}/review-routing${path ? '?path=' + encodeURIComponent(path) : ''}`),
   // Speculative merges
   repoSpeculative: (id) => request(`/repos/${id}/speculative`),
   // Agent commits
@@ -234,8 +249,24 @@ export const api = {
   // Agent logs
   agentLogs: (id, limit = 100, offset = 0) =>
     request(`/agents/${id}/logs?limit=${limit}&offset=${offset}`),
+  // Agent log SSE stream URL (for live tailing active agents)
+  agentLogStreamUrl: (id) =>
+    `${API_BASE}/agents/${id}/logs/stream`,
   appendAgentLog: (id, message) =>
     request(`/agents/${id}/logs`, { method: 'POST', body: JSON.stringify({ message }) }),
+  // Agent messages (distinct from logs — typed messages: TaskAssignment, ReviewRequest, etc.)
+  agentMessages: (id) => request(`/agents/${id}/messages`),
+  // Send message via workspace message bus (POST /workspaces/:wsId/messages)
+  // Server expects: { to: { agent: "<id>" }, kind: "FreeText", payload: {...} }
+  sendAgentMessage: (workspaceId, agentId, data) =>
+    request(`/workspaces/${workspaceId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({
+        to: { agent: agentId },
+        kind: data.kind ?? 'FreeText',
+        payload: data.payload ?? { content: data.content },
+      }),
+    }),
   // MR dependencies
   mrDependencies: (id) => request(`/merge-requests/${id}/dependencies`),
   setMrDependencies: (id, data) =>
@@ -295,6 +326,10 @@ export const api = {
   agentSpawnLog: (id) => request(`/agents/${id}/logs?limit=50&offset=0`),
   // Container audit record (M19.3) — 404 if agent was not container-spawned
   agentContainer: (id) => request(`/agents/${id}/container`),
+  // Agent workload attestation (G10) — pid, hostname, compute_target, stack_hash, alive
+  agentWorkload: (id) => request(`/agents/${id}/workload`),
+  // Agent touched paths (M13.4) — all branches and files written by this agent
+  agentTouchedPaths: (id) => request(`/agents/${id}/touched-paths`),
   // BCP (M23)
   bcpTargets: () => request('/admin/bcp/targets'),
   bcpDrill: () => request('/admin/bcp/drill', { method: 'POST' }),
@@ -330,13 +365,22 @@ export const api = {
   // Spec registry (M21.1)
   getSpecs: () => request('/specs'),
   getSpec: (path) => request(`/specs/${encodeURIComponent(path)}`),
-  approveSpec: (path, sha) =>
+  approveSpec: (path, sha, { output_constraints, scope } = {}) =>
     request(`/specs/${encodeURIComponent(path)}/approve`, {
       method: 'POST',
-      body: JSON.stringify({ sha }),
+      body: JSON.stringify({
+        sha,
+        ...(output_constraints?.length ? { output_constraints } : {}),
+        ...(scope ? { scope } : {}),
+      }),
     }),
   revokeSpec: (path, reason) =>
     request(`/specs/${encodeURIComponent(path)}/revoke`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  rejectSpec: (path, reason) =>
+    request(`/specs/${encodeURIComponent(path)}/reject`, {
       method: 'POST',
       body: JSON.stringify({ reason }),
     }),
@@ -344,6 +388,15 @@ export const api = {
   getSpecProgress: (path) => request(`/specs/${encodeURIComponent(path)}/progress`),
   getPendingSpecs: () => request('/specs/pending'),
   getDriftedSpecs: () => request('/specs/drifted'),
+  // Constraint syntax validation (authorization-provenance.md §7.6)
+  validateConstraints: (data) =>
+    request('/constraints/validate', { method: 'POST', body: JSON.stringify(data) }),
+  // Constraint dry-run evaluation against repo state (authorization-provenance.md §7.6)
+  dryRunConstraints: (data) =>
+    request('/constraints/dry-run', { method: 'POST', body: JSON.stringify(data) }),
+  // Strategy-implied constraints preview (authorization-provenance.md §7.6)
+  getStrategyConstraints: (queryString) =>
+    request(`/constraints/strategy${queryString ? '?' + queryString : ''}`),
   // Search (M22.7)
   search: ({ q, entity_type, workspace_id, limit = 20 } = {}) => {
     const params = new URLSearchParams({ q: q || '' });
@@ -440,9 +493,15 @@ export const api = {
     request(`/personas/resolve?slug=${encodeURIComponent(slug)}&scope_kind=${encodeURIComponent(scopeKind)}&scope_id=${encodeURIComponent(scopeId)}`),
   // Dependency graph (M22.5)
   dependencyGraph: () => request('/dependencies/graph'),
+  workspaceDependencyGraph: (wsId) => request(`/workspaces/${wsId}/dependency-graph`),
   repoDependencies: (id) => request(`/repos/${id}/dependencies`),
   repoDependents: (id) => request(`/repos/${id}/dependents`),
   repoBlastRadius: (id) => request(`/repos/${id}/blast-radius`),
+  staleDependencies: (wsId) => request(`/dependencies/stale${wsId ? '?workspace_id=' + encodeURIComponent(wsId) : ''}`),
+  breakingChanges: () => request('/dependencies/breaking'),
+  acknowledgeBreakingChange: (id) =>
+    request(`/dependencies/breaking/${id}/acknowledge`, { method: 'POST' }),
+  workspaceDependencyPolicy: (wsId) => request(`/workspaces/${wsId}/dependency-policy`),
   // User profile (M22.5)
   me: () => request('/users/me'),
   updateMe: (data) =>
@@ -495,6 +554,16 @@ export const api = {
   // Workspace admin (S4.7)
   updateWorkspace: (id, data) =>
     request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Tenant-level ABAC policies
+  policies: () => request('/policies'),
+  createPolicy: (data) =>
+    request('/policies', { method: 'POST', body: JSON.stringify(data) }),
+  deletePolicy: (id) =>
+    request(`/policies/${id}`, { method: 'DELETE' }),
+  policyDecisions: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/policies/decisions${qs ? '?' + qs : ''}`);
+  },
   workspaceAbacPolicies: (id) => request(`/policies?scope=Workspace&scope_id=${id}`),
   createWorkspaceAbacPolicy: (id, data) =>
     request('/policies', { method: 'POST', body: JSON.stringify({ ...data, scope: 'Workspace', scope_id: id }) }),
@@ -502,13 +571,20 @@ export const api = {
     request(`/policies/${policyId}`, { method: 'DELETE' }),
   simulateAbacPolicy: (id, data) =>
     request('/policies/evaluate', { method: 'POST', body: JSON.stringify(data) }),
-  // Explorer saved views (HSI §3)
+  // Explorer saved views — repo-scoped (canonical, via WS or REST)
+  savedViews: (repoId) => request(`/repos/${repoId}/views`),
+  createSavedView: (repoId, data) =>
+    request(`/repos/${repoId}/views`, { method: 'POST', body: JSON.stringify(data) }),
+  updateSavedView: (repoId, viewId, data) =>
+    request(`/repos/${repoId}/views/${viewId}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteSavedView: (repoId, viewId) =>
+    request(`/repos/${repoId}/views/${viewId}`, { method: 'DELETE' }),
+  // Deprecated: workspace-scoped explorer views (legacy KV-based, use savedViews instead)
   explorerViews: (workspaceId) => request(`/workspaces/${workspaceId}/explorer-views`),
   saveExplorerView: (workspaceId, data) =>
     request(`/workspaces/${workspaceId}/explorer-views`, { method: 'POST', body: JSON.stringify(data) }),
   deleteExplorerView: (workspaceId, id) =>
     request(`/workspaces/${workspaceId}/explorer-views/${id}`, { method: 'DELETE' }),
-  // LLM view generation (SSE — returns raw Response, not parsed JSON)
   generateExplorerView: (workspaceId, body) =>
     fetch(`${API_BASE}/workspaces/${workspaceId}/explorer-views/generate`, {
       method: 'POST',
@@ -523,12 +599,24 @@ export const api = {
     request(`/specs${workspaceId ? '?workspace_id=' + encodeURIComponent(workspaceId) : ''}`),
   specContent: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  updateSpec: (path, repoId, content) =>
+    request(`/specs/${encodeURIComponent(path)}${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
   specProgress: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}/progress${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
   specLinks: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}/links${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
   specHistoryRepo: (path, repoId) =>
     request(`/specs/${encodeURIComponent(path)}/history${repoId ? '?repo_id=' + encodeURIComponent(repoId) : ''}`),
+  specDependents: (path) =>
+    request(`/specs/${encodeURIComponent(path)}/dependents`),
+  checkSpecAssertions: (repoId, specPath, content) =>
+    request(`/repos/${repoId}/spec-assertions/check`, {
+      method: 'POST',
+      body: JSON.stringify({ spec_path: specPath, content }),
+    }),
   specsAssist: (repoId, body) =>
     fetch(`${API_BASE}/repos/${repoId}/specs/assist`, {
       method: 'POST',
@@ -556,6 +644,59 @@ export const api = {
   // Presence
   workspacePresence: (workspaceId) =>
     request(`/workspaces/${workspaceId}/presence`),
+  // Release preparation
+  releasePrep: (repoId) =>
+    request('/release/prepare', { method: 'POST', body: JSON.stringify({ repo_id: repoId }) }),
+  // Conversation provenance
+  conversationProvenance: (sha) => request(`/conversations/${sha}`),
+  // Agent discovery
+  agentDiscovery: (capability) => {
+    const qs = capability ? `?capability=${encodeURIComponent(capability)}` : '';
+    return request(`/agents/discover${qs}`);
+  },
+  // ── LLM Configuration (per-workspace overrides) ────────────────────
+  llmConfigList: (workspaceId) =>
+    request(`/workspaces/${workspaceId}/llm/config`),
+  llmConfigGet: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/config/${encodeURIComponent(feature)}`),
+  llmConfigSet: (workspaceId, feature, data) =>
+    request(`/workspaces/${workspaceId}/llm/config/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  llmConfigDelete: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/config/${encodeURIComponent(feature)}`, { method: 'DELETE' }),
+  llmPromptGet: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/prompts/${encodeURIComponent(feature)}`),
+  llmPromptSet: (workspaceId, feature, data) =>
+    request(`/workspaces/${workspaceId}/llm/prompts/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  llmPromptDelete: (workspaceId, feature) =>
+    request(`/workspaces/${workspaceId}/llm/prompts/${encodeURIComponent(feature)}`, { method: 'DELETE' }),
+  // Admin LLM defaults
+  adminLlmConfigGet: (feature) =>
+    request(`/admin/llm/config/${encodeURIComponent(feature)}`),
+  adminLlmConfigSet: (feature, data) =>
+    request(`/admin/llm/config/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  adminLlmPromptGet: (feature) =>
+    request(`/admin/llm/prompts/${encodeURIComponent(feature)}`),
+  adminLlmPromptSet: (feature, data) =>
+    request(`/admin/llm/prompts/${encodeURIComponent(feature)}`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Graph diff (architecture delta between commits/branches)
+  repoGraphDiff: (id, params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/repos/${id}/graph/diff${qs ? '?' + qs : ''}`);
+  },
+  // Workspace-scope concept search
+  workspaceGraphConcept: (wsId, name) =>
+    request(`/workspaces/${wsId}/graph/concept/${encodeURIComponent(name)}`),
+  // API token management
+  createApiToken: (data) =>
+    request('/users/me/tokens', { method: 'POST', body: JSON.stringify(data) }),
+  deleteApiToken: (id) =>
+    request(`/users/me/tokens/${id}`, { method: 'DELETE' }),
+  listApiTokens: () => request('/users/me/tokens'),
+  // Server version
+  serverVersion: () => request('/version'),
+  // Activity feed
+  activityFeed: (limit = 20) =>
+    request(`/activity?limit=${limit}`),
   // Graph predict — LLM-powered structural predictions (TASK-358)
   graphPredict: async (repoId, body) => {
     try {
@@ -570,4 +711,21 @@ export const api = {
       throw e;
     }
   },
+  // Thorough preview: create throwaway branch, run agents, get real impact
+  thoroughPreview: async (repoId, body) => {
+    return await request(`/repos/${repoId}/graph/thorough-preview`, {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    });
+  },
+  // Task status polling
+  taskStatus: async (taskId) => {
+    return await request(`/tasks/${taskId}`);
+  },
+  // View query dry-run — resolves a view query server-side, returns node_metrics etc.
+  graphQueryDryrun: (repoId, query, selectedNodeId) =>
+    request(`/repos/${repoId}/graph/query-dryrun`, {
+      method: 'POST',
+      body: JSON.stringify({ query, selected_node_id: selectedNodeId ?? null }),
+    }),
 };

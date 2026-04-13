@@ -9,14 +9,15 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { toastError } from '../lib/toast.svelte.js';
+  import { shortId } from '../lib/entityNames.svelte.js';
 
   let {
     workspace = null,
     onBack = undefined,
   } = $props();
 
-  const TAB_IDS = ['general', 'trust', 'teams', 'budget', 'compute', 'audit'];
-  let TABS = $derived(TAB_IDS.map(id => ({ id, label: $t(`workspace_settings.tabs.${id}`) })));
+  const TAB_IDS = ['general', 'trust', 'teams', 'budget', 'compute', 'llm', 'audit'];
+  let TABS = $derived(TAB_IDS.map(id => ({ id, label: id === 'llm' ? 'LLM Config' : $t(`workspace_settings.tabs.${id}`) })));
 
   let activeTab = $state('general');
 
@@ -139,6 +140,107 @@
     'agent_spawned', 'agent_stopped', 'policy_evaluated', 'member_added', 'member_removed',
   ];
 
+  // ── LLM Config ────────────────────────────────────────────────────────
+  const LLM_FEATURES = ['briefing-ask', 'spec-assist', 'explorer-generate', 'graph-predict'];
+  let llmConfigs = $state({});
+  let llmPrompts = $state({});
+  let llmLoading = $state(false);
+  let llmError = $state(null);
+  let llmEditFeature = $state(null);
+  let llmEditModel = $state('');
+  let llmEditMaxTokens = $state('');
+  let llmEditPrompt = $state('');
+  let llmSaving = $state(false);
+  let llmSaved = $state(false);
+
+  async function loadLlmConfigs(wsId) {
+    llmLoading = true;
+    llmError = null;
+    try {
+      const [configList, ...prompts] = await Promise.all([
+        api.llmConfigList(wsId).catch(() => []),
+        ...LLM_FEATURES.map(f => api.llmPromptGet(wsId, f).catch(() => null)),
+      ]);
+      const cfgMap = {};
+      if (Array.isArray(configList)) {
+        for (const c of configList) {
+          cfgMap[c.feature ?? c.name ?? 'unknown'] = c;
+        }
+      }
+      // Also try to fetch each feature's config individually
+      for (const f of LLM_FEATURES) {
+        if (!cfgMap[f]) {
+          try {
+            const cfg = await api.llmConfigGet(wsId, f);
+            if (cfg && cfg.model_name) cfgMap[f] = cfg;
+          } catch { /* not configured */ }
+        }
+      }
+      llmConfigs = cfgMap;
+      const promptMap = {};
+      LLM_FEATURES.forEach((f, i) => {
+        if (prompts[i]) promptMap[f] = prompts[i];
+      });
+      llmPrompts = promptMap;
+    } catch (e) {
+      llmError = e?.message ?? 'Failed to load LLM config';
+    } finally {
+      llmLoading = false;
+    }
+  }
+
+  function editLlmFeature(feature) {
+    llmEditFeature = feature;
+    const cfg = llmConfigs[feature];
+    llmEditModel = cfg?.model_name ?? '';
+    llmEditMaxTokens = cfg?.max_tokens ? String(cfg.max_tokens) : '';
+    llmEditPrompt = llmPrompts[feature]?.content ?? '';
+    llmSaved = false;
+  }
+
+  async function saveLlmConfig() {
+    const wsId = workspace?.id;
+    if (!wsId || !llmEditFeature) return;
+    llmSaving = true;
+    llmSaved = false;
+    try {
+      if (llmEditModel.trim()) {
+        const data = { model_name: llmEditModel.trim() };
+        if (llmEditMaxTokens.trim()) data.max_tokens = parseInt(llmEditMaxTokens);
+        await api.llmConfigSet(wsId, llmEditFeature, data);
+      } else {
+        await api.llmConfigDelete(wsId, llmEditFeature).catch(() => {});
+      }
+      if (llmEditPrompt.trim()) {
+        await api.llmPromptSet(wsId, llmEditFeature, { content: llmEditPrompt.trim() });
+      } else {
+        await api.llmPromptDelete(wsId, llmEditFeature).catch(() => {});
+      }
+      llmSaved = true;
+      setTimeout(() => { llmSaved = false; }, 2000);
+      await loadLlmConfigs(wsId);
+    } catch (e) {
+      toastError('Failed to save: ' + (e?.message ?? e));
+    } finally {
+      llmSaving = false;
+    }
+  }
+
+  async function resetLlmFeature(feature) {
+    const wsId = workspace?.id;
+    if (!wsId) return;
+    try {
+      await Promise.all([
+        api.llmConfigDelete(wsId, feature).catch(() => {}),
+        api.llmPromptDelete(wsId, feature).catch(() => {}),
+      ]);
+      await loadLlmConfigs(wsId);
+      if (llmEditFeature === feature) llmEditFeature = null;
+    } catch (e) {
+      toastError('Failed to reset: ' + (e?.message ?? e));
+    }
+  }
+
   // ── Data loading driven by tab ─────────────────────────────────────────
   $effect(() => {
     const wsId = workspace?.id;
@@ -158,6 +260,9 @@
     }
     if (activeTab === 'compute') {
       if (untrack(() => allCompute.length === 0 && !allComputeLoading)) loadAllCompute();
+    }
+    if (activeTab === 'llm') {
+      if (untrack(() => Object.keys(llmConfigs).length === 0 && !llmLoading)) loadLlmConfigs(wsId);
     }
     if (activeTab === 'audit') {
       loadAudit(wsId);
@@ -407,7 +512,7 @@
               >
                 <option value="">{$t('workspace_settings.general.none_tenant_default')}</option>
                 {#each computeTargets as ct}
-                  <option value={ct.id}>{ct.name ?? ct.id}</option>
+                  <option value={ct.id}>{ct.name ?? shortId(ct.id)}</option>
                 {/each}
               </select>
             {/if}
@@ -479,7 +584,7 @@
             <div class="policy-list" data-testid="abac-policy-list">
               {#each abacPolicies as policy}
                 <div class="policy-row">
-                  <span class="policy-name">{policy.name ?? policy.id}</span>
+                  <span class="policy-name">{policy.name ?? shortId(policy.id)}</span>
                   <span class="policy-effect policy-effect-{(policy.effect ?? 'allow').toLowerCase()}">
                     {policy.effect ?? 'allow'}
                   </span>
@@ -490,7 +595,7 @@
                     class="policy-delete-btn"
                     onclick={() => deleteAbacPolicy(policy.id)}
                     disabled={deletingPolicyId === policy.id}
-                    aria-label="{$t('common.delete')} {policy.name ?? policy.id}"
+                    aria-label="{$t('common.delete')} {policy.name ?? shortId(policy.id)}"
                     data-testid="delete-abac-policy-btn"
                   >
                     {deletingPolicyId === policy.id ? '…' : $t('common.delete')}
@@ -699,7 +804,7 @@
             {#each allCompute as ct}
               <div class="compute-card" data-testid="compute-card">
                 <div class="compute-card-header">
-                  <span class="compute-name">{ct.name ?? ct.id}</span>
+                  <span class="compute-name">{ct.name ?? shortId(ct.id)}</span>
                   {#if ct.kind}
                     <span class="compute-kind">{ct.kind}</span>
                   {/if}
@@ -713,6 +818,95 @@
               </div>
             {/each}
           </div>
+        {/if}
+      </div>
+
+    <!-- LLM Config tab -->
+    {:else if activeTab === 'llm'}
+      <div class="settings-section" data-testid="llm-config-tab">
+        <h2 class="section-title">LLM Model Configuration</h2>
+        <p class="section-desc">Override the default LLM model and prompt templates for each feature in this workspace. Leave blank to use tenant defaults.</p>
+
+        {#if llmLoading}
+          <p class="settings-loading">Loading LLM configuration...</p>
+        {:else if llmError}
+          <p class="settings-error">{llmError}</p>
+        {:else}
+          <table class="settings-table">
+            <thead>
+              <tr>
+                <th>Feature</th>
+                <th>Model Override</th>
+                <th>Custom Prompt</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each LLM_FEATURES as feature}
+                {@const cfg = llmConfigs[feature]}
+                {@const prompt = llmPrompts[feature]}
+                <tr class="settings-row">
+                  <td class="cell-feature">
+                    <span class="feature-name">{feature.replace(/-/g, ' ')}</span>
+                    <span class="feature-desc">
+                      {feature === 'briefing-ask' ? 'Workspace Q&A and briefing' :
+                       feature === 'spec-assist' ? 'LLM-assisted spec editing' :
+                       feature === 'explorer-generate' ? 'Auto-generate graph views' :
+                       feature === 'graph-predict' ? 'Structural code predictions' : ''}
+                    </span>
+                  </td>
+                  <td>
+                    {#if cfg?.model_name}
+                      <code class="mono">{cfg.model_name}</code>
+                      {#if cfg.max_tokens}
+                        <span class="meta-hint">max {cfg.max_tokens} tokens</span>
+                      {/if}
+                    {:else}
+                      <span class="meta-hint">default</span>
+                    {/if}
+                  </td>
+                  <td>
+                    {#if prompt?.content}
+                      <span class="prompt-preview" title={prompt.content}>{prompt.content.slice(0, 40)}...</span>
+                    {:else}
+                      <span class="meta-hint">default</span>
+                    {/if}
+                  </td>
+                  <td class="cell-actions">
+                    <button class="action-btn" onclick={() => editLlmFeature(feature)}>Edit</button>
+                    {#if cfg?.model_name || prompt?.content}
+                      <button class="action-btn action-btn-danger" onclick={() => resetLlmFeature(feature)}>Reset</button>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+
+          {#if llmEditFeature}
+            <div class="llm-edit-form">
+              <h3 class="form-heading">Edit: {llmEditFeature.replace(/-/g, ' ')}</h3>
+              <div class="field">
+                <label class="field-label" for="llm-model">Model name</label>
+                <input id="llm-model" class="field-input" bind:value={llmEditModel} placeholder="e.g. claude-sonnet-4-20250514" />
+                <p class="field-hint">Leave empty to use tenant default</p>
+              </div>
+              <div class="field">
+                <label class="field-label" for="llm-tokens">Max tokens</label>
+                <input id="llm-tokens" class="field-input" type="number" bind:value={llmEditMaxTokens} placeholder="e.g. 4096" />
+              </div>
+              <div class="field">
+                <label class="field-label" for="llm-prompt">Custom prompt template</label>
+                <textarea id="llm-prompt" class="field-textarea" rows="5" bind:value={llmEditPrompt} placeholder="Leave empty to use default prompt. Use {{context}} and {{question}} as placeholders."></textarea>
+              </div>
+              <div class="form-actions">
+                <button class="action-btn" onclick={() => { llmEditFeature = null; }}>Cancel</button>
+                <button class="action-btn action-btn-primary" onclick={saveLlmConfig} disabled={llmSaving}>
+                  {llmSaving ? 'Saving...' : llmSaved ? 'Saved!' : 'Save'}
+                </button>
+              </div>
+            </div>
+          {/if}
         {/if}
       </div>
 
@@ -1598,6 +1792,38 @@
     .audit-row { grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
     .budget-stat-row { grid-template-columns: 1fr; }
   }
+
+  /* ── LLM Config ─────────────────────────────────────────────────────── */
+  .cell-feature { display: flex; flex-direction: column; gap: 2px; }
+  .feature-name { font-weight: 600; text-transform: capitalize; }
+  .feature-desc { font-size: var(--text-xs); color: var(--color-text-muted); }
+  .prompt-preview { font-size: var(--text-xs); color: var(--color-text-secondary); font-family: var(--font-mono); }
+  .meta-hint { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; }
+  .cell-actions { display: flex; gap: var(--space-2); white-space: nowrap; }
+  .action-btn {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text);
+    cursor: pointer;
+    font: inherit;
+    font-size: var(--text-xs);
+    padding: var(--space-1) var(--space-3);
+  }
+  .action-btn:hover { background: var(--color-surface-elevated); }
+  .action-btn-primary { background: var(--color-primary); color: white; border-color: var(--color-primary); }
+  .action-btn-primary:hover { opacity: 0.9; }
+  .action-btn-danger { color: var(--color-danger); border-color: var(--color-danger); background: transparent; }
+  .action-btn-danger:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .llm-edit-form {
+    margin-top: var(--space-4);
+    padding: var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    background: var(--color-surface-elevated);
+  }
+  .form-heading { font-size: var(--text-sm); font-weight: 600; margin: 0 0 var(--space-3); text-transform: capitalize; }
+  .form-actions { display: flex; gap: var(--space-2); justify-content: flex-end; margin-top: var(--space-3); }
 
   @media (prefers-reduced-motion: reduce) {
     .settings-tab-btn,

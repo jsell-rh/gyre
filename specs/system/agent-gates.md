@@ -116,7 +116,7 @@ MR enters merge queue
 
 ### Gate Failure Feedback
 
-When a gate fails, the forge must get feedback to the right agent as fast as possible. Speed matters -- a gate failure is a Ralph loop event, not a separate workflow. See [ralph-loop.md](ralph-loop.md) for the canonical loop definition.
+When a gate fails, the forge must get feedback to the right agent as fast as possible. Speed matters -- a gate failure is a Ralph loop event, not a separate workflow. See [agent-runtime.md](agent-runtime.md) §1 for the canonical agent lifecycle definition.
 
 #### Agent Inbox Delivery
 
@@ -160,12 +160,12 @@ description: |
   Fix the issue and re-push to trigger gate re-evaluation.
 ```
 
-The CEO agent picks this up in its next OBSERVE cycle and dispatches a new agent.
+The repo orchestrator picks this up in its next OBSERVE cycle and dispatches a new agent.
 
 #### Escalation
 
 - **Security gate failure:** The Security agent persona is notified in addition to the author. Critical security findings escalate to the Overseer (human).
-- **3+ consecutive failures on the same gate:** The CEO agent is notified directly. This is a signal that the task may need re-scoping or the spec may be ambiguous.
+- **3+ consecutive failures on the same gate:** The repo orchestrator is notified directly. This is a signal that the task may need re-scoping or the spec may be ambiguous.
 - **All gates failed:** The MR is removed from the merge queue. A task is created to reassess the approach.
 
 ---

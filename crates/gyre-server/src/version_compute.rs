@@ -27,8 +27,11 @@ pub struct ParsedCommit {
     pub is_breaking: bool,
 }
 
-/// Parse a single commit subject line into a `ParsedCommit`.
-/// Returns `None` if the message does not match the conventional format.
+/// Parse a conventional commit message into a `ParsedCommit`.
+/// Accepts the full commit message (subject + body). The subject line is
+/// extracted from the first line; `BREAKING CHANGE:` footers are detected
+/// anywhere in the message body. Returns `None` if the message does not
+/// match the conventional format.
 pub fn parse_conventional(sha: &str, message: &str) -> Option<ParsedCommit> {
     let subject = message.lines().next().unwrap_or("").trim();
     let has_breaking_footer = message.contains("BREAKING CHANGE:");
@@ -128,6 +131,28 @@ pub fn compute_next_version(current_tag: Option<&str>, bump: &BumpLevel) -> Stri
     }
 }
 
+/// Compute version drift between a pinned version and the current version.
+///
+/// Returns the number of minor versions the pinned version is behind the current.
+/// If there is a major version difference, each major version counts as 10 minor versions
+/// to ensure it always exceeds reasonable `max_version_drift` thresholds.
+/// Returns `None` if either version string cannot be parsed.
+pub fn compute_version_drift(pinned: &str, current: &str) -> Option<u32> {
+    let (p_major, p_minor, _p_patch) = parse_semver(pinned)?;
+    let (c_major, c_minor, _c_patch) = parse_semver(current)?;
+
+    if c_major > p_major {
+        // Major version drift: each major counts as 10 minor versions.
+        let major_diff = (c_major - p_major) as u32;
+        let minor_in_current = c_minor as u32;
+        Some(major_diff * 10 + minor_in_current)
+    } else if c_major == p_major && c_minor > p_minor {
+        Some((c_minor - p_minor) as u32)
+    } else {
+        Some(0)
+    }
+}
+
 // ── Git helpers ───────────────────────────────────────────────────────────────
 
 /// Find the latest semver git tag in a bare repo (e.g. `v1.2.3`).
@@ -164,10 +189,11 @@ pub async fn commits_since(
         None => to_ref.to_string(),
     };
 
-    // Use %x00 (null) as field separator and %x01 (SOH) as record separator
-    // to safely handle multi-line commit messages.
+    // Use %x00 (null) as field separator between SHA and full message (%B),
+    // and %x01 (SOH) as record separator between commits. Using %B (full
+    // message) ensures BREAKING CHANGE: footers in the body are included.
     let output = tokio::process::Command::new("git")
-        .args(["log", "--pretty=format:%H%x00%s", &range])
+        .args(["log", "--pretty=format:%H%x00%B%x01", &range])
         .current_dir(repo_path)
         .output()
         .await?;
@@ -179,15 +205,19 @@ pub async fn commits_since(
 
     let text = String::from_utf8(output.stdout)?;
     let commits = text
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(2, '\x00');
+        .split('\x01')
+        .filter_map(|record| {
+            let record = record.trim();
+            if record.is_empty() {
+                return None;
+            }
+            let mut parts = record.splitn(2, '\x00');
             let sha = parts.next()?.trim().to_string();
-            let subject = parts.next().unwrap_or("").trim().to_string();
+            let message = parts.next().unwrap_or("").trim().to_string();
             if sha.is_empty() {
                 None
             } else {
-                Some((sha, subject))
+                Some((sha, message))
             }
         })
         .collect();
@@ -447,5 +477,49 @@ mod tests {
         assert!(md.contains("**auth:** add OIDC login"));
         assert!(md.contains("worker-1"));
         assert!(md.contains("TASK-001"));
+    }
+
+    // ── Version drift computation tests (TASK-021) ────────────────────
+
+    #[test]
+    fn drift_same_version() {
+        assert_eq!(compute_version_drift("1.2.3", "1.2.3"), Some(0));
+        assert_eq!(compute_version_drift("v1.2.3", "v1.2.3"), Some(0));
+    }
+
+    #[test]
+    fn drift_minor_versions() {
+        assert_eq!(compute_version_drift("1.2.3", "1.5.0"), Some(3));
+        assert_eq!(compute_version_drift("v1.0.0", "v1.3.0"), Some(3));
+    }
+
+    #[test]
+    fn drift_major_version() {
+        // Major diff: 1 major * 10 + current minor
+        assert_eq!(compute_version_drift("1.2.3", "2.0.0"), Some(10));
+        assert_eq!(compute_version_drift("1.2.3", "2.3.0"), Some(13));
+        assert_eq!(compute_version_drift("1.2.3", "3.0.0"), Some(20));
+    }
+
+    #[test]
+    fn drift_current_behind_pinned() {
+        // Current is not behind pinned — drift should be 0.
+        assert_eq!(compute_version_drift("1.5.0", "1.2.3"), Some(0));
+    }
+
+    #[test]
+    fn drift_unparseable_returns_none() {
+        assert_eq!(compute_version_drift("not-a-version", "1.2.3"), None);
+        assert_eq!(compute_version_drift("1.2.3", "bad"), None);
+    }
+
+    #[test]
+    fn drift_with_v_prefix() {
+        assert_eq!(compute_version_drift("v1.2.0", "v1.5.0"), Some(3));
+    }
+
+    #[test]
+    fn drift_prerelease_stripped() {
+        assert_eq!(compute_version_drift("1.2.3-beta.1", "1.5.0"), Some(3));
     }
 }

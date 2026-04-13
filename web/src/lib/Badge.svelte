@@ -1,13 +1,12 @@
 <script>
-  let { value = '', variant = 'default', role: roleAttr = 'status', 'aria-label': ariaLabel = undefined } = $props();
+  let { value = '', variant = 'default', role: roleAttr = 'status', 'aria-label': ariaLabel = undefined, title = undefined } = $props();
 
   /* Map common status strings to badge variants */
   const STATUS_MAP = {
-    // Agent
+    // Agent (per agent-runtime.md §1: Active, Idle, Failed, Stopped, Dead)
     Active: 'success', active: 'success',
     Idle: 'muted', idle: 'muted',
-    Blocked: 'blocked', blocked: 'blocked',
-    Error: 'danger', error: 'danger',
+    Stopped: 'warning', stopped: 'warning',
     Dead: 'muted', dead: 'muted',
     // Task
     Backlog: 'muted', backlog: 'muted',
@@ -39,7 +38,7 @@
   );
 </script>
 
-<span class="badge badge-{resolvedVariant}" role={roleAttr} aria-label={ariaLabel}>{label}</span>
+<span class="badge badge-{resolvedVariant}" role={roleAttr} aria-label={ariaLabel} {title}>{label}</span>
 
 <style>
   .badge {

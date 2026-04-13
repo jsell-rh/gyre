@@ -6,7 +6,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::Stream;
-use gyre_ports::{LlmPort, LlmPortFactory};
+use gyre_ports::{
+    ConversationContent, ConversationMessage, LlmPort, LlmPortFactory, ToolCallingResponse,
+    ToolDefinition,
+};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -90,6 +93,30 @@ impl LlmPort for MockLlmAdapter {
             .map(|c| Ok(c.iter().collect::<String>()))
             .collect();
         Ok(Box::pin(futures_util::stream::iter(chunks)))
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _system_prompt: &str,
+        messages: &[ConversationMessage],
+        _tools: &[ToolDefinition],
+        _max_tokens: Option<u32>,
+    ) -> Result<ToolCallingResponse> {
+        let user_text = messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .filter_map(|m| match &m.content {
+                ConversationContent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .last()
+            .unwrap_or("");
+        let text = self.resolve_text(user_text);
+        Ok(ToolCallingResponse {
+            text,
+            tool_calls: vec![],
+            stop_reason: "end_turn".to_string(),
+        })
     }
 }
 
