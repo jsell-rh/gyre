@@ -2,15 +2,15 @@
 
 **Spec:** [`system/ui-navigation.md`](../../system/ui-navigation.md)
 **Last audited:** 2026-04-13
-**Coverage:** 18/26
+**Coverage:** 25/26
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
 | 1 | Why a New Navigation Model | 2 | n/a | - | Rationale — no implementation |
 | 2 | Design Principles | 2 | n/a | - | Rationale — no implementation |
-| 3 | 1. Application Shell | 2 | implemented | - | App.svelte: topbar + status bar + no-sidebar layout |
-| 4 | Top Bar (always visible, all modes) | 3 | implemented | - | App.svelte: workspace selector, search, decisions badge, user avatar |
-| 5 | Status Bar (bottom, always visible) | 3 | implemented | - | App.svelte: WebSocket, trust, budget, presence |
+| 3 | 1. Application Shell | 2 | verified | - | App.svelte: topbar + status bar + no-sidebar layout |
+| 4 | Top Bar (always visible, all modes) | 3 | implemented | - | Partial — repo-mode decisions badge shows workspace-wide count, not repo-scoped (backend /count endpoint lacks repo_id filter). All other features present. |
+| 5 | Status Bar (bottom, always visible) | 3 | verified | - | App.svelte: WebSocket status (connected/offline/connecting), trust level, budget % with color-coded bar, PresenceAvatars with real-time WS updates |
 | 6 | 2. Workspace Home | 2 | implemented | - | WorkspaceHome.svelte |
 | 7 | Sections | 3 | implemented | - | Decisions, Repos, Briefing, Specs, Agent Rules sections |
 | 8 | Workspace Settings | 3 | implemented | - | WorkspaceSettings.svelte via gear icon |
