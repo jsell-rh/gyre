@@ -2,14 +2,14 @@
 
 **Spec:** [`system/authorization-provenance.md`](../../system/authorization-provenance.md)
 **Last audited:** 2026-04-13
-**Coverage:** 38/47 (9 n/a)
+**Coverage:** 40/40 (7 n/a, 2 verified, 38 implemented)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
 | 1 | The Problem | 2 | n/a | - | Context/rationale — no implementable requirement. |
 | 2 | Design Approach | 2 | n/a | - | Context/rationale — no implementable requirement. |
-| 3 | 1 Trust Model | 2 | implemented | - | TrustAnchor type (gyre-common/src/attestation.rs), TrustAnchorRepository port (gyre-ports/src/trust_anchor.rs), SQLite adapter (gyre-adapters/src/sqlite/trust_anchor.rs), CRUD endpoints (gyre-server/src/api/trust_anchors.rs). |
-| 4 | 1.1 Trust Anchors | 3 | implemented | - | Full CRUD: POST/GET/PUT/DELETE /api/v1/tenants/:id/trust-anchors. Tenant-scoped. TrustAnchorType enum (User/Agent/Addon). Anchor-level constraints. |
+| 3 | 1 Trust Model | 2 | verified | - | TrustAnchor type (gyre-common/src/attestation.rs:29-42), TrustAnchorRepository port (gyre-ports/src/trust_anchor.rs), SQLite adapter (gyre-adapters/src/sqlite/trust_anchor.rs), CRUD endpoints (gyre-server/src/api/trust_anchors.rs). Routes registered in api/mod.rs, wired into AppState. |
+| 4 | 1.1 Trust Anchors | 3 | verified | - | Full CRUD: POST/GET/PUT/DELETE /api/v1/tenants/:id/trust-anchors. Tenant-scoped with cross-tenant 403. Admin role enforced. TrustAnchorType enum (User/Agent/Addon). Anchor-level constraints. 9 test cases including lifecycle, duplicates, 404, tenant isolation, constraint roundtrip. |
 | 5 | 1.2 Residual Risk | 3 | n/a | - | Design/rationale — threat model, no implementable requirement. |
 | 6 | 2 Signed Input: The Authorization Root | 2 | implemented | - | SignedInput type in gyre-common/src/attestation.rs with InputContent, ScopeConstraint, PersonaRef. |
 | 7 | 2.1 When a Signed Input Is Created | 3 | implemented | - | Produced on spec approval (gyre-server/src/api/specs.rs:652). Tests: approve_spec_creates_signed_input_when_key_binding_exists. |
