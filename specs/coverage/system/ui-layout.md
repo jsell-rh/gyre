@@ -24,7 +24,7 @@
 | 16 | Drill-Down (Entity Detail) | 3 | task-assigned | task-173 | Detail panel slide-in |
 | 17 | Inline Expansion (Inbox/Briefing) | 3 | task-assigned | task-173 | Accordion pattern |
 | 18 | Contextual Chat | 3 | task-assigned | task-173 | Recipient indicator chat |
-| 19 | LLM-Assisted Spec Editing | 3 | not-started | - | Deferred to next cycle |
+| 19 | LLM-Assisted Spec Editing | 3 | task-assigned | task-185 | Inline suggestions with Accept/Edit/Dismiss |
 | 20 | 4. View Specification Grammar | 2 | task-assigned | task-170 | Grammar structure |
 | 21 | Structure | 3 | task-assigned | task-170 | JSON view spec schema |
 | 22 | Data Layer | 3 | task-assigned | task-170 | concept, node_types, depth, etc. |

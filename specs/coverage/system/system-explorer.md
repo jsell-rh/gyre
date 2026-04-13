@@ -2,7 +2,7 @@
 
 **Spec:** [`system/system-explorer.md`](../../system/system-explorer.md)
 **Last audited:** 2026-04-13
-**Coverage:** 0/9
+**Coverage:** 0/9 (all sections task-assigned)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
@@ -16,12 +16,12 @@
 | 8 | Design | 2 | n/a | - | Section header only |
 | 9 | 1. The Navigable Architecture | 3 | task-assigned | task-178 | Canvas, lens, view selector, filter panel |
 | 10 | 2. Moldable Views | 3 | task-assigned | task-179 | Type, Trait, Endpoint, Spec detail views |
-| 11 | 3. Inline Spec Editing with Progressive Preview | 3 | not-started | - | Ghost overlays, predict endpoint — next cycle |
-| 12 | 4. Concept Views | 3 | not-started | - | Cross-cutting views — next cycle |
-| 13 | 5. Flow Traces | 3 | not-started | - | Animated particle flow — next cycle |
-| 14 | 6. Architectural Timeline | 3 | not-started | - | Time scrubber — next cycle |
-| 15 | 7. Risk Map | 3 | not-started | - | Heat map overlay — next cycle |
-| 16 | 8. Conversational Exploration | 3 | not-started | - | AI Q&A from graph — next cycle |
-| 17 | 9. Executable Spec Assertions | 3 | not-started | - | gyre:assert validation — next cycle |
+| 11 | 3. Inline Spec Editing with Progressive Preview | 3 | task-assigned | task-186 | Ghost overlays, predict endpoint |
+| 12 | 4. Concept Views | 3 | task-assigned | task-182 | Cross-cutting views |
+| 13 | 5. Flow Traces | 3 | task-assigned | task-184 | Animated particle flow |
+| 14 | 6. Architectural Timeline | 3 | task-assigned | task-183 | Time scrubber |
+| 15 | 7. Risk Map | 3 | task-assigned | task-181 | Heat map overlay |
+| 16 | 8. Conversational Exploration | 3 | task-assigned | task-187 | AI Q&A from graph |
+| 17 | 9. Executable Spec Assertions | 3 | task-assigned | task-180 | gyre:assert validation |
 | 18 | Invariants | 2 | n/a | - | Constraints — no direct implementation |
 | 19 | Relationship to Existing Specs | 2 | n/a | - | Documentation — no implementation |
