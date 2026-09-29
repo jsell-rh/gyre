@@ -869,6 +869,12 @@ Before marking a task `ready-for-review`, verify:
     - **Cross-references are transitive.** If §X references §Y for additional detail (e.g., "keyboard shortcuts in §1.8"), the elements defined in §Y are also implicit requirements when they relate to the component being built.
     - **Verification procedure:** For every spec section reference in the task file: (1) read the entire referenced section, (2) enumerate every element it defines, (3) verify each element has corresponding code. If an element is out of scope for the current task (e.g., it requires server-side changes not in the task plan), document it as explicitly deferred — do not silently omit it.
 
+135. **Cross-surface parity — sweep frontend mirrors of backend semantic constants:** When a fix changes a backend semantic constant or shared definition that has a parallel frontend implementation (e.g., an edge-type set like `TEST_REACHABILITY_EDGES` mirrored as a `new Set([...])` in a Svelte component), grep the constant's name repo-wide — in `crates/` AND in `web/` — and update EVERY mirror to the new semantics. The most common failure mode: the backend constant is restricted (e.g., to Calls-only per a spec section), the fix commit touches zero `web/` files, and the frontend mirror keeps the old contents while its comment still reads "matches backend TEST_REACHABILITY_EDGES" — a false parity assertion the tests never catch because the production helper is inline and untestable (tests re-implement it with mirrored logic). Specifically:
+    - **The cross-surface sweep is mandatory.** Any commit that changes the contents of a constant with a frontend mirror (or changes semantics the mirror implements) MUST also update the mirror in the same commit. Grep the constant name in `web/src` before committing; a zero-hit grep means either no mirror exists or you have not looked hard enough — check for renamed mirrors (e.g., `FRONTEND_TEST_EDGES`) via comments claiming parity ("matches backend", "match backend", "mirrors backend").
+    - **Never leave a "matches backend X" comment unverified.** A parity comment is an assertion about another file's contents. When you change `X`, re-read the comment's target and confirm it is still true; if the surfaces intentionally diverge, DELETE the parity comment and document the intentional difference at the site (or mark it `// parity:ok — <reason>`).
+    - **Mechanical check:** `scripts/check-cross-surface-parity.sh` compares frontend edge-type Set/array literals (claimed by name or by a parity comment) against the backend Rust constant's actual contents and fails on divergence. Run it after touching any backend constant.
+    - **Cite the spec, not the backend file.** Both surfaces should cite the spec section that defines the semantics (e.g., `view-query-grammar.md` §3 "via Calls"), so a future reader can verify each surface against the source of truth without diffing the other surface.
+
 ## Workflow
 
 1. Read the relevant system specs. These are your source of truth and overarching vision.
@@ -963,6 +969,7 @@ scripts/check-abac-context-parity.sh
 scripts/check-positional-collection-access.sh
 scripts/check-non-atomic-creation.sh
 scripts/check-exhaustive-ui-state.sh
+scripts/check-cross-surface-parity.sh
 ```
 If any script reports violations, fix them before proceeding. **Do not commit with check script violations.** These scripts exist because prior review rounds found flaws that the checklist alone did not prevent — they are the mechanical backstop.
 

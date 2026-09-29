@@ -115,7 +115,7 @@ test `test_reachability_is_calls_only_not_implements_or_routes_to` present, and 
 stale three-edge references remain anywhere in Rust. Re-ran
 `cargo test -p gyre-domain --lib view_query_resolver`: 116 passed, 0 failed.
 
-- [ ] **F3 — F2 fix not applied exhaustively: frontend still resolves §3 computed references over the old three-edge set, with comments now falsely claiming backend parity.**
+- [-] [process-revision-complete] **F3 — F2 fix not applied exhaustively: frontend still resolves §3 computed references over the old three-edge set, with comments now falsely claiming backend parity.**
 
   The F2 fix commit `e828ff39` touched only `crates/gyre-domain/src/view_query_resolver.rs`
   plus the review/task files — no `web/` files (verified: all four task-062 commits

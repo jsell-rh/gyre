@@ -1,0 +1,4 @@
+# Cross-surface parity check exemptions (check-cross-surface-parity.sh)
+# One file path (relative or as-substring) per line; # comments allowed.
+# Only use when a frontend mirror of a backend constant intentionally diverges
+# AND the site documents why (a parity:ok comment with reason).
