@@ -64,6 +64,27 @@ async function ageMs(path, now) {
 
 let lastSnapshot = { workers: [], log: "", error: null, when: 0 };
 
+// True if the loop orchestrator process is alive. loop.sh holds
+// /tmp/gyre-loop.lock (flock) and writes its PID into it; a live PID means
+// the loop is running even when the log is quiet mid-agent-run.
+async function loopAlive() {
+  const lockPath = process.env.GYRE_LOOP_LOCK || "/tmp/gyre-loop.lock";
+  let pid;
+  try {
+    const text = await readFile(lockPath, "utf8");
+    pid = Number(text.split("\n")[0].trim());
+  } catch {
+    return false; // no lock file — loop not started
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM"; // exists but owned by someone else
+  }
+}
+
 async function refreshSnapshot() {
   try {
     const now = Date.now();
@@ -80,10 +101,11 @@ async function refreshSnapshot() {
     const log = await tailFile(LOG_PATH, TAIL_LINES);
     lastSnapshot = {
       workers, log: log ?? "", logAgeMs: await ageMs(LOG_PATH, now),
+      loopAlive: await loopAlive(),
       error: null, when: now,
     };
   } catch (e) {
-    lastSnapshot = { workers: [], log: lastSnapshot.log, logAgeMs: null, error: String(e.message || e), when: Date.now() };
+    lastSnapshot = { workers: [], log: lastSnapshot.log, logAgeMs: null, loopAlive: await loopAlive(), error: String(e.message || e), when: Date.now() };
   }
 }
 
@@ -392,11 +414,16 @@ function render(data) {
     (data.when ? new Date(data.when).toLocaleTimeString() : "\\u2014");
   conn.classList.toggle("down", hasErr);
 
-  var loopStopped = data.logAgeMs != null && data.logAgeMs >= LOOP_QUIET_MS;
-  loopChip.hidden = !loopStopped;
-  if (loopStopped) {
+  var stopped = data.loopAlive === false;
+  loopChip.hidden = !stopped;
+  if (stopped) {
     loopChip.className = "chip warn";
-    loopChip.textContent = "loop appears stopped \\u00b7 quiet " + fmtDuration(data.logAgeMs);
+    loopChip.textContent = "loop stopped";
+  } else if (data.logAgeMs != null && data.logAgeMs >= LOOP_QUIET_MS && data.loopAlive !== false) {
+    // Alive but quiet — usually an agent mid-run. Informational, not an alarm.
+    loopChip.className = "chip";
+    loopChip.hidden = false;
+    loopChip.textContent = "quiet " + fmtDuration(data.logAgeMs) + " \\u00b7 agent mid-run";
   }
 
   var anyContent = data.workers.length > 0 || data.log;

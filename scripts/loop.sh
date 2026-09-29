@@ -30,8 +30,8 @@ LOCK_FILE=/tmp/gyre-loop.lock
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK_FILE"
   flock -n 9 || { echo "ERROR: another loop is already running (lock: $LOCK_FILE). Aborting." >&2; exit 1; }
+  echo $$ >&9   # PID for liveness probes (dashboard); flock ignores content
 else
-  # flock-less fallback: PID lockfile with staleness check
   if [ -f "$LOCK_FILE" ]; then
     lock_pid=$(head -1 "$LOCK_FILE" 2>/dev/null)
     if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
