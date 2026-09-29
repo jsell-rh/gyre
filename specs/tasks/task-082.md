@@ -65,7 +65,7 @@ The current UI has no sidebar (confirmed by auditor: App.svelte:1032 "no sidebar
 - [x] Clicking a sidebar item preserves current scope
 - [x] Sidebar + topbar breadcrumb coexist without layout conflicts
 - [x] Mobile/responsive behavior: sidebar collapses gracefully
-- [x] `npm test` passes in `web/` (task-082 suites AppShell + Sidebar: 92/92; pre-existing canvas/ResizeObserver failures in FlowRenderer/MoldableViewNodeTypeFilter/ExplorerViewAskViewSpec are unrelated and reproduce identically at merge-base `4988865b`)
+- [x] `npm test` passes in `web/` (task-082 suites AppShell + Sidebar: 101/101 — 92 after R5, +1 repo-scope Briefing regression (F5), +9 tenant-scope suite (Post-R8 sweep); pre-existing canvas/ResizeObserver failures in FlowRenderer/MoldableViewNodeTypeFilter/ExplorerViewAskViewSpec are unrelated and reproduce identically at merge-base `4988865b`)
 - [x] No regression in existing navigation flows
 
 ## Agent Instructions

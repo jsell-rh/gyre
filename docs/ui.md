@@ -2,11 +2,15 @@
 
 The Svelte SPA at `GET /*` is served from `web/dist/`. Access at `http://localhost:3000`.
 
-> **Nav rework (PRs #589-#599):** The UI was restructured from a sidebar-driven 6-view model to a **two-mode, no-sidebar** model — Workspace Home (dashboard) and Repo Mode (horizontal tabs). The old sidebar (`/inbox`, `/briefing`, `/explorer`, etc.) is replaced. See `specs/system/ui-navigation.md` for the full spec.
+> **Nav rework (PRs #589-#599):** The UI was restructured from a sidebar-driven 6-view model to a **two-mode** model — Workspace Home (dashboard) and Repo Mode (horizontal tabs). See `specs/system/ui-navigation.md` for that spec. **task-082 later reinstated the permanent 6-item sidebar** (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin) per `specs/system/human-system-interface.md` §1.3 — the sidebar is now always visible alongside the two content modes; the sidebar stays fixed across scopes while the content area adapts.
 
 ---
 
 ## Application Shell
+
+### Sidebar (permanent — task-082, HSI §1.3)
+
+Fixed-width left sidebar, always visible, always these six items in this order: **Inbox, Briefing, Explorer, Specs, Meta-specs, Admin**. The sidebar never changes with scope (tenant/workspace/repo) — the content area adapts instead. The active item is highlighted; clicking an item navigates to that section while preserving the current scope. The footer shows the server version indicator and a collapse toggle (icon-only mode on narrow viewports; `Sidebar.svelte` in `web/src/lib/`). `⌘1`–`⌘6` jump to the six items.
 
 ### Top Bar (always visible)
 
@@ -41,13 +45,14 @@ WebSocket connection indicator, trust level, budget usage progress bar, presence
 - `g` then `5` — open settings (in repo mode)
 - `i` — focus decisions/inbox
 - `b` — open briefing
+- `⌘1`–`⌘6` — jump to the six sidebar items
 - Arrow keys — navigate list items; `Enter` — open selected
 
 ---
 
 ## Mode 1: Workspace Home
 
-The workspace home is a **dashboard** — the landing page after selecting a workspace. No sidebar. Sections are scrollable cards:
+The workspace home is a **dashboard** — the landing page after selecting a workspace. Sections are scrollable cards:
 
 ### Sections
 
@@ -136,6 +141,7 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 
 | Component | Role |
 |---|---|
+| `Sidebar.svelte` | Permanent 6-item navigation sidebar (HSI §1.3, task-082) |
 | `WorkspaceHome.svelte` | Workspace home dashboard — 5 section cards |
 | `RepoMode.svelte` | Repo mode shell — horizontal tab routing |
 | `ExplorerCanvas.svelte` | Architecture graph (d3-force + ELK, 9 node types) |
