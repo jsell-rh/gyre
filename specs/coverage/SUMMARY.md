@@ -34,7 +34,7 @@
 | source-control.md | 13 | 2 | 0 | 1 | 10 | 0 | 90% |
 | spec-lifecycle.md | 13 | 3 | 0 | 1 | 9 | 0 | 90% |
 | spec-links.md | 17 | 3 | 0 | 0 | 14 | 0 | 100% |
-| spec-registry.md | 19 | 1 | 0 | 1 | 17 | 0 | 94% |
+| spec-registry.md | 19 | 1 | 1 | 1 | 10 | 6 | 88% |
 | supply-chain.md | 18 | 4 | 0 | 7 | 7 | 0 | 50% |
 | system-explorer.md | 19 | 10 | 0 | 9 | 0 | 0 | 0% |
 | trusted-foundry-integration.md | 26 | 26 | 0 | 0 | 0 | 0 | 0% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **218** | **0** | **304** | **234** | **46** | **47%** |
+| **TOTAL** | **802** | **218** | **1** | **304** | **227** | **52** | **47%** |
