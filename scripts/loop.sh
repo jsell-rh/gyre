@@ -10,7 +10,8 @@
 # implement -> verify -> process-revision cycle independently. Completed
 # worktrees are merged back to main.
 #
-# Prerequisites: tmux session named "gyre-loop" (or set TMUX_SESSION).
+# Prerequisites: omp CLI on PATH (agent runner). tmux optional — workers
+#   fall back to background processes when tmux is unavailable.
 # Usage: bash scripts/loop.sh
 set -uo pipefail
 
@@ -21,6 +22,17 @@ LOG=/tmp/gyre-loop.log
 WORKTREE_BASE="$REPO_ROOT/worktrees/workers"
 MAX_WORKERS=${GYRE_MAX_WORKERS:-6}
 TMUX_SESSION=${GYRE_TMUX_SESSION:-gyre-loop}
+
+# Agent runner: omp in headless print mode, auto-approved, no session state.
+# Set GYRE_MODEL to override the model (fuzzy match, e.g. "opus").
+OMP=${OMP:-omp}
+run_agent() {
+  if [ -n "${GYRE_MODEL:-}" ]; then
+    "$OMP" -p --no-session --approval-mode yolo --model "$GYRE_MODEL"
+  else
+    "$OMP" -p --no-session --approval-mode yolo
+  fi
+}
 
 log() { echo "[$(date '+%H:%M:%S')] [orchestrator] $*" | tee -a "$LOG"; }
 
@@ -79,8 +91,12 @@ spawn_worker() {
   task_name=$(basename "$task_file" .md)
   local worktree="$WORKTREE_BASE/$task_name"
 
-  # Clean up stale branch if it exists
+  # Clean up stale branch and stale worktree directory if it exists
   git branch -D "worker/$task_name" 2>/dev/null
+  if [ -e "$worktree" ]; then
+    git worktree remove "$worktree" --force 2>/dev/null || rm -rf "$worktree"
+    log "    Removed stale worktree directory for $task_name"
+  fi
 
   # Create worktree
   if ! git worktree add "$worktree" -b "worker/$task_name" HEAD 2>/dev/null; then
@@ -90,12 +106,23 @@ spawn_worker() {
 
   log ">>> Spawning worker: $task_name (worktree: $worktree)"
 
-  if ! tmux new-window -t "$TMUX_SESSION" -n "$task_name" \
-    "bash '$REPO_ROOT/scripts/worker.sh' '$task_file' '$worktree'; echo 'Worker $task_name exited'; sleep 5"; then
-    log "!!! Failed to spawn tmux window for $task_name (session '$TMUX_SESSION' exists?)"
-    git worktree remove "$worktree" --force 2>/dev/null
-    git branch -D "worker/$task_name" 2>/dev/null
-    return 1
+  # Ensure the loop's tmux session exists (new-window needs a running server)
+  if command -v tmux >/dev/null 2>&1; then
+    tmux has-session -t "$TMUX_SESSION" 2>/dev/null || \
+      tmux new-session -d -s "$TMUX_SESSION" "exec sleep infinity"
+  fi
+
+  if command -v tmux >/dev/null 2>&1 && \
+     tmux new-window -t "$TMUX_SESSION" -n "$task_name" \
+       "bash '$REPO_ROOT/scripts/worker.sh' '$task_file' '$worktree'; echo 'Worker $task_name exited'; sleep 5"; then
+    :
+  else
+    # No tmux (or window spawn failed) — run the worker as a background
+    # process. Output goes to the worker's own .worker.log and
+    # /tmp/gyre-loop.log (see worker.sh log()).
+    log "    (tmux unavailable — backgrounding worker)"
+    nohup bash "$REPO_ROOT/scripts/worker.sh" "$task_file" "$worktree" \
+      > "$worktree/.spawn.log" 2>&1 &
   fi
 
   ACTIVE_WORKERS[$task_name]="$worktree"
@@ -172,15 +199,16 @@ for f in "$REPO_ROOT"/specs/tasks/task-*.md; do
   task_name=$(basename "$f" .md)
   log ">>> Pre-flight: verifying $task_name on main"
   {
-    cat specs/prompts/verifier.md
+    cat specs/GOAL.md specs/prompts/verifier.md
     printf '\n---\n\n## Pre-computed Target\n\nYour target task file is: `%s` (%s).\nRead this file first. Do not scan other task files to find work.\n' "$f" "$task_name"
-  } | claude --model opus[1m] --dangerously-skip-permissions 2>/dev/null
+  } | run_agent 2>/dev/null
   log "<<< Pre-flight verifier done for $task_name"
 
   new_status=$(get_progress "$f")
   if [ "$new_status" = "needs-revision" ]; then
     log ">>> Pre-flight: process revision for $task_name"
-    claude --model opus[1m] --dangerously-skip-permissions < specs/prompts/process-revision.md 2>/dev/null
+    cat specs/GOAL.md specs/prompts/process-revision.md | \
+      run_agent 2>/dev/null
     log "<<< Pre-flight process revision done"
   fi
 done
@@ -191,18 +219,42 @@ while true; do
   log "--- Orchestrator cycle $ITERATION (${#ACTIVE_WORKERS[@]} active workers) ---"
 
   # 1. SERIAL: Spec-fidelity auditor (updates coverage matrix on main)
+  #    Skip if no code changes since last audit — avoids burning Opus tokens
+  #    re-confirming identical classifications.
   if [ -d specs/coverage ]; then
-    log ">>> Spec-Fidelity Auditor"
-    claude --model opus[1m] --dangerously-skip-permissions \
-      < specs/prompts/spec-fidelity-auditor.md 2>/dev/null
-    log "<<< Auditor done"
+    last_audit_sha=$(git log -1 --format=%H --grep='audit(coverage)' 2>/dev/null || true)
+    code_changes_since=0
+    if [ -n "$last_audit_sha" ]; then
+      code_changes_since=$(git log "$last_audit_sha"..HEAD --oneline \
+        --invert-grep --grep='audit(coverage)\|^merge:' 2>/dev/null | wc -l)
+    else
+      code_changes_since=1  # no audit yet — run the auditor
+    fi
+
+    if [ "$code_changes_since" -gt 0 ]; then
+      log ">>> Spec-Fidelity Auditor ($code_changes_since code change(s) since last audit)"
+      cat specs/GOAL.md specs/prompts/spec-fidelity-auditor.md | \
+        run_agent 2>/dev/null
+      log "<<< Auditor done"
+    else
+      log "    Auditor skipped — no code changes since last audit"
+    fi
   fi
 
   # 2. SERIAL: Project manager (reads matrix, creates tasks on main)
-  log ">>> Project Manager"
-  claude --model opus[1m] --dangerously-skip-permissions \
-    < specs/prompts/project-manager.md 2>/dev/null
-  log "<<< Project Manager done"
+  #    Skip if no not-started sections remain — nothing to decompose.
+  # Count table rows with "| not-started |" (excludes header summary text)
+  not_started_count=$(grep -c '| not-started |' specs/coverage/system/*.md 2>/dev/null \
+    | awk -F: '{s+=$2} END{print s+0}')
+
+  if [ "$not_started_count" -gt 0 ]; then
+    log ">>> Project Manager ($not_started_count not-started section(s) to decompose)"
+    cat specs/GOAL.md specs/prompts/project-manager.md | \
+      run_agent 2>/dev/null
+    log "<<< Project Manager done"
+  else
+    log "    PM skipped — no not-started coverage sections"
+  fi
 
   # 3. Merge completed workers back to main
   for task_name in "${!ACTIVE_WORKERS[@]}"; do
@@ -236,13 +288,21 @@ while true; do
   if [ "$active" -eq 0 ]; then
     remaining=$(find_eligible_tasks | wc -l)
     if [ "$remaining" -eq 0 ]; then
-      # Check coverage matrix — are we actually done?
-      not_started=$(grep -c 'not-started' specs/coverage/system/*.md 2>/dev/null || echo 0)
-      if [ "$not_started" -eq 0 ]; then
-        log "=== All specs covered, all tasks complete ==="
+      # Check coverage matrix — are we actually done? (specs/GOAL.md)
+      # Done = zero not-started AND zero task-assigned sections AND no
+      # incomplete tasks. Partial-implemented sections stay open — the
+      # auditor re-splits them into tasks.
+      not_started=$(grep -c '| not-started |' specs/coverage/system/*.md 2>/dev/null \
+        | awk -F: '{s+=$2} END{print s+0}')
+      task_assigned=$(grep -c '| task-assigned |' specs/coverage/system/*.md 2>/dev/null \
+        | awk -F: '{s+=$2} END{print s+0}')
+      incomplete_tasks=$(grep -rl 'progress: \(not-started\|in-progress\|ready-for-review\|needs-revision\)' \
+        specs/tasks/ 2>/dev/null | wc -l)
+      if [ "$not_started" -eq 0 ] && [ "$task_assigned" -eq 0 ] && [ "$incomplete_tasks" -eq 0 ]; then
+        log "=== All specs covered, all tasks complete (goal: specs/GOAL.md) ==="
         break
       else
-        log "    $not_started coverage gaps remain — next auditor cycle will surface them"
+        log "    $not_started not-started, $task_assigned task-assigned coverage sections, $incomplete_tasks incomplete tasks remain"
       fi
     fi
   fi
