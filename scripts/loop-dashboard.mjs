@@ -186,6 +186,7 @@ function render(data) {
     const titleEl = el.querySelector(".title");
     const titleText = i.title ? i.title + (i.specRef ? "  ·  " + i.specRef : "") : "";
     if (titleEl.textContent !== titleText) titleEl.textContent = titleText;
+    const phaseEl = el.querySelector(".phase");
     if (phaseEl.textContent !== i.phase) phaseEl.textContent = i.phase;
     const pre = el.querySelector("pre");
     if (pre.textContent !== i.content) pre.textContent = i.content;
