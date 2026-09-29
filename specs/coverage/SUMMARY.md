@@ -19,7 +19,7 @@
 | forge-advantages.md | 10 | 2 | 0 | 0 | 0 | 8 | 100% |
 | hierarchy-enforcement.md | 29 | 11 | 0 | 6 | 3 | 9 | 66% |
 | human-system-interface.md | 55 | 19 | 0 | 18 | 13 | 5 | 50% |
-| identity-security.md | 12 | 2 | 0 | 2 | 8 | 0 | 80% |
+| identity-security.md | 12 | 2 | 0 | 2 | 4 | 4 | 80% |
 | lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | merge-dependencies.md | 20 | 3 | 0 | 1 | 0 | 16 | 94% |
 | message-bus.md | 17 | 3 | 0 | 3 | 1 | 10 | 78% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **218** | **0** | **318** | **124** | **142** | **45%** |
+| **TOTAL** | **802** | **218** | **0** | **318** | **120** | **146** | **45%** |
