@@ -27,14 +27,24 @@ const WORKER_DIR = process.env.GYRE_WORKER_DIR || "worktrees/workers";
 const TAIL_LINES = Number(process.env.GYRE_DASH_TAIL || 120);
 const REFRESH_MS = Number(process.env.GYRE_DASH_REFRESH_MS || 2000);
 
-async function tailFile(path, lines) {
-  try {
-    const content = await readFile(path, "utf8");
-    return content.split("\n").slice(-lines).join("\n").trimEnd();
-  } catch {
-    return null;
-  }
+// Parse `title:` / `spec_ref:` out of a task file's YAML frontmatter.
+function taskMeta(frontmatter) {
+  const out = {};
+  const title = frontmatter.match(/^title:\s*"?(.*?)"?\s*$/m);
+  if (title) out.title = title[1];
+  const ref = frontmatter.match(/^spec_ref:\s*"?(.*?)"?\s*$/m);
+  if (ref) out.specRef = ref[1];
+  return out;
 }
+
+ async function tailFile(path, lines) {
+   try {
+     const content = await readFile(path, "utf8");
+     return content.split("\n").slice(-lines).join("\n").trimEnd();
+   } catch {
+     return null;
+   }
+ }
 
 let lastSnapshot = { workers: [], log: "", error: null, when: 0 };
 
@@ -46,13 +56,25 @@ async function refreshSnapshot() {
         const dir = join(WORKER_DIR, name);
         const agentLog = await tailFile(join(dir, ".agent.log"), TAIL_LINES);
         const workerLog = await tailFile(join(dir, ".worker.log"), 60);
-        return { name, agentLog, workerLog };
+        const { title, specRef } = taskMeta(await readFrontmatter(`specs/tasks/${name}.md`));
+        return { name, title, specRef, agentLog, workerLog };
       })
     );
     const log = await tailFile(LOG_PATH, TAIL_LINES);
     lastSnapshot = { workers, log: log ?? "", error: null, when: Date.now() };
   } catch (e) {
     lastSnapshot = { workers: [], log: lastSnapshot.log, error: String(e.message || e), when: Date.now() };
+  }
+}
+
+// Read just the YAML frontmatter (leading `--- ... ---` block) of a task file.
+async function readFrontmatter(path) {
+  try {
+    const text = await readFile(path, "utf8");
+    const m = text.match(/^---\n([\s\S]*?)\n---/);
+    return m ? m[1] : "";
+  } catch {
+    return "";
   }
 }
 
@@ -93,7 +115,8 @@ const HTML = `<!doctype html>
   }
   .card .bar .name { color: #89b4fa; font-weight: bold; }
   .card .bar .phase { color: #a6e3a1; }
-  .card .bar .dim { color: #6c7086; }
+  .card .bar .title { color: #cdd6f4; font-weight: normal; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .bar .title .spec { color: #6c7086; }
   .card pre {
     flex: 1; margin: 0; padding: 8px 10px; overflow: auto;
     white-space: pre-wrap; word-break: break-all; line-height: 1.35;
@@ -129,8 +152,7 @@ function card(key, name) {
   el.className = "card";
   el.dataset.key = key;
   const bar = document.createElement("div");
-  bar.className = "bar";
-  bar.innerHTML = '<span class="dot"></span><span class="name"></span><span class="phase"></span>';
+  bar.innerHTML = '<span class="dot"></span><span class="name"></span><span class="title"></span><span class="phase"></span>';
   bar.querySelector(".name").textContent = name;
   const pre = document.createElement("pre");
   el.append(bar, pre);
@@ -142,9 +164,10 @@ function render(data) {
   status.textContent = data.error ? "error — retrying"
     : data.workers.length + " worker(s), updated " + new Date().toLocaleTimeString();
   const items = [...data.workers.map((w) => ({
-    key: w.name, name: w.name, content: w.agentLog || "(no agent output yet)", phase: phaseOf(w.workerLog),
+    key: w.name, name: w.name, title: w.title, specRef: w.specRef,
+    content: w.agentLog || "(no agent output yet)", phase: phaseOf(w.workerLog),
     idle: !w.agentLog,
-  })), { key: "log", name: "orchestrator", content: data.log, phase: "", idle: false }];
+  })), { key: "log", name: "orchestrator", title: "", specRef: "", content: data.log, phase: "", idle: false }];
 
   // Rebuild the grid only when the set of cards changes.
   const want = items.map((i) => i.key).join(",");
@@ -160,8 +183,9 @@ function render(data) {
   for (const el of grid.children) {
     const i = items.find((x) => x.key === el.dataset.key);
     if (!i) continue;
-    el.classList.toggle("idle", i.idle);
-    const phaseEl = el.querySelector(".phase");
+    const titleEl = el.querySelector(".title");
+    const titleText = i.title ? i.title + (i.specRef ? "  ·  " + i.specRef : "") : "";
+    if (titleEl.textContent !== titleText) titleEl.textContent = titleText;
     if (phaseEl.textContent !== i.phase) phaseEl.textContent = i.phase;
     const pre = el.querySelector("pre");
     if (pre.textContent !== i.content) pre.textContent = i.content;
