@@ -10,7 +10,7 @@
 | agent-gates.md | 25 | 9 | 0 | 16 | 0 | 0 | 0% |
 | agent-runtime.md | 33 | 1 | 0 | 32 | 0 | 0 | 0% |
 | analytics.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
-| authorization-provenance.md | 47 | 7 | 1 | 0 | 21 | 18 | 97% |
+| authorization-provenance.md | 47 | 7 | 0 | 1 | 21 | 18 | 97% |
 | business-continuity.md | 10 | 4 | 0 | 1 | 5 | 0 | 83% |
 | dependency-graph.md | 19 | 3 | 0 | 4 | 12 | 0 | 75% |
 | design-principles.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **217** | **1** | **299** | **246** | **39** | **48%** |
+| **TOTAL** | **802** | **217** | **0** | **300** | **246** | **39** | **48%** |
