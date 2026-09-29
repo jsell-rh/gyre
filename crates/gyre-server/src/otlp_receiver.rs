@@ -1,24 +1,33 @@
-//! Lightweight OTLP HTTP receiver for gate-time trace capture (HSI §3a).
+//! Lightweight OTLP gRPC receiver for gate-time trace capture (HSI §3a).
 //!
 //! This is NOT a general-purpose observability backend. It is scoped to
 //! gate-time traces only — started per gate run, stopped after test execution.
 //!
-//! Protocol: OTLP HTTP/JSON (Content-Type: application/json) on a configurable port.
-//! The application under test is started with:
-//!   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:<port>
-//!   OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+//! Protocol: OTLP/gRPC (per the OpenTelemetry Protocol specification). The
+//! receiver implements the `TraceService` gRPC service and accepts
+//! `ExportTraceServiceRequest` messages. The application under test is started
+//! with:
+//!   OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:<port>
+//!   OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 //!   OTEL_SERVICE_NAME=<service>
-//!
-//! This avoids gRPC/tonic complexity while remaining OTLP-compliant.
 
 use anyhow::{Context, Result};
-use axum::{body::Bytes, extract::State, http::StatusCode, routing::post, Router};
 use gyre_common::{GateTrace, Id, SpanKind, SpanStatus, TraceSpan};
+use opentelemetry_proto::tonic::collector::trace::v1::{
+    trace_service_server::{TraceService, TraceServiceServer},
+    ExportTraceServiceRequest, ExportTraceServiceResponse,
+};
+use opentelemetry_proto::tonic::common::v1::{any_value::Value as OtlpValue, AnyValue, KeyValue};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::net::SocketAddr;
+use parking_lot::Mutex;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio_stream::wrappers::TcpListenerStream;
+use tonic::transport::Server;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -29,23 +38,26 @@ use crate::AppState;
 /// Configuration for a TraceCapture gate (parsed from gate.command JSON).
 #[derive(Debug, Clone, Deserialize)]
 pub struct TraceCaptureConfig {
-    /// Port to start the OTLP HTTP receiver on.
-    #[serde(default = "default_otlp_port")]
-    pub otlp_port: u16,
+    /// Port to start the OTLP gRPC receiver on. When omitted, the server-level
+    /// `GYRE_OTLP_GRPC_PORT` (default 4317) is used.
+    #[serde(default)]
+    pub otlp_port: Option<u16>,
     /// Test command to run with OTel env vars injected.
     #[serde(default = "default_test_command")]
     pub test_command: String,
     /// Maximum spans per trace (prevents unbounded storage from fuzz tests).
     #[serde(default = "default_max_spans")]
     pub max_spans: usize,
-    /// Whether to capture external dependency spans.
+    /// Whether to capture external dependency spans (requires real network
+    /// access in the app-under-test). Informational — the receiver ingests
+    /// whatever spans it is sent; the app-under-test decides whether to mock
+    /// external deps. Surfaced to the test process via `GYRE_CAPTURE_EXTERNAL`.
     #[serde(default)]
     pub capture_external: bool,
 }
 
-fn default_otlp_port() -> u16 {
-    4318
-}
+/// Default gRPC OTLP port (per OTLP spec).
+pub const DEFAULT_OTLP_GRPC_PORT: u16 = 4317;
 
 fn default_test_command() -> String {
     "cargo test --features integration".to_string()
@@ -58,7 +70,7 @@ fn default_max_spans() -> usize {
 impl Default for TraceCaptureConfig {
     fn default() -> Self {
         Self {
-            otlp_port: default_otlp_port(),
+            otlp_port: None,
             test_command: default_test_command(),
             max_spans: default_max_spans(),
             capture_external: false,
@@ -66,177 +78,96 @@ impl Default for TraceCaptureConfig {
     }
 }
 
-// ── OTLP JSON types (subset needed for span ingestion) ───────────────────────
-
-/// Minimal OTLP JSON ExportTraceServiceRequest structure.
-/// Only the fields we need — extras are ignored by serde.
-#[derive(Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-struct OtlpExportRequest {
-    #[serde(default)]
-    resource_spans: Vec<OtlpResourceSpans>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct OtlpResourceSpans {
-    #[serde(default)]
-    resource: Option<OtlpResource>,
-    #[serde(default)]
-    scope_spans: Vec<OtlpScopeSpans>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct OtlpResource {
-    #[serde(default)]
-    attributes: Vec<OtlpAttribute>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct OtlpScopeSpans {
-    #[serde(default)]
-    spans: Vec<OtlpSpan>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct OtlpSpan {
-    trace_id: Option<String>,
-    span_id: String,
-    parent_span_id: Option<String>,
-    name: String,
-    kind: Option<i32>,
-    start_time_unix_nano: Option<String>,
-    end_time_unix_nano: Option<String>,
-    #[serde(default)]
-    attributes: Vec<OtlpAttribute>,
-    #[serde(default)]
-    status: Option<OtlpStatus>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct OtlpAttribute {
-    key: String,
-    value: Option<OtlpAnyValue>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct OtlpAnyValue {
-    string_value: Option<String>,
-    int_value: Option<serde_json::Value>,
-    bool_value: Option<bool>,
-    double_value: Option<f64>,
-}
-
-impl OtlpAnyValue {
-    fn to_string_repr(&self) -> String {
-        if let Some(s) = &self.string_value {
-            return s.clone();
-        }
-        if let Some(i) = &self.int_value {
-            return i.to_string();
-        }
-        if let Some(b) = self.bool_value {
-            return b.to_string();
-        }
-        if let Some(d) = self.double_value {
-            return d.to_string();
-        }
-        String::new()
-    }
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct OtlpStatus {
-    code: Option<i32>,
-}
-
-// ── Receiver state ────────────────────────────────────────────────────────────
+// ── gRPC receiver service ─────────────────────────────────────────────────────
 
 type SpanAccumulator = Arc<Mutex<Vec<TraceSpan>>>;
 
-/// Axum handler: POST /v1/traces
-async fn ingest_traces(
-    State((accumulator, max_spans)): State<(SpanAccumulator, usize)>,
-    body: Bytes,
-) -> StatusCode {
-    let request: OtlpExportRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("otlp_receiver: failed to parse OTLP JSON: {e}");
-            return StatusCode::BAD_REQUEST;
+/// gRPC `TraceService` implementation that buffers received spans in memory.
+struct TraceCollector {
+    accumulator: SpanAccumulator,
+    max_spans: usize,
+}
+
+#[tonic::async_trait]
+impl TraceService for TraceCollector {
+    async fn export(
+        &self,
+        request: tonic::Request<ExportTraceServiceRequest>,
+    ) -> std::result::Result<tonic::Response<ExportTraceServiceResponse>, tonic::Status> {
+        let req = request.into_inner();
+        {
+            let mut guard = self.accumulator.lock();
+            ingest_request(&req, &mut guard, self.max_spans);
         }
-    };
-
-    let mut guard = accumulator.lock().unwrap();
-    if guard.len() >= max_spans {
-        return StatusCode::OK; // silently drop when over limit
+        Ok(tonic::Response::new(ExportTraceServiceResponse {
+            partial_success: None,
+        }))
     }
+}
 
-    for resource_spans in &request.resource_spans {
-        // Extract service.name from resource attributes.
+/// Extract a string attribute value by key from an OTLP `KeyValue` list.
+fn attr_string(attrs: &[KeyValue], key: &str) -> Option<String> {
+    attrs
+        .iter()
+        .find(|kv| kv.key == key)
+        .and_then(|kv| kv.value.as_ref())
+        .map(anyvalue_to_string)
+}
+
+/// Render an OTLP `AnyValue` as a display string.
+fn anyvalue_to_string(v: &AnyValue) -> String {
+    match &v.value {
+        Some(OtlpValue::StringValue(s)) => s.clone(),
+        Some(OtlpValue::IntValue(i)) => i.to_string(),
+        Some(OtlpValue::BoolValue(b)) => b.to_string(),
+        Some(OtlpValue::DoubleValue(d)) => d.to_string(),
+        Some(OtlpValue::BytesValue(b)) => hex::encode(b),
+        // Array/kvlist values are not used by our span heuristics; skip.
+        _ => String::new(),
+    }
+}
+
+/// Convert all spans in an `ExportTraceServiceRequest` into `TraceSpan`s,
+/// appending to `guard` while respecting `max_spans`.
+fn ingest_request(req: &ExportTraceServiceRequest, guard: &mut Vec<TraceSpan>, max_spans: usize) {
+    for resource_spans in &req.resource_spans {
         let service_name = resource_spans
             .resource
             .as_ref()
-            .map(|r| {
-                r.attributes
-                    .iter()
-                    .find(|a| a.key == "service.name")
-                    .and_then(|a| a.value.as_ref())
-                    .map(|v| v.to_string_repr())
-                    .unwrap_or_default()
-            })
+            .and_then(|r| attr_string(&r.attributes, "service.name"))
             .unwrap_or_default();
 
         for scope_spans in &resource_spans.scope_spans {
             for span in &scope_spans.spans {
                 if guard.len() >= max_spans {
-                    break;
+                    return;
                 }
 
-                let start_us = span
-                    .start_time_unix_nano
-                    .as_deref()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0)
-                    / 1000; // ns → µs
-
-                let end_us = span
-                    .end_time_unix_nano
-                    .as_deref()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0)
-                    / 1000;
-
+                let start_us = span.start_time_unix_nano / 1000; // ns → µs
+                let end_us = span.end_time_unix_nano / 1000;
                 let duration_us = end_us.saturating_sub(start_us);
 
-                // Convert OTLP span kind integer to our enum.
+                // OTLP SpanKind: 1=Internal, 2=Server, 3=Client, 4=Producer, 5=Consumer.
                 let kind = match span.kind {
-                    Some(1) => SpanKind::Internal,
-                    Some(2) => SpanKind::Server,
-                    Some(3) => SpanKind::Client,
-                    Some(4) => SpanKind::Producer,
-                    Some(5) => SpanKind::Consumer,
+                    2 => SpanKind::Server,
+                    3 => SpanKind::Client,
+                    4 => SpanKind::Producer,
+                    5 => SpanKind::Consumer,
                     _ => SpanKind::Internal,
                 };
 
-                // Convert OTLP status code (0=Unset, 1=Ok, 2=Error).
-                let status = match span.status.as_ref().and_then(|s| s.code) {
+                // OTLP StatusCode: 0=Unset, 1=Ok, 2=Error.
+                let status = match span.status.as_ref().map(|s| s.code) {
                     Some(1) => SpanStatus::Ok,
                     Some(2) => SpanStatus::Error,
                     _ => SpanStatus::Unset,
                 };
 
-                // Collect all attributes as string map.
+                // Collect attributes as a string map.
                 let mut attributes: HashMap<String, String> = HashMap::new();
                 for attr in &span.attributes {
                     if let Some(v) = &attr.value {
-                        attributes.insert(attr.key.clone(), v.to_string_repr());
+                        attributes.insert(attr.key.clone(), anyvalue_to_string(v));
                     }
                 }
 
@@ -250,26 +181,27 @@ async fn ingest_traces(
                     .or_else(|| attributes.get("rpc.response.metadata"))
                     .cloned();
 
-                // Use trace_id + span_id for uniqueness (OTLP span_id alone is trace-scoped).
-                // IMPORTANT: apply the same prefix to parent_span_id so parent-child
-                // references remain consistent after uniquification.
-                let tid = span.trace_id.as_deref().unwrap_or("");
-                let unique_span_id = if !tid.is_empty() {
-                    format!("{}-{}", tid, span.span_id)
+                // trace_id/span_id are raw bytes in OTLP/gRPC. Hex-encode and
+                // combine so span_ids are globally unique across traces.
+                let trace_hex = hex::encode(&span.trace_id);
+                let span_hex = hex::encode(&span.span_id);
+                let unique_span_id = if trace_hex.is_empty() {
+                    span_hex
                 } else {
-                    span.span_id.clone()
+                    format!("{trace_hex}-{span_hex}")
                 };
-                let unique_parent_id = span
-                    .parent_span_id
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|pid| {
-                        if !tid.is_empty() {
-                            format!("{}-{}", tid, pid)
-                        } else {
-                            pid.to_string()
-                        }
-                    });
+                // Apply the same prefix to parent_span_id so parent-child
+                // references remain consistent after uniquification.
+                let unique_parent_id = if span.parent_span_id.is_empty() {
+                    None
+                } else {
+                    let parent_hex = hex::encode(&span.parent_span_id);
+                    Some(if trace_hex.is_empty() {
+                        parent_hex
+                    } else {
+                        format!("{trace_hex}-{parent_hex}")
+                    })
+                };
 
                 guard.push(TraceSpan {
                     span_id: unique_span_id,
@@ -288,51 +220,65 @@ async fn ingest_traces(
             }
         }
     }
-
-    StatusCode::OK
 }
 
-// ── Main entry point: run a TraceCapture gate ─────────────────────────────────
+// ── Receiver lifecycle ────────────────────────────────────────────────────────
 
-/// Run the full TraceCapture gate lifecycle:
-/// 1. Start OTLP HTTP receiver on config.otlp_port
-/// 2. Run test_command with OTel env vars
-/// 3. Stop receiver
-/// 4. Return the captured GateTrace (spans not yet graph-linked)
-pub async fn run_trace_capture(
-    config: TraceCaptureConfig,
-    mr_id: Id,
-    gate_run_id: Id,
-    commit_sha: String,
-) -> Result<GateTrace> {
-    let max_spans = config.max_spans;
-    let accumulator: SpanAccumulator = Arc::new(Mutex::new(Vec::new()));
-
-    // Build the receiver Axum app.
-    let app = Router::new()
-        .route("/v1/traces", post(ingest_traces))
-        .with_state((Arc::clone(&accumulator), max_spans));
-
-    let addr = format!("127.0.0.1:{}", config.otlp_port);
+/// Bind and start the OTLP gRPC receiver, returning the bound address, a
+/// shutdown sender, and the server task handle. The socket is bound before
+/// this returns, so the receiver is guaranteed ready before the caller runs
+/// the test command (HSI §3a lifecycle step 1 precedes step 2).
+async fn spawn_receiver(
+    port: u16,
+    accumulator: SpanAccumulator,
+    max_spans: usize,
+) -> Result<(
+    SocketAddr,
+    oneshot::Sender<()>,
+    JoinHandle<std::result::Result<(), tonic::transport::Error>>,
+)> {
+    let addr = format!("127.0.0.1:{port}");
     let listener = TcpListener::bind(&addr)
         .await
-        .with_context(|| format!("bind OTLP receiver on {addr}"))?;
-
+        .with_context(|| format!("bind OTLP gRPC receiver on {addr}"))?;
     let actual_addr = listener.local_addr()?;
 
-    // Shutdown channel.
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let collector = TraceCollector {
+        accumulator,
+        max_spans,
+    };
+    let incoming = TcpListenerStream::new(listener);
 
-    // Start receiver in background.
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async {
+    let handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(TraceServiceServer::new(collector))
+            .serve_with_incoming_shutdown(incoming, async {
                 let _ = shutdown_rx.await;
             })
             .await
     });
 
-    // Run the test command with OTel env vars.
+    Ok((actual_addr, shutdown_tx, handle))
+}
+
+/// Run the full TraceCapture gate lifecycle:
+/// 1. Start OTLP gRPC receiver on `port`
+/// 2. Run `test_command` with OTel env vars
+/// 3. Stop receiver
+/// 4. Return the captured GateTrace (spans not yet graph-linked)
+pub async fn run_trace_capture(
+    config: TraceCaptureConfig,
+    port: u16,
+    mr_id: Id,
+    gate_run_id: Id,
+    commit_sha: String,
+) -> Result<GateTrace> {
+    let accumulator: SpanAccumulator = Arc::new(Mutex::new(Vec::new()));
+    let (actual_addr, shutdown_tx, server) =
+        spawn_receiver(port, Arc::clone(&accumulator), config.max_spans).await?;
+
+    // Run the test command with OTel env vars pointing at our gRPC receiver.
     let otlp_endpoint = format!("http://{actual_addr}");
     let parts: Vec<&str> = config.test_command.split_whitespace().collect();
     let command_output = if parts.is_empty() {
@@ -341,9 +287,17 @@ pub async fn run_trace_capture(
         tokio::process::Command::new(parts[0])
             .args(&parts[1..])
             .env("OTEL_EXPORTER_OTLP_ENDPOINT", &otlp_endpoint)
-            .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
+            .env("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
             .env("OTEL_SERVICE_NAME", "gyre-gate-test")
             .env("OTEL_TRACES_EXPORTER", "otlp")
+            .env(
+                "GYRE_CAPTURE_EXTERNAL",
+                if config.capture_external {
+                    "true"
+                } else {
+                    "false"
+                },
+            )
             .output()
             .await
             .context("run test_command")
@@ -358,15 +312,12 @@ pub async fn run_trace_capture(
     // Collect spans.
     let spans = Arc::try_unwrap(accumulator)
         .unwrap_or_else(|a| {
-            // If Arc still has other references (shouldn't happen post-shutdown),
-            // take a clone of the contents.
-            let guard = a.lock().unwrap();
-            let cloned = guard.clone();
-            drop(guard);
+            // If the Arc still has other references (shouldn't happen after
+            // the server task has been awaited), clone the contents.
+            let cloned = a.lock().clone();
             Mutex::new(cloned)
         })
-        .into_inner()
-        .unwrap_or_default();
+        .into_inner();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -385,12 +336,6 @@ pub async fn run_trace_capture(
 
 // ── Graph node linkage (heuristic post-capture) ───────────────────────────────
 
-/// Resolve span-to-graph-node linkage using heuristics:
-/// - HTTP Server spans → Endpoint nodes (matched by `http.route` attribute)
-/// - Function spans → Function nodes (matched by `code.function` qualified name)
-/// - Database spans → adapter nodes (matched by `db.system` + service_name)
-///
-/// Unresolved spans are stored as-is (graph_node_id remains None).
 /// Resolve span-to-graph-node linkage by querying the knowledge graph directly.
 ///
 /// Loads all graph nodes for the MR's repo once, builds lookup maps, then
@@ -400,7 +345,7 @@ pub async fn run_trace_capture(
 /// - Database spans → Module nodes (matched by `db.system`)
 /// - Unmatched spans → fuzzy match by operation_name against any node name
 ///
-/// Previously this used the search index, but graph nodes are not indexed there.
+/// Unresolved spans are stored as-is (graph_node_id remains None).
 pub async fn resolve_graph_linkage(state: &Arc<AppState>, mut trace: GateTrace) -> GateTrace {
     // Resolve repo_id from the MR.
     let repo_id = match state.merge_requests.find_by_id(&trace.mr_id).await {
@@ -426,7 +371,6 @@ pub async fn resolve_graph_linkage(state: &Arc<AppState>, mut trace: GateTrace) 
 
     // Build lookup maps by different matching strategies.
     use gyre_common::graph::NodeType;
-    use std::collections::HashMap;
 
     // qualified_name (lowercase) → node_id
     let mut by_qualified: HashMap<String, Id> = HashMap::new();
@@ -501,7 +445,7 @@ pub async fn resolve_graph_linkage(state: &Arc<AppState>, mut trace: GateTrace) 
             SpanKind::Database => {
                 // Match DB spans to module/type nodes by db.system or operation name.
                 let db_system = span.attributes.get("db.system").cloned();
-                if let Some(_sys) = db_system {
+                if db_system.is_some() {
                     // Try matching the table name from the operation.
                     let op_lc = span.operation_name.to_lowercase();
                     find_in_types(
@@ -580,13 +524,16 @@ fn find_in_types(
     None
 }
 
-// ── OTlp config from server env vars ─────────────────────────────────────────
+// ── OTLP config from server env vars ─────────────────────────────────────────
 
-/// Server-level OTLP configuration (from env vars, applied when no gate-level config exists).
+/// Server-level OTLP configuration (from env vars, HSI §3a).
 #[derive(Clone, Debug)]
 pub struct OtlpServerConfig {
+    /// Whether the OTLP receiver is enabled at all (GYRE_OTLP_ENABLED).
     pub enabled: bool,
+    /// Default gRPC port used when a gate does not specify `otlp_port`.
     pub grpc_port: u16,
+    /// Safety cap on spans per trace (GYRE_OTLP_MAX_SPANS_PER_TRACE).
     pub max_spans_per_trace: usize,
 }
 
@@ -598,7 +545,7 @@ impl OtlpServerConfig {
         let grpc_port = std::env::var("GYRE_OTLP_GRPC_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(4317);
+            .unwrap_or(DEFAULT_OTLP_GRPC_PORT);
         let max_spans_per_trace = std::env::var("GYRE_OTLP_MAX_SPANS_PER_TRACE")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -616,131 +563,193 @@ impl OtlpServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use tower::ServiceExt;
+    use opentelemetry_proto::tonic::collector::trace::v1::trace_service_client::TraceServiceClient;
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+    use opentelemetry_proto::tonic::trace::v1::{
+        ResourceSpans, ScopeSpans, Span as OtlpSpan, Status as OtlpProtoStatus,
+    };
 
-    fn make_app(max_spans: usize) -> (Router, SpanAccumulator) {
-        let accumulator: SpanAccumulator = Arc::new(Mutex::new(Vec::new()));
-        let app = Router::new()
-            .route("/v1/traces", post(ingest_traces))
-            .with_state((Arc::clone(&accumulator), max_spans));
-        (app, accumulator)
+    fn string_attr(key: &str, value: &str) -> KeyValue {
+        KeyValue {
+            key: key.to_string(),
+            value: Some(AnyValue {
+                value: Some(OtlpValue::StringValue(value.to_string())),
+            }),
+        }
     }
 
-    fn otlp_json(trace_id: &str, span_id: &str, parent_id: Option<&str>, name: &str) -> String {
-        let parent_field = match parent_id {
-            Some(p) => format!(r#","parentSpanId": "{p}""#),
-            None => String::new(),
-        };
-        format!(
-            r#"{{
-                "resourceSpans": [{{
-                    "resource": {{"attributes": [{{"key": "service.name", "value": {{"stringValue": "test-svc"}}}}]}},
-                    "scopeSpans": [{{
-                        "spans": [{{
-                            "traceId": "{trace_id}",
-                            "spanId": "{span_id}"
-                            {parent_field},
-                            "name": "{name}",
-                            "kind": 2,
-                            "startTimeUnixNano": "1000000000000",
-                            "endTimeUnixNano": "1001000000000",
-                            "attributes": [],
-                            "status": {{"code": 1}}
-                        }}]
-                    }}]
-                }}]
-            }}"#
-        )
+    fn make_request(
+        service: &str,
+        spans: Vec<OtlpSpan>,
+    ) -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![string_attr("service.name", service)],
+                    ..Default::default()
+                }),
+                scope_spans: vec![ScopeSpans {
+                    spans,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
     }
 
-    #[tokio::test]
-    async fn ingest_span_basic() {
-        let (app, acc) = make_app(100);
-        let body = otlp_json("trace1", "span1", None, "GET /health");
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/traces")
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+    fn make_span(
+        trace_id: &[u8],
+        span_id: &[u8],
+        parent: Option<&[u8]>,
+        name: &str,
+        kind: i32,
+        start_ns: u64,
+        end_ns: u64,
+        status_code: i32,
+    ) -> OtlpSpan {
+        OtlpSpan {
+            trace_id: trace_id.to_vec(),
+            span_id: span_id.to_vec(),
+            parent_span_id: parent.map(|p| p.to_vec()).unwrap_or_default(),
+            name: name.to_string(),
+            kind,
+            start_time_unix_nano: start_ns,
+            end_time_unix_nano: end_ns,
+            status: Some(OtlpProtoStatus {
+                code: status_code,
+                message: String::new(),
+            }),
+            ..Default::default()
+        }
+    }
 
-        let spans = acc.lock().unwrap();
+    #[test]
+    fn ingest_converts_span_fields() {
+        let req = make_request(
+            "test-svc",
+            vec![make_span(
+                &[0x01, 0x02],
+                &[0xaa, 0xbb],
+                None,
+                "GET /health",
+                2, // Server
+                1_000_000_000_000,
+                1_001_000_000_000,
+                1, // Ok
+            )],
+        );
+        let mut spans = Vec::new();
+        ingest_request(&req, &mut spans, 100);
+
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].span_id, "trace1-span1");
+        assert_eq!(spans[0].span_id, "0102-aabb");
         assert_eq!(spans[0].operation_name, "GET /health");
         assert_eq!(spans[0].service_name, "test-svc");
         assert_eq!(spans[0].kind, SpanKind::Server);
         assert_eq!(spans[0].status, SpanStatus::Ok);
-        assert_eq!(spans[0].start_time, 1_000_000_000); // 1_000_000_000_000 ns / 1000
-        assert_eq!(spans[0].duration_us, 1_000_000); // (1_001_000_000_000 - 1_000_000_000_000) ns / 1000
+        assert_eq!(spans[0].start_time, 1_000_000_000); // ns / 1000
+        assert_eq!(spans[0].duration_us, 1_000_000);
     }
 
-    #[tokio::test]
-    async fn ingest_span_parent_id_prefixed_consistently() {
-        let (app, acc) = make_app(100);
-        let body = otlp_json("trace1", "child-span", Some("parent-span"), "child op");
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/traces")
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let _ = app.oneshot(req).await.unwrap();
+    #[test]
+    fn ingest_prefixes_parent_span_id_consistently() {
+        let req = make_request(
+            "svc",
+            vec![make_span(
+                &[0x01],
+                &[0xcc],
+                Some(&[0xdd]),
+                "child op",
+                1,
+                0,
+                1000,
+                0,
+            )],
+        );
+        let mut spans = Vec::new();
+        ingest_request(&req, &mut spans, 100);
 
-        let spans = acc.lock().unwrap();
-        assert_eq!(spans[0].span_id, "trace1-child-span");
+        assert_eq!(spans[0].span_id, "01-cc");
         assert_eq!(
             spans[0].parent_span_id.as_deref(),
-            Some("trace1-parent-span"),
+            Some("01-dd"),
             "parent_span_id must be prefixed with trace_id to match stored span_id format"
         );
     }
 
-    #[tokio::test]
-    async fn ingest_respects_max_spans() {
-        let (app, acc) = make_app(1);
-        // Send two spans in one request.
-        let body = r#"{
-            "resourceSpans": [{"resource": {"attributes": []}, "scopeSpans": [{"spans": [
-                {"traceId": "t1", "spanId": "s1", "name": "op1", "kind": 1, "startTimeUnixNano": "0", "endTimeUnixNano": "1000", "attributes": [], "status": {}},
-                {"traceId": "t1", "spanId": "s2", "name": "op2", "kind": 1, "startTimeUnixNano": "0", "endTimeUnixNano": "1000", "attributes": [], "status": {}}
-            ]}]}]
-        }"#;
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/traces")
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let _ = app.oneshot(req).await.unwrap();
-
-        let spans = acc.lock().unwrap();
+    #[test]
+    fn ingest_respects_max_spans() {
+        let req = make_request(
+            "svc",
+            vec![
+                make_span(&[0x01], &[0x01], None, "op1", 1, 0, 1000, 0),
+                make_span(&[0x01], &[0x02], None, "op2", 1, 0, 1000, 0),
+            ],
+        );
+        let mut spans = Vec::new();
+        ingest_request(&req, &mut spans, 1);
         assert_eq!(spans.len(), 1, "should cap at max_spans=1");
     }
 
+    #[test]
+    fn ingest_maps_kind_and_status() {
+        let req = make_request(
+            "svc",
+            vec![
+                make_span(&[0x01], &[0x01], None, "internal", 1, 0, 1, 0),
+                make_span(&[0x01], &[0x02], None, "client", 3, 0, 1, 2),
+            ],
+        );
+        let mut spans = Vec::new();
+        ingest_request(&req, &mut spans, 100);
+        assert_eq!(spans[0].kind, SpanKind::Internal);
+        assert_eq!(spans[0].status, SpanStatus::Unset);
+        assert_eq!(spans[1].kind, SpanKind::Client);
+        assert_eq!(spans[1].status, SpanStatus::Error);
+    }
+
+    /// End-to-end gRPC round-trip: start the receiver, send an
+    /// ExportTraceServiceRequest via a real tonic client, verify accumulation.
     #[tokio::test]
-    async fn ingest_bad_json_returns_400() {
-        let (app, _) = make_app(100);
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/traces")
-            .header("content-type", "application/json")
-            .body(Body::from("not json"))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    async fn grpc_receiver_accepts_export() {
+        let accumulator: SpanAccumulator = Arc::new(Mutex::new(Vec::new()));
+        let (addr, shutdown_tx, server) =
+            spawn_receiver(0, Arc::clone(&accumulator), 100).await.unwrap();
+
+        let mut client = TraceServiceClient::connect(format!("http://{addr}"))
+            .await
+            .expect("connect to gRPC receiver");
+        let req = make_request(
+            "payment-api",
+            vec![make_span(
+                &[0x0a],
+                &[0x0b],
+                None,
+                "POST /payments/retry",
+                2,
+                0,
+                300_000_000,
+                1,
+            )],
+        );
+        client.export(req).await.expect("export spans");
+
+        let _ = shutdown_tx.send(());
+        let _ = server.await;
+
+        let spans = accumulator.lock();
+        assert_eq!(spans.len(), 1, "receiver should have accumulated one span");
+        assert_eq!(spans[0].operation_name, "POST /payments/retry");
+        assert_eq!(spans[0].service_name, "payment-api");
+        assert_eq!(spans[0].kind, SpanKind::Server);
     }
 
     #[test]
     fn otlp_server_config_defaults() {
-        // Clear env vars to test defaults (they may not be set in CI).
         let cfg = OtlpServerConfig {
             enabled: true,
-            grpc_port: 4317,
+            grpc_port: DEFAULT_OTLP_GRPC_PORT,
             max_spans_per_trace: 10_000,
         };
         assert!(cfg.enabled);

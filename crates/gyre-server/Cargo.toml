@@ -52,6 +52,7 @@ tempfile = "3"
 tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
 opentelemetry-proto = { version = "0.27", default-features = false, features = ["gen-tonic", "trace"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+parking_lot = "0.12"
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

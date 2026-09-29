@@ -705,7 +705,7 @@ async fn run_trace_capture_gate(
     gate_run_id: &Id,
 ) -> (GateStatus, String) {
     // Parse config from gate.command field (JSON).
-    // Server-level OTLP config (env vars) provides the max_spans ceiling.
+    // Server-level OTLP config (env vars) provides defaults and the max_spans ceiling.
     let mut config = gate
         .command
         .as_deref()
@@ -714,12 +714,25 @@ async fn run_trace_capture_gate(
     // Enforce the server-level max_spans cap so operators can bound memory usage.
     config.max_spans = config.max_spans.min(state.otlp_config.max_spans_per_trace);
 
+    // Honor the server-level GYRE_OTLP_ENABLED switch (HSI §3a). When the OTLP
+    // receiver is disabled, the gate still passes (observational) but captures nothing.
+    if !state.otlp_config.enabled {
+        info!(gate_id = %gate.id, mr_id = %mr_id, "trace_capture gate: OTLP receiver disabled (GYRE_OTLP_ENABLED=false), skipping capture");
+        return (
+            GateStatus::Passed,
+            "trace_capture gate: OTLP receiver disabled — capture skipped".to_string(),
+        );
+    }
+
+    // Resolve the receiver port: gate-level override, else server-level default.
+    let port = config.otlp_port.unwrap_or(state.otlp_config.grpc_port);
+
     info!(
         gate_id = %gate.id,
         mr_id = %mr_id,
-        otlp_port = config.otlp_port,
+        otlp_port = port,
         test_command = %config.test_command,
-        "trace_capture gate: starting OTLP receiver"
+        "trace_capture gate: starting OTLP gRPC receiver"
     );
 
     // Look up commit SHA from MR (best effort).
@@ -735,6 +748,7 @@ async fn run_trace_capture_gate(
     // Run the OTLP receiver + test command.
     let capture_result = crate::otlp_receiver::run_trace_capture(
         config,
+        port,
         mr_id.clone(),
         gate_run_id.clone(),
         commit_sha,
