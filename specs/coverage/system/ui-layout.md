@@ -1,14 +1,14 @@
 # Coverage: UI Layout & Interaction Patterns
 
 **Spec:** [`system/ui-layout.md`](../../system/ui-layout.md)
-**Last audited:** 2026-04-13
+**Last audited:** 2026-09-29
 **Coverage:** 0/38
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
-| 1 | 1. Application Shell | 2 | n/a | - | Superseded by ui-navigation.md §1 |
-| 2 | Fixed Structure | 3 | n/a | - | Superseded by ui-navigation.md §1 |
-| 3 | Entrypoint Flow | 3 | n/a | - | Superseded by ui-navigation.md §5 |
+| 1 | 1. Application Shell | 2 | n/a | - | Superseded by ui-navigation.md §1. Re-audited 2026-09-29: supersession confirmed (ui-navigation spec header amends ui-layout §1; shell/§ topbar+status bar implemented and verified under ui-navigation coverage #3-5) |
+| 2 | Fixed Structure | 3 | n/a | - | Superseded by ui-navigation.md §1. Re-audited 2026-09-29: sidebar model replaced by no-sidebar two-mode design |
+| 3 | Entrypoint Flow | 3 | n/a | - | Superseded by ui-navigation.md §5. Re-audited 2026-09-29: entrypoint routing implemented under ui-navigation coverage #17-20 |
 | 4 | 2. Content Area Layouts | 2 | task-assigned | task-170 | ViewSpec types define what layouts are available |
 | 5 | Full-Width | 3 | task-assigned | task-175 | Used by Inbox, Briefing, Specs list |
 | 6 | Split (Main + Detail Panel) | 3 | task-assigned | task-173 | Drill-down interaction pattern |
@@ -47,4 +47,4 @@
 | 39 | Canvas Rendering | 3 | task-assigned | task-177 | SVG, auto-filter thresholds |
 | 40 | Layout Engines | 3 | task-assigned | task-177 | ELK, d3-force, d3-scale |
 | 41 | Interaction Events | 3 | task-assigned | task-177 | ViewEvent interface |
-| 42 | Relationship to Existing Specs | 2 | n/a | - | Documentation — no implementation |
+| 42 | Relationship to Existing Specs | 2 | n/a | - | Documentation — no implementation. Re-audited 2026-09-29: confirms supersession mappings, no implementable requirement |
