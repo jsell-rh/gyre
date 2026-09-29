@@ -54,13 +54,19 @@ while [ $ROUND -lt $MAX_ROUNDS ]; do
 
   case "$status" in
     not-started|needs-revision)
-      # Rebase onto the main repo HEAD to pick up merged work from other workers
+      # Rebase onto the main repo HEAD to pick up merged work from other
+      # workers. --autostash: workers' trees are routinely dirty (build.rs
+      # regenerates web/dist with new content-hash names on every cargo run;
+      # agents write .agent.jsonl/.agent.log), and rebase refuses to start on
+      # a dirty tree. On failure, abort back to the pre-rebase state — never
+      # leave the worktree mid-rebase for the agent to trip over.
       log "--- Rebasing onto main HEAD (round $ROUND)"
       MAIN_ROOT="$(git rev-parse --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
-      if [ -n "$MAIN_ROOT" ] && git fetch "$MAIN_ROOT" HEAD 2>/dev/null && git rebase FETCH_HEAD 2>/dev/null; then
+      if [ -n "$MAIN_ROOT" ] && git fetch "$MAIN_ROOT" HEAD 2>/dev/null && git rebase --autostash FETCH_HEAD 2>/dev/null; then
         :
       else
-        log "!!! Rebase failed (may need manual resolution)"
+        git rebase --abort 2>/dev/null || true
+        log "!!! Rebase failed (real conflict with main — continuing on current base)"
       fi
 
       log ">>> Implementation (round $ROUND, status=$status)"
