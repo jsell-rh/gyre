@@ -36,6 +36,10 @@
   // active sidebar indicator is tracked here rather than derived from `mode` alone
   // (HSI §1.3 — "Active sidebar item is visually highlighted").
   let workspaceActiveSection = $state('inbox');
+  // Same tracking for the cross-workspace dashboard (/all): Inbox/Briefing/Specs
+  // are scroll sections of the cross-workspace page, and the workspace cards
+  // grid is Explorer (HSI §1.3 tenant-scope row, ui-navigation.md §10).
+  let tenantActiveSection = $state('explorer');
 
   // ── Global detail panel ──────────────────────────────────────────────
   let detailPanel = $state({ open: false, entity: null });
@@ -442,10 +446,13 @@
     fadeContent();
     pushState({ mode: 'profile', slug: null, repoName: null, tab: null });
   }
-
   function goToCrossWorkspace() {
     mode = 'cross_workspace';
     crossWorkspaceTab = null;
+    // Default to Explorer per the tenant-scope table: the dashboard's primary
+    // content is the workspace cards grid. Section-specific sidebar clicks
+    // override this after calling goToCrossWorkspace.
+    tenantActiveSection = 'explorer';
     currentRepo = null;
     repoTab = 'specs';
     fadeContent();
@@ -784,7 +791,10 @@
     if (mode === 'cross_workspace') {
       if (crossWorkspaceTab === 'settings') return 'admin';
       if (crossWorkspaceTab === 'agent-rules') return 'meta-specs';
-      return 'explorer'; // Cross-workspace dashboard = workspace cards grid = Explorer at tenant scope
+      // Dashboard (/all): Inbox/Briefing/Specs are scroll sections of the
+      // cross-workspace page; Explorer is the workspace cards grid (HSI §1.3
+      // tenant-scope table, ui-navigation.md §10).
+      return tenantActiveSection;
     }
     if (mode === 'repo') {
       // Map every repo tab (REPO_TABS: specs, tasks, mrs, agents, architecture,
@@ -817,8 +827,36 @@
           return;
         case 'meta-specs': goToAgentRules(); return;
       }
+    } else if (mode === 'cross_workspace') {
+      // At tenant scope (/all and its sub-pages): navigate within the
+      // cross-workspace view — preserve tenant scope (HSI §1.3 tenant-scope
+      // table, ui-navigation.md §10). Never fall through to workspace scope.
+      switch (itemId) {
+        case 'inbox':
+        case 'briefing':
+        case 'specs':
+          // Scroll sections of the cross-workspace dashboard (Inbox = the
+          // Decisions queue across workspaces).
+          goToCrossWorkspace();
+          tenantActiveSection = itemId;
+          tick().then(() => document.querySelector(`[data-testid="section-${itemId === 'inbox' ? 'decisions' : itemId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          return;
+        case 'explorer':
+          // The workspace cards grid is the Explorer content at tenant scope.
+          goToCrossWorkspace();
+          return;
+        case 'meta-specs':
+          // Tenant meta-spec catalog.
+          goToTenantAgentRules();
+          return;
+        case 'admin':
+          // Tenant settings are admin-only (ui-navigation.md §10) — no-op for
+          // non-admins rather than escaping to workspace scope.
+          if (userIsAdmin) goToTenantSettings();
+          return;
+      }
     } else {
-      // At workspace or tenant scope: navigate to the appropriate view
+      // At workspace scope: navigate to the appropriate view
       switch (itemId) {
         case 'inbox':
           goToWorkspaceHome(currentWorkspace);
