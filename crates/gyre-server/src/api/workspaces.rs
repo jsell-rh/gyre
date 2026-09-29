@@ -324,6 +324,10 @@ pub struct PresenceEntryResponse {
     pub session_id: String,
     pub view: String,
     pub last_seen: u64,
+    /// Entity the session is actively editing, e.g. `"spec:specs/system/x.md"`
+    /// (HSI §7). Absent when the session is only navigating a view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub editing_entity: Option<String>,
 }
 
 /// GET /api/v1/workspaces/:workspace_id/presence
@@ -356,6 +360,7 @@ pub async fn get_workspace_presence(
             session_id: session_id.clone(),
             view: entry.view.clone(),
             last_seen: entry.timestamp,
+            editing_entity: entry.editing_entity.clone(),
         })
         .collect();
 

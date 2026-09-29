@@ -52,6 +52,9 @@ pub enum NotificationType {
     DependencyChainTooDeep,
     /// Priority 3 — an atomic group member failed to merge; entire group rolled back.
     AtomicGroupFailure,
+    /// Priority 2 — two humans edited the same spec concurrently and the second
+    /// save was rejected (HSI §7 Conflict Prevention). Created for both editors.
+    SpecConflict,
 }
 
 impl NotificationType {
@@ -77,6 +80,7 @@ impl NotificationType {
             Self::CascadeTestFailed => "CascadeTestFailed",
             Self::DependencyChainTooDeep => "DependencyChainTooDeep",
             Self::AtomicGroupFailure => "AtomicGroupFailure",
+            Self::SpecConflict => "SpecConflict",
         }
     }
 
@@ -102,6 +106,7 @@ impl NotificationType {
             "CascadeTestFailed" => Some(Self::CascadeTestFailed),
             "DependencyChainTooDeep" => Some(Self::DependencyChainTooDeep),
             "AtomicGroupFailure" => Some(Self::AtomicGroupFailure),
+            "SpecConflict" => Some(Self::SpecConflict),
             _ => None,
         }
     }
@@ -128,6 +133,7 @@ impl NotificationType {
             Self::CascadeTestFailed => 3,
             Self::DependencyChainTooDeep => 7,
             Self::AtomicGroupFailure => 3,
+            Self::SpecConflict => 2,
         }
     }
 }
@@ -211,6 +217,7 @@ mod tests {
             4
         );
         assert_eq!(NotificationType::SuggestedSpecLink.default_priority(), 10);
+        assert_eq!(NotificationType::SpecConflict.default_priority(), 2);
     }
 
     #[test]
@@ -235,6 +242,7 @@ mod tests {
             NotificationType::CascadeTestFailed,
             NotificationType::DependencyChainTooDeep,
             NotificationType::AtomicGroupFailure,
+            NotificationType::SpecConflict,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));

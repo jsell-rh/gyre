@@ -185,6 +185,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     workspace_id,
                                     view,
                                     timestamp,
+                                    editing_entity,
                                 } => {
                                     // Only track presence for connections with verified user identity.
                                     // Shared-token (GYRE_AUTH_TOKEN) and agent-token connections have
@@ -228,6 +229,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                     PresenceEntry {
                                                         workspace_id: workspace_id.to_string(),
                                                         view: view.clone(),
+                                                        editing_entity: editing_entity.clone(),
                                                         timestamp,
                                                         server_last_seen: server_now_ms,
                                                         connection_id,
@@ -277,6 +279,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                 workspace_id: workspace_id.clone(),
                                                 view,
                                                 timestamp,
+                                                editing_entity,
                                             };
                                             if let Ok(payload) = serde_json::to_string(&broadcast_msg) {
                                                 let ws_id = &workspace_id;

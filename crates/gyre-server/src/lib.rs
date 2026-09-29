@@ -89,6 +89,9 @@ pub struct PresenceEntry {
     pub workspace_id: String,
     /// Current view name (e.g. "inbox", "explorer", "specs").
     pub view: String,
+    /// Optional entity the session is actively editing, e.g.
+    /// `"spec:specs/system/payments.md"` (HSI §7). `None` when only navigating.
+    pub editing_entity: Option<String>,
     /// Client-supplied epoch milliseconds (informational only — NOT used for eviction).
     pub timestamp: u64,
     /// Server-recorded epoch milliseconds of the last `UserPresence` heartbeat.

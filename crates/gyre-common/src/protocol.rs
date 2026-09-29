@@ -145,6 +145,11 @@ pub enum WsMessage {
         workspace_id: Id,
         view: String,
         timestamp: u64,
+        /// Optional entity the user is actively editing, e.g.
+        /// `"spec:specs/system/payments.md"` (HSI §7 Conflict Prevention).
+        /// Absent when the user is merely navigating a view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        editing_entity: Option<String>,
     },
     /// Sent by the server to a specific tab when it has been evicted from the
     /// presence map (5-session cap or 60-second idle timeout).
@@ -302,11 +307,13 @@ mod tests {
             user_id: Id::new("user-1"),
             session_id: "tab-abc".to_string(),
             workspace_id: Id::new("ws-99"),
-            view: "inbox".to_string(),
+            view: "specs".to_string(),
             timestamp: 1_711_324_800_000,
+            editing_entity: Some("spec:specs/system/payments.md".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"UserPresence\""));
+        assert!(json.contains("\"editing_entity\":\"spec:specs/system/payments.md\""));
         let decoded: WsMessage = serde_json::from_str(&json).unwrap();
         if let WsMessage::UserPresence {
             user_id,
@@ -314,15 +321,43 @@ mod tests {
             workspace_id,
             view,
             timestamp,
+            editing_entity,
         } = decoded
         {
             assert_eq!(user_id, Id::new("user-1"));
             assert_eq!(session_id, "tab-abc");
             assert_eq!(workspace_id, Id::new("ws-99"));
-            assert_eq!(view, "inbox");
+            assert_eq!(view, "specs");
             assert_eq!(timestamp, 1_711_324_800_000);
+            assert_eq!(editing_entity.as_deref(), Some("spec:specs/system/payments.md"));
         } else {
             panic!("expected UserPresence variant");
+        }
+    }
+
+    #[test]
+    fn user_presence_without_editing_entity_omits_field() {
+        use crate::Id;
+        // A presence heartbeat that is not editing anything omits editing_entity
+        // from the wire format (serde skip) and decodes back to None.
+        let msg = WsMessage::UserPresence {
+            user_id: Id::new("user-2"),
+            session_id: "tab-xyz".to_string(),
+            workspace_id: Id::new("ws-1"),
+            view: "inbox".to_string(),
+            timestamp: 42,
+            editing_entity: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("editing_entity"), "None must be skipped: {json}");
+        // A payload with no editing_entity key decodes to None (serde default).
+        let decoded: WsMessage =
+            serde_json::from_str(r#"{"type":"UserPresence","user_id":"u","session_id":"s","workspace_id":"w","view":"inbox","timestamp":1}"#).unwrap();
+        match decoded {
+            WsMessage::UserPresence { editing_entity, .. } => {
+                assert_eq!(editing_entity, None);
+            }
+            _ => panic!("expected UserPresence"),
         }
     }
 

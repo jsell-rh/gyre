@@ -1,7 +1,7 @@
 # Coverage: Human-System Interface
 
 **Spec:** [`system/human-system-interface.md`](../../system/human-system-interface.md)
-**Last audited:** 2026-04-13 (full audit — §4-12 reclassified from not-started)
+**Last audited:** 2026-09-29 (§2 Navigation Model group code-verified: §4/§6/§7/§8 partials confirmed against current App.svelte + middleware.rs + migration 000027 — all real-but-incomplete, remain implemented. Prior: 2026-04-13 full audit — §4-12 reclassified from not-started.)
 **Coverage:** 19/36 (19 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
@@ -13,7 +13,7 @@
 | 5 | What Each Nav Item Shows at Each Scope | 3 | task-assigned | task-083 | No sidebar nav items exist. Content uses modes/tabs/sections instead of spec's 6-item × 3-scope matrix. |
 | 6 | Workspace Attribution on Items | 3 | implemented | - | Partial — workspace name badges exist (CrossWorkspaceHome.svelte:938) but NOT clickable (spec requires link to workspace view; decision badges ARE clickable at :675). Status bar fully implemented (App.svelte:1565-1619: trust, budget, WS status, presence). Presence backend complete (ws.rs:182-295: session_id, 5-cap eviction, PresenceEvicted). Frontend presence sending NOT implemented: no client-side UserPresence messages, no session_id generation, no debounce, no view-change triggers. beforeunload handler exists but doesn't send disconnect message. Consider splitting UI badges vs presence mechanics. |
 | 7 | Deep Links | 3 | implemented | - | Partial — Backend solid: user_workspace_state table (migration 000027), last_seen_at middleware (middleware.rs:104-175, 60s debounce, async upsert), briefing time dropdown (Briefing.svelte:25-56, all 5 options). URL routing partial: routes exist but patterns differ from spec (/workspaces/:slug/r/:repo/... vs spec's /repos/:id/...), missing /inbox and /workspaces/:id/inbox routes, no query param support for explorer filters/lens or specs path. Entrypoint diverges: goes to workspace home, not explorer→inbox flow per spec. |
-| 8 | Keyboard Navigation | 3 | implemented | - | Partial — 4/10 shortcuts match spec: Cmd+K (App.svelte:380), Esc (:388), / (:400), ? (:408). Cmd+1-6 for global nav (Inbox/Briefing/Explorer/Specs/Meta-specs/Admin) NOT implemented. Instead uses g-key sequences (:417-470) for repo tab switching (different purpose). SearchBar.svelte:16-24 defines nav items with numeric icons 1-6 but no keyboard binding. |
+| 8 | Keyboard Navigation | 3 | implemented | - | Partial — 4/10 shortcuts match spec: Cmd+K (App.svelte:581), Esc (:589), / (:604), ? (:612). Cmd+1-6 for global nav (Inbox/Briefing/Explorer/Specs/Meta-specs/Admin) NOT implemented. Instead uses g-key sequences (:620-663) for workspace home/settings/agent-rules + repo tab switching (different purpose). SearchBar.svelte defines nav items with numeric icons 1-6 but no keyboard binding. |
 | 9 | 2. Trust Gradient | 2 | task-assigned | task-077 | |
 | 10 | The Problem | 3 | task-assigned | task-077 | |
 | 11 | Trust Levels | 3 | task-assigned | task-077 | |
