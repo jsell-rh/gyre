@@ -2,7 +2,8 @@
 title: "View Query Grammar — Core Type Definitions & Computed Reference Resolver"
 spec_ref: "view-query-grammar.md §1–3"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
+review: "specs/reviews/task-062.md"
 coverage_sections:
   - "view-query-grammar.md §1 Problem"
   - "view-query-grammar.md §2 Primitives"
