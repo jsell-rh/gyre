@@ -140,8 +140,7 @@ const ALERT_MARKERS = [
   { re: /!!! Unresolvable conflicts in: (.+)/, sev: "danger", label: "merge conflicts" },
   { re: /Merge aborted for (task-\S+)/, sev: "danger", label: "merge aborted" },
   { re: /!!! Failed to create worktree for (task-\S+)/, sev: "danger", label: "worktree spawn failed" },
-  { re: /!!! Max rounds \(\d+\) reached without completion for (task-\S+)/, sev: "danger", label: "task wedged (max rounds)" },
-  { re: /!!! Rebase failed/, sev: "warning", label: "rebase failed" },
+  { re: /!!! Rebase unresolved after resolver agent/, sev: "danger", label: "rebase unresolved — worker aborted to pre-rebase base" },
   { re: /!!! Unknown status: (\S+)/, sev: "warning", label: "unknown status" },
 ];
 
@@ -174,6 +173,8 @@ const EVENT_RES = [
   />>> Project Manager/,
   /Loop exiting/,
   /=== All specs covered/,
+  /Reusing branch (worker\/\S+) \(unmerged commits/,
+  />>> Rebase resolver \(round \d+\) for (task-\S+)|>>> Rebase resolver \(round \d+\)/,
   /Pre-flight: verifying (task-\S+)/,
 ];
 
@@ -575,6 +576,50 @@ const HTML = `<!doctype html>
     font: 12px/1.5 var(--pf-font-mono); color: var(--pf-text);
     white-space: pre-wrap; overflow-wrap: anywhere;
   }
+  #dlg-body.rendered { white-space: normal; overflow-wrap: anywhere; }
+  #dlg-body.rendered pre { white-space: pre-wrap; }
+
+  /* Rendered markdown inside the modal (tasks/reviews/specs are .md files). */
+  .md h1, .md h2, .md h3, .md h4 { margin: var(--sp-4) 0 var(--sp-2); line-height: 1.25; }
+  .md h1 { font-size: 17px; }
+  .md h2 { font-size: 15px; padding-bottom: var(--sp-1); border-bottom: 1px solid var(--pf-border); }
+  .md h3 { font-size: 13.5px; }
+  .md h4 { font-size: 12.5px; color: var(--pf-text-muted); }
+  .md p  { margin: var(--sp-2) 0; }
+  .md ul, .md ol { margin: var(--sp-2) 0; padding-left: var(--sp-5); }
+  .md li { margin: var(--sp-1) 0; }
+  .md code {
+    font: 11px var(--pf-font-mono); background: var(--pf-surface-2);
+    border: 1px solid var(--pf-border); border-radius: 4px; padding: 1px 4px;
+  }
+  .md pre {
+    margin: var(--sp-2) 0; padding: var(--sp-3); overflow-x: auto;
+    background: var(--pf-surface-2); border: 1px solid var(--pf-border);
+    border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .md pre code { border: 0; background: none; padding: 0; font-size: 11px; }
+  .md blockquote {
+    margin: var(--sp-2) 0; padding: var(--sp-1) var(--sp-3);
+    border-left: 3px solid var(--pf-border-strong); color: var(--pf-text-muted);
+  }
+  .md hr { border: 0; border-top: 1px solid var(--pf-border); margin: var(--sp-3) 0; }
+  .md a { color: var(--pf-link); }
+  .md table { border-collapse: collapse; margin: var(--sp-2) 0; font-size: 11.5px; }
+  .md th, .md td { border: 1px solid var(--pf-border); padding: 2px 8px; text-align: left; }
+  .md th { background: var(--pf-surface-2); }
+  .fm {
+    margin: 0 0 var(--sp-3); padding: var(--sp-2) var(--sp-3);
+    background: var(--pf-surface-2); border: 1px dashed var(--pf-border);
+    border-radius: 8px; font: 11px var(--pf-font-mono); color: var(--pf-text-muted);
+  }
+  .fm .fm-k { color: var(--pf-info); }
+
+  .md th { background: var(--pf-surface-2); }
+  .source-toggle {
+    background: var(--pf-surface-2); border: 1px solid var(--pf-border);
+    color: var(--pf-text); border-radius: var(--pf-radius-pill);
+    padding: 2px var(--sp-3); cursor: pointer; font-size: 12px;
+  }
 
   @media (prefers-reduced-motion: reduce) {
     .card.receiving .dot { animation: none; }
@@ -605,8 +650,14 @@ const HTML = `<!doctype html>
 </div>
 <div id="grid"></div>
 <dialog id="filedlg">
-  <div class="dlg-head"><span id="dlg-title"></span><button id="dlg-close">Close</button></div>
-  <pre id="dlg-body"></pre>
+  <div class="dlg-head">
+    <span id="dlg-title"></span>
+    <span style="display:flex; gap:var(--sp-2);">
+      <button class="source-toggle" id="dlg-src" hidden>Source</button>
+      <button id="dlg-close">Close</button>
+    </span>
+  </div>
+  <div id="dlg-body"></div>
 </dialog>
 <script>
 var grid = document.getElementById("grid");
@@ -636,7 +687,7 @@ function phaseOf(w) {
   var lines = (w.workerLog || "").split("\\n").filter(Boolean);
   for (var i = lines.length - 1; i >= 0; i--) {
     var l = lines[i].replace(/^\\[[0-9:]+\\] \\[task-[^\\]]+\\] /, "");
-    var m = l.match(/^>>> (Implementation|Verifier|Process Revision)/);
+    var m = l.match(/^>>> (Implementation|Verifier|Process Revision|Rebase resolver)/);
     if (m) return m[1].toLowerCase();
     if (/^--- Rebasing/.test(l)) return "rebasing";
   }
@@ -752,18 +803,139 @@ function setDangerState(danger, reason) {
   prevDanger = danger;
 }
 
+// --- Minimal markdown renderer (zero deps, dashboard-scope) ----------------
+// Adapted from web/src/lib/markdown.js: headers, bold/italic, code spans and
+// blocks, lists, blockquotes, hr, links (protocol-whitelisted). Content is
+// escaped before inline transforms; only renderer-generated tags survive.
+function mdEscape(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function mdInline(line) {
+  return line
+    .replace(/\\x60([^\\x60]+)\\x60/g, function (_, c) { return '<code class="md-code">' + c + "</code>"; })
+    .replace(/\\*\\*\\*(.+?)\\*\\*\\*/g, "<strong><em>$1</em></strong>")
+    .replace(/\\*\\*(.+?)\\*\\*/g, "<strong>$1</strong>")
+    .replace(/\\*(.+?)\\*/g, "<em>$1</em>")
+    .replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, function (_, text, url) {
+      var u = url.trim().toLowerCase().replace(/[\\s\\x00-\\x1f]+/g, "");
+      if (/^(javascript|data|vbscript):/.test(u)) return text;
+      if (u.includes(":") && !/^(https?|mailto):/.test(u)) return text;
+      return '<a href="' + url + '" target="_blank" rel="noopener">' + text + "</a>";
+    });
+}
+function renderMarkdown(md) {
+  var lines = String(md || "").split("\\n");
+  var out = [];
+  var inCode = false, codeLines = [];
+  var inList = null; // "ul" | "ol"
+  function closeList() { if (inList) { out.push("</" + inList + ">"); inList = null; } }
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (line.indexOf("\\x60\\x60\\x60") === 0) {
+      if (inCode) {
+        out.push("<pre><code>" + mdEscape(codeLines.join("\\n")) + "</code></pre>");
+        codeLines = []; inCode = false;
+      } else { closeList(); inCode = true; }
+      continue;
+    }
+    if (inCode) { codeLines.push(line); continue; }
+    if (line.trim() === "") { closeList(); continue; }
+    var h = line.match(/^(#{1,6})\\s+(.+)/);
+    if (h) {
+      closeList();
+      var lv = h[1].length;
+      out.push("<h" + lv + ">" + mdInline(mdEscape(h[2])) + "</h" + lv + ">");
+      continue;
+    }
+    if (/^(-{3,}|_{3,}|\\*{3,})$/.test(line.trim())) { closeList(); out.push("<hr/>"); continue; }
+    if (line.charAt(0) === ">") {
+      closeList();
+      out.push("<blockquote>" + mdInline(mdEscape(line.replace(/^>\\s?/, ""))) + "</blockquote>");
+      continue;
+    }
+    var ul = line.match(/^\\s*[-*+]\\s+(.+)/);
+    if (ul) {
+      if (inList !== "ul") { closeList(); out.push('<ul class="md-list">'); inList = "ul"; }
+      out.push("<li>" + mdInline(mdEscape(ul[1])) + "</li>");
+      continue;
+    }
+    var ol = line.match(/^\\s*\\d+\\.\\s+(.+)/);
+    if (ol) {
+      if (inList !== "ol") { closeList(); out.push('<ol class="md-list">'); inList = "ol"; }
+      out.push("<li>" + mdInline(mdEscape(ol[1])) + "</li>");
+      continue;
+    }
+    closeList();
+    out.push("<p>" + mdInline(mdEscape(line)) + "</p>");
+  }
+  if (inCode) out.push("<pre><code>" + mdEscape(codeLines.join("\\n")) + "</code></pre>");
+  closeList();
+  return out.join("\\n");
+}
+
 // --- File modal (path-sandboxed /api/file) --------------------------------
+// Tasks, reviews, and specs are markdown: render them (with frontmatter as a
+// metadata chip) instead of dumping raw source. A Source toggle shows the
+// raw text for copy/paste. Everything else stays plain text.
+var dlgSrcBtn = document.getElementById("dlg-src");
+var dlgRendered = true;
+var dlgContent = null;
+
+function renderFileModal(path, content) {
+  dlgContent = content;
+  dlgTitle.textContent = path;
+  dlgBody.innerHTML = "";
+  dlgRendered = true;
+  var isMd = path.endsWith(".md");
+  dlgSrcBtn.hidden = !isMd;
+  if (!isMd || content == null) {
+    dlgBody.classList.remove("rendered");
+    dlgBody.textContent = content == null ? "(failed to load)" : content;
+    return;
+  }
+  dlgBody.classList.add("rendered", "md");
+  var body = content.replace(/^---\\n[\\s\\S]*?\\n---\\n/, "");
+  var fm = content.slice(0, content.length - body.length);
+  if (fm) {
+    var fmEl = document.createElement("details");
+    fmEl.className = "fm";
+    var sum = document.createElement("summary");
+    sum.textContent = "frontmatter";
+    fmEl.appendChild(sum);
+    var fmPre = document.createElement("pre");
+    fmPre.textContent = fm.replace(/^---\\n|\\n---\\n$/g, "");
+    fmPre.style.whiteSpace = "pre-wrap";
+ fmPre.style.margin = "var(--sp-2) 0 0";
+    fmEl.appendChild(fmPre);
+    dlgBody.appendChild(fmEl);
+  }
+  var mdEl = document.createElement("div");
+  mdEl.innerHTML = renderMarkdown(body);
+  dlgBody.appendChild(mdEl);
+}
+
+dlgSrcBtn.addEventListener("click", function () {
+  dlgRendered = !dlgRendered;
+  dlgSrcBtn.textContent = dlgRendered ? "Source" : "Rendered";
+  var path = dlgTitle.textContent;
+  if (dlgRendered) renderFileModal(path, dlgContent);
+  else {
+    dlgBody.classList.remove("rendered", "md");
+    dlgBody.textContent = dlgContent == null ? "" : dlgContent;
+  }
+});
+
 function loadFile(path) {
   fetch("/api/file?path=" + encodeURIComponent(path))
     .then(function (r) { return r.json(); })
     .then(function (d) {
-      dlgTitle.textContent = path;
-      dlgBody.textContent = d.error ? "(" + d.error + ")" : d.content;
+      renderFileModal(path, d.error ? null : d.content);
+      dlgSrcBtn.textContent = "Source";
       if (!dlg.open) dlg.showModal();
     })
     .catch(function () {
-      dlgTitle.textContent = path;
-      dlgBody.textContent = "(failed to load)";
+      renderFileModal(path, null);
+      dlgSrcBtn.textContent = "Source";
       if (!dlg.open) dlg.showModal();
     });
 }
@@ -889,16 +1061,21 @@ function render(data) {
   Object.keys(haveMap).forEach(function (k) {
     if (want.indexOf(k) === -1) { haveMap[k].remove(); sticks.delete(k); }
   });
-  var anchor = null;
-  for (var k = items.length - 1; k >= 0; k--) {
+  // Insert only when the node's position actually changes: moving a DOM
+  // node — even to its current slot — resets scrollTop on its scrollable
+  // children, wiping the user's scroll every 2s cycle. Walk forward,
+  // compare with what's already in place, and skip no-op moves.
+  var cursor = grid.firstChild;
+  for (var k = 0; k < items.length; k++) {
     var item = items[k];
     var el = haveMap[item.key];
     if (!el) {
       el = card(item).el;
       if (!item.noFollow) sticks.set(item.key, true);
     }
-    grid.insertBefore(el, anchor);
-    anchor = el;
+    if (cursor === el) { cursor = el.nextSibling; continue; } // already in place
+    grid.insertBefore(el, cursor);
+    // cursor unchanged: el now occupies its slot
   }
   Array.prototype.forEach.call(grid.children, function (el) {
     var i = items.find(function (x) { return x.key === el.dataset.key; });

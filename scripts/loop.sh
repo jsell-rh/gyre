@@ -27,9 +27,15 @@ TMUX_SESSION=${GYRE_TMUX_SESSION:-gyre-loop}
 # Two concurrent loops spawn duplicate workers on the same worktrees, which
 # corrupts in-flight agent runs. Hold a lock for the lifetime of this process.
 LOCK_FILE=/tmp/gyre-loop.lock
+# Open WITHOUT truncation: a stray `bash scripts/loop.sh` from an agent or
+# user would otherwise blank the PID line the running loop wrote (flock
+# correctly refuses the second instance, but `>` truncates BEFORE flock
+# runs — observed in the wild). Append mode keeps the existing content.
 if command -v flock >/dev/null 2>&1; then
-  exec 9>"$LOCK_FILE"
+  LOCK_FD=9
+  exec 9>>"$LOCK_FILE"
   flock -n 9 || { echo "ERROR: another loop is already running (lock: $LOCK_FILE). Aborting." >&2; exit 1; }
+  : >"$LOCK_FILE"   # we hold the lock — NOW it is safe to reset content
   echo $$ >&9   # PID for liveness probes (dashboard); flock ignores content
 else
   if [ -f "$LOCK_FILE" ]; then
@@ -284,10 +290,16 @@ for f in "$REPO_ROOT"/specs/tasks/task-*.md; do
   fi
 done
 
+
 ITERATION=0
 while true; do
   ITERATION=$((ITERATION + 1))
   log "--- Orchestrator cycle $ITERATION (${#ACTIVE_WORKERS[@]} active workers) ---"
+
+  # Self-heal the lock PID: agents occasionally truncate /tmp/gyre-loop.lock
+  # (or /tmp cleanups wipe it). Rewrite our PID each cycle so the dashboard's
+  # liveness probe recovers instead of reading a blank file forever.
+  [ -n "${LOCK_FD:-}" ] && echo $$ >&"$LOCK_FD"
 
   # 1. SERIAL: Spec-fidelity auditor (updates coverage matrix on main)
   #    Skip if no code changes since last audit — avoids burning Opus tokens
