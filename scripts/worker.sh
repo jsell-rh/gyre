@@ -11,15 +11,21 @@ TASK_NAME=$(basename "$TASK_FILE" .md)
 
 cd "$WORKTREE"
 
-# Agent runner: omp in headless print mode, auto-approved, no session state.
-# Set GYRE_MODEL to override the model (fuzzy match, e.g. "opus").
+# Agent runner: omp in headless print mode with JSON event stream.
+# Raw events -> .agent.jsonl (dashboard reads this live);
+# formatted progress -> .agent.log (human-readable, also in the pane via tee).
+# GYRE_MODEL overrides the model (fuzzy match, e.g. "opus").
 OMP=${OMP:-omp}
 run_agent() {
+  local model_args=()
   if [ -n "${GYRE_MODEL:-}" ]; then
-    "$OMP" -p --no-session --approval-mode yolo --model "$GYRE_MODEL"
-  else
-    "$OMP" -p --no-session --approval-mode yolo
+    model_args=(--model "$GYRE_MODEL")
   fi
+  "$OMP" -p --no-session --approval-mode yolo --mode json "${model_args[@]}" \
+    2>/dev/null \
+    | tee "$WORKTREE/.agent.jsonl" \
+    | node "$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/fmt-omp-jsonl.mjs" \
+      | tee "$WORKTREE/.agent.log"
 }
 
 log() {

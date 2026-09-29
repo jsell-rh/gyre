@@ -1,89 +1,69 @@
 #!/usr/bin/env node
-// Loop dashboard: watch every gyre-loop tmux pane in one web page.
+// Loop dashboard: watch every loop worker's live agent output in one web page.
 //
-// Serves a single page that polls /api/panes every 1.5s. Each pane is
-// captured with `tmux capture-pane` (last N lines) and rendered as a
-// terminal card; the orchestrator log (/tmp/gyre-loop.log) gets a card too.
+// Serves a dark tiled dashboard. Cards:
+//   - one per worker worktree (worktrees/workers/task-NNN): tails that
+//     worker's .agent.log (formatted omp event stream) + .worker.log
+//   - one for the orchestrator log (/tmp/gyre-loop.log)
+//
+// Data source is files, NOT tmux capture-pane — cheap to poll. The snapshot
+// is refreshed on a server-side timer (2s) and served from cache, so a slow
+// filesystem read never blocks page interaction. Read-only.
 //
 // Usage:
 //   node scripts/loop-dashboard.mjs
-//   GYRE_DASHBOARD_PORT=7690 GYRE_TMUX_SESSION=gyre-loop node scripts/loop-dashboard.mjs
-// Then open http://localhost:7690
+//   GYRE_DASHBOARD_PORT=7690 GYRE_LOOP_LOG=/tmp/gyre-loop.log node scripts/loop-dashboard.mjs
+// Then open http://127.0.0.1:7690
 //
-// No dependencies — Node >= 18. Read-only against tmux; it never sends input.
+// No dependencies — Node >= 18.
 
 import { createServer } from "node:http";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
 
 const PORT = Number(process.env.GYRE_DASHBOARD_PORT || 7690);
-const SESSION = process.env.GYRE_TMUX_SESSION || "gyre-loop";
-
 const LOG_PATH = process.env.GYRE_LOOP_LOG || "/tmp/gyre-loop.log";
-const CAPTURE_LINES = 80;
+const WORKER_DIR = process.env.GYRE_WORKER_DIR || "worktrees/workers";
+const TAIL_LINES = Number(process.env.GYRE_DASH_TAIL || 120);
+const REFRESH_MS = Number(process.env.GYRE_DASH_REFRESH_MS || 2000);
 
-function run(args) {
-  return execFileSync("tmux", args, { encoding: "utf8", timeout: 5000 });
-}
-function listPanes() {
-  // One line per pane across all windows of the session.
-  // NOTE: list-panes -a ignores -t and lists every session, so capture
-  // session_name and filter here.
-  const fmt = [
-    "#{session_name}", "#{window_index}", "#{window_name}", "#{pane_id}",
-    "#{pane_current_command}", "#{pane_dead}", "#{pane_active}",
-    "#{pane_width}", "#{pane_height}",
-  ].join("\t");
-  const out = run(["list-panes", "-a", "-F", fmt]);
-  return out
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => line.split("\t"))
-    .filter((f) => f[0] === SESSION)
-    .map(([sess, widx, wname, pid, cmd, dead, active, w, h]) => {
-      // %N pane ids are globally unique — unambiguous capture target.
-      return { target: pid, widx: +widx, wname, cmd, dead: dead === "1", active: active === "1", w: +w, h: +h };
-    })
-    .sort((a, b) => a.widx - b.widx);
-}
-
-function capturePane(target) {
+async function tailFile(path, lines) {
   try {
-    const out = run(["capture-pane", "-p", "-t", target, "-S", `-${CAPTURE_LINES}`, "-E", "-"]);
-    return out.replace(/\n+$/, ""); // trim trailing blank screen lines
+    const content = await readFile(path, "utf8");
+    return content.split("\n").slice(-lines).join("\n").trimEnd();
   } catch {
-    return "(pane vanished)";
+    return null;
   }
 }
 
-function tailLog() {
-  try {
-    const content = readFileSync(LOG_PATH, "utf8");
-    return content.split("\n").slice(-80).join("\n").trimEnd();
-  } catch {
-    return `(${LOG_PATH} not found)`;
-  }
-}
+let lastSnapshot = { workers: [], log: "", error: null, when: 0 };
 
-function snapshot() {
+async function refreshSnapshot() {
   try {
-    const panes = listPanes();
-    return {
-      session: SESSION,
-      error: null,
-      log: tailLog(),
-      panes: panes.map((p) => ({ ...p, content: capturePane(p.target) })),
-    };
+    const names = (await readdir(WORKER_DIR)).filter((n) => /^task-/.test(n)).sort();
+    const workers = await Promise.all(
+      names.map(async (name) => {
+        const dir = join(WORKER_DIR, name);
+        const agentLog = await tailFile(join(dir, ".agent.log"), TAIL_LINES);
+        const workerLog = await tailFile(join(dir, ".worker.log"), 60);
+        return { name, agentLog, workerLog };
+      })
+    );
+    const log = await tailFile(LOG_PATH, TAIL_LINES);
+    lastSnapshot = { workers, log: log ?? "", error: null, when: Date.now() };
   } catch (e) {
-    return { session: SESSION, error: `tmux error: ${e.message.split("\n")[0]}`, log: tailLog(), panes: [] };
+    lastSnapshot = { workers: [], log: lastSnapshot.log, error: String(e.message || e), when: Date.now() };
   }
 }
+
+refreshSnapshot();
+setInterval(refreshSnapshot, REFRESH_MS);
 
 const HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>gyre loop — ${SESSION}</title>
+<title>gyre loop dashboard</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -100,28 +80,27 @@ const HTML = `<!doctype html>
   header .meta { color: #6c7086; }
   #grid {
     flex: 1; overflow: auto; padding: 10px; display: grid; gap: 10px;
-    grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
-    grid-auto-rows: minmax(220px, auto); align-content: start;
+    grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+    grid-auto-rows: minmax(240px, auto); align-content: start;
   }
   .card {
     border: 1px solid #232733; border-radius: 6px; background: #0e1017;
-    display: flex; flex-direction: column; min-height: 220px; overflow: hidden;
+    display: flex; flex-direction: column; min-height: 240px; overflow: hidden;
   }
   .card .bar {
-    flex: none; padding: 5px 10px; background: #151823; border-bottom: 1px solid #232733;
+    flex: none; padding: 5px 10px; background: #151823; border-bottom: 1px solid #233;
     display: flex; gap: 10px; align-items: center;
   }
   .card .bar .name { color: #89b4fa; font-weight: bold; }
-  .card .bar .cmd { color: #a6e3a1; }
+  .card .bar .phase { color: #a6e3a1; }
   .card .bar .dim { color: #6c7086; }
-  .card .bar .dead { color: #f38ba8; }
   .card pre {
     flex: 1; margin: 0; padding: 8px 10px; overflow: auto;
-    white-space: pre; line-height: 1.35;
+    white-space: pre-wrap; word-break: break-all; line-height: 1.35;
   }
-  .card.dead pre { opacity: 0.4; }
+  .card pre.phase-log { color: #6c7086; border-top: 1px dashed #232733; padding-top: 4px; margin-top: 4px; flex: none; max-height: 60px; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: #a6e3a1; animation: pulse 2s infinite; flex: none; }
-  .card.dead .dot { background: #f38ba8; animation: none; }
+  .card.idle .dot { background: #6c7086; animation: none; }
   @keyframes pulse { 50% { opacity: 0.3; } }
   #err { padding: 10px 14px; color: #f38ba8; flex: none; }
 </style>
@@ -129,7 +108,6 @@ const HTML = `<!doctype html>
 <body>
 <header>
   <h1>gyre loop</h1>
-  <span class="meta">session: ${SESSION}</span>
   <span class="meta" id="status">connecting…</span>
 </header>
 <div id="err"></div>
@@ -138,78 +116,70 @@ const HTML = `<!doctype html>
 const grid = document.getElementById("grid");
 const status = document.getElementById("status");
 const errBox = document.getElementById("err");
-const sticks = new Map(); // pane target -> stick-to-bottom
+const sticks = new Map(); // card key -> stick-to-bottom
 
-function card(p) {
+function phaseOf(workerLog) {
+  // Latest worker.sh phase line, e.g. ">>> Implementation (round 2, ...)".
+  const m = (workerLog || "").split("\\n").filter(Boolean).pop() || "";
+  return m.replace(/^\\[[0-9:]+\\] \\[task-[^\\]]+\\] /, "");
+}
+
+function card(key, name) {
   const el = document.createElement("div");
-  el.className = "card" + (p.dead ? " dead" : "");
+  el.className = "card";
+  el.dataset.key = key;
   const bar = document.createElement("div");
   bar.className = "bar";
-  bar.innerHTML =
-    '<span class="dot"></span>' +
-    '<span class="name"></span>' +
-    '<span class="cmd"></span>' +
-    '<span class="dim"></span>';
-  bar.querySelector(".name").textContent = p.wname;
-  bar.querySelector(".cmd").textContent = p.cmd;
-  bar.querySelector(".dim").textContent = \`\${p.w}x\${p.h}\`;
-  if (p.dead) { const d = document.createElement("span"); d.className = "dead"; d.textContent = "dead"; bar.appendChild(d); }
+  bar.innerHTML = '<span class="dot"></span><span class="name"></span><span class="phase"></span>';
+  bar.querySelector(".name").textContent = name;
   const pre = document.createElement("pre");
   el.append(bar, pre);
-  return { el, pre };
+  return { el, pre, phaseEl: bar.querySelector(".phase") };
 }
 
 function render(data) {
   errBox.textContent = data.error || "";
-  status.textContent = data.error ? "tmux unreachable"
-    : \`\${data.panes.length} pane(s), updated \${new Date().toLocaleTimeString()}\`;
-  const seen = new Set();
-  // Update or append cards in order; keys are window index + name.
-  const keys = data.panes.map((p) => p.widx + ":" + p.wname);
-  // Rebuild if the set of panes changed; otherwise update in place.
-  const current = [...grid.children].map((c) => c.dataset.key);
-  const changed = current.length !== keys.length || current.some((k, i) => k !== keys[i]);
-  if (changed) {
+  status.textContent = data.error ? "error — retrying"
+    : data.workers.length + " worker(s), updated " + new Date().toLocaleTimeString();
+  const items = [...data.workers.map((w) => ({
+    key: w.name, name: w.name, content: w.agentLog || "(no agent output yet)", phase: phaseOf(w.workerLog),
+    idle: !w.agentLog,
+  })), { key: "log", name: "orchestrator", content: data.log, phase: "", idle: false }];
+
+  // Rebuild the grid only when the set of cards changes.
+  const want = items.map((i) => i.key).join(",");
+  const have = [...grid.children].map((c) => c.dataset.key).join(",");
+  if (want !== have) {
     grid.innerHTML = "";
-    for (const p of data.panes) {
-      const c = card(p);
-      c.el.dataset.key = p.widx + ":" + p.wname;
+    for (const i of items) {
+      const c = card(i.key, i.name);
+      c.el.classList.toggle("idle", i.idle);
       grid.appendChild(c.el);
     }
   }
-  [...grid.children].forEach((el, i) => {
-    const p = data.panes[i];
+  for (const el of grid.children) {
+    const i = items.find((x) => x.key === el.dataset.key);
+    if (!i) continue;
+    el.classList.toggle("idle", i.idle);
+    const phaseEl = el.querySelector(".phase");
+    if (phaseEl.textContent !== i.phase) phaseEl.textContent = i.phase;
     const pre = el.querySelector("pre");
-    const stick = sticks.get(el.dataset.key) !== false; // default stick
-    if (pre.textContent !== p.content) pre.textContent = p.content;
-    if (stick) pre.scrollTop = pre.scrollHeight;
-    seen.add(el.dataset.key);
-  });
-  // Orchestrator log card — always last.
-  if (!grid.querySelector('[data-key="log"]')) {
-    const c = card({ wname: "orchestrator log", cmd: "tail", dead: false, w: 0, h: 0 });
-    c.el.dataset.key = "log";
-    grid.appendChild(c.el);
+    if (pre.textContent !== i.content) pre.textContent = i.content;
+    if (sticks.get(el.dataset.key) !== false) pre.scrollTop = pre.scrollHeight;
   }
-  const logPre = grid.querySelector('[data-key="log"] pre');
-  const logBar = grid.querySelector('[data-key="log"] .cmd');
-  logBar.textContent = "${LOG_PATH}";
-  if (logPre.textContent !== data.log) logPre.textContent = data.log;
-  if (sticks.get("log") !== false) logPre.scrollTop = logPre.scrollHeight;
 }
 
-// Track user scroll: stop sticking when scrolled up, resume at bottom.
+// Stop auto-scrolling a card when the user scrolls it up; resume at bottom.
 grid.addEventListener("scroll", (e) => {
   const pre = e.target.closest("pre");
   if (!pre) return;
-  const card = pre.closest(".card");
-  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
-  sticks.set(card.dataset.key, atBottom);
+  const key = pre.closest(".card").dataset.key;
+  sticks.set(key, pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30);
 }, true);
 
 async function poll() {
   try {
-    const r = await fetch("/api/panes");
+    const r = await fetch("/api/snapshot");
     render(await r.json());
   } catch {
     status.textContent = "server unreachable";
@@ -222,8 +192,8 @@ setInterval(poll, 1500);
 </html>`;
 
 const server = createServer((req, res) => {
-  if (req.url === "/api/panes") {
-    const body = JSON.stringify(snapshot());
+  if (req.url === "/api/snapshot") {
+    const body = JSON.stringify(lastSnapshot);
     res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(body);
   } else if (req.url === "/") {
@@ -236,5 +206,5 @@ const server = createServer((req, res) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`loop dashboard: http://127.0.0.1:${PORT} (session '${SESSION}')`);
+  console.log(`loop dashboard: http://127.0.0.1:${PORT}`);
 });
