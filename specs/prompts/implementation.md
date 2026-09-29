@@ -877,7 +877,7 @@ Before marking a task `ready-for-review`, verify:
 4. Before marking the task `ready-for-review`, run the self-verification checklist above.
 5. Update the task file: set the `progress` field in the YAML frontmatter to `ready-for-review`. Add git commit SHAs to the `commits` list.
 6. Commit your work, using conventional commits, and author: "Implementation <implementation@redhat.com>"
-7. Call `kill $PPID` — this will transfer control to the verifier.
+7. Exit cleanly — the orchestrator continues the loop and will run the verifier. Do NOT kill any process; you run inside a supervised loop.
 
 ## Needs-Revision Workflow
 

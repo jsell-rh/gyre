@@ -36,4 +36,4 @@ Ted Keller offers an example of the payoff of the approach, involving the shuttl
    5. `AGENTS.md` — if the flaw was caused by missing or misleading documentation.
 6. For all addressed flaws, place a `-` in the relevant checkbox in the review file, and add a tag before the item description `[process-revision-complete]`.
 7. Commit your work, using conventional commits, and author: "Process Revision <process-revision@redhat.com>"
-8. Call `kill $PPID` — this will transfer control over to the implementation team.
+8. Exit cleanly — the orchestrator continues the loop. Do NOT kill any process; you run inside a supervised loop.

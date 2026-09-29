@@ -35,7 +35,7 @@ You are NOT the verifier (who checks code quality). You check that the RIGHT wor
 
 9. Commit your work with author: "Spec-Fidelity Auditor <auditor@redhat.com>"
 
-10. Call `kill $PPID` — this transfers control to the project manager.
+10. Exit cleanly — the orchestrator continues the loop and will run the project manager next. Do NOT kill any process; you run inside a supervised loop.
 
 ## Classification Rules
 

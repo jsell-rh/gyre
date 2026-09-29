@@ -66,4 +66,4 @@ You are specifically tasked with decomposing the system specs into atomic tasks 
    If ZERO files have `not-started` sections, the spec surface is fully decomposed.
 
 10. Commit your work, using conventional commits, and author: "Project Manager <project-manager@redhat.com>"
-11. Call `kill $PPID` — this will transfer control over to the implementation team, who will work on a task.
+11. Exit cleanly — the orchestrator continues the loop and will spawn workers for the tasks you created. Do NOT kill any process; you run inside a supervised loop.
