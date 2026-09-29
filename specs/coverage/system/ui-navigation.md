@@ -22,11 +22,11 @@
 | 14 | Tab: Code | 3 | verified | - | ExplorerCodeTab.svelte: clone URL, branches/commits/files/hot-files/provenance sub-tabs, commit log with agent attribution. MRs + Merge Queue live in separate RepoMode 'mrs' tab (impl divergence from spec sub-tab list). Re-verified 2026-09-29. |
 | 15 | Tab: ⚙ (Settings) | 3 | verified | - | RepoSettings.svelte: General/Gates/Policies/Budget/Audit/Danger Zone tabs all present. Re-verified 2026-09-29. |
 | 16 | 4. Meta-Spec Management | 2 | implemented | - | MetaSpecs.svelte |
-| 17 | 5. Navigation Flows | 2 | implemented | - | App.svelte: onMount entrypoint + popstate |
-| 18 | First Visit | 3 | implemented | - | App.svelte: entrypoint flow with localStorage |
-| 19 | Daily Flow | 3 | implemented | - | App.svelte: workspace home first |
-| 20 | Exception Flow | 3 | implemented | - | App.svelte: decisions badge → scroll to section |
-| 21 | Meta-Spec Editing Flow | 3 | implemented | - | App.svelte: goToAgentRules |
+| 17 | 5. Navigation Flows | 2 | verified | - | App.svelte: onMount entrypoint routing (L892-1002) + popstate handler + full goTo* nav functions (goToWorkspaceHome/goToRepo/goToRepoTab/goToWorkspaceSettings/goToAgentRules/goToProfile/goToCrossWorkspace). Verified 2026-09-29. |
+| 18 | First Visit | 3 | implemented | - | Partial — auth→home, localStorage workspace restore (onMount L957-963), land on home without auto-entering repo all present. Missing: "last repo pre-selected in dropdown" — no last-repo persistence (no gyre_repo in localStorage; grep confirmed). Re-audited 2026-09-29. |
+| 19 | Daily Flow | 3 | implemented | - | Partial — always workspace-home-first (entrypoint flow restores workspace only, never a repo), decisions badge glance, handle decisions, click repo→Specs tab all present. Missing: "last-used repo remembered/highlighted in Repos section" — no last-repo persistence. Re-audited 2026-09-29. |
+| 20 | Exception Flow | 3 | verified | - | Decisions badge (App.svelte L1445-1470): repo mode→goToRepoTab('decisions'), else goToWorkspaceHome + scroll to section-decisions. Decision item nav() → repo-mode entity detail (gate_failure→MR gates tab, WorkspaceHome L1256-1263). Back arrow→home. Verified 2026-09-29. |
+| 21 | Meta-Spec Editing Flow | 3 | verified | - | Agent Rules "Manage rules"→goToAgentRules→MetaSpecs workspace preview loop: select spec(s)→api.previewPersona + poll previewPersonaStatus→architecture_diff/specs_diff impact panel→publish + approve via real API (updateMetaSpec). Back arrow→home. Verified 2026-09-29. |
 | 22 | 6. Keyboard Shortcuts | 2 | implemented | - | App.svelte: handleKeydown with g-key sequences |
 | 23 | 7. URL Structure | 2 | implemented | - | App.svelte: parseUrl + urlFor |
 | 24 | 8. Responsive Design | 2 | implemented | - | App.svelte: CSS media queries + mobile drawer |
