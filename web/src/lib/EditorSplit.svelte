@@ -1,5 +1,7 @@
 <script>
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
+  import ConcurrentEditBanner from './ConcurrentEditBanner.svelte';
+  import SpecConflictDialog from './SpecConflictDialog.svelte';
   import { api } from './api.js';
   import { toastError, toastSuccess } from './toast.svelte.js';
   import { t } from 'svelte-i18n';
@@ -23,6 +25,10 @@
    *   ghostOverlays — array of { nodeId, type: 'new'|'modified'|'removed' }
    *   onClose       — () => void — called when user dismisses (Back or Esc)
    *   context       — 'spec' | 'meta-spec' — display label
+   *   workspaceId   — string | null — workspace scope for the presence banner (HSI §7)
+   *   wsStore       — WebSocket store ({ send, sessionId, onMessage }) for live presence
+   *   selfUserId    — string | null — current user id (excludes own sessions)
+   *   baseSha       — string | null — spec current_sha at load (optimistic concurrency)
    */
   let {
     content = $bindable(''),
@@ -32,7 +38,14 @@
     ghostOverlays = [],
     onClose = undefined,
     context = 'spec',
+    workspaceId = null,
+    wsStore = null,
+    selfUserId = null,
+    baseSha = null,
   } = $props();
+
+  // 409 conflict body from the last save attempt, or null (HSI §7).
+  let specConflict = $state(null);
 
   // ── Graph data (lazy-loaded from graphPredict) ─────────────────────────────
   let graphNodes = $state([]);
@@ -174,7 +187,7 @@
     return c.length;
   }
 
-  async function saveSpec() {
+  async function saveSpec({ overwrite = false } = {}) {
     if (!repoId || !specPath || saving) return;
     saving = true;
     try {
@@ -182,13 +195,38 @@
         spec_path: specPath,
         content,
         message: `Update ${specPath} via editor split`,
+        base_sha: baseSha ?? undefined,
+        overwrite,
       });
+      if (result?.conflict) {
+        // Another editor's change landed since load — surface the conflict dialog.
+        specConflict = result.conflict;
+        return;
+      }
+      specConflict = null;
       toastSuccess($t('editor_split.spec_saved', { values: { mr_id: result.mr_id } }));
     } catch (e) {
       toastError($t('editor_split.save_failed', { values: { error: e.message } }));
     } finally {
       saving = false;
     }
+  }
+
+  // Conflict dialog resolvers (HSI §7).
+  function conflictOverwrite() {
+    saveSpec({ overwrite: true });
+  }
+
+  function conflictDiscard() {
+    // Take the server's current version, dropping local edits.
+    const serverContent = specConflict?.current_content ?? '';
+    content = serverContent;
+    onChange?.(serverContent);
+    specConflict = null;
+  }
+
+  function conflictClose() {
+    specConflict = null;
   }
 
   function handleContentInput(e) {
@@ -220,7 +258,7 @@
     {#if repoId && specPath}
       <button
         class="save-btn"
-        onclick={saveSpec}
+        onclick={() => saveSpec()}
         disabled={saving || !content.trim()}
         aria-busy={saving}
       >
@@ -233,6 +271,9 @@
   <div class="split-panes">
     <!-- Left: Editor + LLM chat -->
     <div class="pane pane-left">
+      {#if context === 'spec' && specPath && workspaceId}
+        <ConcurrentEditBanner {specPath} {workspaceId} {wsStore} {selfUserId} />
+      {/if}
       <textarea
         class="split-textarea"
         value={content}
@@ -333,6 +374,13 @@
     </div>
   </div>
 </div>
+
+<SpecConflictDialog
+  conflict={specConflict}
+  onOverwrite={conflictOverwrite}
+  onDiscard={conflictDiscard}
+  onClose={conflictClose}
+/>
 
 <style>
   .editor-split {

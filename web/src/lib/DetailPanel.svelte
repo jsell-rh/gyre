@@ -20,6 +20,9 @@
   import CopyableId from './CopyableId.svelte';
   import ProvenanceChain from '../components/ProvenanceChain.svelte';
   import ImpactAnalysisModal from '../components/ImpactAnalysisModal.svelte';
+  import ConcurrentEditBanner from './ConcurrentEditBanner.svelte';
+  import SpecConflictDialog from './SpecConflictDialog.svelte';
+  import { sendEditingPresence, specEditingEntity } from './presence.js';
 
   const goToRepoTab = getContext('goToRepoTab') ?? null;
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -44,6 +47,9 @@
     onclose = undefined,
     onpopout = undefined,
     onback = undefined,
+    wsStore = null,
+    workspaceId = null,
+    selfUserId = null,
   } = $props();
 
   let activeTab = $state('info');
@@ -968,6 +974,42 @@
   let llmSuggestion = $state(null); // { diff: [...], explanation: string } | null
   let saving = $state(false);
 
+  // ── Concurrent spec editing (HSI §7 Conflict Prevention) ────────────────
+  // 409 conflict body from the last inline save, or null.
+  let specConflict = $state(null);
+  // Workspace scope for presence: prefer the explicit prop, fall back to the
+  // spec entity's own workspace_id.
+  let specWorkspaceId = $derived(workspaceId ?? entity?.data?.workspace_id ?? null);
+  // Optimistic-concurrency token: the current_sha the editor loaded.
+  let specBaseSha = $derived(specDetail?.current_sha ?? entity?.data?.current_sha ?? null);
+
+  // Announce that this tab is editing the spec whenever the Edit tab is active
+  // or the split editor is open; clear the announcement otherwise so other
+  // editors' warning banners disappear when we leave.
+  $effect(() => {
+    if (entity?.type !== 'spec' || !specWorkspaceId || !wsStore) return;
+    const isEditing = activeTab === 'edit' || showEditorSplit;
+    const editingEntity = isEditing ? specEditingEntity(entity.id) : null;
+    sendEditingPresence(wsStore, { workspaceId: specWorkspaceId, editingEntity, view: 'specs' });
+    return () => {
+      sendEditingPresence(wsStore, { workspaceId: specWorkspaceId, editingEntity: null, view: 'specs' });
+    };
+  });
+
+  function conflictOverwrite() {
+    specConflict = null;
+    saveSpec({ overwrite: true });
+  }
+
+  function conflictDiscard() {
+    editContent = specConflict?.current_content ?? '';
+    specConflict = null;
+  }
+
+  function conflictClose() {
+    specConflict = null;
+  }
+
   // ── Spec approval actions ──────────────────────────────────────────────
   let approving = $state(false);
   let revoking = $state(false);
@@ -1405,7 +1447,7 @@
     return content.length;
   }
 
-  async function saveSpec() {
+  async function saveSpec({ overwrite = false } = {}) {
     if (!entity || saving) return;
     const repoId = entity.data?.repo_id;
     if (!repoId) return;
@@ -1415,7 +1457,14 @@
         spec_path: entity.id,
         content: editContent,
         message: `Update ${entity.id} via UI editor`,
+        base_sha: specBaseSha ?? undefined,
+        overwrite,
       });
+      if (result?.conflict) {
+        specConflict = result.conflict;
+        return;
+      }
+      specConflict = null;
       toastSuccess($t('detail_panel.spec_saved', { values: { mr_id: result.mr_id } }));
     } catch (e) {
       toastError($t('detail_panel.save_failed', { values: { error: e.message } }));
@@ -1997,6 +2046,10 @@
       ghostOverlays={archGhostOverlays}
       onClose={closeEditorSplit}
       context="spec"
+      workspaceId={specWorkspaceId}
+      {wsStore}
+      {selfUserId}
+      baseSha={specBaseSha}
     />
   {:else if entity}
     <div class="panel-header">
@@ -3498,6 +3551,9 @@
           {#if specDetailLoading}
             <Skeleton width="100%" height="200px" />
           {:else}
+            {#if specWorkspaceId}
+              <ConcurrentEditBanner specPath={entity.id} workspaceId={specWorkspaceId} {wsStore} {selfUserId} />
+            {/if}
             <textarea
               class="spec-editor-textarea"
               bind:value={editContent}
@@ -3591,7 +3647,7 @@
                 <Button variant="secondary" onclick={openEditorSplit} aria-label={$t('detail_panel.preview_aria')}>
                   {$t('detail_panel.preview')}
                 </Button>
-                <Button variant="primary" onclick={saveSpec} disabled={saving || !editContent.trim()}>
+                <Button variant="primary" onclick={() => saveSpec()} disabled={saving || !editContent.trim()}>
                   {saving ? $t('detail_panel.saving') : $t('detail_panel.save_create_mr')}
                 </Button>
               </div>
@@ -5227,6 +5283,13 @@
     </div>
   {/if}
 </div>
+
+<SpecConflictDialog
+  conflict={specConflict}
+  onOverwrite={conflictOverwrite}
+  onDiscard={conflictDiscard}
+  onClose={conflictClose}
+/>
 
 {#if entity?.type === 'mr'}
   {@const mrData = mrDetail ?? entity.data ?? {}}

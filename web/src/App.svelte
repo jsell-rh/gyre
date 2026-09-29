@@ -56,6 +56,15 @@
     };
   });
 
+  // Subscribe the WebSocket to the current workspace so the client receives
+  // broadcast messages — including rebroadcast UserPresence for concurrent-edit
+  // detection (HSI §7). Re-runs when the workspace or store changes.
+  $effect(() => {
+    if (wsStore && typeof wsStore.subscribe === 'function' && currentWorkspace?.id) {
+      wsStore.subscribe(currentWorkspace.id);
+    }
+  });
+
   // ── UI state ─────────────────────────────────────────────────────────
   let searchOpen = $state(false);
   let shortcutsOpen = $state(false);
@@ -1603,6 +1612,8 @@
               fullPage={true}
               onclose={() => window.history.back()}
               onback={() => window.history.back()}
+              {wsStore}
+              workspaceId={currentWorkspace?.id ?? null}
             />
           {:else}
             <RepoMode
@@ -1636,6 +1647,8 @@
       bind:expanded={detailExpanded}
       onclose={closeDetailPanel}
       onback={detailHistory.length > 0 ? goBackDetailPanel : undefined}
+      {wsStore}
+      workspaceId={currentWorkspace?.id ?? null}
     />
     </div>
 

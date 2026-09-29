@@ -11,6 +11,7 @@
     'aria-expanded': ariaExpanded = undefined,
     'aria-busy': ariaBusy = undefined,
     'aria-controls': ariaControls = undefined,
+    'data-testid': testId = undefined,
     children,
   } = $props();
 </script>
@@ -26,6 +27,7 @@
   aria-expanded={ariaExpanded}
   aria-busy={ariaBusy}
   aria-controls={ariaControls}
+  data-testid={testId}
 >
   {@render children?.()}
 </button>

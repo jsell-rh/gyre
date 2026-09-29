@@ -262,6 +262,9 @@ vi.mock('../lib/ws.js', () => ({
     onStatus: vi.fn().mockReturnValue(() => {}),
     destroy: vi.fn(),
     onMessage: vi.fn().mockReturnValue(() => {}),
+    subscribe: vi.fn(),
+    send: vi.fn(),
+    sessionId: 'test-session',
   }),
 }));
 

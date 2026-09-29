@@ -1633,14 +1633,17 @@ mod tests {
             base_sha: Some("client-sha-1".to_string()),
             overwrite: false,
         };
-        let resp = save_spec(
+        let resp = match save_spec(
             axum::extract::State(state.clone()),
             axum::extract::Path("repo-conf".to_string()),
             caller,
             Json(req),
         )
         .await
-        .unwrap();
+        {
+            Ok(r) => r,
+            Err(_) => panic!("save_spec should return Ok(409 response), not Err"),
+        };
         assert_eq!(resp.status(), StatusCode::CONFLICT);
 
         // Both editors receive a SpecConflict notification with the spec path.
@@ -1648,7 +1651,7 @@ mod tests {
         for uid in ["user-a", "user-b"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws), None, None, 100, 0)
+                .list_for_user(&Id::new(uid), Some(&ws), None, None, None, 100, 0)
                 .await
                 .unwrap();
             let conflict: Vec<_> = notifs
