@@ -20,7 +20,7 @@ Scope verified:
 
 Findings:
 
-- [ ] **F1 — Dead code: `compute_test_fragility_count` never called.**
+- [x] **F1 — Dead code: `compute_test_fragility_count` never called.**
   `crates/gyre-domain/src/view_query_resolver.rs:443-470` defines a private
   `compute_test_fragility_count(node_id, ...)` marked `#[allow(dead_code)]` with rationale
   "Kept for potential use in per-node metric queries." It is referenced nowhere in `crates/`
@@ -29,3 +29,12 @@ Findings:
   `$where(test_fragility, ...)`). Speculative dead code retained behind an `#[allow]` is a
   defect under the dead-code flaw class and violates clean-cutover (remove obsolete code).
   Fix: delete `compute_test_fragility_count` and its `#[allow(dead_code)]` attribute.
+
+## Round 2
+
+- [x] **F1 resolved.** Deleted `compute_test_fragility_count` (private, `#[allow(dead_code)]`)
+  from `crates/gyre-domain/src/view_query_resolver.rs`. Its single-node computation was
+  fully superseded by `compute_all_test_fragility` (used at the `$where(test_fragility, ...)`
+  and `$test_fragility(...)` sites). `bfs_traverse` remains referenced by
+  `compute_all_test_fragility`, so no cascading dead code. `cargo test -p gyre-domain
+  view_query_resolver`: 115 passed, 0 failed. `cargo build -p gyre-domain`: clean, zero warnings.
