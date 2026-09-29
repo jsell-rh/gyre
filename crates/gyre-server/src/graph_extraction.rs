@@ -388,12 +388,14 @@ async fn do_extract(
         // binding keeps the extracted tree alive until the analysis finishes.
         tokio::spawn(async move {
             let _tmp = tmp;
+            let extractor = gyre_adapters::call_graph::SubprocessCallGraphExtractor::new();
             extract_and_persist_call_graph(
                 &pass2_repo_root,
                 &pass2_nodes,
                 &pass2_edges,
                 &pass2_repo_id,
                 pass2_graph_store.as_ref(),
+                &extractor,
             )
             .await;
         });
@@ -781,8 +783,8 @@ pub async fn extract_and_persist_call_graph(
     existing_edges: &[GraphEdge],
     repo_id: &Id,
     graph_store: &dyn GraphPort,
+    extractor: &dyn gyre_ports::call_graph::CallGraphExtractor,
 ) -> usize {
-    use gyre_adapters::call_graph::SubprocessCallGraphExtractor;
     use gyre_domain::call_graph_resolve::{detect_all_languages, resolve_call_edges};
     use gyre_ports::call_graph::CallGraphExtractor;
 
@@ -791,7 +793,6 @@ pub async fn extract_and_persist_call_graph(
         return 0;
     }
 
-    let extractor = SubprocessCallGraphExtractor::new();
     // Accumulate resolved edges so later languages dedup against earlier ones
     // (polyglot repos) as well as the Pass 1 edges.
     let mut known_edges = existing_edges.to_vec();
@@ -1224,5 +1225,126 @@ mod tests {
 
         let changes = diff_nodes(&old, &new);
         assert_eq!(changes.len(), 3);
+    }
+
+    // ── Pass 2 sync → graph storage integration (lsp-call-graph.md §6) ──────────
+
+    use gyre_common::call_graph::{CallEdge, Language};
+    use gyre_common::graph::{EdgeType, GraphEdge};
+    use gyre_adapters::mem_graph::MemGraphStore;
+
+    /// Fake [`CallGraphExtractor`] standing in for the subprocess adapter, so the
+    /// resolve→persist pipeline can be exercised hermetically (no Go toolchain).
+    struct FakeCallGraphExtractor {
+        edges: Vec<CallEdge>,
+    }
+
+    #[async_trait::async_trait]
+    impl gyre_ports::call_graph::CallGraphExtractor for FakeCallGraphExtractor {
+        async fn extract_call_edges(
+            &self,
+            _repo_path: &Path,
+            _language: Language,
+        ) -> anyhow::Result<Vec<CallEdge>> {
+            Ok(self.edges.clone())
+        }
+    }
+
+    fn make_go_fn(qname: &str, file: &str, repo_id: &Id) -> GraphNode {
+        let mut n = make_graph_node(qname, qname);
+        n.file_path = file.to_string();
+        n.repo_id = repo_id.clone();
+        n
+    }
+
+    #[tokio::test]
+    async fn sync_go_repo_persists_calls_edges_in_graph_store() {
+        // A repo with a go.mod → detect_all_languages reports Go.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/app\n\ngo 1.21\n").unwrap();
+
+        let repo_id = Id::new("repo-go");
+        let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
+        let callee = make_go_fn("example.com/app/svc.DoWork", "svc/work.go", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone()];
+
+        // Graph is usable after Pass 1: nodes persisted before Pass 2 runs.
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+
+        // Pass 2 reports a cross-package call that Pass 1 syntax analysis missed.
+        let fake = FakeCallGraphExtractor {
+            edges: vec![CallEdge {
+                from: "example.com/app/api.Handler".to_string(),
+                to: "example.com/app/svc.DoWork".to_string(),
+            }],
+        };
+
+        let persisted =
+            extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
+        assert_eq!(persisted, 1, "one cross-package Calls edge should be persisted");
+
+        // The Calls edge must actually appear in the graph store, resolved to the
+        // Pass 1 node IDs.
+        let calls = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1, "Calls edge must appear in the graph store");
+        assert_eq!(calls[0].source_id, caller.id);
+        assert_eq!(calls[0].target_id, callee.id);
+        assert_eq!(calls[0].edge_type, EdgeType::Calls);
+    }
+
+    #[tokio::test]
+    async fn pass2_dedups_calls_edge_already_present_from_pass1() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module example.com/app\n\ngo 1.21\n").unwrap();
+
+        let repo_id = Id::new("repo-go");
+        let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
+        let callee = make_go_fn("example.com/app/svc.DoWork", "svc/work.go", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+
+        // Pass 1 already produced this exact Calls edge.
+        let existing = vec![GraphEdge {
+            id: Id::new("pass1-edge"),
+            repo_id: repo_id.clone(),
+            source_id: caller.id.clone(),
+            target_id: callee.id.clone(),
+            edge_type: EdgeType::Calls,
+            metadata: None,
+            first_seen_at: 1,
+            last_seen_at: 1,
+            deleted_at: None,
+        }];
+
+        let fake = FakeCallGraphExtractor {
+            edges: vec![CallEdge {
+                from: "example.com/app/api.Handler".to_string(),
+                to: "example.com/app/svc.DoWork".to_string(),
+            }],
+        };
+
+        let persisted =
+            extract_and_persist_call_graph(dir.path(), &nodes, &existing, &repo_id, &store, &fake)
+                .await;
+        assert_eq!(persisted, 0, "duplicate of a Pass 1 Calls edge must be skipped");
+
+        let calls = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert!(
+            calls.is_empty(),
+            "no new Calls edge should be persisted for a duplicate"
+        );
     }
 }

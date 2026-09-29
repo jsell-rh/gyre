@@ -245,7 +245,7 @@ for f in "$REPO_ROOT"/specs/tasks/task-*.md; do
   {
     cat specs/GOAL.md specs/prompts/verifier.md
     printf '\n---\n\n## Pre-computed Target\n\nYour target task file is: `%s` (%s).\nRead this file first. Do not scan other task files to find work.\n' "$f" "$task_name"
-  } | run_agent 2>/dev/null
+  } | run_serial_agent "$f" 2>/dev/null
   log "<<< Pre-flight verifier done for $task_name"
 
   new_status=$(get_progress "$f")
@@ -274,11 +274,9 @@ while true; do
     else
       code_changes_since=1  # no audit yet — run the auditor
     fi
-
     if [ "$code_changes_since" -gt 0 ]; then
       log ">>> Spec-Fidelity Auditor ($code_changes_since code change(s) since last audit)"
-      cat specs/GOAL.md specs/prompts/spec-fidelity-auditor.md | \
-        run_agent 2>/dev/null
+      run_serial_agent specs/prompts/spec-fidelity-auditor.md
       log "<<< Auditor done"
     else
       log "    Auditor skipped — no code changes since last audit"
@@ -293,8 +291,7 @@ while true; do
 
   if [ "$not_started_count" -gt 0 ]; then
     log ">>> Project Manager ($not_started_count not-started section(s) to decompose)"
-    cat specs/GOAL.md specs/prompts/project-manager.md | \
-      run_agent 2>/dev/null
+    run_serial_agent specs/prompts/project-manager.md
     log "<<< Project Manager done"
   else
     log "    PM skipped — no not-started coverage sections"

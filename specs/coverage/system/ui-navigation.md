@@ -1,7 +1,7 @@
 # Coverage: UI Navigation Model
 
 **Spec:** [`system/ui-navigation.md`](../../system/ui-navigation.md)
-**Last audited:** 2026-04-13
+**Last audited:** 2026-09-29
 **Coverage:** 25/26
 
 | # | Section | Depth | Status | Task | Notes |
@@ -14,13 +14,13 @@
 | 6 | 2. Workspace Home | 2 | verified | - | WorkspaceHome.svelte: dashboard landing page with real data loading for decisions, repos, specs, tasks, MRs, agents, budget |
 | 7 | Sections | 3 | implemented | - | Partial — Decisions (inline actions, trust filtering) and Repos (cards, health, New/Import) genuine. Missing: Specs cross-repo list, Briefing (removed from template), Agent Rules section. Architecture partial (DependencyGraph only). |
 | 8 | Workspace Settings | 3 | verified | - | WorkspaceSettings.svelte: 6 tabs (General, Trust & Policies, Teams, Budget, Compute, Audit) + gear icon access + back arrow |
-| 9 | 3. Repo Mode | 2 | implemented | - | RepoMode.svelte with horizontal tabs |
-| 10 | Repo Header | 3 | implemented | - | RepoMode header with agent count, budget, clone URL |
-| 11 | Tab: Specs (default, landing tab) | 3 | implemented | - | SpecDashboard.svelte |
+| 9 | 3. Repo Mode | 2 | verified | - | RepoMode.svelte: TABS array + role=tablist tab bar + tab-content routing to all specced tabs. Re-verified 2026-09-29. |
+| 10 | Repo Header | 3 | verified | - | RepoMode header: agent-count button → AgentCardPanel slide-in, budget %, copyable clone URL. Re-verified 2026-09-29. |
+| 11 | Tab: Specs (default, landing tab) | 3 | implemented | - | Partial — registry list/filters/New Spec + DetailPanel mini arch canvas + predict/preview loop + Ask Why (interrogation) genuine. Meta-spec binding editor (stale pins) + inline assertion results confirmed only in Architecture/ExplorerView (§12, task-assigned), not the Specs-tab DetailPanel. Re-verified 2026-09-29. |
 | 12 | Tab: Architecture (Moldable Development Surface) | 3 | task-assigned | task-178 | ExplorerView exists; needs full moldable surface features |
-| 13 | Tab: Decisions | 3 | implemented | - | Inbox.svelte scoped to repo |
-| 14 | Tab: Code | 3 | implemented | - | ExplorerCodeTab.svelte |
-| 15 | Tab: ⚙ (Settings) | 3 | implemented | - | RepoSettings.svelte |
+| 13 | Tab: Decisions | 3 | verified | - | Inbox.svelte: real client-side repo_id filter (scope="repo"). Re-verified 2026-09-29. |
+| 14 | Tab: Code | 3 | verified | - | ExplorerCodeTab.svelte: clone URL, branches/commits/files/hot-files/provenance sub-tabs, commit log with agent attribution. MRs + Merge Queue live in separate RepoMode 'mrs' tab (impl divergence from spec sub-tab list). Re-verified 2026-09-29. |
+| 15 | Tab: ⚙ (Settings) | 3 | verified | - | RepoSettings.svelte: General/Gates/Policies/Budget/Audit/Danger Zone tabs all present. Re-verified 2026-09-29. |
 | 16 | 4. Meta-Spec Management | 2 | implemented | - | MetaSpecs.svelte |
 | 17 | 5. Navigation Flows | 2 | implemented | - | App.svelte: onMount entrypoint + popstate |
 | 18 | First Visit | 3 | implemented | - | App.svelte: entrypoint flow with localStorage |
