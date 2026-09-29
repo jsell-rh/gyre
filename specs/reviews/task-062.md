@@ -66,3 +66,27 @@ available in this environment). New spec-fidelity finding below.
   spec lifecycle to define test reachability over the three-edge set (and update the §2 `test_gaps`
   description accordingly). Add a test that exercises an Implements/RoutesTo-only path so the chosen
   semantics are pinned.
+
+## Round 4
+
+Task was flipped back to `ready-for-review` without addressing F2 — R3 raised F2 but
+never updated the task frontmatter's `progress` field to `needs-revision` (the R3 commit
+`9ca7ea3d` touched only the review file). No code commit or spec amendment landed after
+R3: `git log` shows the last resolver commit is the F1 fix (`e482bbf3`/`30a46847`), and the
+working tree is clean.
+
+F2 remains OPEN and unchanged:
+- `crates/gyre-domain/src/view_query_resolver.rs:399-400` still defines
+  `TEST_REACHABILITY_EDGES = &[EdgeType::Calls, EdgeType::Implements, EdgeType::RoutesTo]`,
+  consumed at lines 429 (`compute_test_reachable`) and 455 (`compute_all_test_fragility`).
+- `specs/system/view-query-grammar.md` §3 line 31 still reads
+  `$test_reachable — nodes reachable from any test function **via Calls**` (no amendment).
+
+The three-edge traversal continues to contradict the spec's single-edge (`Calls`) definition
+for `$test_reachable`/`$test_unreachable`/`$test_fragility` and the §2 `test_gaps` scope. A
+node reachable from a test only via `Implements`/`RoutesTo` is still misclassified as
+test-reachable and wrongly excluded from coverage gaps. Resolution requires EITHER restricting
+`TEST_REACHABILITY_EDGES` to `&[EdgeType::Calls]` to match §3, OR amending §3 (and the §2
+`test_gaps` row) via spec lifecycle to define test reachability over the three-edge set — plus
+a test that pins an Implements/RoutesTo-only path so the chosen semantics are enforced.
+Setting `progress: needs-revision`.
