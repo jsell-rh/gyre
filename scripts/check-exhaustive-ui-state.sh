@@ -25,7 +25,15 @@
 #
 # Exempt with: // exhaustive-state:ok — <reason>
 #
-# See: specs/reviews/task-082.md F1, F3, F4
+# See: specs/reviews/task-082.md F1, F3, F4, F5
+#
+# NOTE: This script covers the DERIVATION side (state -> display mapping).
+# The complementary ACTION-HANDLER side (F5) — a shared navigation helper
+# that resets a highlight-tracking variable, where only some parallel
+# scope-branches re-set the correct value — is not mechanically detectable
+# here without fragile switch/case parsing. It is enforced via the
+# implementation and verifier checklists (impl item 133, verifier
+# "Incomplete highlight-state fix across parallel scope-branches").
 #
 # Run by pre-commit and CI.
 
