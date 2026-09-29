@@ -112,12 +112,14 @@ spawn_worker() {
   task_name=$(basename "$task_file" .md)
   local worktree="$WORKTREE_BASE/$task_name"
 
+  # Drop registrations for worktree directories that no longer exist on
+  # disk (e.g. after a crash or manual cleanup). Without this, a prunable
+  # registration blocks both the branch delete below and worktree add —
+  # the task is then wedged forever, failing every cycle.
+  git worktree prune
+
   # Clean up stale branch and stale worktree directory if it exists
   git branch -D "worker/$task_name" 2>/dev/null
-  if [ -e "$worktree" ]; then
-    git worktree remove "$worktree" --force 2>/dev/null || rm -rf "$worktree"
-    log "    Removed stale worktree directory for $task_name"
-  fi
 
   # Create worktree
   if ! git worktree add "$worktree" -b "worker/$task_name" HEAD 2>/dev/null; then
