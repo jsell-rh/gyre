@@ -8,6 +8,13 @@
   import Breadcrumb from '../components/Breadcrumb.svelte';
   import EvaluativeOverlay from '../components/EvaluativeOverlay.svelte';
   import ObservableBanner from '../components/ObservableBanner.svelte';
+  import {
+    buildAdjacency,
+    computeTestFragilityCounts,
+    computeTestGaps,
+    computeTestReachable as computeTestReachableSet,
+    computeTestUnreachable as computeTestUnreachableSet,
+  } from './test-reachability.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null }} */
   let {
@@ -1608,27 +1615,11 @@
       case 'endpoints': return et === 'calls' || et === 'routes_to';
       case 'types': return et === 'field_of' || et === 'depends_on';
       case 'calls': return et === 'calls';
-      case 'dependencies': return et === 'depends_on' || et === 'calls';
       default: return true;
     }
   }
 
-  // ── View query support ─────────────────────────────────────────────
-  let adjacency = $derived.by(() => {
-    const adj = new Map();
-    for (const e of edges) {
-      const src = edgeSrc(e);
-      const tgt = edgeTgt(e);
-      const et = edgeType(e);
-      if (src && tgt) {
-        if (!adj.has(src)) adj.set(src, []);
-        adj.get(src).push({ targetId: tgt, edgeType: et });
-        if (!adj.has(tgt)) adj.set(tgt, []);
-        adj.get(tgt).push({ targetId: src, edgeType: et, reverse: true });
-      }
-    }
-    return adj;
-  });
+  let adjacency = $derived.by(() => buildAdjacency(edges));
 
   // ── Computed reference helpers (view-query-grammar.md) ───────────────
   // These resolve computed expressions like $callers(), $callees(), etc.
@@ -1704,43 +1695,15 @@
     return result;
   }
 
-  // Edge types traversed for test reachability — matches backend TEST_REACHABILITY_EDGES.
-  // Contains is intentionally excluded to avoid inflating coverage.
-  const FRONTEND_TEST_EDGES = new Set(['calls', 'implements', 'routes_to']);
-  const TESTABLE_TYPES = new Set(['function', 'method', 'endpoint', 'type', 'trait', 'class']);
-
+  // Test-reachability semantics (Calls-only traversal, TESTABLE_TYPES, and
+  // the shared adjacency builder) live in ./test-reachability.js so the §3
+  // computed references resolve identically here and in unit tests.
   function computeTestUnreachable() {
-    const testN = nodes.filter(n => n.test_node);
-    const reachable = new Set(testN.map(n => n.id));
-    const q = [...reachable];
-    while (q.length > 0) {
-      const id = q.shift();
-      for (const nb of (adjacency.get(id) ?? [])) {
-        if (reachable.has(nb.targetId) || !FRONTEND_TEST_EDGES.has(nb.edgeType) || nb.reverse) continue;
-        reachable.add(nb.targetId);
-        q.push(nb.targetId);
-      }
-    }
-    const result = new Set();
-    for (const n of nodes) {
-      if (!n.test_node && TESTABLE_TYPES.has(n.node_type) && !reachable.has(n.id)) result.add(n.id);
-    }
-    return result;
+    return computeTestUnreachableSet(nodes, adjacency);
   }
 
   function computeTestReachable() {
-    const testN = nodes.filter(n => n.test_node);
-    const reachable = new Set(testN.map(n => n.id));
-    const q = [...reachable];
-    while (q.length > 0) {
-      const id = q.shift();
-      for (const nb of (adjacency.get(id) ?? [])) {
-        if (reachable.has(nb.targetId) || !FRONTEND_TEST_EDGES.has(nb.edgeType) || nb.reverse) continue;
-        reachable.add(nb.targetId);
-        q.push(nb.targetId);
-      }
-    }
-    return reachable;
+    return computeTestReachableSet(nodes, adjacency);
   }
 
   function computeWhere(property, operator, value) {
@@ -1848,30 +1811,10 @@
     const key = `${nodes.length}:${edges.length}`;
     if (_testFragilityCache && _testFragilityCacheKey === key) return _testFragilityCache;
 
-    const fragility = new Map(); // node_id -> count of distinct tests reaching it
-    const testNodes = nodes.filter(n => n.test_node);
-
-    // For each test node, do a BFS and increment fragility for each reached node.
-    // This is O(T * (N+M)) total but runs once and is cached.
-    for (const tn of testNodes) {
-      const reached = new Set([tn.id]);
-      const q = [tn.id];
-      while (q.length > 0) {
-        const id = q.shift();
-        for (const nb of (adjacency.get(id) ?? [])) {
-          if (FRONTEND_TEST_EDGES.has(nb.edgeType) && !nb.reverse && !reached.has(nb.targetId)) {
-            reached.add(nb.targetId);
-            q.push(nb.targetId);
-          }
-        }
-      }
-      for (const id of reached) {
-        fragility.set(id, (fragility.get(id) || 0) + 1);
-      }
-    }
-    _testFragilityCache = fragility;
+    // O(T * (N+M)) once, then O(1) per lookup — semantics in test-reachability.js
+    _testFragilityCache = computeTestFragilityCounts(nodes, adjacency);
     _testFragilityCacheKey = key;
-    return fragility;
+    return _testFragilityCache;
   }
 
   function computeTestFragility(nodeName) {
@@ -2024,28 +1967,9 @@
     }
 
     if (scope.type === 'test_gaps') {
-      // Match backend TEST_REACHABILITY_EDGES: calls, implements, routes_to
-      // NOTE: Contains is intentionally excluded — including it would make all
-      // sibling functions in a module "reachable" just because one test exists
-      // in the same module, inflating test coverage metrics.
-      const TEST_REACHABILITY_EDGES = new Set(['calls', 'implements', 'routes_to']);
-      const testN = nodes.filter(n => n.test_node);
-      const reachable = new Set(testN.map(n => n.id));
-      const q = [...reachable];
-      while (q.length > 0) {
-        const id = q.shift();
-        for (const nb of (adjacency.get(id) ?? [])) {
-          if (reachable.has(nb.targetId) || !TEST_REACHABILITY_EDGES.has(nb.edgeType) || nb.reverse) continue;
-          reachable.add(nb.targetId);
-          q.push(nb.targetId);
-        }
-      }
-      const matched = new Map();
-      for (const n of nodes) {
-        const testableTypes = new Set(['function', 'method', 'endpoint', 'type', 'trait', 'class']);
-        if (!n.test_node && testableTypes.has(n.node_type) && !reachable.has(n.id)) matched.set(n.id, 0);
-      }
-      return matched.size > 0 ? matched : null;
+      // Calls-only reachability and TESTABLE_TYPES filtering live in
+      // test-reachability.js (spec: view-query-grammar.md §2/§3).
+      return computeTestGaps(nodes, adjacency);
     }
 
     if (scope.type === 'filter') {
