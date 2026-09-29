@@ -206,9 +206,12 @@ const HTML = `<!doctype html>
   .card:focus-within { border-color: var(--pf-info); outline: none; }
 
   .card-head {
-    flex: none; display: flex; align-items: center; gap: var(--sp-2);
-    padding: var(--sp-3) var(--sp-4);
+    flex: none;
+    padding: var(--sp-3) var(--sp-4) var(--sp-2);
     background: var(--pf-surface-2); border-bottom: 1px solid var(--pf-border);
+  }
+  .card-head .row1 {
+    display: flex; align-items: center; gap: var(--sp-2);
   }
   .dot {
     width: 8px; height: 8px; border-radius: 50%; flex: none;
@@ -220,11 +223,16 @@ const HTML = `<!doctype html>
     font: 700 13px var(--pf-font-mono); color: var(--pf-text); flex: none;
   }
   .card-head .title {
-    flex: 1; min-width: 0; color: var(--pf-text-muted); font-size: 12px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    display: block;
+    margin-top: var(--sp-1);
+    color: var(--pf-text-muted); font-size: 12px; line-height: 1.4;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
   }
   .badge {
-    flex: none; max-width: 40%;
+    flex: none; margin-left: auto; max-width: 60%;
     padding: 2px var(--sp-3); border-radius: var(--pf-radius-pill);
     background: color-mix(in srgb, var(--pf-info) 15%, var(--pf-surface-2));
     border: 1px solid color-mix(in srgb, var(--pf-info) 35%, var(--pf-border));
@@ -317,16 +325,19 @@ function card(key, name) {
   el.tabIndex = 0;
   var head = document.createElement("div");
   head.className = "card-head";
+  var row1 = document.createElement("div");
+  row1.className = "row1";
   var dot = document.createElement("span");
   dot.className = "dot";
   var nameEl = document.createElement("span");
   nameEl.className = "name";
   nameEl.textContent = name;
-  var titleEl = document.createElement("span");
-  titleEl.className = "title";
   var badge = document.createElement("span");
   badge.className = "badge";
-  head.append(dot, nameEl, titleEl, badge);
+  row1.append(dot, nameEl, badge);
+  var titleEl = document.createElement("span");
+  titleEl.className = "title";
+  head.append(row1, titleEl);
   var body = document.createElement("pre");
   body.className = "card-body";
   var foot = document.createElement("pre");
@@ -409,7 +420,10 @@ function render(data) {
     el.classList.toggle("receiving", i.receiving);
     var titleText = i.title ? i.title + (i.specRef ? " \\u00b7 " + i.specRef : "") : "";
     var titleEl = el.querySelector(".title");
-    if (titleEl.textContent !== titleText) titleEl.textContent = titleText;
+    if (titleEl.textContent !== titleText) {
+      titleEl.textContent = titleText;
+      titleEl.title = titleText;
+    }
     var badge = el.querySelector(".badge");
     if (badge.textContent !== i.phase) badge.textContent = i.phase;
     var body = el.querySelector(".card-body");
