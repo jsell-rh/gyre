@@ -415,6 +415,18 @@ describe('Sidebar active item highlight (HSI §1.3)', () => {
     const { container } = render(App);
     await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
   });
+
+  // F5: at repo scope, clicking Briefing highlights Briefing (not Inbox).
+  // Repo mode has no briefing tab, so the click goes to workspace home and must
+  // still highlight Briefing — goToWorkspaceHome resets to Inbox, then the repo
+  // branch re-sets workspaceActiveSection to 'briefing'.
+  it('highlights Briefing after clicking it at repo scope', async () => {
+    window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
+    const { container } = render(App);
+    await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
+    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
+  });
 });
 
 // ── Entrypoint flow ───────────────────────────────────────────────────

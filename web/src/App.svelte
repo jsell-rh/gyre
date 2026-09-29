@@ -809,7 +809,12 @@
         case 'specs':      goToRepoTab('specs'); return;
         case 'explorer':   goToRepoTab('architecture'); return;
         case 'admin':      goToRepoTab('settings'); return;
-        case 'briefing':   goToWorkspaceHome(currentWorkspace); return; // No repo-scoped briefing tab
+        case 'briefing':
+          // No repo-scoped briefing tab — go to workspace home and highlight Briefing.
+          goToWorkspaceHome(currentWorkspace);
+          workspaceActiveSection = 'briefing';
+          tick().then(() => document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          return;
         case 'meta-specs': goToAgentRules(); return;
       }
     } else {
