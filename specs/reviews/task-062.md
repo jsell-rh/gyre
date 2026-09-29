@@ -38,3 +38,31 @@ Findings:
   and `$test_fragility(...)` sites). `bfs_traverse` remains referenced by
   `compute_all_test_fragility`, so no cascading dead code. `cargo test -p gyre-domain
   view_query_resolver`: 115 passed, 0 failed. `cargo build -p gyre-domain`: clean, zero warnings.
+
+## Round 3
+
+F1 confirmed resolved: `compute_test_fragility_count` is gone; grep across `crates/`
+finds no residual references; `bfs_traverse` remains live via `compute_all_test_fragility`.
+`cargo test -p gyre-domain --lib view_query_resolver`: 115 passed, 0 failed (clang+mold
+available in this environment). New spec-fidelity finding below.
+
+- [ ] **F2 — `$test_reachable`/`$test_unreachable`/`$test_fragility` traverse Implements+RoutesTo, contradicting spec's "via Calls".**
+  Spec `view-query-grammar.md` §3 defines these references with an explicit edge qualifier:
+  `$test_reachable — nodes reachable from any test function **via Calls**`,
+  `$test_unreachable — complement`, and `$test_fragility(node) — count of distinct **test paths**
+  reaching this node`. The §2 `test_gaps` scope is likewise "Nodes NOT reachable from any test
+  function". The implementation defines
+  `const TEST_REACHABILITY_EDGES: &[EdgeType] = &[EdgeType::Calls, EdgeType::Implements, EdgeType::RoutesTo]`
+  (`crates/gyre-domain/src/view_query_resolver.rs:399-400`) and uses it in
+  `compute_test_reachable` (line 405) and `compute_all_test_fragility` (line 441). These power
+  `$test_reachable` (line 994), `$test_unreachable` (lines 973-991), the `test_gaps` scope, and
+  `$test_fragility` (line 1494) plus `$where(test_fragility, ...)` (line 1041) and the dry_run
+  metric population (lines 2109, 2170). A node reachable from a test only via an `Implements` or
+  `RoutesTo` edge (not `Calls`) is classified as test-reachable and is excluded from test-coverage
+  gaps — the opposite of what the spec specifies. The code carries a rationale comment
+  (trait dispatch / HTTP endpoint tests), but that is a reinterpretation of the spec, not an
+  amendment. Per the goal's rule 4 ("Never implement around a spec by reinterpreting it"): either
+  restrict the traversal to `EdgeType::Calls` to match §3, or amend `view-query-grammar.md` §3 via
+  spec lifecycle to define test reachability over the three-edge set (and update the §2 `test_gaps`
+  description accordingly). Add a test that exercises an Implements/RoutesTo-only path so the chosen
+  semantics are pinned.
