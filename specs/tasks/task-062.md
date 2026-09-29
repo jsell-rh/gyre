@@ -7,7 +7,7 @@ coverage_sections:
   - "view-query-grammar.md §1 Problem"
   - "view-query-grammar.md §2 Primitives"
   - "view-query-grammar.md §3 1. Computed References"
-commits: ["0054721d"]
+commits: ["ce4845cc"]
 ---
 
 ## Spec Excerpt
