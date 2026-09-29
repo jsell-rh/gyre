@@ -1184,4 +1184,77 @@ mod tests {
             "advisory gate failure should not block MR"
         );
     }
+
+    // ── TraceCapture gate ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn trace_capture_gate_always_passes_even_on_bad_command() {
+        // TraceCapture is observational — it always passes, even when the test
+        // command fails or the OTLP receiver can't start.
+        let state = test_state();
+        let gate = make_gate(
+            GateType::TraceCapture,
+            // Invalid JSON config means defaults apply; "false" as test_command exits non-zero.
+            Some(r#"{"test_command": "false"}"#.to_string()),
+        );
+        let mr_id = make_mr_id();
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        let (status, output) = run_trace_capture_gate(&state, &gate, &mr_id, &result_id).await;
+
+        assert_eq!(
+            status,
+            GateStatus::Passed,
+            "TraceCapture must always pass (observational): {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trace_capture_gate_always_passes_with_default_config() {
+        // With no config (empty/invalid JSON), defaults apply.
+        // The test command "cargo test --features integration" likely won't succeed
+        // in CI, but the gate should still pass.
+        let state = test_state();
+        let gate = make_gate(GateType::TraceCapture, None);
+        let mr_id = make_mr_id();
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        let (status, output) = run_trace_capture_gate(&state, &gate, &mr_id, &result_id).await;
+
+        assert_eq!(
+            status,
+            GateStatus::Passed,
+            "TraceCapture must always pass (observational): {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trace_capture_gate_successful_run_stores_trace() {
+        // When the test command succeeds, spans should be stored.
+        let state = test_state();
+        // Use "true" as a test command that exits successfully (no spans emitted).
+        let gate = make_gate(
+            GateType::TraceCapture,
+            Some(r#"{"test_command": "true", "otlp_port": 0}"#.to_string()),
+        );
+        let mr_id = make_mr_id();
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        let (status, output) = run_trace_capture_gate(&state, &gate, &mr_id, &result_id).await;
+
+        assert_eq!(status, GateStatus::Passed, "output: {output}");
+        assert!(
+            output.contains("captured") || output.contains("trace_capture gate"),
+            "output should mention trace capture: {output}"
+        );
+
+        // Verify a GateTrace was stored (even if 0 spans, the trace header is stored).
+        let stored = state.traces.get_by_mr(&mr_id).await.unwrap();
+        assert!(
+            stored.is_some(),
+            "trace should be stored for the MR after successful capture"
+        );
+        let trace = stored.unwrap();
+        assert_eq!(trace.mr_id, mr_id);
+    }
 }

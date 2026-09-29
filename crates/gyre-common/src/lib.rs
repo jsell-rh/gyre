@@ -1,4 +1,5 @@
 pub mod attestation;
+pub mod call_graph;
 pub mod completion;
 pub mod conversation;
 pub mod error;
@@ -18,6 +19,7 @@ pub use attestation::{
     GateAttestation, GateConstraint, InputContent, OutputConstraint, PersonaRef, ScopeConstraint,
     SignedInput, TrustAnchor, TrustAnchorType, VerificationResult,
 };
+pub use call_graph::{CallEdge, Language};
 pub use completion::{AgentCompletionSummary, Decision};
 pub use conversation::{ConversationProvenance, TurnCommitLink};
 pub use error::GyreError;

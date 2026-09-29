@@ -372,51 +372,30 @@ async fn do_extract(
         }
     }
 
-    // --- Step 7: Non-blocking Pass 2 (LSP) -----------------------------------
-    // Per lsp-call-graph.md, the graph is usable after Pass 1 with partial call data.
-    // Pass 2 runs in the background and merges additional edges when done.
-    // The temp directory is moved into the spawned task so it stays alive.
+    // --- Step 7: Non-blocking Pass 2 (call graph) ----------------------------
+    // Per lsp-call-graph.md §6, the graph is usable after Pass 1 with partial
+    // call data. Pass 2 delegates to language type checkers (behind the
+    // CallGraphExtractor port) in a background task and merges the complete
+    // Calls edges when done. The temp dir is moved into the task to stay alive.
     {
         let pass2_nodes = final_nodes.clone();
         let pass2_edges: Vec<GraphEdge> = new_edge_map.into_values().collect();
         let pass2_repo_root = tmp.path().to_path_buf();
         let pass2_repo_id = repo_id_parsed.clone();
-        let pass2_repo_id_log = repo_id_parsed.to_string();
-        let pass2_sha = new_sha.to_string();
         let pass2_graph_store = Arc::clone(&graph_store);
 
-        // Fire-and-forget: spawn a background task so Pass 2 never blocks the
-        // push response.  The `_tmp` binding keeps the temp directory alive
-        // until the LSP analysis finishes.
+        // Fire-and-forget: Pass 2 never blocks the push response. The `_tmp`
+        // binding keeps the extracted tree alive until the analysis finishes.
         tokio::spawn(async move {
-            let _tmp = tmp; // prevent TempDir drop until this task completes
-
-            let lsp_edges = match tokio::task::spawn_blocking(move || {
-                extract_lsp_edges(
-                    &pass2_repo_root,
-                    &pass2_nodes,
-                    &pass2_edges,
-                    &pass2_repo_id,
-                    &pass2_sha,
-                )
-            })
-            .await
-            {
-                Ok(edges) => edges,
-                Err(e) => {
-                    tracing::warn!(
-                        repo_id = %pass2_repo_id_log,
-                        error = %e,
-                        "LSP call graph extraction (Pass 2) failed — graph will be missing cross-module call edges"
-                    );
-                    Vec::new()
-                }
-            };
-
-            // Persist any new LSP-discovered edges.
-            for edge in lsp_edges {
-                let _ = pass2_graph_store.create_edge(edge).await;
-            }
+            let _tmp = tmp;
+            extract_and_persist_call_graph(
+                &pass2_repo_root,
+                &pass2_nodes,
+                &pass2_edges,
+                &pass2_repo_id,
+                pass2_graph_store.as_ref(),
+            )
+            .await;
         });
     }
 
@@ -788,57 +767,75 @@ fn run_all_extractors(
     (all_nodes, all_edges)
 }
 
-/// Run Pass 2 (LSP) extraction and return additional edges.
-/// This is designed to run AFTER Pass 1 results are already persisted,
-/// so the graph is usable immediately and becomes complete when Pass 2 finishes.
-pub fn extract_lsp_edges(
+/// Pass 2: extract the complete call graph via language type checkers (behind
+/// the [`CallGraphExtractor`] port) and persist the resulting `Calls` edges.
+///
+/// Runs AFTER Pass 1 results are persisted, so the graph is usable immediately
+/// and becomes complete when Pass 2 finishes. Best-effort — logs and continues
+/// on any failure, never failing a push.
+///
+/// Returns the number of new `Calls` edges persisted.
+pub async fn extract_and_persist_call_graph(
     repo_root: &Path,
     nodes: &[GraphNode],
     existing_edges: &[GraphEdge],
     repo_id: &Id,
-    commit_sha: &str,
-) -> Vec<GraphEdge> {
-    // Auto-detect language and use the appropriate LSP extractor.
-    // Supports Rust (rust-analyzer), Python (pyright), Go (gopls),
-    // and TypeScript (typescript-language-server).
-    let lang = gyre_domain::lsp_call_graph::detect_language(repo_root);
-    if lang == gyre_domain::lsp_call_graph::RepoLanguage::Unknown {
-        return vec![];
+    graph_store: &dyn GraphPort,
+) -> usize {
+    use gyre_adapters::call_graph::SubprocessCallGraphExtractor;
+    use gyre_domain::call_graph_resolve::{detect_all_languages, resolve_call_edges};
+    use gyre_ports::call_graph::CallGraphExtractor;
+
+    let languages = detect_all_languages(repo_root);
+    if languages.is_empty() {
+        return 0;
     }
 
-    let lsp_result = gyre_domain::lsp_call_graph::extract_call_graph_auto(
-        repo_root,
-        nodes,
-        existing_edges,
-        repo_id,
-        commit_sha,
-    );
+    let extractor = SubprocessCallGraphExtractor::new();
+    // Accumulate resolved edges so later languages dedup against earlier ones
+    // (polyglot repos) as well as the Pass 1 edges.
+    let mut known_edges = existing_edges.to_vec();
+    let mut persisted = 0usize;
 
-    if !lsp_result.errors.is_empty() {
-        for err in &lsp_result.errors {
-            tracing::info!("LSP call graph: {err}");
+    for lang in languages {
+        let raw = match extractor.extract_call_edges(repo_root, lang).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    repo_id = %repo_id,
+                    language = %lang,
+                    error = %e,
+                    "Pass 2 call graph extraction failed — graph will be missing some call edges"
+                );
+                continue;
+            }
+        };
+        if raw.is_empty() {
+            continue;
+        }
+
+        let edges = resolve_call_edges(lang, &raw, nodes, &known_edges, repo_id);
+        for edge in edges {
+            match graph_store.create_edge(edge.clone()).await {
+                Ok(_) => {
+                    persisted += 1;
+                    known_edges.push(edge);
+                }
+                Err(e) => {
+                    tracing::warn!(repo_id = %repo_id, error = %e, "failed to persist Pass 2 edge");
+                }
+            }
         }
     }
 
-    if lsp_result.new_edges_found > 0 || lsp_result.incomplete {
+    if persisted > 0 {
         tracing::info!(
-            definitions = lsp_result.definitions_queried,
-            total = lsp_result.total_definitions,
-            new_edges = lsp_result.new_edges_found,
-            incomplete = lsp_result.incomplete,
-            "LSP call graph extraction {}",
-            if lsp_result.incomplete {
-                format!(
-                    "incomplete ({}/{})",
-                    lsp_result.definitions_queried, lsp_result.total_definitions
-                )
-            } else {
-                "complete".to_string()
-            }
+            repo_id = %repo_id,
+            edges = persisted,
+            "LSP call graph extraction (Pass 2) complete"
         );
     }
-
-    lsp_result.edges
+    persisted
 }
 
 /// Post-extraction spec assertion check.

@@ -8,6 +8,7 @@
 //! Adapters depend on ports, not the other way around.
 //! Domain logic MUST NOT import this crate.
 
+pub mod call_graph;
 pub mod compute;
 pub mod git2_ops;
 pub mod jj_ops;
@@ -19,6 +20,7 @@ pub mod postgres;
 pub mod schema;
 pub mod sqlite;
 
+pub use call_graph::SubprocessCallGraphExtractor;
 pub use compute::{DockerTarget, LocalTarget, SshTarget};
 pub use git2_ops::Git2OpsAdapter;
 pub use jj_ops::JjOpsAdapter;
