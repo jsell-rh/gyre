@@ -415,6 +415,127 @@ describe('Sidebar active item highlight (HSI §1.3)', () => {
     const { container } = render(App);
     await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
   });
+
+  // F5: at repo scope, clicking Briefing highlights Briefing (not Inbox).
+  // Repo mode has no briefing tab, so the click goes to workspace home and must
+  // still highlight Briefing — goToWorkspaceHome resets to Inbox, then the repo
+  // branch re-sets workspaceActiveSection to 'briefing'.
+  it('highlights Briefing after clicking it at repo scope', async () => {
+    window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
+    const { container } = render(App);
+    await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
+    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
+  });
+});
+
+// ── Tenant scope (/all) — scope preservation + highlight (HSI §1.3) ──
+// At tenant scope the sidebar must preserve tenant scope: Inbox/Briefing/
+// Specs are scroll sections of the cross-workspace dashboard, Meta-specs is
+// the tenant agent-rules catalog, Admin is tenant settings (admin-only).
+// Before this fix every sidebar click at /all escaped to workspace scope.
+describe('Sidebar tenant-scope navigation (HSI §1.3)', () => {
+  function activeItem(container) {
+    const active = container.querySelector('.sidebar-item.active');
+    return active?.getAttribute('data-testid')?.replace('sidebar-item-', '') ?? null;
+  }
+
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue([]);
+    api.workspaceRepos.mockResolvedValue([]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+    api.version.mockResolvedValue({ version: '0.1.0' });
+    // jsdom lacks scrollIntoView; the cross-workspace sections render for
+    // real, so the sidebar click's section scroll would throw.
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+
+  it('defaults to Explorer highlight at /all (workspace cards grid)', async () => {
+    window.history.pushState({}, '', '/all');
+    const { container } = render(App);
+    await waitFor(() => expect(activeItem(container)).toBe('explorer'), { timeout: 3000 });
+  });
+
+  it('clicking Briefing at /all stays at /all and highlights Briefing', async () => {
+    window.history.pushState({}, '', '/all');
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy(), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
+    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
+    expect(window.location.pathname).toBe('/all');
+  });
+
+  it('clicking Inbox at /all stays at /all and highlights Inbox', async () => {
+    window.history.pushState({}, '', '/all');
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-inbox"]')).toBeTruthy(), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-inbox"]'));
+    await waitFor(() => expect(activeItem(container)).toBe('inbox'), { timeout: 3000 });
+    expect(window.location.pathname).toBe('/all');
+  });
+
+  it('clicking Specs at /all stays at /all and highlights Specs', async () => {
+    window.history.pushState({}, '', '/all');
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-specs"]')).toBeTruthy(), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-specs"]'));
+    await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
+    expect(window.location.pathname).toBe('/all');
+  });
+
+  it('clicking Meta-specs at /all navigates to /all/agent-rules and highlights Meta-specs', async () => {
+    window.history.pushState({}, '', '/all');
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-meta-specs"]')).toBeTruthy(), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-meta-specs"]'));
+    await waitFor(() => expect(window.location.pathname).toBe('/all/agent-rules'), { timeout: 3000 });
+    await waitFor(() => expect(activeItem(container)).toBe('meta-specs'), { timeout: 3000 });
+  });
+
+  it('clicking Admin at /all as admin navigates to /all/settings and highlights Admin', async () => {
+    api.me.mockResolvedValue({ role: 'Admin' });
+    window.history.pushState({}, '', '/all');
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-admin"]')).toBeTruthy(), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-admin"]'));
+    await waitFor(() => expect(window.location.pathname).toBe('/all/settings'), { timeout: 3000 });
+    await waitFor(() => expect(activeItem(container)).toBe('admin'), { timeout: 3000 });
+  });
+
+  it('clicking Admin at /all as non-admin stays at /all (tenant settings are admin-only)', async () => {
+    api.me.mockResolvedValue({ role: 'Member' });
+    window.history.pushState({}, '', '/all');
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-admin"]')).toBeTruthy(), { timeout: 3000 });
+    // Let api.me resolve so userIsAdmin settles
+    await new Promise(r => setTimeout(r, 50));
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-admin"]'));
+    await new Promise(r => setTimeout(r, 50));
+    expect(window.location.pathname).toBe('/all');
+  });
+
+  it('clicking Explorer at /all keeps Explorer highlight (workspace cards grid)', async () => {
+    window.history.pushState({}, '', '/all');
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-explorer"]')).toBeTruthy(), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-explorer"]'));
+    await waitFor(() => expect(activeItem(container)).toBe('explorer'), { timeout: 3000 });
+    expect(window.location.pathname).toBe('/all');
+  });
+
+  it('clicking Briefing from /all/settings returns to /all and highlights Briefing (no workspace-scope escape)', async () => {
+    api.me.mockResolvedValue({ role: 'Admin' });
+    window.history.pushState({}, '', '/all/settings');
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy(), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
+    await waitFor(() => expect(window.location.pathname).toBe('/all'), { timeout: 3000 });
+    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
+  });
 });
 
 // ── Entrypoint flow ───────────────────────────────────────────────────
