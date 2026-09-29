@@ -55,24 +55,31 @@ run_agent() {
   fi
 }
 
-# Run a serial agent (auditor/PM) on main with the working tree protected:
-# stash any uncommitted/untracked work, run the agent, restore afterwards.
-# Without this, agents that commit with `git add -A` sweep unrelated
-# in-flight human/agent work into their audit commits (observed in
-# 32edb3f1 and d7d67e22).
-run_serial_agent() {
-  local prompt_file="$1"
-  local had_changes=0
-  if ! git diff --quiet --ignore-submodules -- && ! git diff --cached --quiet --ignore-submodules -- || \
+# Working-tree guard for agents that run on main (auditor, PM, pre-flight
+# verifier): they commit their own edits, and agents that use `git add -A`
+# sweep unrelated in-flight human/agent work into their commits (observed
+# in 32edb3f1 and d7d67e22). Stash uncommitted work around the run.
+wt_guard_stash() {
+  WT_GUARDED=0
+  if ! git diff --quiet --ignore-submodules -- || \
+     ! git diff --cached --quiet --ignore-submodules -- || \
      [ -n "$(git ls-files --others --exclude-standard)" ]; then
-    had_changes=1
-    git stash push --include-untracked --message "loop-serial-agent: $(basename "$prompt_file")" >/dev/null 2>&1 || had_changes=0
+    git stash push --include-untracked --message "loop-wt-guard" >/dev/null 2>&1 && WT_GUARDED=1
   fi
-  cat specs/GOAL.md "$prompt_file" | run_agent 2>/dev/null
+}
+wt_guard_restore() {
+  if [ "${WT_GUARDED:-0}" -eq 1 ]; then
+    git stash pop >/dev/null 2>&1 || \
+      log "!!! WARNING: failed to restore stashed WIP (loop-wt-guard) — check git stash list"
+  fi
+}
+
+# Serial agents (auditor/PM): prompt = GOAL.md + their prompt file.
+run_serial_agent() {
+  wt_guard_stash
+  cat specs/GOAL.md "$1" | run_agent 2>/dev/null
   local rc=$?
-  if [ "$had_changes" -eq 1 ]; then
-    git stash pop >/dev/null 2>&1 || log "!!! WARNING: failed to restore stashed WIP after serial agent — check git stash list"
-  fi
+  wt_guard_restore
   return $rc
 }
 
@@ -235,17 +242,18 @@ mkdir -p "$WORKTREE_BASE"
 > "$LOG"
 log "=== Parallel Dev Loop Started (max $MAX_WORKERS workers) ==="
 
-# Pre-flight: handle any ready-for-review tasks on main before going parallel
 for f in "$REPO_ROOT"/specs/tasks/task-*.md; do
   [ -f "$f" ] || continue
   status=$(get_progress "$f")
   [ "$status" = "ready-for-review" ] || continue
   task_name=$(basename "$f" .md)
   log ">>> Pre-flight: verifying $task_name on main"
+  wt_guard_stash
   {
     cat specs/GOAL.md specs/prompts/verifier.md
     printf '\n---\n\n## Pre-computed Target\n\nYour target task file is: `%s` (%s).\nRead this file first. Do not scan other task files to find work.\n' "$f" "$task_name"
-  } | run_serial_agent "$f" 2>/dev/null
+  } | run_agent 2>/dev/null
+  wt_guard_restore
   log "<<< Pre-flight verifier done for $task_name"
 
   new_status=$(get_progress "$f")
