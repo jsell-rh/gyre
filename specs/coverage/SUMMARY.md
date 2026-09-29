@@ -25,7 +25,7 @@
 | message-bus.md | 17 | 3 | 0 | 2 | 12 | 0 | 85% |
 | meta-spec-reconciliation.md | 18 | 7 | 0 | 6 | 5 | 0 | 45% |
 | observability.md | 9 | 0 | 0 | 3 | 6 | 0 | 66% |
-| platform-model.md | 56 | 4 | 1 | 28 | 19 | 4 | 44% |
+| platform-model.md | 56 | 4 | 0 | 29 | 19 | 4 | 44% |
 | ralph-loop.md | 27 | 27 | 0 | 0 | 0 | 0 | 0% |
 | realized-model.md | 12 | 4 | 0 | 1 | 7 | 0 | 87% |
 | repo-lifecycle.md | 20 | 2 | 0 | 3 | 15 | 0 | 83% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **217** | **1** | **300** | **241** | **43** | **48%** |
+| **TOTAL** | **802** | **217** | **0** | **301** | **241** | **43** | **48%** |
