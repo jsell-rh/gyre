@@ -1,6 +1,7 @@
 <script>
   import { t } from 'svelte-i18n';
   import Button from './Button.svelte';
+  import SpecDiffView from './SpecDiffView.svelte';
   import { toastSuccess } from './toast.svelte.js';
 
   /**
@@ -21,19 +22,7 @@
    */
   let { conflict = null, onOverwrite = undefined, onDiscard = undefined, onClose = undefined } = $props();
 
-  // Build aligned side-by-side rows from the LCS diff.
-  //   context → both sides show the line
-  //   remove  → left (current/server) only
-  //   add     → right (yours) only
-  let rows = $derived(buildRows(conflict?.diff ?? []));
-
-  function buildRows(diff) {
-    return diff.map((d) => {
-      if (d.op === 'remove') return { left: d.text, right: null, op: 'remove' };
-      if (d.op === 'add') return { left: null, right: d.text, op: 'add' };
-      return { left: d.text, right: d.text, op: 'context' };
-    });
-  }
+  // Diff rows are built by the shared SpecDiffView component.
 
   async function copyMine() {
     const text = conflict?.submitted_content ?? '';
@@ -78,20 +67,7 @@
 
       <p class="conflict-explain">{$t('spec_conflict.explanation', { values: { path: conflict.spec_path ?? '' } })}</p>
 
-      <div class="conflict-diff" role="table" aria-label={$t('spec_conflict.diff_label')}>
-        <div class="diff-col-headers" role="row">
-          <span class="diff-col-header" role="columnheader">{$t('spec_conflict.current_version')}</span>
-          <span class="diff-col-header" role="columnheader">{$t('spec_conflict.your_version')}</span>
-        </div>
-        <div class="diff-body">
-          {#each rows as row}
-            <div class="diff-row" role="row">
-              <span class="diff-cell diff-left diff-{row.op}" role="cell">{row.left ?? ''}</span>
-              <span class="diff-cell diff-right diff-{row.op}" role="cell">{row.right ?? ''}</span>
-            </div>
-          {/each}
-        </div>
-      </div>
+      <SpecDiffView diff={conflict?.diff ?? []} />
 
       <footer class="conflict-actions">
         <Button variant="primary" onclick={() => onOverwrite?.()} data-testid="conflict-overwrite-btn">
@@ -156,46 +132,6 @@
     margin: 0;
     color: var(--text-muted, #555);
     font-size: 0.85rem;
-  }
-  .conflict-diff {
-    margin: 0.75rem 1rem;
-    border: 1px solid var(--border, #e2e2e2);
-    border-radius: 6px;
-    overflow: auto;
-    flex: 1;
-    font-family: var(--mono, ui-monospace, monospace);
-    font-size: 0.8rem;
-  }
-  .diff-col-headers,
-  .diff-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-  }
-  .diff-col-headers {
-    position: sticky;
-    top: 0;
-    background: var(--surface-alt, #f5f5f5);
-    border-bottom: 1px solid var(--border, #e2e2e2);
-    font-weight: 600;
-  }
-  .diff-col-header {
-    padding: 0.35rem 0.6rem;
-  }
-  .diff-col-header:first-child {
-    border-right: 1px solid var(--border, #e2e2e2);
-  }
-  .diff-cell {
-    padding: 0.1rem 0.6rem;
-    white-space: pre-wrap;
-    word-break: break-word;
-    border-right: 1px solid var(--border, #eee);
-    min-height: 1.2em;
-  }
-  .diff-cell.diff-remove.diff-left {
-    background: rgba(220, 50, 50, 0.14);
-  }
-  .diff-cell.diff-add.diff-right {
-    background: rgba(50, 160, 80, 0.16);
   }
   .conflict-actions {
     display: flex;

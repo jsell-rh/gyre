@@ -2,10 +2,13 @@
 title: "HSI Conflict Prevention — Concurrent Spec Editing Warning"
 spec_ref: "human-system-interface.md §7 Conflict Prevention"
 depends_on: []
-progress: not-started
+progress: ready-for-review
+review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
-commits: []
+commits:
+  - 1ac15418
+  - eee00dba
 ---
 
 ## Spec Excerpt
@@ -45,16 +48,16 @@ This is optimistic concurrency, not real-time co-editing (CRDT-based co-editing 
 
 ## Acceptance Criteria
 
-- [ ] UserPresence includes optional `editing_entity` field
-- [ ] Warning banner appears when another user is editing the same spec
-- [ ] Warning disappears when the other user leaves the spec editor
-- [ ] Spec save returns 409 when SHA has changed since load
-- [ ] 409 response includes diff between versions
-- [ ] Conflict notification created for both editors
-- [ ] Conflict dialog shows side-by-side diff
-- [ ] "Overwrite" option saves with latest SHA
-- [ ] `cargo test --all` passes
-- [ ] `npm test` passes in `web/`
+- [x] UserPresence includes optional `editing_entity` field
+- [x] Warning banner appears when another user is editing the same spec
+- [x] Warning disappears when the other user leaves the spec editor
+- [x] Spec save returns 409 when SHA has changed since load
+- [x] 409 response includes diff between versions
+- [x] Conflict notification created for both editors
+- [x] Conflict dialog shows side-by-side diff
+- [x] "Overwrite" option saves with latest SHA
+- [x] `cargo test --all` passes
+- [x] `npm test` passes in `web/` (task-092 suites; pre-existing canvas/WebGL failures in ExplorerCanvas/FlowRenderer/MoldableViewNodeTypeFilter/ExplorerViewAskViewSpec are unrelated and fail on `main` without these changes)
 
 ## Agent Instructions
 

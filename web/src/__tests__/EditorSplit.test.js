@@ -14,6 +14,7 @@ vi.mock('../lib/api.js', () => ({
     graphPredict: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     specsAssist: vi.fn(),
     specsSave: vi.fn().mockResolvedValue({ mr_id: 42 }),
+    workspacePresence: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -207,6 +208,91 @@ describe('EditorSplit', () => {
 
     await waitFor(() => {
       expect(api.specsAssist).toHaveBeenCalled();
+    });
+  });
+
+  // ── Conflict prevention (HSI §7) ────────────────────────────────────────────
+
+  it('sends base_sha with the save for optimistic concurrency', async () => {
+    const { api } = await import('../lib/api.js');
+    api.specsSave.mockResolvedValueOnce({ mr_id: 7 });
+    render(EditorSplit, {
+      props: { content: 'text', repoId: 'repo-1', specPath: 'specs/auth.md', baseSha: 'sha-loaded' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => {
+      expect(api.specsSave).toHaveBeenCalledWith(
+        'repo-1',
+        expect.objectContaining({ base_sha: 'sha-loaded', overwrite: false }),
+      );
+    });
+  });
+
+  it('opens the conflict dialog on a 409 conflict response', async () => {
+    const { api } = await import('../lib/api.js');
+    api.specsSave.mockResolvedValueOnce({
+      conflict: {
+        spec_path: 'specs/auth.md',
+        current_content: 'server',
+        submitted_content: 'mine',
+        diff: [{ op: 'add', text: 'mine' }],
+      },
+    });
+    render(EditorSplit, {
+      props: { content: 'mine', repoId: 'repo-1', specPath: 'specs/auth.md', baseSha: 'stale' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => {
+      expect(screen.getByTestId('spec-conflict-dialog')).toBeTruthy();
+    });
+  });
+
+  it('force-saves with overwrite when the user chooses Overwrite', async () => {
+    const { api } = await import('../lib/api.js');
+    api.specsSave
+      .mockResolvedValueOnce({
+        conflict: {
+          spec_path: 'specs/auth.md',
+          current_content: 'server',
+          submitted_content: 'mine',
+          diff: [{ op: 'add', text: 'mine' }],
+        },
+      })
+      .mockResolvedValueOnce({ mr_id: 99 });
+    render(EditorSplit, {
+      props: { content: 'mine', repoId: 'repo-1', specPath: 'specs/auth.md', baseSha: 'stale' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => expect(screen.getByTestId('spec-conflict-dialog')).toBeTruthy());
+
+    await fireEvent.click(screen.getByTestId('conflict-overwrite-btn'));
+    await waitFor(() => {
+      expect(api.specsSave).toHaveBeenLastCalledWith(
+        'repo-1',
+        expect.objectContaining({ overwrite: true }),
+      );
+    });
+    // Dialog dismissed after a successful overwrite.
+    await waitFor(() => expect(screen.queryByTestId('spec-conflict-dialog')).toBeNull());
+  });
+
+  it('renders the concurrent-edit banner when another user is editing the spec', async () => {
+    const { api } = await import('../lib/api.js');
+    api.workspacePresence.mockResolvedValueOnce([
+      { session_id: 's-maria', user_id: 'maria', editing_entity: 'spec:specs/auth.md' },
+    ]);
+    const wsStore = { sessionId: 's-self', onMessage: () => () => {}, send: vi.fn() };
+    render(EditorSplit, {
+      props: {
+        content: '',
+        repoId: 'repo-1',
+        specPath: 'specs/auth.md',
+        workspaceId: 'ws1',
+        wsStore,
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('concurrent-edit-banner')).toBeTruthy();
     });
   });
 });

@@ -272,4 +272,56 @@ describe('ws.js — createWsStore', () => {
     expect(cb2).toHaveBeenCalledWith({ type: 'AgentStatus', id: 'a1', status: 'running' });
     store.destroy();
   });
+
+  it('exposes a stable per-tab sessionId', () => {
+    const store = createWsStore();
+    expect(typeof store.sessionId).toBe('string');
+    expect(store.sessionId.length).toBeGreaterThan(0);
+    store.destroy();
+  });
+
+  it('queues sends until authenticated, then flushes them', () => {
+    const store = createWsStore();
+    const ws = MockWebSocket.instances[0];
+    ws._simulateOpen(); // only Auth sent so far
+    store.send({ type: 'Ping', timestamp: 7 });
+    // Not authenticated yet — the Ping must be queued, not sent.
+    expect(ws.sentMessages.map((m) => JSON.parse(m).type)).not.toContain('Ping');
+    ws._simulateMessage({ type: 'AuthResult', success: true });
+    const pings = ws.sentMessages.map((m) => JSON.parse(m)).filter((m) => m.type === 'Ping');
+    expect(pings.length).toBe(1);
+    expect(pings[0].timestamp).toBe(7);
+    store.destroy();
+  });
+
+  it('subscribe sends a Subscribe carrying the session id', () => {
+    const store = createWsStore();
+    const ws = MockWebSocket.instances[0];
+    ws._simulateOpen();
+    ws._simulateMessage({ type: 'AuthResult', success: true });
+    store.subscribe('ws-42');
+    const subs = ws.sentMessages.map((m) => JSON.parse(m)).filter((m) => m.type === 'Subscribe');
+    expect(subs.length).toBe(1);
+    expect(subs[0].scopes[0].workspace_id).toBe('ws-42');
+    expect(subs[0].session_id).toBe(store.sessionId);
+    store.destroy();
+  });
+
+  it('re-sends the subscription automatically after a reconnect', () => {
+    const store = createWsStore();
+    let ws = MockWebSocket.instances[0];
+    ws._simulateOpen();
+    ws._simulateMessage({ type: 'AuthResult', success: true });
+    store.subscribe('ws-9');
+    // Drop and reconnect.
+    ws._simulateClose();
+    vi.advanceTimersByTime(3000);
+    ws = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    ws._simulateOpen();
+    ws._simulateMessage({ type: 'AuthResult', success: true });
+    const subs = ws.sentMessages.map((m) => JSON.parse(m)).filter((m) => m.type === 'Subscribe');
+    expect(subs.length).toBe(1);
+    expect(subs[0].scopes[0].workspace_id).toBe('ws-9');
+    store.destroy();
+  });
 });

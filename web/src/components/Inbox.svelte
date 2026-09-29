@@ -7,6 +7,7 @@
   import Button from '../lib/Button.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
+  import SpecDiffView from '../lib/SpecDiffView.svelte';
   import { toastError } from '../lib/toast.svelte.js';
 
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
@@ -454,6 +455,10 @@
                 {/if}
                 {#if body.diff_summary}
                   <p class="card-detail">{body.diff_summary}</p>
+                {/if}
+                {#if Array.isArray(body.diff) && body.diff.length > 0}
+                  <!-- HSI §7 item 3: both editors see the conflict diff in the Inbox. -->
+                  <SpecDiffView diff={body.diff} />
                 {/if}
                 {#if body.change_summary}
                   <p class="card-detail">{body.change_summary}</p>

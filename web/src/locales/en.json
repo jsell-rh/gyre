@@ -906,6 +906,22 @@
     "spec_saved": "Spec saved \u2014 MR #{mr_id} created",
     "save_failed": "Save failed: {error}"
   },
+  "concurrent_edit": {
+    "warning_one": "{user} is also editing this spec",
+    "warning_many": "{users} are also editing this spec"
+  },
+  "spec_conflict": {
+    "title": "Spec edit conflict",
+    "close": "Close conflict dialog",
+    "explanation": "\"{path}\" was modified since you loaded it. Review the differences, then choose how to resolve.",
+    "diff_label": "Side-by-side diff between the current version and your version",
+    "current_version": "Current (server)",
+    "your_version": "Yours",
+    "overwrite": "Overwrite",
+    "discard": "Discard my changes",
+    "copy": "Copy mine",
+    "copied": "Your version copied to clipboard"
+  },
   "moldable_view": {
     "view_mode": "View mode",
     "tab_graph": "Graph",

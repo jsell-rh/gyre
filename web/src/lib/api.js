@@ -634,8 +634,27 @@ export const api = {
   // Return a failed Response so callers fall through gracefully.
   specsAssistGlobal: (_body) =>
     Promise.resolve(new Response(null, { status: 404, statusText: 'Not available without repo context' })),
-  specsSave: (repoId, data) =>
-    request(`/repos/${repoId}/specs/save`, { method: 'POST', body: JSON.stringify(data) }),
+  // Spec save with optimistic-concurrency conflict handling (HSI §7).
+  // On 409 (stale base_sha), resolves to { conflict: <body> } instead of
+  // throwing, so callers can render the conflict resolution dialog.
+  specsSave: async (repoId, data) => {
+    const res = await fetch(`${API_BASE}/repos/${repoId}/specs/save`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${getAuthToken()}`,
+      },
+      body: JSON.stringify(data),
+    });
+    if (res.status === 409) {
+      const conflict = await res.json().catch(() => ({}));
+      return { conflict };
+    }
+    if (!res.ok) {
+      throw new Error(`API /repos/${repoId}/specs/save: ${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  },
   costs: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
     return request(`/costs${qs ? '?' + qs : ''}`);

@@ -324,4 +324,39 @@ describe('Inbox', () => {
     const { findByText } = render(Inbox);
     expect(await findByText('Network error')).toBeTruthy();
   });
+
+  it('renders the conflict diff view when a SpecConflict card is expanded (HSI §7 item 3)', async () => {
+    const conflictNotif = makeNotification({
+      id: 'notif-conflict',
+      notification_type: 'SpecConflict',
+      priority: 2,
+      title: 'Spec edit conflict: specs/system/payments.md',
+      body: JSON.stringify({
+        spec_path: 'specs/system/payments.md',
+        base_sha: 'client-sha-1',
+        current_sha: 'server-sha-2',
+        diff_summary: '+1 / -1 lines',
+        diff: [
+          { op: 'context', text: '# Payments' },
+          { op: 'remove', text: 'old server line' },
+          { op: 'add', text: 'my local line' },
+        ],
+      }),
+      entity_ref: 'specs/system/payments.md',
+    });
+    api.myNotifications.mockResolvedValue([conflictNotif]);
+    const { findByRole, container } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Spec edit conflict/ });
+    await fireEvent.click(header);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="spec-diff-view"]')).not.toBeNull();
+    });
+    // The diff view must show both the removed (server) and added (mine) lines.
+    const rows = container.querySelectorAll('.diff-row');
+    expect(rows.length).toBe(3);
+    const removeCell = container.querySelector('.diff-cell.diff-remove.diff-left');
+    expect(removeCell.textContent).toContain('old server line');
+    const addCell = container.querySelector('.diff-cell.diff-add.diff-right');
+    expect(addCell.textContent).toContain('my local line');
+  });
 });
