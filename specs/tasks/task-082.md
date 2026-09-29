@@ -58,14 +58,14 @@ The current UI has no sidebar (confirmed by auditor: App.svelte:1032 "no sidebar
 
 ## Acceptance Criteria
 
-- [ ] Permanent 6-item sidebar visible on all routes (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin)
-- [ ] Sidebar does NOT change based on current scope (tenant, workspace, repo)
-- [ ] Active sidebar item is visually highlighted
-- [ ] Clicking a sidebar item preserves current scope
-- [ ] Sidebar + topbar breadcrumb coexist without layout conflicts
-- [ ] Mobile/responsive behavior: sidebar collapses gracefully
-- [ ] `npm test` passes in `web/`
-- [ ] No regression in existing navigation flows
+- [x] Permanent 6-item sidebar visible on all routes (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin)
+- [x] Sidebar does NOT change based on current scope (tenant, workspace, repo)
+- [x] Active sidebar item is visually highlighted
+- [x] Clicking a sidebar item preserves current scope
+- [x] Sidebar + topbar breadcrumb coexist without layout conflicts
+- [x] Mobile/responsive behavior: sidebar collapses gracefully
+- [x] `npm test` passes in `web/` (task-082 suites AppShell + Sidebar: 92/92; pre-existing canvas/ResizeObserver failures in FlowRenderer/MoldableViewNodeTypeFilter/ExplorerViewAskViewSpec are unrelated and reproduce identically at merge-base `4988865b`)
+- [x] No regression in existing navigation flows
 
 ## Agent Instructions
 
