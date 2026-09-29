@@ -46,7 +46,7 @@ finds no residual references; `bfs_traverse` remains live via `compute_all_test_
 `cargo test -p gyre-domain --lib view_query_resolver`: 115 passed, 0 failed (clang+mold
 available in this environment). New spec-fidelity finding below.
 
-- [ ] **F2 — `$test_reachable`/`$test_unreachable`/`$test_fragility` traverse Implements+RoutesTo, contradicting spec's "via Calls".**
+- [x] **F2 — `$test_reachable`/`$test_unreachable`/`$test_fragility` traverse Implements+RoutesTo, contradicting spec's "via Calls".**
   Spec `view-query-grammar.md` §3 defines these references with an explicit edge qualifier:
   `$test_reachable — nodes reachable from any test function **via Calls**`,
   `$test_unreachable — complement`, and `$test_fragility(node) — count of distinct **test paths**
@@ -90,3 +90,18 @@ test-reachable and wrongly excluded from coverage gaps. Resolution requires EITH
 `test_gaps` row) via spec lifecycle to define test reachability over the three-edge set — plus
 a test that pins an Implements/RoutesTo-only path so the chosen semantics are enforced.
 Setting `progress: needs-revision`.
+
+## Round 5
+
+F2 resolved by conforming to the spec (rule 4: follow the spec, do not reinterpret).
+`TEST_REACHABILITY_EDGES` restricted to `&[EdgeType::Calls]` in
+`crates/gyre-domain/src/view_query_resolver.rs`; the doc comment now cites
+`view-query-grammar.md` §3 "via Calls" and explains the exclusion of Implements/RoutesTo/Contains.
+This single constant powers `compute_test_reachable` and `compute_all_test_fragility`, so
+`$test_reachable`, `$test_unreachable`, `$test_fragility`, `$where(test_fragility, ...)`,
+the `test_gaps` scope, and dry-run metric population all now use Calls-only reachability.
+New test `test_reachability_is_calls_only_not_implements_or_routes_to` pins the semantics:
+a node reachable from a test only via `Implements` and one only via `RoutesTo` are both
+classified test-unreachable (present in `$test_unreachable`, absent from `$test_reachable`)
+and accrue zero `$test_fragility` count, while the Calls-reached node is reachable with
+fragility 1. `cargo test -p gyre-domain --lib view_query_resolver`: 116 passed, 0 failed.

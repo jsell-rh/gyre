@@ -391,13 +391,13 @@ fn find_node_by_name_with_match_type<'a>(
 }
 
 /// Edge types traversed for test reachability analysis.
-/// Tests can reach code via direct calls, trait dispatch (Implements),
-/// and HTTP endpoint tests (RoutesTo).
-/// NOTE: Contains is intentionally excluded — including it would make all
-/// sibling functions in a module "reachable" just because one test exists
-/// in the same module, inflating test coverage metrics.
-const TEST_REACHABILITY_EDGES: &[EdgeType] =
-    &[EdgeType::Calls, EdgeType::Implements, EdgeType::RoutesTo];
+/// Per `view-query-grammar.md` §3, test reachability is defined strictly
+/// "via Calls": a node is test-reachable only if a test function reaches it
+/// through a chain of `Calls` edges. Other edge types (Implements, RoutesTo,
+/// Contains) are intentionally excluded to match the spec's single-edge
+/// definition for `$test_reachable`/`$test_unreachable`/`$test_fragility` and
+/// the §2 `test_gaps` scope.
+const TEST_REACHABILITY_EDGES: &[EdgeType] = &[EdgeType::Calls];
 
 /// Compute the set of nodes reachable from test functions.
 /// Pre-computes a single BFS from all test nodes for O(T + N + M) total.
@@ -2749,6 +2749,65 @@ mod tests {
         assert!(result.contains("t1"));
         assert!(result.contains("n1"));
         assert!(!result.contains("n2"));
+    }
+
+    #[test]
+    fn test_reachability_is_calls_only_not_implements_or_routes_to() {
+        // Spec view-query-grammar.md §3: test reachability is "via Calls" only.
+        // t1 reaches n1 via Calls (reachable). n2 is reachable from t1 ONLY via
+        // an Implements edge and n3 ONLY via a RoutesTo edge — neither counts as
+        // test-reachable, so both must appear in $test_unreachable / test_gaps
+        // and must NOT accrue any $test_fragility count.
+        let nodes = vec![
+            make_node("n1", "called_fn", NodeType::Function),
+            make_node("n2", "impl_only_fn", NodeType::Function),
+            make_node("n3", "route_only_fn", NodeType::Function),
+            make_test_node("t1", "test_fn"),
+        ];
+        let edges = vec![
+            make_edge("e1", "t1", "n1", EdgeType::Calls),
+            make_edge("e2", "t1", "n2", EdgeType::Implements),
+            make_edge("e3", "t1", "n3", EdgeType::RoutesTo),
+        ];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+
+        let reachable = resolve_computed_expression(
+            "$test_reachable",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(reachable.contains("n1"), "Calls-reached node is test-reachable");
+        assert!(
+            !reachable.contains("n2"),
+            "Implements-only path must NOT be test-reachable (spec: via Calls)"
+        );
+        assert!(
+            !reachable.contains("n3"),
+            "RoutesTo-only path must NOT be test-reachable (spec: via Calls)"
+        );
+
+        let unreachable = resolve_computed_expression(
+            "$test_unreachable",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(unreachable.contains("n2"));
+        assert!(unreachable.contains("n3"));
+        assert!(!unreachable.contains("n1"));
+
+        // $test_fragility counts distinct tests reaching a node via Calls only:
+        // n1 has one test path; n2/n3 (Implements/RoutesTo only) have zero.
+        let fragility_map = compute_all_test_fragility(&active, &outgoing, &incoming);
+        assert_eq!(fragility_map.get("n1").copied().unwrap_or(0), 1);
+        assert_eq!(fragility_map.get("n2").copied().unwrap_or(0), 0);
+        assert_eq!(fragility_map.get("n3").copied().unwrap_or(0), 0);
     }
 
     #[test]
