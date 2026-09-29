@@ -8,6 +8,7 @@ coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
 commits:
   - 25854f64
+  - a6fe4ce8
 ---
 
 ## Spec Excerpt
