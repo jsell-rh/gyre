@@ -12,7 +12,7 @@
 | analytics.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | authorization-provenance.md | 47 | 7 | 0 | 1 | 13 | 26 | 97% |
 | business-continuity.md | 10 | 4 | 0 | 1 | 5 | 0 | 83% |
-| dependency-graph.md | 19 | 3 | 0 | 4 | 12 | 0 | 75% |
+| dependency-graph.md | 19 | 3 | 1 | 4 | 2 | 9 | 68% |
 | design-principles.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | explorer-canvas.md | 10 | 3 | 0 | 7 | 0 | 0 | 0% |
 | explorer-implementation.md | 33 | 3 | 0 | 25 | 0 | 5 | 16% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **218** | **0** | **310** | **172** | **102** | **46%** |
+| **TOTAL** | **802** | **218** | **1** | **310** | **162** | **111** | **46%** |
