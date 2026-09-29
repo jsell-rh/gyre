@@ -18,7 +18,7 @@
 | explorer-implementation.md | 33 | 3 | 0 | 25 | 0 | 5 | 16% |
 | forge-advantages.md | 10 | 2 | 0 | 0 | 0 | 8 | 100% |
 | hierarchy-enforcement.md | 29 | 11 | 0 | 6 | 3 | 9 | 66% |
-| human-system-interface.md | 55 | 19 | 0 | 18 | 13 | 5 | 50% |
+| human-system-interface.md | 55 | 20 | 0 | 18 | 11 | 6 | 48% |
 | identity-security.md | 12 | 2 | 0 | 2 | 4 | 4 | 80% |
 | lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | merge-dependencies.md | 20 | 3 | 0 | 1 | 0 | 16 | 94% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **801** | **218** | **0** | **320** | **108** | **155** | **45%** |
+| **TOTAL** | **801** | **219** | **0** | **320** | **106** | **156** | **45%** |
