@@ -105,3 +105,69 @@ a node reachable from a test only via `Implements` and one only via `RoutesTo` a
 classified test-unreachable (present in `$test_unreachable`, absent from `$test_reachable`)
 and accrue zero `$test_fragility` count, while the Calls-reached node is reachable with
 fragility 1. `cargo test -p gyre-domain --lib view_query_resolver`: 116 passed, 0 failed.
+
+## Round 6
+
+F2 verified resolved end-to-end on the Rust side: `TEST_REACHABILITY_EDGES` is
+`&[EdgeType::Calls]` (`view_query_resolver.rs:400`) with a doc comment citing §3 "via
+Calls", consumed by `compute_test_reachable` and `compute_all_test_fragility`, pinning
+test `test_reachability_is_calls_only_not_implements_or_routes_to` present, and no
+stale three-edge references remain anywhere in Rust. Re-ran
+`cargo test -p gyre-domain --lib view_query_resolver`: 116 passed, 0 failed.
+
+- [ ] **F3 — F2 fix not applied exhaustively: frontend still resolves §3 computed references over the old three-edge set, with comments now falsely claiming backend parity.**
+
+  The F2 fix commit `e828ff39` touched only `crates/gyre-domain/src/view_query_resolver.rs`
+  plus the review/task files — no `web/` files (verified: all four task-062 commits
+  `ce4845cc`/`30a46847`/`e482bbf3`/`e828ff39` show zero `web/` paths in `--stat`).
+  `web/src/lib/ExplorerCanvas.svelte` contains a parallel frontend implementation of the
+  §3 computed references, and it still uses the pre-F2 three-edge traversal:
+
+  - `ExplorerCanvas.svelte:1709` — `FRONTEND_TEST_EDGES = new Set(['calls', 'implements',
+    'routes_to'])` under the comment "Edge types traversed for test reachability — matches
+    backend TEST_REACHABILITY_EDGES", which is now **false**: backend is Calls-only.
+  - `ExplorerCanvas.svelte:2031` — the `test_gaps` scope block re-declares a local
+    `TEST_REACHABILITY_EDGES = new Set(['calls', 'implements', 'routes_to'])` with the
+    comment "Match backend TEST_REACHABILITY_EDGES: calls, implements, routes_to" —
+    quoting the backend constant's old contents, now deleted backend-side.
+
+  Affected frontend functions: `computeTestUnreachable()` (1712), `computeTestReachable()`
+  (1731), `computeAllTestFragility()` (1846, `FRONTEND_TEST_EDGES` at 1862), and the inline
+  `test_gaps` scope block (2026–2048). All traverse Implements+RoutesTo. These power the
+  frontend resolution of `$test_reachable`/`$test_unreachable` (via `resolveComputed`,
+  1933–1934), `$test_fragility`/`$where(test_fragility, ...)` (1962, 2205–2208), and the
+  `test_gaps` scope (2026). A node reachable from a test only via `Implements` or
+  `RoutesTo` renders as test-covered in the canvas but is a coverage gap in server-side
+  dry_run — contradicting spec §3 "via Calls" (view-query-grammar.md line 31), §2
+  `test_gaps` ("Nodes NOT reachable from any test function", line 46), and §3 line 17
+  ("All computations are deterministic" — the same reference resolves differently in the
+  two surfaces).
+
+  Corroborating evidence that this is staleness, not intentional divergence: the frontend
+  test helper `resolveQueryMatch` in `web/src/__tests__/ExplorerCanvas.test.js:348-373`
+  already uses Calls-only (`et === 'calls'`, `nb.edgeType !== 'calls'`) for `test_gaps`,
+  mirroring the post-F2 backend semantics, while the production `ExplorerCanvas.svelte`
+  code does not.
+
+  Filed under task-062 (not task-063): the frontend `resolveComputed` implements the §3
+  computed references — task-062's exact coverage section ("view-query-grammar.md §3 1.
+  Computed References", task frontmatter line 10) — and the false "matches backend"
+  comments are a direct stale-reference consequence of the F2 fix commit. The `test_gaps`
+  scope block specifically overlaps task-063's §4 territory, but its local edge set and
+  comment duplicate the same stale backend claim, so it is included here.
+
+  Fix shape: restrict both sets to `new Set(['calls'])`, update the comments to cite
+  spec §3 "via Calls", and add a frontend test case mirroring the Rust pinning test (an
+  Implements-only or RoutesTo-only node must be untested/gap, not covered). Note: no
+  existing frontend test exercises the production `computeTest*` helpers (grep of
+  `web/src/__tests__` for `computeTestUnreachable|computeTestReachable|computeAllTestFragility`
+  returns nothing) — the frontend test mirror uses its own re-implementation, so the
+  production code path is untested either way; the pinning test must call the real code
+  path or re-home the logic so it is testable.
+
+  Not a task-062 finding: `npm test` in `web/` currently reports 17 failing tests (3
+  files: `ExplorerCanvas-performance`, `ExplorerViewAskViewSpec`, `FlowRenderer`,
+  `MoldableViewNodeTypeFilter`), all in files untouched by any task-062 commit —
+  pre-existing failures outside this task's scope.
+
+Setting `progress: needs-revision` (F3 open).
