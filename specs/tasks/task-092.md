@@ -7,8 +7,8 @@ review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
 commits:
-  - ff1c92e2
-  - 2fa734a0
+  - 1ac15418
+  - eee00dba
 ---
 
 ## Spec Excerpt
