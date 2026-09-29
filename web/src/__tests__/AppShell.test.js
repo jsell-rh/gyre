@@ -273,6 +273,7 @@ vi.mock('../lib/api.js', () => ({
     notificationCount: vi.fn().mockResolvedValue(0),
     tokenInfo: vi.fn().mockResolvedValue({ kind: 'global' }),
     me: vi.fn().mockResolvedValue(null),
+    version: vi.fn().mockResolvedValue({ version: '0.1.0', commit: 'abc1234', milestone: 'M35' }),
   },
   setAuthToken: vi.fn(),
 }));
@@ -286,7 +287,7 @@ import App from '../App.svelte';
 
 // ── App shell — topbar-first ─────────────────────────────────────────
 
-describe('App shell — no sidebar', () => {
+describe('App shell — stable sidebar (HSI §1.3)', () => {
   beforeEach(() => {
     window.history.pushState({}, '', '/');
     localStorage.clear();
@@ -297,11 +298,18 @@ describe('App shell — no sidebar', () => {
     api.notificationCount.mockResolvedValue(0);
   });
 
-  it('renders topbar instead of sidebar', async () => {
+  it('renders permanent sidebar with 6 items alongside topbar', async () => {
     const { container } = render(App);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
-      expect(container.querySelector('.sidebar')).toBeNull();
+      expect(container.querySelector('[data-testid="sidebar"]')).toBeTruthy();
+      // Verify all 6 sidebar items are present
+      expect(container.querySelector('[data-testid="sidebar-item-inbox"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="sidebar-item-explorer"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="sidebar-item-specs"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="sidebar-item-meta-specs"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="sidebar-item-admin"]')).toBeTruthy();
     }, { timeout: 3000 });
   });
 
@@ -335,6 +343,77 @@ describe('App shell — no sidebar', () => {
     await waitFor(() => {
       expect(container.querySelector('.decisions-count')?.textContent).toBe('99+');
     }, { timeout: 3000 });
+  });
+});
+
+// ── Sidebar active item (HSI §1.3 — F1/F3/F4) ─────────────────────────
+
+describe('Sidebar active item highlight (HSI §1.3)', () => {
+  const WS = [{ id: 'ws-1', name: 'Payments', slug: 'payments' }];
+
+  beforeEach(() => {
+    window.history.pushState({}, '', '/');
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.workspaces.mockResolvedValue(WS);
+    api.workspaceRepos.mockResolvedValue([{ id: 'repo-1', name: 'core' }]);
+    api.workspaceBudget.mockResolvedValue(null);
+    api.notificationCount.mockResolvedValue(0);
+    api.version.mockResolvedValue({ version: '0.1.0' });
+  });
+
+  function activeItem(container) {
+    const active = container.querySelector('.sidebar-item.active');
+    return active?.getAttribute('data-testid')?.replace('sidebar-item-', '') ?? null;
+  }
+
+  // F4: clicking Briefing at workspace scope highlights Briefing, not Inbox.
+  it('highlights Briefing after clicking it at workspace scope', async () => {
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy(), { timeout: 3000 });
+    // Default active item is Inbox per the entrypoint flow.
+    expect(activeItem(container)).toBe('inbox');
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
+    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
+  });
+
+  // F4: clicking Specs highlights Specs.
+  it('highlights Specs after clicking it at workspace scope', async () => {
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-specs"]')).toBeTruthy(), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-specs"]'));
+    await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
+  });
+
+  // F4: clicking Inbox after Briefing returns highlight to Inbox.
+  it('returns highlight to Inbox after clicking Inbox', async () => {
+    const { container } = render(App);
+    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy(), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
+    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
+    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-inbox"]'));
+    await waitFor(() => expect(activeItem(container)).toBe('inbox'), { timeout: 3000 });
+  });
+
+  // F1: at repo scope, the Code tab highlights Explorer (Code is part of Explorer per §1.3).
+  it('highlights Explorer when the repo Code tab is active', async () => {
+    window.history.pushState({}, '', '/workspaces/payments/r/core/code');
+    const { container } = render(App);
+    await waitFor(() => expect(activeItem(container)).toBe('explorer'), { timeout: 3000 });
+  });
+
+  // F3: at repo scope, the MRs tab highlights Explorer (MRs are part of the Code tab).
+  it('highlights Explorer when the repo MRs tab is active', async () => {
+    window.history.pushState({}, '', '/workspaces/payments/r/core/mrs');
+    const { container } = render(App);
+    await waitFor(() => expect(activeItem(container)).toBe('explorer'), { timeout: 3000 });
+  });
+
+  // Regression: the Specs repo tab still highlights Specs (not swept into Explorer).
+  it('highlights Specs when the repo Specs tab is active', async () => {
+    window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
+    const { container } = render(App);
+    await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
   });
 });
 
@@ -564,7 +643,7 @@ describe('Keyboard shortcuts', () => {
     });
   });
 
-  it('shortcut overlay does NOT show old ⌘1-6 nav shortcuts', async () => {
+  it('shortcut overlay shows ⌘1-6 sidebar shortcuts (HSI §1.8)', async () => {
     const { container } = render(App);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
@@ -573,8 +652,18 @@ describe('Keyboard shortcuts', () => {
     await fireEvent.keyDown(window, { key: '?' });
     await waitFor(() => {
       const overlay = document.querySelector('.shortcuts-overlay');
-      expect(overlay?.textContent).not.toContain('⌘1');
-      expect(overlay?.textContent).not.toContain('⌘2');
+      expect(overlay?.textContent).toContain('⌘1');
+      expect(overlay?.textContent).toContain('Inbox');
+      expect(overlay?.textContent).toContain('⌘2');
+      expect(overlay?.textContent).toContain('Briefing');
+      expect(overlay?.textContent).toContain('⌘3');
+      expect(overlay?.textContent).toContain('Explorer');
+      expect(overlay?.textContent).toContain('⌘4');
+      expect(overlay?.textContent).toContain('Specs');
+      expect(overlay?.textContent).toContain('⌘5');
+      expect(overlay?.textContent).toContain('Meta-specs');
+      expect(overlay?.textContent).toContain('⌘6');
+      expect(overlay?.textContent).toContain('Admin');
     });
   });
 
@@ -643,7 +732,7 @@ describe('Responsive — hamburger button', () => {
     });
   });
 
-  it('mobile drawer has workspace home section links', async () => {
+  it('mobile drawer has 6 sidebar navigation items (HSI §1.3)', async () => {
     const { container } = render(App);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
@@ -653,11 +742,12 @@ describe('Responsive — hamburger button', () => {
     await waitFor(() => {
       const drawer = container.querySelector('[data-testid="mobile-drawer"]');
       expect(drawer).toBeTruthy();
-      expect(drawer.textContent).toContain('Decisions');
-      expect(drawer.textContent).toContain('Specs');
-      expect(drawer.textContent).toContain('Repos');
+      expect(drawer.textContent).toContain('Inbox');
       expect(drawer.textContent).toContain('Briefing');
-      expect(drawer.textContent).toContain('Agent Rules');
+      expect(drawer.textContent).toContain('Explorer');
+      expect(drawer.textContent).toContain('Specs');
+      expect(drawer.textContent).toContain('Meta-specs');
+      expect(drawer.textContent).toContain('Admin');
     });
   });
 
@@ -713,14 +803,13 @@ describe('Cross-workspace view', () => {
 
     // Open dropdown
     const arrowBtn = container.querySelector('[data-testid="ws-dropdown-toggle"]');
-    if (arrowBtn) {
-      await fireEvent.click(arrowBtn);
-      await waitFor(() => {
-        const dropdown = container.querySelector('[data-testid="ws-dropdown"]');
-        expect(dropdown).toBeTruthy();
-        expect(dropdown.textContent).toContain('All Workspaces');
-      });
-    }
+    expect(arrowBtn).toBeTruthy();
+    await fireEvent.click(arrowBtn);
+    await waitFor(() => {
+      const dropdown = container.querySelector('[data-testid="ws-dropdown"]');
+      expect(dropdown).toBeTruthy();
+      expect(dropdown.textContent).toContain('All Workspaces');
+    });
   });
 
   it('"All Workspaces" entry has a testid', async () => {
@@ -730,12 +819,11 @@ describe('Cross-workspace view', () => {
     }, { timeout: 3000 });
 
     const arrowBtn = container.querySelector('[data-testid="ws-dropdown-toggle"]');
-    if (arrowBtn) {
-      await fireEvent.click(arrowBtn);
-      await waitFor(() => {
-        expect(container.querySelector('[data-testid="ws-all-workspaces"]')).toBeTruthy();
-      });
-    }
+    expect(arrowBtn).toBeTruthy();
+    await fireEvent.click(arrowBtn);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-all-workspaces"]')).toBeTruthy();
+    });
   });
 
   it('clicking "All Workspaces" navigates to /all', async () => {
@@ -745,16 +833,15 @@ describe('Cross-workspace view', () => {
     }, { timeout: 3000 });
 
     const arrowBtn = container.querySelector('[data-testid="ws-dropdown-toggle"]');
-    if (arrowBtn) {
-      await fireEvent.click(arrowBtn);
-      await waitFor(() => {
-        expect(container.querySelector('[data-testid="ws-all-workspaces"]')).toBeTruthy();
-      });
-      await fireEvent.click(container.querySelector('[data-testid="ws-all-workspaces"]'));
-      await waitFor(() => {
-        expect(window.location.pathname).toBe('/all');
-      });
-    }
+    expect(arrowBtn).toBeTruthy();
+    await fireEvent.click(arrowBtn);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="ws-all-workspaces"]')).toBeTruthy();
+    });
+    await fireEvent.click(container.querySelector('[data-testid="ws-all-workspaces"]'));
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/all');
+    });
   });
 
   // ── Cross-workspace topbar (Bug 7 fix) ──────────────────────────────

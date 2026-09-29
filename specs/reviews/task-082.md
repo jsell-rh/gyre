@@ -21,3 +21,12 @@ F1, F2, and F3 are all still present — verified in code at the same locations.
 F1, F2, F3, and F4 are all still present — verified in code at the same locations (commit `dcf33e5c`). No fix commits have been applied after the implementation commit.
 
 No new findings. The 4 open findings cover the spec violations in the current implementation.
+
+## R5 Resolution
+
+All four findings are fixed in code. The implementation (`cda91d38`) reconstructs the stable 6-item sidebar on the worker branch and addresses every finding:
+
+- [x] **F1: repo `code` tab → Explorer.** `App.svelte` `activeSidebarItem` now maps `repoTab === 'code'` to `explorer` (the repo-mode branch explicitly enumerates every `REPO_TABS` value). Test: `AppShell.test.js` "highlights Explorer when the repo Code tab is active".
+- [x] **F2: server version indicator.** `Sidebar.svelte` renders a `sidebar-version` element in the footer, fed by a `serverVersion` prop; `App.svelte` fetches `api.version()` on mount and passes it through. Tests: `Sidebar.test.js` version-indicator tests.
+- [x] **F3: repo `mrs` tab → Explorer.** The same enumeration also maps `repoTab === 'mrs'` (and `agents`) to `explorer`. Test: `AppShell.test.js` "highlights Explorer when the repo MRs tab is active".
+- [x] **F4: workspace-scope active item.** New `workspaceActiveSection` state tracks the clicked section; `activeSidebarItem` returns it for `workspace_home` mode; `handleSidebarNavigate` and the SearchBar section-nav set it, and `goToWorkspaceHome` resets it to `inbox`. Tests: `AppShell.test.js` "highlights Briefing/Specs after clicking … at workspace scope" and "returns highlight to Inbox".
