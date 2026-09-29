@@ -725,6 +725,9 @@
   // Track whether the current user is a tenant admin (for gear icon visibility).
   // Loaded once on mount; false by default (fail closed for security).
   let userIsAdmin = $state(false);
+  // Current user id — threaded into presence-aware components (ConcurrentEditBanner)
+  // so a user's own other tabs are excluded from the concurrent-edit warning (HSI §7).
+  let selfUserId = $state(null);
 
   // ── Token modal ───────────────────────────────────────────────────────
   const TOKEN_KIND_LABELS = {
@@ -1014,6 +1017,7 @@
     try {
       const me = await api.me();
       userIsAdmin = me?.global_role === 'Admin' || me?.role === 'Admin' || me?.is_admin === true;
+      selfUserId = me?.id ?? null;
     } catch { /* fail closed — gear icon stays hidden */ }
     loadDecisionsCount();
     const decisionsInterval = setInterval(loadDecisionsCount, 60_000);
@@ -1614,6 +1618,7 @@
               onback={() => window.history.back()}
               {wsStore}
               workspaceId={currentWorkspace?.id ?? null}
+              {selfUserId}
             />
           {:else}
             <RepoMode
@@ -1649,6 +1654,7 @@
       onback={detailHistory.length > 0 ? goBackDetailPanel : undefined}
       {wsStore}
       workspaceId={currentWorkspace?.id ?? null}
+      {selfUserId}
     />
     </div>
 

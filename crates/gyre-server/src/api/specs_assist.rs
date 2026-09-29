@@ -213,11 +213,17 @@ async fn spec_conflict_response(
     }
 
     let now = now_secs();
+    // Persist the full line diff (and summary) in the notification body so BOTH
+    // editors get a diff view in their Inbox (HSI §7 item 3) — not just the
+    // second editor who receives the transient 409 response. `to_value` borrows
+    // `diff` so it remains available for the HTTP response below.
+    let diff_value = serde_json::to_value(&diff).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
     let body = serde_json::json!({
         "spec_path": spec_path,
         "base_sha": base_sha,
         "current_sha": current_sha,
         "diff_summary": diff_summary,
+        "diff": diff_value,
     })
     .to_string();
 
@@ -1671,6 +1677,19 @@ mod tests {
             let body: serde_json::Value =
                 serde_json::from_str(conflict[0].body.as_deref().unwrap()).unwrap();
             assert_eq!(body["current_sha"], "server-sha-2");
+            // HSI §7 item 3: the diff must be persisted so BOTH editors get a
+            // diff view in their Inbox — not only the second editor's 409 dialog.
+            let diff = body["diff"]
+                .as_array()
+                .expect("diff array persisted in notification body");
+            assert!(
+                !diff.is_empty(),
+                "conflict notification body must carry the line diff for the Inbox diff view"
+            );
+            assert!(
+                diff.iter().any(|d| d["op"] == "add"),
+                "submitted lines should appear as add ops in the persisted diff"
+            );
         }
     }
 }

@@ -69,6 +69,36 @@ describe('ConcurrentEditBanner', () => {
     expect(screen.queryByTestId('concurrent-edit-banner')).toBeNull();
   });
 
+  it('excludes the same user in another tab (different session, same user_id) when selfUserId is set', async () => {
+    // F1: a second tab of the *same* user editing the same spec has a different
+    // session_id but the same user_id. With selfUserId wired, the banner must
+    // stay hidden (no false "you are also editing this spec" warning).
+    const { api } = await import('../lib/api.js');
+    api.workspacePresence.mockResolvedValueOnce([
+      { session_id: 's-other-tab', user_id: 'jsell', editing_entity: 'spec:specs/a.md' },
+    ]);
+    render(ConcurrentEditBanner, {
+      props: { specPath: 'specs/a.md', workspaceId: 'ws1', wsStore: makeWsStore('s-self'), selfUserId: 'jsell' },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByTestId('concurrent-edit-banner')).toBeNull();
+  });
+
+  it('still warns about a genuinely different user when selfUserId is set', async () => {
+    // Guard against over-broad exclusion: a different user must still trigger the banner.
+    const { api } = await import('../lib/api.js');
+    api.workspacePresence.mockResolvedValueOnce([
+      { session_id: 's-maria', user_id: 'maria', editing_entity: 'spec:specs/a.md' },
+    ]);
+    render(ConcurrentEditBanner, {
+      props: { specPath: 'specs/a.md', workspaceId: 'ws1', wsStore: makeWsStore('s-self'), selfUserId: 'jsell' },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('concurrent-edit-banner')).toBeTruthy();
+    });
+    expect(document.body.textContent).toContain('maria is also editing this spec');
+  });
+
   it('appears and then disappears as another editor arrives and leaves via live updates', async () => {
     const wsStore = makeWsStore();
     render(ConcurrentEditBanner, {

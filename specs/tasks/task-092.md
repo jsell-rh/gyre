@@ -2,7 +2,7 @@
 title: "HSI Conflict Prevention — Concurrent Spec Editing Warning"
 spec_ref: "human-system-interface.md §7 Conflict Prevention"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
