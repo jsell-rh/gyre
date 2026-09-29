@@ -56,6 +56,7 @@ vi.mock('../lib/api.js', () => ({
     workspaceDependencyPolicy: vi.fn().mockResolvedValue(null),
     cascadeTestResults: vi.fn().mockResolvedValue(null),
     acknowledgeBreakingChange: vi.fn().mockResolvedValue({}),
+    sendAgentMessage: vi.fn().mockResolvedValue({}),
   },
 }));
 
@@ -215,6 +216,52 @@ describe('WorkspaceHome — basic rendering', () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     // Single-column layout: Repos + Entity tabs
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
+  });
+});
+
+// ── Workspace orchestrator chat (HSI §4) ────────────────────────────────────────
+
+describe('WorkspaceHome — orchestrator scoped chat', () => {
+  const ORCH = { id: 'seed-agent-1', name: 'orchestrator', status: 'active', repo_id: 'repo-1' };
+
+  it('renders the orchestrator chat widget with recipient label when an orchestrator agent exists', async () => {
+    api.agents.mockResolvedValue([ORCH, { id: 'a2', name: 'worker-backend', status: 'active', repo_id: 'repo-1' }]);
+    const { container, getByText } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="section-orchestrator-chat"]')).toBeTruthy();
+    });
+    // Recipient always visible (HSI §4 visual indicator).
+    expect(getByText('Message to orchestrator ▸')).toBeTruthy();
+  });
+
+  it('does NOT render the orchestrator widget when no orchestrator agent exists', async () => {
+    api.agents.mockResolvedValue([{ id: 'a2', name: 'worker-backend', status: 'active', repo_id: 'repo-1' }]);
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    // Give loadAgents time to resolve, then confirm the widget is absent.
+    await waitFor(() => expect(api.agents).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 0));
+    expect(container.querySelector('[data-testid="section-orchestrator-chat"]')).toBeNull();
+  });
+
+  it('sends a Directed-tier priority message to the orchestrator agent', async () => {
+    api.agents.mockResolvedValue([ORCH]);
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="section-orchestrator-chat"]')).toBeTruthy();
+    });
+    const widget = container.querySelector('[data-testid="section-orchestrator-chat"]');
+    const textarea = widget.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await fireEvent.input(textarea, { target: { value: 'pause search work, focus on payments' } });
+    const sendBtn = widget.querySelector('.send-btn');
+    expect(sendBtn).toBeTruthy();
+    await fireEvent.click(sendBtn);
+    await waitFor(() => expect(api.sendAgentMessage).toHaveBeenCalled());
+    expect(api.sendAgentMessage).toHaveBeenCalledWith('ws-1', 'seed-agent-1', {
+      kind: 'user_message',
+      tier: 'directed',
+      payload: { content: 'pause search work, focus on payments' },
+    });
   });
 });
 

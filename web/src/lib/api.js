@@ -257,13 +257,17 @@ export const api = {
   // Agent messages (distinct from logs — typed messages: TaskAssignment, ReviewRequest, etc.)
   agentMessages: (id) => request(`/agents/${id}/messages`),
   // Send message via workspace message bus (POST /workspaces/:wsId/messages)
-  // Server expects: { to: { agent: "<id>" }, kind: "FreeText", payload: {...} }
+  // Server expects: { to: { agent: "<id>" }, kind, tier?, payload }
+  // Human steering/feedback messages are Directed-tier: pass a Custom kind
+  // (e.g. "user_message") with tier: "directed" so they enter the agent's
+  // ack-based Directed inbox drained by message.poll (HSI §4).
   sendAgentMessage: (workspaceId, agentId, data) =>
     request(`/workspaces/${workspaceId}/messages`, {
       method: 'POST',
       body: JSON.stringify({
         to: { agent: agentId },
-        kind: data.kind ?? 'FreeText',
+        kind: data.kind ?? 'user_message',
+        ...(data.tier ? { tier: data.tier } : {}),
         payload: data.payload ?? { content: data.content },
       }),
     }),

@@ -169,6 +169,14 @@
     messages = [];
     error = null;
   }
+
+  /**
+   * Focus the message textarea. Exposed for parents (e.g. the agent detail
+   * panel's "Message" hard-interrupt button, HSI §4) that open/focus the chat.
+   */
+  export function focus() {
+    inputEl?.focus();
+  }
 </script>
 
 <div class="inline-chat">

@@ -2,7 +2,7 @@
 title: "HSI Scoped Inline Chat + Hard Interrupt"
 spec_ref: "human-system-interface.md §4 Scoped Inline Chat + Hard Interrupt"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §4 Scoped Inline Chat"
   - "human-system-interface.md §4 Hard Interrupt"
@@ -87,17 +87,27 @@ Agent Detail Panel:
 
 ## Acceptance Criteria
 
-- [ ] `ScopedChat` component renders with recipient label in placeholder
-- [ ] Agent detail panel has inline chat sending Directed-tier messages
-- [ ] Workspace orchestrator chat targets the orchestrator agent
-- [ ] MR detail panel chat targets the author agent
-- [ ] Briefing Q&A uses `POST /workspaces/:id/briefing/ask`
-- [ ] Pause button sends StatusUpdate Directed-tier message
-- [ ] Stop button calls `POST /admin/agents/:id/kill` with confirmation
-- [ ] Message button opens inline chat
-- [ ] Human messages appear in agent's `message.poll` results
-- [ ] Chat input always shows who the message is going to
-- [ ] `npm test` passes in `web/`
+- [x] `ScopedChat` component renders with recipient label in placeholder
+- [x] Agent detail panel has inline chat sending Directed-tier messages
+- [x] Workspace orchestrator chat targets the orchestrator agent
+- [x] MR detail panel chat targets the author agent
+- [x] Briefing Q&A uses `POST /workspaces/:id/briefing/ask`
+- [x] Pause button sends StatusUpdate Directed-tier message
+- [x] Stop button calls `POST /admin/agents/:id/kill` with confirmation
+- [x] Message button opens inline chat
+- [x] Human messages appear in agent's `message.poll` results
+- [x] Chat input always shows who the message is going to
+- [x] `npm test` passes in `web/` (task-091 suites; pre-existing canvas/ResizeObserver failures in ExplorerCanvas/FlowRenderer/MoldableView/ExplorerViewAskViewSpec are unrelated and fail on `main` without these changes)
+
+## Implementation Notes
+
+- **Scoped chat component = `web/src/lib/InlineChat.svelte`.** The task plan names it `ScopedChat`, but the reusable scoped-chat component already exists as `InlineChat` (props `recipient`, `recipientType`, `onmessage`; renders `Message to {recipient} ▸`). Per the no-duplicate-convention rule it is reused rather than duplicated. Added an exported `focus()` method so the "Message" hard-interrupt button can focus the input.
+- **Directed-tier delivery.** `api.sendAgentMessage` now forwards an optional `tier`. Human steering/feedback/priority chat sends a Custom kind `user_message` with `tier: "directed"` (server: `POST /workspaces/:id/messages`, `messages.rs:96-98` — Custom opts into Directed). These are signed, persisted, ack-based, and drained by `message.poll` (`GET /agents/:id/messages`, `list_after` returns any stored message to the agent regardless of tier).
+- **Pause** sends kind `status_update` (natively Directed) with payload `{status: "pause_requested", summary: "Human requested pause"}`. **Stop** confirms then calls `api.adminKillAgent`. **Message** opens/focuses the chat.
+- **Agent detail panel** (`DetailPanel.svelte`): chat tab renders `InlineChat` (recipient = agent name) below the delivered-message thread; a Hard Interrupt row (`Pause`/`Stop`/`Message`) is shown while the agent is active/running/spawning.
+- **MR detail panel**: added a `chat` tab. The author agent is resolved once in the MR loader (`api.agent`, capturing `workspace_id`/`status`/`name`). Active author → `InlineChat`; completed/dead author → "Agent completed" with an **Ask Why** button.
+- **Workspace orchestrator** (`WorkspaceHome.svelte`): orchestrator agent identified by name convention (agents carry no role field), sidebar `InlineChat` sends Directed priority messages.
+- **Backend already complete** — no server changes needed; the message bus supports User-origin Directed messages to workspace agents.
 
 ## Agent Instructions
 

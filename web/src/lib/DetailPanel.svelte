@@ -9,6 +9,7 @@
   import EditorSplit from './EditorSplit.svelte';
   import ArchPreviewCanvas from './ArchPreviewCanvas.svelte';
   import ConstraintEditor from './ConstraintEditor.svelte';
+  import InlineChat from './InlineChat.svelte';
   import { api } from './api.js';
   import { entityName as sharedEntityName, shortId as sharedShortId, formatSha, formatId as sharedFormatId } from './entityNames.svelte.js';
   import { relativeTime, absoluteTime, formatDuration, formatDate } from './timeFormat.js';
@@ -112,6 +113,7 @@
         { id: 'gates',       label: $t('detail_panel.tabs.gates') },
         { id: 'trace',       label: 'Trace' },
         { id: 'reviews',     label: 'Reviews' },
+        { id: 'chat',        label: $t('detail_panel.tabs.chat') },
         { id: 'attestation', label: $t('detail_panel.tabs.attestation') },
       );
       // Always show ask-why for MRs — conversation_sha is loaded async from attestation
@@ -352,8 +354,14 @@
   let newReviewDecision = $state('approved');
   let newReviewBody = $state('');
   let submittingReview = $state(false);
-  let newMessageText = $state('');
-  let sendingMessage = $state(false);
+  // Scoped-chat component refs (for the "Message" hard-interrupt button, HSI §4).
+  let agentChatRef = $state(null);
+  let mrChatRef = $state(null);
+  // Author agent of the current MR (resolved in the MR loader) — recipient for MR feedback chat.
+  let mrAuthorAgent = $state(null);
+  // Pause request in-flight / already sent (visual state for the Pause button).
+  let pausing = $state(false);
+  let pauseRequested = $state(false);
 
   // Agent/task name cache for cross-references
   // Entity name cache is now a shared singleton in entityNames.svelte.js
@@ -396,6 +404,7 @@
       mrCommits = null;
       mrSpecPreview = null;
       mrSpecProgress = null;
+      mrAuthorAgent = null;
     }
     if (entity?.type === 'agent') {
       agentDetail = null;
@@ -403,6 +412,8 @@
       agentMessages = null;
       agentWorkload = null;
       agentLogFilter = '';
+      pausing = false;
+      pauseRequested = false;
     }
     if (entity?.type === 'task') {
       taskDetail = null;
@@ -450,13 +461,18 @@
             mrDetail = { ...mrDetail, merged_at: mergedEvt.timestamp };
           }
         }
-        // Resolve task_id via agent's current_task_id if MR lacks it
+        // Resolve the author agent: needed both for task_id enrichment and for
+        // the MR feedback chat (HSI §4 — recipient is the author agent, and we
+        // need its workspace_id to route the Directed message). Single fetch.
         const agentId = d?.author_agent_id ?? d?.agent_id;
-        if (!d?.task_id && agentId) {
+        if (agentId) {
           try {
             const ag = await api.agent(agentId);
-            const taskId = ag?.current_task_id ?? ag?.task_id;
-            if (taskId) mrDetail = { ...mrDetail, task_id: taskId };
+            if (ag) {
+              mrAuthorAgent = ag;
+              const taskId = ag?.current_task_id ?? ag?.task_id;
+              if (!d?.task_id && taskId) mrDetail = { ...mrDetail, task_id: taskId };
+            }
           } catch { /* best effort */ }
         }
         // Fetch repo gate definitions to enrich gate results with names/types
@@ -1520,27 +1536,101 @@
     }
   }
 
-  async function sendMessage() {
-    if (!newMessageText?.trim() || !entity || sendingMessage) return;
+  // ── Scoped inline chat + hard interrupt (HSI §4) ─────────────────────────
+  //
+  // Human steering/feedback messages are Directed-tier: a Custom kind
+  // ("user_message") with tier "directed" so they enter the agent's ack-based
+  // Directed inbox drained by message.poll (GET /agents/:id/messages).
+
+  /** Send a Directed steering message to the current agent entity (chat tab). */
+  async function sendAgentSteeringMessage(text) {
+    const body = text?.trim();
+    if (!body || !entity) return;
     const ag = agentDetail ?? entity.data ?? {};
     const wsId = ag.workspace_id;
     if (!wsId) {
       toastError('Agent has no workspace — cannot send message');
       return;
     }
-    sendingMessage = true;
-    try {
-      await api.sendAgentMessage(wsId, entity.id, { content: newMessageText.trim(), kind: 'FreeText' });
-      toastSuccess('Message sent');
-      newMessageText = '';
-      // Reload messages
-      const msgs = await api.agentMessages(entity.id).catch(() => []);
-      agentMessages = Array.isArray(msgs) ? msgs : (msgs?.messages ?? []);
-    } catch (e) {
-      toastError('Failed to send message: ' + (e.message ?? e));
-    } finally {
-      sendingMessage = false;
+    await api.sendAgentMessage(wsId, entity.id, {
+      kind: 'user_message',
+      tier: 'directed',
+      payload: { content: body },
+    });
+    // Refresh the delivered-message thread so the sent message appears.
+    const msgs = await api.agentMessages(entity.id).catch(() => []);
+    agentMessages = Array.isArray(msgs) ? msgs : (msgs?.messages ?? []);
+  }
+
+  /** Send a Directed feedback message to an MR's author agent (MR chat tab). */
+  async function sendMrAuthorMessage(text) {
+    const body = text?.trim();
+    const author = mrAuthorAgent;
+    if (!body || !author?.id) return;
+    const wsId = author.workspace_id;
+    if (!wsId) {
+      toastError('Author agent has no workspace — cannot send message');
+      return;
     }
+    await api.sendAgentMessage(wsId, author.id, {
+      kind: 'user_message',
+      tier: 'directed',
+      payload: { content: body },
+    });
+  }
+
+  /**
+   * Pause: Directed StatusUpdate with payload {status: "pause_requested"}.
+   * StatusUpdate is natively Directed-tier — the agent picks it up on its next
+   * message.poll and pauses after the current tool call (HSI §4 Hard Interrupt).
+   */
+  async function pauseAgent() {
+    if (!entity || pausing) return;
+    const ag = agentDetail ?? entity.data ?? {};
+    const wsId = ag.workspace_id;
+    if (!wsId) {
+      toastError('Agent has no workspace — cannot pause');
+      return;
+    }
+    pausing = true;
+    try {
+      await api.sendAgentMessage(wsId, entity.id, {
+        kind: 'status_update',
+        payload: { status: 'pause_requested', summary: 'Human requested pause' },
+      });
+      pauseRequested = true;
+      toastSuccess('Pause requested — agent will pause after its current action');
+    } catch (e) {
+      toastError('Failed to request pause: ' + (e.message ?? e));
+    } finally {
+      pausing = false;
+    }
+  }
+
+  /**
+   * Stop: terminate the agent process (work preserved in worktree/branch).
+   * Calls POST /api/v1/admin/agents/:id/kill (HSI §4 Hard Interrupt).
+   */
+  async function stopAgent() {
+    if (!entity) return;
+    const ag = agentDetail ?? entity.data ?? {};
+    const name = ag.name ?? entity.id;
+    if (!confirm(`Stop agent ${name}? Work will be preserved in the worktree.`)) return;
+    try {
+      await api.adminKillAgent(entity.id);
+      toastSuccess('Agent stopped — work preserved');
+      const updated = await api.agent(entity.id).catch(() => null);
+      if (updated) agentDetail = updated;
+    } catch (err) {
+      toastError('Stop failed: ' + (err?.message ?? err));
+    }
+  }
+
+  /** Message: open/focus the agent's inline chat input. */
+  function messageAgent() {
+    activeTab = 'chat';
+    // Wait for the chat pane to render before focusing.
+    setTimeout(() => agentChatRef?.focus(), 0);
   }
 
   // ── Spawn agent for task ──────────────────────────────────────────────
@@ -2759,26 +2849,40 @@
                 </div>
               {/if}
 
+              <!-- Hard Interrupt (HSI §4): Pause / Stop / Message -->
+              {#if ag.status === 'active' || ag.status === 'running' || ag.status === 'spawning'}
+                <div class="agent-interrupt-bar" role="group" aria-label="Agent controls">
+                  <button
+                    class="mr-explore-btn agent-pause-btn"
+                    onclick={pauseAgent}
+                    disabled={pausing || pauseRequested}
+                    title="Ask the agent to pause after its current action (non-destructive)"
+                  >
+                    {pauseRequested ? 'Pause requested' : pausing ? 'Pausing…' : 'Pause'}
+                  </button>
+                  <button
+                    class="mr-explore-btn agent-kill-btn"
+                    onclick={stopAgent}
+                    title="Terminate the agent process — work preserved in the worktree"
+                  >
+                    Stop
+                  </button>
+                  <button
+                    class="mr-explore-btn agent-message-btn"
+                    onclick={messageAgent}
+                    title="Open the inline chat to message this agent"
+                  >
+                    Message
+                  </button>
+                </div>
+              {/if}
+
               <!-- Agent Quick Actions -->
               <div class="mr-quick-links">
                 <button class="mr-explore-btn" onclick={() => { activeTab = 'chat'; }} title="Send messages to this agent">Chat</button>
                 <button class="mr-explore-btn" onclick={() => { activeTab = 'history'; }} title="View execution logs">Logs</button>
                 <button class="mr-explore-btn" onclick={() => { activeTab = 'trace'; }} title="View execution trace">Trace</button>
                 <button class="mr-explore-btn" onclick={() => { activeTab = 'ask-why'; }} title="Explore agent reasoning and decisions">Ask Why</button>
-                {#if ag.status === 'active' || ag.status === 'running' || ag.status === 'spawning'}
-                  <button class="mr-explore-btn agent-kill-btn" onclick={async () => {
-                    if (!confirm('Kill this agent? This will terminate the process and mark it as dead.')) return;
-                    try {
-                      await api.adminKillAgent(entity.id);
-                      toastSuccess('Agent killed');
-                      // Reload agent detail
-                      const updated = await api.agent(entity.id).catch(() => null);
-                      if (updated) agentDetail = updated;
-                    } catch (err) {
-                      toastError('Kill failed: ' + (err?.message ?? err));
-                    }
-                  }} title="Force-terminate this agent process">Kill Agent</button>
-                {/if}
               </div>
 
               <!-- Conversation provenance link -->
@@ -3766,25 +3870,41 @@
                 {/each}
               </div>
             {:else}
-              <p class="no-data">No messages yet. You can send typed messages (FreeText, TaskAssignment, ReviewRequest) to active agents via the workspace message bus.</p>
+              <p class="no-data">No messages yet. Type below to send a signed, Directed-tier steering message — the agent picks it up on its next message poll.</p>
             {/if}
 
-            <!-- Send message form -->
+            <!-- Scoped inline chat: signed, Directed-tier steering (HSI §4) -->
+            {@const agentName = agentDetail?.name ?? entity.data?.name ?? entity.id}
             <div class="message-form">
-              <span class="progress-section-label">Send Message</span>
-              <textarea
-                class="comment-textarea"
-                bind:value={newMessageText}
-                placeholder="Send a message to this agent..."
-                rows="2"
-                disabled={sendingMessage}
-              ></textarea>
-              <div class="comment-form-actions">
-                <Button variant="primary" size="sm" onclick={sendMessage} disabled={!newMessageText?.trim() || sendingMessage}>
-                  {sendingMessage ? 'Sending...' : 'Send'}
-                </Button>
-              </div>
+              <InlineChat
+                bind:this={agentChatRef}
+                recipient={agentName}
+                recipientType="agent"
+                onmessage={sendAgentSteeringMessage}
+              />
             </div>
+          {:else if entity.type === 'mr'}
+            {@const author = mrAuthorAgent}
+            {@const authorActive = author && (author.status === 'active' || author.status === 'running' || author.status === 'spawning')}
+            {#if author?.id && authorActive}
+              <div class="message-form">
+                <InlineChat
+                  bind:this={mrChatRef}
+                  recipient={author.name ?? author.id}
+                  recipientType="agent"
+                  onmessage={sendMrAuthorMessage}
+                />
+              </div>
+            {:else if author?.id}
+              <EmptyState
+                title="Agent completed"
+                description="This MR's author agent is no longer active. Open Ask Why to spawn an interrogation agent."
+              >
+                <Button variant="primary" size="sm" onclick={() => { activeTab = 'ask-why'; }}>Ask Why</Button>
+              </EmptyState>
+            {:else}
+              <EmptyState title={$t('detail_panel.no_conversation')} description="This MR has no author agent to message." />
+            {/if}
           {:else}
             <EmptyState title={$t('detail_panel.no_conversation')} description={$t('detail_panel.start_conversation')} />
           {/if}
@@ -7173,6 +7293,27 @@
 
   .agent-kill-btn:hover {
     background: color-mix(in srgb, var(--color-danger) 10%, transparent) !important;
+  }
+
+  .agent-interrupt-bar {
+    display: flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    margin-top: var(--space-3);
+  }
+
+  .agent-pause-btn {
+    color: var(--color-warning) !important;
+    border-color: var(--color-warning) !important;
+  }
+
+  .agent-pause-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-warning) 10%, transparent) !important;
+  }
+
+  .agent-pause-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
 
   .gates-tab-summary-text {

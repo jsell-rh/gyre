@@ -24,6 +24,7 @@
   import Modal from '../lib/Modal.svelte';
   import Icon from '../lib/Icon.svelte';
   import CopyableId from '../lib/CopyableId.svelte';
+  import InlineChat from '../lib/InlineChat.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
   const openDetailPanel = getContext('openDetailPanel') ?? null;
@@ -163,6 +164,28 @@
   // ── Agents state ───────────────────────────────────────────────────────
   let agentsLoading = $state(true);
   let wsAgents = $state([]);
+
+  // Workspace orchestrator agent — recipient for the scoped priority chat (HSI §4).
+  // Agents carry no role field; the orchestrator is identified by naming
+  // convention (seed "orchestrator", persona "workspace-orchestrator"), preferring
+  // an active instance.
+  let orchestratorAgent = $derived.by(() => {
+    const matches = wsAgents.filter((a) => (a.name ?? '').toLowerCase().includes('orchestrator'));
+    if (matches.length === 0) return null;
+    return matches.find((a) => a.status === 'active') ?? matches[0];
+  });
+
+  // Send a Directed-tier priority message to the workspace orchestrator (HSI §4).
+  async function sendOrchestratorMessage(text) {
+    const body = text?.trim();
+    const orch = orchestratorAgent;
+    if (!body || !orch?.id || !workspace?.id) return;
+    await api.sendAgentMessage(workspace.id, orch.id, {
+      kind: 'user_message',
+      tier: 'directed',
+      payload: { content: body },
+    });
+  }
 
   // ── Trust-level filtering ──────────────────────────────────────────────
   // At Guided/Autonomous trust, exclude priority-10 items (suggested links)
@@ -1450,6 +1473,18 @@
                   </span>
                 </button>
               {/each}
+            </div>
+          {/if}
+
+          <!-- Workspace orchestrator chat (HSI §4 — scoped priority steering) -->
+          {#if orchestratorAgent}
+            <div class="sidebar-widget" data-testid="section-orchestrator-chat">
+              <h3 class="sidebar-widget-title">Message orchestrator</h3>
+              <InlineChat
+                recipient={orchestratorAgent.name ?? formatId('agent', orchestratorAgent.id)}
+                recipientType="agent"
+                onmessage={sendOrchestratorMessage}
+              />
             </div>
           {/if}
 

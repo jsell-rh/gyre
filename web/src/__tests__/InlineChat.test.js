@@ -122,4 +122,16 @@ describe('InlineChat', () => {
       expect(screen.getByText(/you accept/i)).toBeTruthy();
     });
   });
+
+  describe('focus() method', () => {
+    it('focuses the message textarea (used by the Message hard-interrupt button)', async () => {
+      const { component } = render(InlineChat, {
+        props: { recipient: 'worker-12', recipientType: 'agent' },
+      });
+      const input = screen.getByRole('textbox');
+      expect(document.activeElement).not.toBe(input);
+      component.focus();
+      expect(document.activeElement).toBe(input);
+    });
+  });
 });
