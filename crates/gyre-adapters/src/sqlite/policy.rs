@@ -162,6 +162,73 @@ struct NewPolicyDecisionRow<'a> {
     evaluated_at: i64,
 }
 
+/// Insert-or-update a single policy row using an existing connection.
+///
+/// Shared by `PolicyRepository::create` and `WorkspaceRepository::
+/// apply_trust_transition` so both take the identical upsert path — the latter
+/// runs it inside a transaction alongside the workspace write.
+pub(crate) fn insert_policy_row_txn(
+    conn: &mut diesel::sqlite::SqliteConnection,
+    p: &Policy,
+) -> Result<()> {
+    let row = NewPolicyRow {
+        id: p.id.as_str().to_string(),
+        name: p.name.clone(),
+        description: p.description.clone(),
+        scope: scope_to_str(&p.scope).to_string(),
+        scope_id: p.scope_id.clone(),
+        priority: p.priority as i32,
+        effect: effect_to_str(&p.effect).to_string(),
+        conditions: serde_json::to_string(&p.conditions)?,
+        actions: serde_json::to_string(&p.actions)?,
+        resource_types: serde_json::to_string(&p.resource_types)?,
+        enabled: p.enabled as i32,
+        built_in: p.built_in as i32,
+        immutable: p.immutable as i32,
+        created_by: p.created_by.clone(),
+        created_at: p.created_at as i64,
+        updated_at: p.updated_at as i64,
+    };
+    diesel::insert_into(policies::table)
+        .values(&row)
+        .on_conflict(policies::id)
+        .do_update()
+        .set((
+            policies::name.eq(&row.name),
+            policies::description.eq(&row.description),
+            policies::scope.eq(&row.scope),
+            policies::scope_id.eq(&row.scope_id),
+            policies::priority.eq(row.priority),
+            policies::effect.eq(&row.effect),
+            policies::conditions.eq(&row.conditions),
+            policies::actions.eq(&row.actions),
+            policies::resource_types.eq(&row.resource_types),
+            policies::enabled.eq(row.enabled),
+            policies::updated_at.eq(row.updated_at),
+        ))
+        .execute(conn)
+        .context("insert policy")?;
+    Ok(())
+}
+
+/// Delete every `trust:`-prefixed policy scoped to `scope_id` using an existing
+/// connection. Shared with `apply_trust_transition` so the delete + reseed run
+/// in one transaction.
+pub(crate) fn delete_trust_policies_for_scope_txn(
+    conn: &mut diesel::sqlite::SqliteConnection,
+    scope_id: &str,
+) -> Result<usize> {
+    diesel::delete(
+        policies::table.filter(
+            policies::name
+                .like("trust:%")
+                .and(policies::scope_id.eq(Some(scope_id))),
+        ),
+    )
+    .execute(conn)
+    .context("delete trust policies by scope_id")
+}
+
 #[async_trait]
 impl PolicyRepository for SqliteStorage {
     async fn create(&self, policy: &Policy) -> Result<()> {
@@ -169,43 +236,7 @@ impl PolicyRepository for SqliteStorage {
         let p = policy.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            let row = NewPolicyRow {
-                id: p.id.as_str().to_string(),
-                name: p.name.clone(),
-                description: p.description.clone(),
-                scope: scope_to_str(&p.scope).to_string(),
-                scope_id: p.scope_id.clone(),
-                priority: p.priority as i32,
-                effect: effect_to_str(&p.effect).to_string(),
-                conditions: serde_json::to_string(&p.conditions)?,
-                actions: serde_json::to_string(&p.actions)?,
-                resource_types: serde_json::to_string(&p.resource_types)?,
-                enabled: p.enabled as i32,
-                built_in: p.built_in as i32,
-                immutable: p.immutable as i32,
-                created_by: p.created_by.clone(),
-                created_at: p.created_at as i64,
-                updated_at: p.updated_at as i64,
-            };
-            diesel::insert_into(policies::table)
-                .values(&row)
-                .on_conflict(policies::id)
-                .do_update()
-                .set((
-                    policies::name.eq(&row.name),
-                    policies::description.eq(&row.description),
-                    policies::scope.eq(&row.scope),
-                    policies::scope_id.eq(&row.scope_id),
-                    policies::priority.eq(row.priority),
-                    policies::effect.eq(&row.effect),
-                    policies::conditions.eq(&row.conditions),
-                    policies::actions.eq(&row.actions),
-                    policies::resource_types.eq(&row.resource_types),
-                    policies::enabled.eq(row.enabled),
-                    policies::updated_at.eq(row.updated_at),
-                ))
-                .execute(&mut *conn)
-                .context("insert policy")?;
+            insert_policy_row_txn(&mut *conn, &p)?;
             Ok(())
         })
         .await?

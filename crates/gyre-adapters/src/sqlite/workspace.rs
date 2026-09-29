@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
 use gyre_domain::{
-    BudgetConfig, Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace,
+    BudgetConfig, Persona, PersonaApprovalStatus, PersonaScope, Policy, TrustLevel, Workspace,
 };
 use gyre_ports::{PersonaRepository, WorkspaceRepository};
 use std::sync::Arc;
@@ -221,6 +221,68 @@ impl WorkspaceRepository for SqliteStorage {
             diesel::delete(workspaces::table.find(id.as_str()))
                 .execute(&mut *conn)
                 .context("delete workspace")?;
+            Ok(())
+        })
+        .await?
+    }
+
+    async fn apply_trust_transition(
+        &self,
+        workspace: &Workspace,
+        delete_trust_policies: bool,
+        new_policies: &[Policy],
+    ) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let w = workspace.clone();
+        let policies = new_policies.to_vec();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            conn.transaction::<_, anyhow::Error, _>(|conn| {
+                let budget_json = w.budget.as_ref().map(serde_json::to_string).transpose()?;
+                let trust_level = w.trust_level.to_string();
+                let compute_target_id = w
+                    .compute_target_id
+                    .as_ref()
+                    .map(|id| id.as_str().to_string());
+                let row = NewWorkspaceRow {
+                    id: w.id.as_str(),
+                    tenant_id: w.tenant_id.as_str(),
+                    name: &w.name,
+                    slug: &w.slug,
+                    description: w.description.as_deref(),
+                    budget: budget_json,
+                    max_repos: w.max_repos.map(|v| v as i32),
+                    max_agents_per_repo: w.max_agents_per_repo.map(|v| v as i32),
+                    trust_level: trust_level.clone(),
+                    llm_model: w.llm_model.clone(),
+                    created_at: w.created_at as i64,
+                    compute_target_id: compute_target_id.clone(),
+                };
+                diesel::insert_into(workspaces::table)
+                    .values(&row)
+                    .on_conflict(workspaces::id)
+                    .do_update()
+                    .set((
+                        workspaces::name.eq(&w.name),
+                        workspaces::slug.eq(&w.slug),
+                        workspaces::description.eq(w.description.as_deref()),
+                        workspaces::budget.eq(row.budget.as_deref()),
+                        workspaces::max_repos.eq(row.max_repos),
+                        workspaces::max_agents_per_repo.eq(row.max_agents_per_repo),
+                        workspaces::trust_level.eq(&trust_level),
+                        workspaces::llm_model.eq(w.llm_model.as_deref()),
+                        workspaces::compute_target_id.eq(compute_target_id.as_deref()),
+                    ))
+                    .execute(conn)
+                    .context("upsert workspace")?;
+                if delete_trust_policies {
+                    crate::sqlite::policy::delete_trust_policies_for_scope_txn(conn, w.id.as_str())?;
+                }
+                for p in &policies {
+                    crate::sqlite::policy::insert_policy_row_txn(conn, p)?;
+                }
+                Ok(())
+            })?;
             Ok(())
         })
         .await?

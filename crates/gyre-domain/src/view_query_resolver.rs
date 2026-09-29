@@ -2761,6 +2761,83 @@ mod tests {
     }
 
     #[test]
+    fn test_computed_test_reachable() {
+        // t1 (test) -> n1 via Calls; n2 is isolated (unreachable from any test).
+        let nodes = vec![
+            make_node("n1", "reachable", NodeType::Function),
+            make_node("n2", "isolated", NodeType::Function),
+            make_test_node("t1", "test_fn"),
+        ];
+        let edges = vec![make_edge("e1", "t1", "n1", EdgeType::Calls)];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        let result = resolve_computed_expression(
+            "$test_reachable",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        // The test node itself and the node it reaches are reachable; the isolated node is not.
+        assert!(result.contains("t1"));
+        assert!(result.contains("n1"));
+        assert!(!result.contains("n2"));
+    }
+
+    #[test]
+    fn test_computed_clicked_resolves_to_selected_node() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+        ];
+        let edges = vec![];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        // $clicked resolves to exactly the selected node id.
+        let result = resolve_computed_expression(
+            "$clicked",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            Some("n2"),
+        );
+        assert_eq!(result, HashSet::from(["n2".to_string()]));
+        // With no selection, $clicked resolves to the empty set.
+        let empty = resolve_computed_expression(
+            "$clicked",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            None,
+        );
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_computed_selected_resolves_to_selected_node() {
+        let nodes = vec![
+            make_node("n1", "A", NodeType::Function),
+            make_node("n2", "B", NodeType::Function),
+        ];
+        let edges = vec![];
+        let active: Vec<&GraphNode> = nodes.iter().collect();
+        let (outgoing, incoming) = build_adjacency(&edges);
+        // $selected resolves to exactly the selected node id.
+        let result = resolve_computed_expression(
+            "$selected",
+            &active,
+            &edges,
+            &outgoing,
+            &incoming,
+            Some("n1"),
+        );
+        assert_eq!(result, HashSet::from(["n1".to_string()]));
+    }
+
+    #[test]
     fn test_computed_where() {
         let mut nodes = vec![
             make_node("n1", "complex_fn", NodeType::Function),

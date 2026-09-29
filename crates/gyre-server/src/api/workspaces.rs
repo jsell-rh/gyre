@@ -127,7 +127,17 @@ pub async fn create_workspace(
         ws.trust_level = TrustLevel::from_db_str(&tl);
     }
     ws.llm_model = req.llm_model;
-    state.workspaces.create(&ws).await?;
+    // Seed the trust preset ABAC policies atomically with the workspace row so a
+    // Supervised workspace is never persisted (or returned) without its
+    // `trust:require-human-mr-review` Deny policy — otherwise the merge processor
+    // would be unblocked in a workspace the user believes is Supervised (F1/F2).
+    // `delete_trust_policies = false`: a brand-new workspace has no prior policies.
+    let seed_policies = trust_policies_for_level(&ws.trust_level, ws.id.as_str(), &auth.agent_id);
+    state
+        .workspaces
+        .apply_trust_transition(&ws, false, &seed_policies)
+        .await
+        .map_err(ApiError::Internal)?;
     Ok((StatusCode::CREATED, Json(WorkspaceResponse::from(ws))))
 }
 
@@ -228,28 +238,31 @@ pub async fn update_workspace(
             _ => ws.compute_target_id,
         };
     }
-    state.workspaces.update(&ws).await?;
-
-    // Apply trust preset ABAC policies as a side effect of trust level change.
-    // When transitioning TO Custom, preserve existing trust: policies as the
-    // starting point for user-managed ABAC (HSI §2). On all other transitions,
-    // delete workspace-scoped trust: policies and seed the new preset.
+    // When the trust level changes, write the workspace row AND its `trust:`
+    // preset policies in a single atomic transaction (F3): `apply_trust_transition`
+    // upserts the full workspace row plus policies, so we must NOT also call
+    // `workspaces.update` — that would write `trust_level` twice and open a
+    // partial-update window. When transitioning TO Custom, existing `trust:`
+    // policies are preserved (`delete_trust_policies = false`) as the starting
+    // point for user-managed ABAC (HSI §2); all other transitions replace them.
+    // A failed transition rolls back and maps to 409 Conflict.
     if trust_changed {
         let is_now_custom = matches!(ws.trust_level, TrustLevel::Custom);
-        if !is_now_custom {
-            state
-                .policies
-                .delete_by_name_prefix_and_scope_id("trust:", ws.id.as_str())
-                .await
-                .map_err(ApiError::Internal)?;
-        }
-        for policy in trust_policies_for_level(&ws.trust_level, ws.id.as_str(), &auth.agent_id) {
-            state.policies.create(&policy).await.map_err(|e| {
-                ApiError::Internal(anyhow::anyhow!(
-                    "Trust level transition failed — policies could not be created: {e}"
-                ))
+        let new_policies =
+            trust_policies_for_level(&ws.trust_level, ws.id.as_str(), &auth.agent_id);
+        state
+            .workspaces
+            .apply_trust_transition(&ws, !is_now_custom, &new_policies)
+            .await
+            .map_err(|_| {
+                ApiError::Conflict(
+                    "Trust level transition failed and was rolled back; no changes were applied"
+                        .to_string(),
+                )
             })?;
-        }
+    } else {
+        // No trust change — only the non-trust workspace fields need updating.
+        state.workspaces.update(&ws).await?;
     }
 
     Ok(Json(WorkspaceResponse::from(ws)))
@@ -796,5 +809,44 @@ mod tests {
             trust_policy2.is_none(),
             "trust: policies must be deleted on transition away from Supervised"
         );
+    }
+
+    /// A failed (rolled-back) trust transition maps to HTTP 409 Conflict.
+    ///
+    /// Uses a workspace repo whose `apply_trust_transition` always errors,
+    /// simulating a DB transaction rollback. The workspace is seeded directly
+    /// (bypassing the create handler, which also goes through the transition),
+    /// then a PUT that changes the trust level must return 409.
+    #[tokio::test]
+    async fn update_workspace_trust_transition_failure_returns_409() {
+        use gyre_ports::WorkspaceRepository;
+        let state = crate::mem::test_state_failing_trust();
+        // Seed a Guided workspace directly (default trust level).
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-fail-1"),
+            gyre_common::Id::new("t1"),
+            "FailWs",
+            "fail-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let app = crate::api::api_router().with_state(state);
+
+        // Changing Guided -> Supervised triggers a trust transition, which the
+        // failing repo rejects; the handler must surface a 409 Conflict.
+        let update = serde_json::json!({ "trust_level": "Supervised" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/workspaces/ws-fail-1")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 }

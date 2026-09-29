@@ -811,6 +811,12 @@ pub fn build_state(
         };
     }
 
+    // In pure in-memory mode (no DB), the workspace and policy repos must share a
+    // single policy store so `apply_trust_transition` writes are visible to the
+    // ABAC engine (which reads through `state.policies`). In DB-backed mode both
+    // come from the same storage struct, so this store is unused.
+    let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -954,10 +960,13 @@ pub fn build_state(
         ),
         workspaces: store!(
             dyn WorkspaceRepository,
-            mem::MemWorkspaceRepository::default()
+            mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
         ),
         personas: store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
-        policies: store!(dyn PolicyRepository, mem::MemPolicyRepository::default()),
+        policies: store!(
+            dyn PolicyRepository,
+            mem::MemPolicyRepository::from_store(Arc::clone(&mem_policy_store))
+        ),
         workspace_memberships: Arc::new(mem::MemWorkspaceMembershipRepository::default()),
         teams: Arc::new(mem::MemTeamRepository::default()),
         notifications: store!(

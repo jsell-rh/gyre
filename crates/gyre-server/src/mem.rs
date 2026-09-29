@@ -1502,6 +1502,34 @@ impl TenantRepository for MemTenantRepository {
 #[derive(Default)]
 pub struct MemWorkspaceRepository {
     store: Arc<Mutex<HashMap<String, Workspace>>>,
+    /// Policy store shared with the paired `MemPolicyRepository` so that
+    /// `apply_trust_transition` writes are visible to the ABAC engine (which
+    /// reads through `state.policies`). Defaults to an independent empty store.
+    policies: Arc<Mutex<HashMap<String, gyre_domain::Policy>>>,
+    /// Test hook: when set, `apply_trust_transition` returns an error to
+    /// simulate a DB transaction rollback (exercises the handler's 409 path).
+    fail_trust_transition: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MemWorkspaceRepository {
+    /// Construct a workspace repo that shares its policy store with a paired
+    /// `MemPolicyRepository`, giving `apply_trust_transition` real policy-write
+    /// behavior in in-memory mode.
+    pub fn with_policy_store(
+        policies: Arc<Mutex<HashMap<String, gyre_domain::Policy>>>,
+    ) -> Self {
+        Self {
+            store: Arc::new(Mutex::new(HashMap::new())),
+            policies,
+            fail_trust_transition: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Test hook: cause subsequent `apply_trust_transition` calls to fail.
+    pub fn fail_trust_transitions(&self) {
+        self.fail_trust_transition
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -1553,6 +1581,36 @@ impl WorkspaceRepository for MemWorkspaceRepository {
 
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.lock().await.remove(id.as_str());
+        Ok(())
+    }
+
+    async fn apply_trust_transition(
+        &self,
+        workspace: &Workspace,
+        delete_trust_policies: bool,
+        new_policies: &[gyre_domain::Policy],
+    ) -> Result<()> {
+        if self
+            .fail_trust_transition
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("simulated trust transition failure");
+        }
+        // In-memory writes cannot partially fail, so this is inherently atomic.
+        self.store
+            .lock()
+            .await
+            .insert(workspace.id.to_string(), workspace.clone());
+        let mut policies = self.policies.lock().await;
+        if delete_trust_policies {
+            policies.retain(|_, p| {
+                !(p.name.starts_with("trust:")
+                    && p.scope_id.as_deref() == Some(workspace.id.as_str()))
+            });
+        }
+        for p in new_policies {
+            policies.insert(p.id.to_string(), p.clone());
+        }
         Ok(())
     }
 }
@@ -1628,6 +1686,23 @@ impl PersonaRepository for MemPersonaRepository {
 pub struct MemPolicyRepository {
     policies: Arc<Mutex<HashMap<String, gyre_domain::Policy>>>,
     decisions: Arc<Mutex<Vec<gyre_domain::PolicyDecision>>>,
+}
+
+impl MemPolicyRepository {
+    /// Construct a policy repo backed by an externally-owned policy store,
+    /// so a paired `MemWorkspaceRepository` can share the same map for atomic
+    /// trust-transition writes.
+    pub fn from_store(policies: Arc<Mutex<HashMap<String, gyre_domain::Policy>>>) -> Self {
+        Self {
+            policies,
+            decisions: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Clone the shared policy-store handle (for wiring a paired workspace repo).
+    pub fn store(&self) -> Arc<Mutex<HashMap<String, gyre_domain::Policy>>> {
+        Arc::clone(&self.policies)
+    }
 }
 
 #[async_trait]
@@ -3028,133 +3103,54 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
-    use std::collections::HashMap;
-    use tokio::sync::{broadcast, Mutex};
-    Arc::new(crate::AppState {
-        auth_token: "test-token".to_string(),
-        base_url: "http://localhost:3000".to_string(),
-        repos: Arc::new(MemRepoRepository::default()),
-        agents: Arc::new(MemAgentRepository::default()),
-        tasks: Arc::new(MemTaskRepository::default()),
-        merge_requests: Arc::new(MemMrRepository::default()),
-        reviews: Arc::new(MemReviewRepository::default()),
-        merge_queue: Arc::new(MemMergeQueueRepository::default()),
-        git_ops: Arc::new(NoopGitOps),
-        jj_ops: Arc::new(NoopJjOps),
-        agent_commits: Arc::new(MemAgentCommitRepository::default()),
-        worktrees: Arc::new(MemWorktreeRepository::default()),
-        telemetry_buffer: Arc::new(gyre_common::message::TelemetryBuffer::new(1_000, 10)),
-        message_broadcast_tx: broadcast::channel(16).0,
-        kv_store: Arc::new(MemKvStore::default()),
-        agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
-        agent_jwt_ttl_secs: 3600,
-        users: Arc::new(MemUserRepository::default()),
-        api_keys: Arc::new(MemApiKeyRepository::default()),
-        jwt_config: None,
-        http_client: reqwest::Client::new(),
-        metrics: Arc::new(crate::metrics::Metrics::new().expect("test metrics")),
-        started_at_secs: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-        compose_sessions: Arc::new(Mutex::new(HashMap::new())),
-        retention_store: crate::retention::RetentionStore::new(),
-        job_registry: Arc::new(crate::jobs::JobRegistry::new()),
-        analytics: Arc::new(MemAnalyticsRepository::default()),
-        costs: Arc::new(MemCostRepository::default()),
-        audit: Arc::new(MemAuditRepository::default()),
-        siem_store: crate::siem::SiemStore::new(),
-        audit_broadcast_tx: broadcast::channel(64).0,
-        network_peers: Arc::new(MemNetworkPeerRepository::default()),
-        dependencies: Arc::new(MemDependencyRepository::default()),
-        breaking_changes: Arc::new(MemBreakingChangeRepository::default()),
-        dependency_policies: Arc::new(MemDependencyPolicyRepository::default()),
-        rate_limiter: crate::rate_limit::RateLimiter::new(1000),
-        process_registry: Arc::new(Mutex::new(HashMap::new())),
-        agent_logs: Arc::new(Mutex::new(HashMap::new())),
-        agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
-        quality_gates: Arc::new(MemQualityGateRepository::default()),
-        gate_results: Arc::new(MemGateResultRepository::default()),
-        push_gate_registry: Arc::new(crate::pre_accept::builtin_gates()),
-        repo_push_gates: Arc::new(MemPushGateRepository::default()),
-        speculative_results: Arc::new(Mutex::new(HashMap::new())),
-        spawn_log: Arc::new(MemSpawnLogRepository::default()),
-        db_storage: None,
-        spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
-        spec_policies: Arc::new(MemSpecPolicyRepository::default()),
-        attestation_store: Arc::new(MemAttestationRepository::default()),
-        chain_attestations: Arc::new(MemChainAttestationRepository::default()),
-        key_bindings: Arc::new(MemKeyBindingRepository::default()),
-        trust_anchors: Arc::new(MemTrustAnchorRepository::default()),
-        trusted_issuers: vec![],
-        remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
-        sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
-        tunnel_store: Arc::new(Mutex::new(HashMap::new())),
-        container_audits: Arc::new(MemContainerAuditRepository::default()),
-        spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
-        spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
-        spec_links_store: Arc::new(Mutex::new(Vec::new())),
-        budget_configs: Arc::new(MemBudgetConfigRepository::default()),
-        budget_usages: Arc::new(MemBudgetUsageRepository::default()),
-        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
-        tenants: Arc::new(MemTenantRepository::default()),
-        workspaces: Arc::new(MemWorkspaceRepository::default()),
-        personas: Arc::new(MemPersonaRepository::default()),
-        policies: Arc::new(MemPolicyRepository::default()),
-        workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
-        teams: Arc::new(MemTeamRepository::default()),
-        notifications: Arc::new(MemNotificationRepository::default()),
-        graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
-        saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
-        wg_config: crate::WireGuardConfig::from_env(),
-        meta_specs: Arc::new(MemMetaSpecRepository::default()),
-        meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
-        meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
-        messages: Arc::new(MemMessageRepository::default()),
-        message_dispatch_tx: {
-            let (tx, rx) = tokio::sync::mpsc::channel(256);
-            tokio::spawn(async move {
-                let mut rx = rx;
-                while rx.recv().await.is_some() {}
-            });
-            tx
-        },
-        agent_inbox_max: 1000,
-        user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
-        last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        llm_configs: Arc::new(MemLlmConfigRepository::default()),
-        presence: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        ws_connections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        ws_connection_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
-        ws_connection_workspaces: Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        )),
-        traces: Arc::new(MemTraceRepository::default()),
-        otlp_config: crate::otlp_receiver::OtlpServerConfig {
-            enabled: false,
-            grpc_port: 4317,
-            max_spans_per_trace: 10_000,
-        },
-        conversations: Arc::new(MemConversationRepository::default()),
-        // Use a non-existent path that unit tests will never actually access via real git.
-        // NoopGitOps does not create files; commits_since() on a missing path returns 0.
-        repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
-        prompt_templates: Arc::new(MemPromptRepository::default()),
-        compute_targets: Arc::new(MemComputeTargetRepository::default()),
-        llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
-        user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
-        user_tokens: Arc::new(MemUserTokenRepository::default()),
-        judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
-        ws_tickets: crate::auth::WsTicketStore::new(),
-    })
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies)
+}
+
+/// Build a test AppState whose workspace repo fails every `apply_trust_transition`,
+/// used to exercise the `update_workspace`/`create_workspace` 409 error path.
+#[cfg(test)]
+pub fn test_state_failing_trust() -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(true);
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies)
+}
+
+/// Construct a paired workspace + policy repo that share a single in-memory
+/// policy store so `apply_trust_transition` writes are visible through
+/// `state.policies`. When `fail_trust` is set, the workspace repo rejects every
+/// trust transition (simulating a DB rollback).
+#[cfg(test)]
+fn shared_workspace_policy_pair(
+    fail_trust: bool,
+) -> (
+    Arc<dyn WorkspaceRepository>,
+    Arc<dyn gyre_ports::PolicyRepository>,
+) {
+    let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let policies = Arc::new(MemPolicyRepository::from_store(Arc::clone(&pol_store)));
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    if fail_trust {
+        workspaces.fail_trust_transitions();
+    }
+    (Arc::new(workspaces), policies)
 }
 
 /// Build an AppState with a custom GitOpsPort for tests that need to control
 /// git operation behavior (e.g., configurable `can_merge` results).
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    test_state_inner(git_ops, workspaces, policies)
+}
+
+/// Shared builder for all in-memory test states. Callers supply the git ops
+/// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`).
+#[cfg(test)]
+fn test_state_inner(
+    git_ops: Arc<dyn gyre_ports::GitOpsPort>,
+    workspaces: Arc<dyn WorkspaceRepository>,
+    policies: Arc<dyn gyre_ports::PolicyRepository>,
+) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
     Arc::new(crate::AppState {
@@ -3226,9 +3222,9 @@ pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
         tenants: Arc::new(MemTenantRepository::default()),
-        workspaces: Arc::new(MemWorkspaceRepository::default()),
+        workspaces,
         personas: Arc::new(MemPersonaRepository::default()),
-        policies: Arc::new(MemPolicyRepository::default()),
+        policies,
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),
         notifications: Arc::new(MemNotificationRepository::default()),

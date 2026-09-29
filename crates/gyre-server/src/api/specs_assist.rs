@@ -8,6 +8,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::sse::{Event, Sse},
+    response::{IntoResponse, Response},
     Json,
 };
 use futures_util::{stream, StreamExt as _};
@@ -39,6 +40,16 @@ pub struct SpecSaveRequest {
     pub spec_path: String,
     pub content: String,
     pub message: String,
+    /// Optimistic-concurrency token: the spec's `current_sha` (git blob SHA)
+    /// at the time the client loaded it for editing (HSI §7). When present and
+    /// it no longer matches the ledger's `current_sha`, the save is rejected
+    /// with 409 Conflict unless `overwrite` is set.
+    #[serde(default)]
+    pub base_sha: Option<String>,
+    /// Force the save even if `base_sha` is stale ("Overwrite" in the conflict
+    /// dialog). Skips the concurrency check.
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Serialize)]
@@ -75,6 +86,172 @@ fn spec_path_slug(spec_path: &str) -> String {
         .bytes()
         .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     format!("{}-{:04x}", slug, hash & 0xffff)
+}
+
+/// A single line in an LCS-based text diff between two spec versions.
+#[derive(Serialize)]
+pub struct SpecDiffLine {
+    /// `"context"` (unchanged), `"add"` (only in the submitted version), or
+    /// `"remove"` (only in the current server version).
+    pub op: String,
+    pub text: String,
+}
+
+/// Compute a line-level diff between `current` (the server's version) and
+/// `submitted` (the client's version) using longest-common-subsequence.
+///
+/// Lines only in `current` are `remove` (the concurrent edit dropped them),
+/// lines only in `submitted` are `add` (the client's local changes), and
+/// shared lines are `context`. Used to build the 409 conflict diff (HSI §7).
+fn line_diff(current: &str, submitted: &str) -> Vec<SpecDiffLine> {
+    let a: Vec<&str> = current.lines().collect();
+    let b: Vec<&str> = submitted.lines().collect();
+    let n = a.len();
+    let m = b.len();
+
+    // LCS length table.
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if a[i] == b[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            out.push(SpecDiffLine { op: "context".to_string(), text: a[i].to_string() });
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            out.push(SpecDiffLine { op: "remove".to_string(), text: a[i].to_string() });
+            i += 1;
+        } else {
+            out.push(SpecDiffLine { op: "add".to_string(), text: b[j].to_string() });
+            j += 1;
+        }
+    }
+    while i < n {
+        out.push(SpecDiffLine { op: "remove".to_string(), text: a[i].to_string() });
+        i += 1;
+    }
+    while j < m {
+        out.push(SpecDiffLine { op: "add".to_string(), text: b[j].to_string() });
+        j += 1;
+    }
+    out
+}
+
+/// Read the current default-branch content of a spec file (best-effort).
+///
+/// Mirrors `get_spec`'s read path: specs live under `specs/<path>` in the repo,
+/// but tolerates a `spec_path` that already carries the `specs/` prefix.
+async fn read_current_spec_content(repo_path: &str, spec_path: &str) -> Option<String> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let stripped = spec_path.strip_prefix("specs/").unwrap_or(spec_path);
+    let candidate = format!("specs/{stripped}");
+    if let Some(c) =
+        crate::spec_registry::read_git_file(&git_bin, repo_path, "HEAD", &candidate).await
+    {
+        return Some(c);
+    }
+    // Fall back to the raw path in case the file is not under specs/.
+    crate::spec_registry::read_git_file(&git_bin, repo_path, "HEAD", spec_path).await
+}
+
+/// Build the 409 Conflict response for a stale spec save and create
+/// `SpecConflict` notifications for both editors (HSI §7 Conflict Prevention).
+///
+/// Recipients are: the caller (the second editor, if the connection carries a
+/// verified user identity) plus every *other* user currently editing the same
+/// `spec:<path>` entity per the presence map. The response body carries both
+/// versions and a line-level diff so the client can render a side-by-side view.
+async fn spec_conflict_response(
+    state: &Arc<AppState>,
+    repo: &gyre_domain::Repository,
+    caller: &AuthenticatedAgent,
+    spec_path: &str,
+    submitted_content: &str,
+    base_sha: &str,
+    current_sha: &str,
+) -> Response {
+    let current_content = read_current_spec_content(&repo.path, spec_path)
+        .await
+        .unwrap_or_default();
+    let diff = line_diff(&current_content, submitted_content);
+    let added = diff.iter().filter(|d| d.op == "add").count();
+    let removed = diff.iter().filter(|d| d.op == "remove").count();
+    let diff_summary = format!("+{added} / -{removed} lines");
+
+    // Resolve tenant for the notifications.
+    let tenant_id = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => "unknown".to_string(),
+    };
+
+    // Determine notification recipients: the caller + other concurrent editors
+    // of the same spec entity (from the presence map).
+    let editing_entity = format!("spec:{spec_path}");
+    let mut recipients: Vec<String> = Vec::new();
+    if let Some(uid) = &caller.user_id {
+        recipients.push(uid.to_string());
+    }
+    {
+        let map = state.presence.read().await;
+        for ((uid, _sid), entry) in map.iter() {
+            if entry.editing_entity.as_deref() == Some(editing_entity.as_str())
+                && !recipients.contains(uid)
+            {
+                recipients.push(uid.clone());
+            }
+        }
+    }
+
+    let now = now_secs();
+    let body = serde_json::json!({
+        "spec_path": spec_path,
+        "base_sha": base_sha,
+        "current_sha": current_sha,
+        "diff_summary": diff_summary,
+    })
+    .to_string();
+
+    for uid in &recipients {
+        let mut notif = Notification::new(
+            new_id(),
+            repo.workspace_id.clone(),
+            Id::new(uid),
+            NotificationType::SpecConflict,
+            format!("Spec edit conflict: {spec_path}"),
+            &tenant_id,
+            now as i64,
+        );
+        notif.body = Some(body.clone());
+        notif.entity_ref = Some(spec_path.to_string());
+        notif.repo_id = Some(repo.id.to_string());
+        if let Err(e) = state.notifications.create(&notif).await {
+            tracing::warn!(spec_path = %spec_path, recipient = %uid, "Failed to create spec-conflict notification: {e}");
+        }
+    }
+
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "Spec was modified since you loaded it. Reload to see the latest version, or overwrite.",
+            "spec_path": spec_path,
+            "base_sha": base_sha,
+            "current_sha": current_sha,
+            "current_content": current_content,
+            "submitted_content": submitted_content,
+            "diff": diff,
+        })),
+    )
+        .into_response()
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -340,7 +517,7 @@ pub async fn save_spec(
     Path(repo_id): Path<String>,
     caller: AuthenticatedAgent,
     Json(req): Json<SpecSaveRequest>,
-) -> Result<(StatusCode, Json<SpecSaveResponse>), ApiError> {
+) -> Result<Response, ApiError> {
     let repo_id_typed = Id::new(&repo_id);
     let repo = state
         .repos
@@ -348,6 +525,46 @@ pub async fn save_spec(
         .await
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", repo_id)))?;
+
+    // Optimistic concurrency (HSI §7 Conflict Prevention): if the client sent
+    // the `base_sha` it loaded and the ledger's `current_sha` has since advanced
+    // (another editor's change was merged), reject with 409 Conflict and notify
+    // both editors — unless the client explicitly chose to overwrite.
+    if !req.overwrite {
+        if let Some(base_sha) = req.base_sha.as_deref() {
+            let stripped = req
+                .spec_path
+                .strip_prefix("specs/")
+                .unwrap_or(&req.spec_path)
+                .to_string();
+            let candidates: Vec<String> = if stripped == req.spec_path {
+                vec![req.spec_path.clone()]
+            } else {
+                vec![req.spec_path.clone(), stripped]
+            };
+            let mut current_sha_opt: Option<String> = None;
+            for c in &candidates {
+                if let Ok(Some(entry)) = state.spec_ledger.find_by_path(c).await {
+                    current_sha_opt = Some(entry.current_sha);
+                    break;
+                }
+            }
+            if let Some(current_sha) = current_sha_opt {
+                if !current_sha.is_empty() && current_sha != base_sha {
+                    return Ok(spec_conflict_response(
+                        &state,
+                        &repo,
+                        &caller,
+                        &req.spec_path,
+                        &req.content,
+                        base_sha,
+                        &current_sha,
+                    )
+                    .await);
+                }
+            }
+        }
+    }
 
     let slug = spec_path_slug(&req.spec_path);
     let branch_prefix = format!("spec-edit/{}", slug);
@@ -385,7 +602,8 @@ pub async fn save_spec(
                 branch: mr.source_branch,
                 mr_id: mr.id.to_string(),
             }),
-        ));
+        )
+            .into_response());
     }
 
     // Generate new branch: spec-edit/<slug>-<short_uuid>
@@ -462,7 +680,8 @@ pub async fn save_spec(
             branch: branch_name,
             mr_id: mr_id.to_string(),
         }),
-    ))
+    )
+        .into_response())
 }
 
 /// POST /api/v1/repos/:id/prompts/save
@@ -1230,5 +1449,225 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("invalid diff"));
+    }
+
+    // ── HSI §7 Conflict Prevention: optimistic concurrency on save ──────────
+
+    use gyre_domain::spec_ledger::{ApprovalStatus, SpecLedgerEntry};
+
+    fn ledger_entry(path: &str, sha: &str, workspace_id: &str) -> SpecLedgerEntry {
+        SpecLedgerEntry {
+            path: path.to_string(),
+            title: format!("Spec {path}"),
+            owner: "system".to_string(),
+            kind: None,
+            current_sha: sha.to_string(),
+            approval_mode: "human_only".to_string(),
+            approval_status: ApprovalStatus::Approved,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 0,
+            updated_at: 0,
+            repo_id: None,
+            workspace_id: Some(workspace_id.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn save_spec_stale_base_sha_returns_409_with_diff() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let repo_id = create_repo(&app, "conflict-repo", "ws-conf").await;
+
+        // Ledger records the spec at a NEWER sha than what the client loaded.
+        state
+            .spec_ledger
+            .save(&ledger_entry("system/conflict.md", "server-sha-2", "ws-conf"))
+            .await
+            .unwrap();
+
+        let save_body = serde_json::json!({
+            "spec_path": "specs/system/conflict.md",
+            "content": "# Conflict\n\nMy local edit.\n",
+            "message": "edit",
+            "base_sha": "client-sha-1",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let json = body_json(resp).await;
+        assert_eq!(json["current_sha"].as_str().unwrap(), "server-sha-2");
+        assert_eq!(json["base_sha"].as_str().unwrap(), "client-sha-1");
+        let diff = json["diff"].as_array().expect("diff array");
+        assert!(!diff.is_empty(), "diff must not be empty");
+        // The submitted lines appear as `add` entries.
+        assert!(
+            diff.iter().any(|d| d["op"] == "add" && d["text"] == "My local edit."),
+            "diff should include the submitted line as an add: {diff:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_spec_matching_base_sha_creates_mr() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let repo_id = create_repo(&app, "match-repo", "ws-match").await;
+        state
+            .spec_ledger
+            .save(&ledger_entry("system/ok.md", "sha-x", "ws-match"))
+            .await
+            .unwrap();
+
+        let save_body = serde_json::json!({
+            "spec_path": "specs/system/ok.md",
+            "content": "# OK\n",
+            "message": "edit",
+            "base_sha": "sha-x",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn save_spec_overwrite_bypasses_stale_base_sha() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let repo_id = create_repo(&app, "overwrite-repo", "ws-ovr").await;
+        state
+            .spec_ledger
+            .save(&ledger_entry("system/ovr.md", "server-sha-2", "ws-ovr"))
+            .await
+            .unwrap();
+
+        let save_body = serde_json::json!({
+            "spec_path": "specs/system/ovr.md",
+            "content": "# Overwrite\n",
+            "message": "force",
+            "base_sha": "client-sha-1",
+            "overwrite": true,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/specs/save", repo_id))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Overwrite skips the concurrency check → creates the MR (201).
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn save_spec_conflict_notifies_caller_and_concurrent_editor() {
+        use crate::PresenceEntry;
+        use gyre_domain::Repository;
+
+        let state = test_state();
+        // Repo record only — the 409 path returns before any git write.
+        let repo = Repository::new(
+            Id::new("repo-conf"),
+            Id::new("ws-conf"),
+            "conf",
+            "/tmp/gyre-nonexistent-conf-repo",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        state
+            .spec_ledger
+            .save(&ledger_entry("system/conflict.md", "server-sha-2", "ws-conf"))
+            .await
+            .unwrap();
+
+        // Another human is concurrently editing the same spec (presence map).
+        state.presence.write().await.insert(
+            ("user-b".to_string(), "sess-b".to_string()),
+            PresenceEntry {
+                workspace_id: "ws-conf".to_string(),
+                view: "specs".to_string(),
+                editing_entity: Some("spec:specs/system/conflict.md".to_string()),
+                timestamp: 0,
+                server_last_seen: 0,
+                connection_id: 1,
+            },
+        );
+
+        let caller = AuthenticatedAgent {
+            agent_id: "user-a".to_string(),
+            user_id: Some(Id::new("user-a")),
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        let req = SpecSaveRequest {
+            spec_path: "specs/system/conflict.md".to_string(),
+            content: "# Conflict\n\nSecond editor's changes.\n".to_string(),
+            message: "edit".to_string(),
+            base_sha: Some("client-sha-1".to_string()),
+            overwrite: false,
+        };
+        let resp = save_spec(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("repo-conf".to_string()),
+            caller,
+            Json(req),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Both editors receive a SpecConflict notification with the spec path.
+        let ws = Id::new("ws-conf");
+        for uid in ["user-a", "user-b"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(uid), Some(&ws), None, None, 100, 0)
+                .await
+                .unwrap();
+            let conflict: Vec<_> = notifs
+                .iter()
+                .filter(|n| n.notification_type == NotificationType::SpecConflict)
+                .collect();
+            assert_eq!(
+                conflict.len(),
+                1,
+                "user {uid} must get exactly one SpecConflict notification, got {notifs:?}"
+            );
+            assert_eq!(conflict[0].priority, 2);
+            assert_eq!(
+                conflict[0].entity_ref.as_deref(),
+                Some("specs/system/conflict.md")
+            );
+            let body: serde_json::Value =
+                serde_json::from_str(conflict[0].body.as_deref().unwrap()).unwrap();
+            assert_eq!(body["current_sha"], "server-sha-2");
+        }
     }
 }
