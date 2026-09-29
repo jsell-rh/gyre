@@ -55,6 +55,27 @@ run_agent() {
   fi
 }
 
+# Run a serial agent (auditor/PM) on main with the working tree protected:
+# stash any uncommitted/untracked work, run the agent, restore afterwards.
+# Without this, agents that commit with `git add -A` sweep unrelated
+# in-flight human/agent work into their audit commits (observed in
+# 32edb3f1 and d7d67e22).
+run_serial_agent() {
+  local prompt_file="$1"
+  local had_changes=0
+  if ! git diff --quiet --ignore-submodules -- && ! git diff --cached --quiet --ignore-submodules -- || \
+     [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    had_changes=1
+    git stash push --include-untracked --message "loop-serial-agent: $(basename "$prompt_file")" >/dev/null 2>&1 || had_changes=0
+  fi
+  cat specs/GOAL.md "$prompt_file" | run_agent 2>/dev/null
+  local rc=$?
+  if [ "$had_changes" -eq 1 ]; then
+    git stash pop >/dev/null 2>&1 || log "!!! WARNING: failed to restore stashed WIP after serial agent — check git stash list"
+  fi
+  return $rc
+}
+
 log() { echo "[$(date '+%H:%M:%S')] [orchestrator] $*" | tee -a "$LOG"; }
 
 # --- Task metadata helpers ---
