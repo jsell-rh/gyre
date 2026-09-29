@@ -1271,4 +1271,39 @@ mod tests {
         let trace = stored.unwrap();
         assert_eq!(trace.mr_id, mr_id);
     }
+
+    #[tokio::test]
+    async fn trace_capture_gate_skips_when_otlp_disabled() {
+        // mem::test_state constructs otlp_config with enabled=false. The gate
+        // must still pass (observational) but skip capture and store nothing.
+        let state = crate::mem::test_state();
+        assert!(
+            !state.otlp_config.enabled,
+            "precondition: OTLP receiver disabled in mem::test_state"
+        );
+        let gate = make_gate(
+            GateType::TraceCapture,
+            Some(r#"{"test_command": "true", "otlp_port": 0}"#.to_string()),
+        );
+        let mr_id = make_mr_id();
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        let (status, output) = run_trace_capture_gate(&state, &gate, &mr_id, &result_id).await;
+
+        assert_eq!(
+            status,
+            GateStatus::Passed,
+            "disabled path still passes (observational): {output}"
+        );
+        assert!(
+            output.contains("disabled"),
+            "output should indicate capture was skipped: {output}"
+        );
+        // No trace is stored when the receiver is disabled.
+        let stored = state.traces.get_by_mr(&mr_id).await.unwrap();
+        assert!(
+            stored.is_none(),
+            "no trace should be stored when OTLP is disabled"
+        );
+    }
 }

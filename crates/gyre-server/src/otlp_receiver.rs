@@ -28,7 +28,6 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
-use tracing::warn;
 use uuid::Uuid;
 
 use crate::AppState;

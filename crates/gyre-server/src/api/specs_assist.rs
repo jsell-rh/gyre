@@ -1648,7 +1648,7 @@ mod tests {
         for uid in ["user-a", "user-b"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(uid), Some(&ws), None, None, 100, 0)
+                .list_for_user(&Id::new(uid), Some(&ws), None, None, None, 100, 0)
                 .await
                 .unwrap();
             let conflict: Vec<_> = notifs
