@@ -1,7 +1,7 @@
 # Coverage: Explorer Implementation
 
 **Spec:** [`system/explorer-implementation.md`](../../system/explorer-implementation.md)
-**Last audited:** 2026-04-13
+**Last audited:** 2026-09-29 (re-verified all 5 `verified` rows against current code: SavedViewRepository port (gyre-ports/src/saved_view.rs, CRUD + tenant-scoped delete defaults), SQLite adapter + migrations 000042/000044-46 (all 11 spec columns; FK on repo_id deliberately dropped in 000044 for workspace-scoped views `repo_id="__workspace__"`, dedup unique index added), 6 system defaults incl. all 4 spec views by name+query (saved_views.rs:190-223, lazy-seeded with upgrade reconciliation in list_views), 5 REST endpoints at /repos/:id/views (mod.rs:897-905) + WS CRUD in explorer_ws.rs, ExplorerChat.svelte saved-views dropdown/save button (list_views on socket open). 3 `n/a` rows spot-checked correct (Migration Plan context w/ phases tracked as rows 25-28; Testing heading-only w/ subsections rows 30-32; cross-reference). No reclassifications; task-assigned rows untouched.)
 **Coverage:** 5/33
 
 | # | Section | Depth | Status | Task | Notes |
