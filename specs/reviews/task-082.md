@@ -24,7 +24,7 @@ No new findings. The 4 open findings cover the spec violations in the current im
 
 ## R5 Resolution
 
-All four findings are fixed in code. The implementation (`dcf33e5c`) was reconstructed onto the worker branch and the findings addressed:
+All four findings are fixed in code. The implementation (`cda91d38`) reconstructs the stable 6-item sidebar on the worker branch and addresses every finding:
 
 - [x] **F1: repo `code` tab → Explorer.** `App.svelte` `activeSidebarItem` now maps `repoTab === 'code'` to `explorer` (the repo-mode branch explicitly enumerates every `REPO_TABS` value). Test: `AppShell.test.js` "highlights Explorer when the repo Code tab is active".
 - [x] **F2: server version indicator.** `Sidebar.svelte` renders a `sidebar-version` element in the footer, fed by a `serverVersion` prop; `App.svelte` fetches `api.version()` on mount and passes it through. Tests: `Sidebar.test.js` version-indicator tests.
