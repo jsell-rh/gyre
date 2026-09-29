@@ -259,8 +259,10 @@ for f in "$REPO_ROOT"/specs/tasks/task-*.md; do
   new_status=$(get_progress "$f")
   if [ "$new_status" = "needs-revision" ]; then
     log ">>> Pre-flight: process revision for $task_name"
+    wt_guard_stash
     cat specs/GOAL.md specs/prompts/process-revision.md | \
       run_agent 2>/dev/null
+    wt_guard_restore
     log "<<< Pre-flight process revision done"
   fi
 done
