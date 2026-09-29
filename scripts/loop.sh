@@ -23,6 +23,27 @@ WORKTREE_BASE="$REPO_ROOT/worktrees/workers"
 MAX_WORKERS=${GYRE_MAX_WORKERS:-6}
 TMUX_SESSION=${GYRE_TMUX_SESSION:-gyre-loop}
 
+# --- Single-instance guard ---
+# Two concurrent loops spawn duplicate workers on the same worktrees, which
+# corrupts in-flight agent runs. Hold a lock for the lifetime of this process.
+LOCK_FILE=/tmp/gyre-loop.lock
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK_FILE"
+  flock -n 9 || { echo "ERROR: another loop is already running (lock: $LOCK_FILE). Aborting." >&2; exit 1; }
+else
+  # flock-less fallback: PID lockfile with staleness check
+  if [ -f "$LOCK_FILE" ]; then
+    lock_pid=$(head -1 "$LOCK_FILE" 2>/dev/null)
+    if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+      echo "ERROR: another loop (pid $lock_pid) is already running (lock: $LOCK_FILE). Aborting." >&2
+      exit 1
+    fi
+    echo "stale lock from pid $lock_pid — reclaiming" >&2
+  fi
+  echo $$ > "$LOCK_FILE"
+  trap 'rm -f "$LOCK_FILE"' EXIT
+fi
+
 # Agent runner: omp in headless print mode, auto-approved, no session state.
 # Set GYRE_MODEL to override the model (fuzzy match, e.g. "opus").
 OMP=${OMP:-omp}
