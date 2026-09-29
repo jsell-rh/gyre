@@ -1,7 +1,7 @@
 ---
-title: "Per-spec manifest gate selection for MR gate chain"
+title: "Manifest-driven gate selection for MRs referencing a spec"
 spec_ref: "spec-registry.md §16 Agent Gates Integration"
-depends_on: []
+depends_on: [task-193]
 progress: not-started
 coverage_sections:
   - "spec-registry.md §16"
@@ -16,42 +16,44 @@ From `specs/system/spec-registry.md` §16 (Integration → Agent Gates):
 > - MR references `system/identity-security.md` -> manifest says gates = [security, accountability]
 > - Forge spawns security gate agent and accountability gate agent for this MR
 > - Different specs can require different gate agents
+>
+> The spec approval ledger in agent-gates.md is now unified with the forge ledger described here. One table, one source of truth.
 
-§5 (shared schema) — each gate declares `persona`, `min_attestation_level` (default 1), and optional `stack_hash`.
+Manifest schema (§Agent Approver / Gate Schema): each gate entry carries `persona`, `min_attestation_level` (default 1), and optional `stack_hash`.
 
-## Problem (current state)
+## Problem
 
-`trigger_gates_for_mr` in `crates/gyre-server/src/gate_executor.rs:23` sources gates **only** from repo-level `quality_gates.list_by_repo_id(repo_id)`. The manifest's per-spec `gates: Vec<GateConfig>` (parsed onto `SpecEntry` in `crates/gyre-server/src/spec_registry.rs`) is never consumed anywhere. As a result:
-- An MR whose `spec_ref` points at a spec declaring `gates: [security, accountability]` does NOT get those persona gate agents spawned.
-- Different specs cannot require different gate agents — the coverage note (§16) confirms this is unimplemented.
+Hollow. `trigger_gates_for_mr()` (`crates/gyre-server/src/gate_executor.rs:23-60`) sources gates **only** from repo-level configuration: `state.quality_gates.list_by_repo_id(repo_id)`. The manifest's per-spec `gates:` (`GateConfig` on `SpecEntry`, `crates/gyre-server/src/spec_registry.rs:107,181-186`) are parsed but **never consumed anywhere**. An MR carrying `spec_ref = "specs/system/identity-security.md@<sha>"` does not get the `[security, accountability]` gate agents its manifest entry declares — per-spec gate selection is unimplemented.
 
-The MR carries `spec_ref` in `path@sha` form (`crates/gyre-server/src/api/merge_requests.rs:255`). `trigger_gates_for_mr` is invoked from `crates/gyre-server/src/api/merge_queue.rs:77` with `mr_id` + `repo_id`.
+`trigger_gates_for_mr` is invoked from `crates/gyre-server/src/api/merge_queue.rs:77` with the MR's `repository_id`. The MR's `spec_ref` (`MergeRequest.spec_ref`, `crates/gyre-domain/src/merge_request.rs:77`) has the form `"path@sha"`.
 
 ## Implementation Plan
 
-1. **Resolve the MR's spec_ref and manifest gates.** In `trigger_gates_for_mr` (or a helper it calls):
-   - Load the MR by `mr_id`; if it has a `spec_ref`, split off the `path` portion.
-   - Load the repo by `repo_id` to get its on-disk path; read `specs/manifest.yaml` at HEAD via `crate::spec_registry::read_git_file` + `parse_manifest`.
-   - Find the `SpecEntry` for the referenced path and read its `gates: Vec<GateConfig>` (`persona`, `min_attestation_level`, `stack_hash`).
+1. In `trigger_gates_for_mr` (or a helper it calls), load the MR (`state.merge_requests.find_by_id`) to read `spec_ref`. If `spec_ref` is `Some("path@sha")`, split off the path and SHA.
 
-2. **Synthesize per-spec gates into the chain.** For each manifest `GateConfig`, construct an in-memory `gyre_domain::QualityGate` with `gate_type = GateType::AgentReview` (the persona-driven gate type), `persona = <resolved persona file path for the named persona>`, `required = true`, and a stable name (e.g. `spec-gate:<persona>`). Append these to the repo-level gates before creating `GateResult`s. Dedup so the same persona isn't run twice if already present as a repo gate.
+2. Read the manifest for the MR's repo at that spec SHA (or repo HEAD if you determine HEAD is the correct policy source — match the approach task-193 uses for reading policy; prefer the spec SHA embedded in `spec_ref` so gates reflect the exact reviewed version): `crate::spec_registry::read_manifest(repo_path, sha)` (helper from task-193). Resolve `repo_path` from `repo_id` via `state.repos`.
 
-3. **Enforce attestation constraints on the spawned gate agent.** When the manifest gate declares `min_attestation_level` / `stack_hash`, thread those into the gate agent spawn / validation path (`run_agent_review_gate`, gate_executor.rs:331) so a gate agent that does not meet the attestation floor or stack_hash cannot satisfy the gate. Reuse the constraint machinery already present (`gyre_domain::constraint_evaluator` supports `agent.attestation_level >= N`) rather than inventing a parallel check.
+3. Find the manifest `SpecEntry` matching the spec_ref path (normalize `specs/`-prefix consistently). For each `GateConfig` in `entry.gates`, materialize a gate to run for this MR:
+   - Map each manifest gate `{persona, min_attestation_level, stack_hash}` onto the existing gate-execution machinery. Reuse the `QualityGate` / `GateResult` flow already in `gate_executor.rs` (create a `Pending` `GateResult`, then run an agent-review/validation gate for the named persona). Do NOT invent a parallel results table — the merge-blocking check `check_gates_for_mr` (gate_executor.rs:837) must see these results.
+   - The gate must actually enforce the persona: spawn/run the agent gate for that persona (reuse `run_agent_review_gate` / the persona-driven path), not the auto-pass stub, when a persona is configured. Carry `min_attestation_level` / `stack_hash` into the gate so the reviewing agent's attestation can be constrained (mirror how task-193 validates agent approvals; if the current gate machinery has no attestation constraint plumbing, wire the minimum needed to record and enforce it — do not silently drop the constraint).
 
-4. **Behavior when no spec_ref / no manifest entry:** fall back to today's repo-level-only gate set (no regression).
+4. **Union, don't replace:** keep running repo-level `quality_gates` gates as today, and additionally run the manifest per-spec gates. Deduplicate if a repo-level gate and a manifest gate target the same persona to avoid double-spawning.
+
+5. If the MR has no `spec_ref`, or the repo has no manifest, or the entry declares no `gates`, behavior is unchanged (repo-level gates only).
 
 ## Acceptance Criteria
 
-- An MR whose `spec_ref` path resolves to a manifest `SpecEntry` with `gates: [security, accountability]` produces `GateResult`s for those two persona gates (in addition to any repo-level gates), and the corresponding gate agents are spawned.
-- Two MRs referencing two different specs with different manifest `gates:` lists get different gate sets.
-- A manifest gate with `min_attestation_level`/`stack_hash` set is not satisfiable by a gate agent below that attestation floor or with a mismatched stack_hash.
-- MRs with no `spec_ref` (or a path absent from the manifest) behave exactly as before (repo-level gates only).
-- `cargo build --all` and `bash scripts/check-arch.sh` pass.
+- An MR whose `spec_ref` points at a spec whose manifest entry declares `gates: [security, accountability]` results in gate executions for **both** personas (visible as `GateResult` rows for the MR), in addition to any repo-level gates.
+- An MR with no `spec_ref` (or a repo with no manifest) runs exactly the repo-level gates it runs today — no regression, no spurious gates.
+- Manifest gates and repo-level gates targeting the same persona do not double-run.
+- A configured manifest gate with a persona runs the real persona-driven gate path (not the always-pass stub) and its pass/fail participates in `check_gates_for_mr` merge-blocking.
+- A test (in `gate_executor.rs` tests) that FAILS if manifest-gate sourcing is removed: with a fixture manifest declaring per-spec gates and an MR referencing that spec, `trigger_gates_for_mr` (or the extracted selection helper) yields gate executions for the manifest personas. Prefer extracting the "which gates apply to this MR?" resolution into a pure helper `(Option<&SpecManifest>, mr) -> Vec<GateSpec>` and asserting on it directly.
+- `cargo build --all`, touched-crate tests, and `bash scripts/check-arch.sh` pass.
 
 ## Agent Instructions
 
-- Real work only. The manifest `gates:` field MUST actually drive which gate agents run for the MR — no audit-only, no logging-without-spawning, no hardcoded persona list.
-- Write a hard test that fails if per-spec gate selection regresses: factor the "compute effective gate set for an MR" logic into a pure function taking (repo gates, matched SpecEntry) → gate list, and assert that a spec with `gates:[security,accountability]` yields exactly those persona gates merged with repo gates (deduped), while a `None` spec_ref yields only repo gates. Add a test proving a below-`min_attestation_level` agent cannot satisfy a manifest gate. Do NOT write assertionless or mirrored-logic tests.
-- Reuse the existing `GateType::AgentReview` path and `constraint_evaluator`; do not add a second gate-execution mechanism.
-- Skip project-wide formatters/linters and the full test suite; run only targeted tests plus `cargo build --all` and `scripts/check-arch.sh`.
-- Respect hexagonal boundaries; wiring lives in `gyre-server`, reusing existing domain gate types and ports.
+- Reuse `crate::spec_registry::read_manifest` from task-193; do not add another manifest reader.
+- Reuse the existing `GateResult`/`check_gates_for_mr` flow so merge-blocking sees manifest gates — do NOT build a separate gate path that the merge processor can't observe.
+- Do NOT satisfy the manifest gate with the auto-pass stub when a persona is configured; run the real persona gate.
+- Extract gate selection into a pure, unit-testable helper; assert on the resolved gate set, not merely that "some gate ran".
+- Run only touched-crate tests plus `scripts/check-arch.sh`; skip formatters and the full suite.

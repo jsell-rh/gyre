@@ -1,7 +1,7 @@
 ---
-title: "Manifest-driven spec lifecycle task creation"
+title: "Manifest-driven spec lifecycle task creation (auto_create_tasks, per-spec policy)"
 spec_ref: "spec-registry.md §15 Spec Lifecycle Integration"
-depends_on: []
+depends_on: [task-193]
 progress: not-started
 coverage_sections:
   - "spec-registry.md §15"
@@ -10,7 +10,7 @@ commits: []
 
 ## Spec Excerpt
 
-From `specs/system/spec-registry.md` §15 (Integration → Spec Lifecycle):
+From `specs/system/spec-registry.md` §14/§15 (Integration with Existing Specs → Spec Lifecycle) and §Manifest Rules:
 
 > The spec lifecycle hooks now use the manifest instead of path prefix matching:
 > - **Which files trigger hooks:** files listed in the manifest with `auto_create_tasks: true`
@@ -18,40 +18,43 @@ From `specs/system/spec-registry.md` §15 (Integration → Spec Lifecycle):
 > - **Per-spec gates:** manifest declares which gate agents review MRs referencing this spec
 > - The `[spec_lifecycle]` config block is superseded by the manifest's `defaults:` section
 
-Manifest rule §4: "The manifest is the single source of truth for policy."
+> 4. **The manifest is the single source of truth for policy.** The `spec_lifecycle` config block in the spec-lifecycle spec is superseded by per-spec manifest entries.
 
-## Problem (current state)
+## Problem
 
-`process_spec_lifecycle` in `crates/gyre-server/src/git_http.rs:1361` drives task creation entirely by **path prefix** matching:
-- `parse_spec_changes` (git_http.rs:1311) filters changed files against the hardcoded `SPEC_WATCHED_PATHS` prefix list — the manifest is never read.
-- `classify_spec_change` (git_http.rs:1273) produces a task title/labels/priority purely from the git status char and path.
-- Consequences the spec forbids: a manifest entry with `auto_create_tasks: false` still spawns a task; a spec file not registered in the manifest still spawns a task if it matches the prefix; per-spec priority is impossible to express.
+Hollow. `process_spec_lifecycle()` (`crates/gyre-server/src/git_http.rs:1360-1540`) classifies changed spec files purely by **path** via `parse_spec_changes` / `classify_spec_change` (`git_http.rs:1272-1358`). It never reads `specs/manifest.yaml`. Consequences that violate §15:
+
+- A changed spec whose manifest entry sets `auto_create_tasks: false` (e.g. `trusted-foundry-integration.md`, personas) **still spawns a task**. `parse_spec_changes` only filters by watched path prefixes (`specs/system/`, `specs/development/`), not by the manifest.
+- Files under `specs/` that are **not** in the manifest but sit in a watched prefix still create tasks; files in the manifest under a non-watched prefix are missed.
+- Per-spec priority declared in the manifest is ignored — priority is hardcoded by change kind in `classify_spec_change`.
 
 ## Implementation Plan
 
-1. **Add optional per-spec priority to the manifest schema.** In `crates/gyre-server/src/spec_registry.rs`, add `priority: Option<String>` (or a typed enum deserialized to `gyre_domain::TaskPriority`) to `SpecEntry`, and an `effective_priority(&self, defaults)` helper. Add a matching optional default to `ManifestDefaults` if a manifest-wide default is warranted. Keep it `#[serde(default)]` so existing manifests parse unchanged.
+1. In `process_spec_lifecycle`, after computing the git diff for the update but before creating tasks, read the manifest at the push's new HEAD: `let manifest = crate::spec_registry::read_manifest(repo_path, &update.new_sha).await;` (helper introduced by task-193).
 
-2. **Read the manifest inside `process_spec_lifecycle`.** For each ref update, read `specs/manifest.yaml` at `update.new_sha` (for D/R cases where the file is gone at HEAD, read at the new HEAD anyway — the manifest reflects post-push policy) via `crate::spec_registry::read_git_file` + `parse_manifest`. Build a lookup from spec path → `SpecEntry`.
+2. For each changed `(status_char, path, old_path)`:
+   - Resolve the manifest `SpecEntry` for `path` (normalize the `specs/`-prefix exactly as task-193's resolution and `sync_spec_ledger` do). For renames (`R`), match on the new `path`.
+   - **Gate task creation on the manifest, not path prefixes:** create a task only when the changed file has a manifest entry with `effective_auto_create_tasks(&manifest.defaults) == true`. If the file is not in the manifest, do **not** create a lifecycle task (the manifest is the source of truth); keep emitting a warning for unregistered `specs/` files if that behavior already exists elsewhere, but do not spawn work.
+   - When a manifest is genuinely absent (manifest-less repo), preserve today's path-prefix behavior as a fallback so existing repos keep working — log at debug that manifest-driven filtering was skipped.
 
-3. **Gate task creation on manifest policy.** For each changed spec path:
-   - If the path has no matching manifest entry, do NOT create a lifecycle task (still perform approval auto-invalidation — that behavior at git_http.rs:1420-1461 stays, since a removed/modified file must stale its approvals regardless).
-   - If the matching entry's `effective_auto_create_tasks(&defaults) == false`, do NOT create a task.
-   - Otherwise create the task as today, but override `task.priority` with the entry's `effective_priority` when set (falling back to the current `classify_spec_change` default).
+3. **Per-spec priority:** if the manifest entry (or `defaults`) carries a priority override, apply it to `task.priority` instead of the hardcoded value from `classify_spec_change`. If the manifest schema currently has no priority field, DO NOT invent one silently — either (a) use the existing `classify_spec_change` priority when no override is declared, or (b) if adding a `priority` field is in scope per the spec's "manifest can override default task priority", add it to `SpecEntry`/`ManifestDefaults` as `Option<TaskPriority>` and thread it through. Prefer the minimal real change: read an override if present, else fall back.
 
-4. **Preserve existing behavior** for approval auto-invalidation, dedup, `SpecChanged`/`TaskCreated` event emission, and cross-workspace notification.
+4. Keep auto-invalidation of stale approvals (git_http.rs:1421-1461) intact — that logic is correct and independent of task creation. Only the **task-creation** decision must become manifest-driven.
+
+5. Preserve the existing dedup (skip if a non-Done task with the same title exists) and the `SpecChanged` / `TaskCreated` event emission for specs that DO get tasks.
 
 ## Acceptance Criteria
 
-- A modified spec file whose manifest entry has `auto_create_tasks: false` produces NO lifecycle task (but its active approvals are still invalidated).
-- A changed file under `specs/` that is NOT registered in the manifest produces NO lifecycle task.
-- A registered spec with `auto_create_tasks: true` (or defaulted true) produces a task, and when the entry declares a `priority`, the created task carries that priority.
-- Existing `SpecChanged` / `TaskCreated` emission and approval auto-invalidation are unchanged.
-- `cargo build --all` and `bash scripts/check-arch.sh` pass.
+- A push modifying a spec whose manifest entry has `auto_create_tasks: false` creates **no** lifecycle task (and emits no `TaskCreated`/`SpecChanged` for it), while a push modifying a spec with `auto_create_tasks: true` still creates exactly one task.
+- A push modifying a `specs/…` file that has **no** manifest entry creates no lifecycle task (manifest is the source of truth), given a manifest exists at HEAD.
+- In a repo with no `specs/manifest.yaml`, lifecycle task creation still works via the existing path-prefix fallback (no regression).
+- A test (in `git_http.rs` tests) that FAILS if the manifest gate is removed: given a fixture manifest marking spec A `auto_create_tasks: false` and spec B `true`, exercising the lifecycle over a diff touching both yields a task for B only. Prefer testing the manifest-filtering decision as an extracted, testable helper if `process_spec_lifecycle` is hard to invoke directly.
+- `cargo build --all`, touched-crate tests, and `bash scripts/check-arch.sh` pass.
 
 ## Agent Instructions
 
-- Real work only. Task creation MUST be gated by the parsed manifest, not the `SPEC_WATCHED_PATHS` prefix list. It is acceptable to keep `SPEC_WATCHED_PATHS` only as a cheap pre-filter for which git-diff entries to even parse, but the authoritative create/skip and priority decisions MUST come from the manifest entry.
-- Write a hard test that fails if the manifest gating regresses: e.g. given a manifest where `system/foo.md` has `auto_create_tasks: false` and `system/bar.md` has `auto_create_tasks: true`, a push modifying both creates exactly one task (for bar) with the manifest-declared priority. Test the decision logic directly (factor a pure helper that takes the manifest + change list and returns the tasks-to-create) so the test does not need a live git repo. Do NOT write self-confirming/assertionless tests.
-- If §15's "per-spec priority" cannot be expressed without a spec/schema change, add the `priority` field (this task authorizes it); do not silently drop the requirement.
-- Skip project-wide formatters/linters and the full test suite; run only the targeted tests plus `cargo build --all` and `scripts/check-arch.sh`.
-- Respect hexagonal boundaries; this work lives in `gyre-server` (manifest + lifecycle hook) and reuses existing ports.
+- Reuse `crate::spec_registry::read_manifest` from task-193; do not add a second manifest reader.
+- Extract the "should this change create a task?" decision into a pure, unit-testable function taking `(Option<&SpecManifest>, status_char, path)` so the behavior can be tested without spawning git.
+- Do NOT weaken the test into asserting only that some task exists — assert the specific inclusion/exclusion by title/path.
+- Do NOT hardcode a priority; only apply an override when the manifest declares one.
+- Run only touched-crate tests plus `scripts/check-arch.sh`; skip formatters and the full suite.

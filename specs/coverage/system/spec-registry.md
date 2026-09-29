@@ -1,7 +1,7 @@
 # Coverage: Spec Registry
 
 **Spec:** [`system/spec-registry.md`](../../system/spec-registry.md)
-**Last audited:** 2026-09-29 (full audit — §9/§15/§16 hollow → not-started; §5/§6/§10/§14/§19 partial; §2/§3/§17 verified)
+**Last audited:** 2026-09-29 (§9→task-193 mode-based approval resolution + attestation/stack_hash validity; §15→task-194 manifest-driven lifecycle task creation; §16→task-195 per-spec manifest gate selection. Prior: full audit — §9/§15/§16 hollow; §5/§6/§10/§14/§19 partial; §2/§3/§17 verified.)
 **Coverage:** 14/18 (1 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
