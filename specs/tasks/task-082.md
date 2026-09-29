@@ -7,7 +7,7 @@ review: specs/reviews/task-082.md
 coverage_sections:
   - "human-system-interface.md §1.3 Stable Sidebar, Adaptive Content"
 commits:
-  - 4848d691
+  - d8086930
 ---
 
 ## Spec Excerpt
