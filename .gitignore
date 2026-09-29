@@ -1,6 +1,14 @@
 # Rust build artifacts
 /target/
 worktrees/
+# Loop worker runtime artifacts (written into worktree roots; also matched
+# inside worktrees/ above, but keep them ignored if ever written to the main
+# checkout by a stray agent or a pre-commit autostash cycle)
+.agent.log
+.agent.jsonl
+.worker.log
+.spawn.log
+.ralph-loop-status.md
 
 # Nix build outputs
 /result

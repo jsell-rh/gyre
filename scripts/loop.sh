@@ -146,13 +146,30 @@ spawn_worker() {
   # the task is then wedged forever, failing every cycle.
   git worktree prune
 
-  # Clean up stale branch and stale worktree directory if it exists
-  git branch -D "worker/$task_name" 2>/dev/null
+  # Clean up a stale worktree directory if it exists (orphaned by a crash
+  # or a previous loop's cleanup). Commits live on the branch, not the dir.
+  if [ -d "$worktree" ]; then
+    git worktree remove "$worktree" --force 2>/dev/null || rm -rf "$worktree"
+  fi
 
-  # Create worktree
-  if ! git worktree add "$worktree" -b "worker/$task_name" HEAD 2>/dev/null; then
-    log "!!! Failed to create worktree for $task_name"
-    return 1
+  # If a previous run's branch carries unmerged commits, keep them: create
+  # the worktree on that branch and let the worker's rebase round (with the
+  # rebase-resolver agent) reconcile it against main HEAD. Only branches
+  # with no unique commits are discarded. This makes loop restarts safe —
+  # in-flight work resumes instead of being deleted by `git branch -D`.
+  if git rev-parse -q --verify "refs/heads/worker/$task_name" >/dev/null 2>&1 && \
+     git cherry HEAD "worker/$task_name" 2>/dev/null | grep -q '^+'; then
+    log "    Reusing branch worker/$task_name (unmerged commits from a prior run)"
+    if ! git worktree add "$worktree" "worker/$task_name" 2>/dev/null; then
+      log "!!! Failed to create worktree for $task_name"
+      return 1
+    fi
+  else
+    git branch -D "worker/$task_name" 2>/dev/null
+    if ! git worktree add "$worktree" -b "worker/$task_name" HEAD 2>/dev/null; then
+      log "!!! Failed to create worktree for $task_name"
+      return 1
+    fi
   fi
 
   log ">>> Spawning worker: $task_name (worktree: $worktree)"

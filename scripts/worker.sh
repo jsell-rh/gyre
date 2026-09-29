@@ -58,15 +58,29 @@ while [ $ROUND -lt $MAX_ROUNDS ]; do
       # workers. --autostash: workers' trees are routinely dirty (build.rs
       # regenerates web/dist with new content-hash names on every cargo run;
       # agents write .agent.jsonl/.agent.log), and rebase refuses to start on
-      # a dirty tree. On failure, abort back to the pre-rebase state — never
-      # leave the worktree mid-rebase for the agent to trip over.
+      # a dirty tree. If the rebase stops on real conflicts, hand the
+      # conflicted state to a rebase-resolver agent instead of aborting —
+      # "continue on stale base" lets the worker drift further from main
+      # every round (task-087: 16-hunk otlp_receiver.rs conflict, ~70
+      # commits behind, wedged at max rounds).
       log "--- Rebasing onto main HEAD (round $ROUND)"
       MAIN_ROOT="$(git rev-parse --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
       if [ -n "$MAIN_ROOT" ] && git fetch "$MAIN_ROOT" HEAD 2>/dev/null && git rebase --autostash FETCH_HEAD 2>/dev/null; then
         :
+      elif [ -n "$MAIN_ROOT" ] && git rev-parse -q --verify REBASE_HEAD 2>/dev/null; then
+        # Rebase started but stopped on conflict — resolve via agent
+        log ">>> Rebase resolver (round $ROUND)"
+        inject_task_prompt specs/prompts/rebase-resolver.md "$TASK_FILE" | \
+          run_agent 2>/dev/null
+        log "<<< Rebase resolver done (exit=$?)"
+        if git rev-parse -q --verify REBASE_HEAD >/dev/null 2>&1; then
+          # Agent failed to complete the rebase — abort to a safe state
+          log "!!! Rebase unresolved after resolver agent — aborting to pre-rebase base"
+          git rebase --abort 2>/dev/null || true
+        fi
       else
-        git rebase --abort 2>/dev/null || true
-        log "!!! Rebase failed (real conflict with main — continuing on current base)"
+        # Fetch itself failed (main worktree gone?) — nothing to rebase onto
+        log "!!! Rebase failed (no fetch target — continuing on current base)"
       fi
 
       log ">>> Implementation (round $ROUND, status=$status)"
