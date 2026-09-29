@@ -8,7 +8,7 @@ coverage_sections:
   - "human-system-interface.md §1.3 Stable Sidebar, Adaptive Content"
 commits:
   - d99ace7b
-  - 942e4f79
+  - 9c501d1d
 ---
 
 ## Spec Excerpt
