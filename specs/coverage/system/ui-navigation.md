@@ -9,7 +9,7 @@
 | 1 | Why a New Navigation Model | 2 | n/a | - | Rationale — no implementation |
 | 2 | Design Principles | 2 | n/a | - | Rationale — no implementation |
 | 3 | 1. Application Shell | 2 | verified | - | App.svelte: topbar + status bar + no-sidebar layout |
-| 4 | Top Bar (always visible, all modes) | 3 | implemented | - | Partial — repo-mode decisions badge shows workspace-wide count, not repo-scoped (backend /count endpoint lacks repo_id filter). All other features present. |
+| 4 | Top Bar (always visible, all modes) | 3 | implemented | - | Partial — repo-mode decisions badge shows workspace-wide count, not repo-scoped. App.svelte `loadDecisionsCount()` always calls `notificationCount(workspace_id)`; backend `get_notification_count` (users.rs) → `count_unresolved(user_id, workspace_id)` has no repo_id filter. All other top-bar features present (workspace selector, ⌘K search, back arrow, repo path, avatar). Re-verified 2026-09-29. |
 | 5 | Status Bar (bottom, always visible) | 3 | verified | - | App.svelte: WebSocket status (connected/offline/connecting), trust level, budget % with color-coded bar, PresenceAvatars with real-time WS updates |
 | 6 | 2. Workspace Home | 2 | verified | - | WorkspaceHome.svelte: dashboard landing page with real data loading for decisions, repos, specs, tasks, MRs, agents, budget |
 | 7 | Sections | 3 | implemented | - | Partial — Decisions (inline actions, trust filtering) and Repos (cards, health, New/Import) genuine. Missing: Specs cross-repo list, Briefing (removed from template), Agent Rules section. Architecture partial (DependencyGraph only). |
