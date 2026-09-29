@@ -435,40 +435,6 @@ fn compute_test_reachable(
     reachable
 }
 
-/// Compute the number of distinct tests that can reach a node (test fragility).
-/// Uses a single multi-source BFS per test node with depth limit, then counts
-/// how many test BFS trees contain the target node.
-/// Accepts `&[&GraphNode]` to avoid cloning node slices.
-#[allow(dead_code)] // Kept for potential use in per-node metric queries
-fn compute_test_fragility_count(
-    node_id: &str,
-    nodes: &[&GraphNode],
-    outgoing: &HashMap<String, Vec<(String, EdgeType)>>,
-    incoming: &HashMap<String, Vec<(String, EdgeType)>>,
-) -> usize {
-    let test_ids: Vec<String> = nodes
-        .iter()
-        .filter(|n| n.test_node && n.deleted_at.is_none())
-        .map(|n| n.id.to_string())
-        .collect();
-    let mut count = 0;
-    for tid in &test_ids {
-        // Depth-limited BFS per test (20 hops is sufficient for fragility)
-        let reached = bfs_traverse(
-            tid,
-            TEST_REACHABILITY_EDGES,
-            "outgoing",
-            20,
-            outgoing,
-            incoming,
-        );
-        if reached.contains(node_id) {
-            count += 1;
-        }
-    }
-    count
-}
-
 /// Pre-compute test fragility counts for ALL nodes at once.
 /// Returns a map from node_id → count of distinct tests that reach it.
 /// This is O(T * (N + M)) total instead of O(T * (N + M)) per node queried.
