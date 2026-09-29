@@ -8,6 +8,8 @@ See [specs/system/agent-runtime.md](specs/system/agent-runtime.md) §1 for the c
 
 ---
 
+**Current goal:** [specs/GOAL.md](specs/GOAL.md) — close every spec gap with real production implementations, no fakery (no stubs, no audit-only where enforcement is specced, no test inflation). Read it before working on any task.
+
 ## Quick Start
 
 ```bash
