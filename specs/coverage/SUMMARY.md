@@ -22,7 +22,7 @@
 | identity-security.md | 12 | 2 | 0 | 2 | 8 | 0 | 80% |
 | lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | merge-dependencies.md | 20 | 3 | 0 | 1 | 0 | 16 | 94% |
-| message-bus.md | 17 | 3 | 1 | 2 | 1 | 10 | 78% |
+| message-bus.md | 17 | 3 | 0 | 3 | 1 | 10 | 78% |
 | meta-spec-reconciliation.md | 18 | 7 | 0 | 6 | 5 | 0 | 45% |
 | observability.md | 9 | 0 | 0 | 3 | 6 | 0 | 66% |
 | platform-model.md | 56 | 5 | 0 | 32 | 15 | 4 | 37% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **218** | **1** | **311** | **148** | **124** | **46%** |
+| **TOTAL** | **802** | **218** | **0** | **312** | **148** | **124** | **46%** |
