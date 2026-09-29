@@ -24,7 +24,8 @@
     "sidebar": {
       "expand": "Expand sidebar",
       "collapse": "Collapse sidebar",
-      "connected": "Connected"
+      "connected": "Connected",
+      "server_version": "Server version {version}"
     }
   },
   "topbar": {

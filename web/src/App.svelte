@@ -15,6 +15,7 @@
   import Modal from './lib/Modal.svelte';
   import PresenceAvatars from './lib/PresenceAvatars.svelte';
   import DetailPanel from './lib/DetailPanel.svelte';
+  import Sidebar from './lib/Sidebar.svelte';
   import { onMount, setContext, tick } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
   import { toast as showToast } from './lib/toast.svelte.js';
@@ -30,6 +31,11 @@
   let repoTab = $state('specs'); // 'specs' | 'architecture' | 'decisions' | 'code' | 'settings'
   // Cross-workspace sub-page: null = dashboard, 'settings' = /all/settings tenant admin
   let crossWorkspaceTab = $state(null);
+  // Which sidebar section is active while at workspace_home scope. workspace_home
+  // renders Inbox/Briefing/Explorer/Specs as scroll sections of one page, so the
+  // active sidebar indicator is tracked here rather than derived from `mode` alone
+  // (HSI §1.3 — "Active sidebar item is visually highlighted").
+  let workspaceActiveSection = $state('inbox');
 
   // ── Global detail panel ──────────────────────────────────────────────
   let detailPanel = $state({ open: false, entity: null });
@@ -60,6 +66,17 @@
   let wsDropdownEl = $state(null);
 
   let mobileDrawerOpen = $state(false);
+  let sidebarCollapsed = $state(false);
+
+  // Restore sidebar collapsed state from localStorage
+  try {
+    sidebarCollapsed = localStorage.getItem('gyre_sidebar_collapsed') === 'true';
+  } catch { /* private browsing */ }
+
+  function toggleSidebar() {
+    sidebarCollapsed = !sidebarCollapsed;
+    try { localStorage.setItem('gyre_sidebar_collapsed', String(sidebarCollapsed)); } catch { /* private browsing */ }
+  }
   let createWsModalOpen = $state(false);
   let createWsForm = $state({ name: '', description: '' });
   let createWsSaving = $state(false);
@@ -104,6 +121,7 @@
   // ── Budget / decisions ────────────────────────────────────────────────
   let workspaceBudget = $state(null);
   let decisionsCount = $state(0);
+  let serverVersion = $state(null); // Server version string for the sidebar footer (HSI ui-layout §1)
 
   // ── Repo ID cache ─────────────────────────────────────────────────────
   // Cache repo name→id mappings so browser back/forward can restore full repo state.
@@ -270,6 +288,9 @@
       try { localStorage.setItem('gyre_workspace_id', ws.id); } catch { /* private browsing */ }
     }
     mode = 'workspace_home';
+    // Default to Inbox per §1 entrypoint flow. Section-specific sidebar clicks
+    // override this after calling goToWorkspaceHome (see handleSidebarNavigate).
+    workspaceActiveSection = 'inbox';
     currentRepo = null;
     repoTab = 'specs';
     entityDetail = null;
@@ -585,6 +606,18 @@
       return;
     }
 
+    // ⌘1-6: sidebar navigation (HSI §1.8)
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+      const sidebarMap = { '1': 'inbox', '2': 'briefing', '3': 'explorer', '4': 'specs', '5': 'meta-specs', '6': 'admin' };
+      const item = sidebarMap[e.key];
+      if (item) {
+        e.preventDefault();
+        gKeyPending = false;
+        handleSidebarNavigate(item);
+        return;
+      }
+    }
+
     // Esc: close overlay / panel / return to workspace home
     if (e.key === 'Escape') {
       if (shortcutsOpen) { shortcutsOpen = false; gKeyPending = false; return; }
@@ -741,6 +774,77 @@
 
   let trustLevel = $derived(currentWorkspace?.trust_level ?? null);
 
+  // ── Sidebar active item (HSI §1.3) ──────────────────────────────────
+  // Maps current mode to the sidebar item that should be highlighted.
+  // The sidebar items are fixed — only the active indicator changes.
+  let activeSidebarItem = $derived.by(() => {
+    if (mode === 'workspace_home') return workspaceActiveSection; // Tracks Inbox/Briefing/Explorer/Specs section clicks
+    if (mode === 'agent_rules') return 'meta-specs';
+    if (mode === 'workspace_settings') return 'admin';
+    if (mode === 'cross_workspace') {
+      if (crossWorkspaceTab === 'settings') return 'admin';
+      if (crossWorkspaceTab === 'agent-rules') return 'meta-specs';
+      return 'explorer'; // Cross-workspace dashboard = workspace cards grid = Explorer at tenant scope
+    }
+    if (mode === 'repo') {
+      // Map every repo tab (REPO_TABS: specs, tasks, mrs, agents, architecture,
+      // dependencies, decisions, code, settings) to a sidebar item (HSI §1.3).
+      if (repoTab === 'specs' || repoTab === 'tasks') return 'specs'; // Specs column covers specs + implementation progress
+      // Code tab (branches, commits, MRs, merge queue) and the C4 graph are part of the Explorer per HSI §1.3
+      if (repoTab === 'architecture' || repoTab === 'dependencies' || repoTab === 'code' || repoTab === 'mrs' || repoTab === 'agents') return 'explorer';
+      if (repoTab === 'decisions') return 'inbox';
+      if (repoTab === 'settings') return 'admin';
+      return 'specs'; // exhaustive-state:ok — all REPO_TABS enumerated above; defensive fallback
+    }
+    if (mode === 'profile') return 'admin';
+    return 'inbox';
+  });
+
+  /** Navigate via sidebar item, preserving current scope (HSI §1.3). */
+  function handleSidebarNavigate(itemId) {
+    if (mode === 'repo' && currentRepo) {
+      // In repo mode: sidebar items switch to a repo tab
+      switch (itemId) {
+        case 'inbox':      goToRepoTab('decisions'); return;
+        case 'specs':      goToRepoTab('specs'); return;
+        case 'explorer':   goToRepoTab('architecture'); return;
+        case 'admin':      goToRepoTab('settings'); return;
+        case 'briefing':   goToWorkspaceHome(currentWorkspace); return; // No repo-scoped briefing tab
+        case 'meta-specs': goToAgentRules(); return;
+      }
+    } else {
+      // At workspace or tenant scope: navigate to the appropriate view
+      switch (itemId) {
+        case 'inbox':
+          goToWorkspaceHome(currentWorkspace);
+          tick().then(() => document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          return;
+        case 'briefing':
+          goToWorkspaceHome(currentWorkspace);
+          workspaceActiveSection = 'briefing';
+          tick().then(() => document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          return;
+        case 'explorer':
+          if (!currentWorkspace) { goToCrossWorkspace(); return; }
+          goToWorkspaceHome(currentWorkspace);
+          workspaceActiveSection = 'explorer';
+          tick().then(() => document.querySelector('[data-testid="section-architecture"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          return;
+        case 'specs':
+          goToWorkspaceHome(currentWorkspace);
+          workspaceActiveSection = 'specs';
+          tick().then(() => document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          return;
+        case 'meta-specs':
+          goToAgentRules();
+          return;
+        case 'admin':
+          goToWorkspaceSettings();
+          return;
+      }
+    }
+  }
+
   // ── Page title ────────────────────────────────────────────────────────
   $effect(() => {
     const wsName = currentWorkspace?.name ?? '';
@@ -788,6 +892,8 @@
   onMount(async () => {
     // 1. Load all workspaces
     try { workspaces = await api.workspaces() ?? []; } catch { workspaces = []; }
+    // Load server version for the sidebar footer (best-effort — never blocks nav)
+    api.version().then(v => { serverVersion = v?.version ?? null; }).catch(() => { serverVersion = null; });
 
     // 2. Determine initial state from URL or entrypoint flow
     const parsed = parseUrl(window.location.pathname);
@@ -1029,7 +1135,17 @@
 
 {#if !$isLoading}
 <div class="app">
-  <!-- Main column: topbar + content + status bar (no sidebar) -->
+  <!-- Sidebar: permanent 6-item navigation (HSI §1.3) -->
+  <Sidebar
+    activeItem={activeSidebarItem}
+    collapsed={sidebarCollapsed}
+    onNavigate={handleSidebarNavigate}
+    onToggleCollapse={toggleSidebar}
+    {decisionsCount}
+    {serverVersion}
+  />
+
+  <!-- Main column: topbar + content + status bar -->
   <div class="main">
 
     <!-- ── Topbar (always visible) ──────────────────────────────────── -->
@@ -1424,61 +1540,23 @@
           >✕</button>
         </div>
         <ul class="drawer-links" role="list">
-          <li>
-            <a
-              class="drawer-link"
-              href="#section-decisions"
-              onclick={(e) => {
-                e.preventDefault();
-                mobileDrawerOpen = false;
-                document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth' });
-              }}
-            >{$t('workspace_home.sections.decisions')}</a>
-          </li>
-          <li>
-            <a
-              class="drawer-link"
-              href="#section-specs"
-              onclick={(e) => {
-                e.preventDefault();
-                mobileDrawerOpen = false;
-                document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth' });
-              }}
-            >{$t('workspace_home.sections.specs')}</a>
-          </li>
-          <li>
-            <a
-              class="drawer-link"
-              href="#section-repos"
-              onclick={(e) => {
-                e.preventDefault();
-                mobileDrawerOpen = false;
-                document.querySelector('[data-testid="section-repos"]')?.scrollIntoView({ behavior: 'smooth' });
-              }}
-            >{$t('workspace_home.sections.repos')}</a>
-          </li>
-          <li>
-            <a
-              class="drawer-link"
-              href="#section-briefing"
-              onclick={(e) => {
-                e.preventDefault();
-                mobileDrawerOpen = false;
-                document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth' });
-              }}
-            >{$t('workspace_home.sections.briefing')}</a>
-          </li>
-          <li>
-            <a
-              class="drawer-link"
-              href="#section-agent-rules"
-              onclick={(e) => {
-                e.preventDefault();
-                mobileDrawerOpen = false;
-                document.querySelector('[data-testid="section-agent-rules"]')?.scrollIntoView({ behavior: 'smooth' });
-              }}
-            >{$t('topbar.agent_rules_label')}</a>
-          </li>
+          {#each [
+            { id: 'inbox', label: 'Inbox' },
+            { id: 'briefing', label: 'Briefing' },
+            { id: 'explorer', label: 'Explorer' },
+            { id: 'specs', label: 'Specs' },
+            { id: 'meta-specs', label: 'Meta-specs' },
+            { id: 'admin', label: 'Admin' },
+          ] as item (item.id)}
+            <li>
+              <button
+                class="drawer-link"
+                class:active={activeSidebarItem === item.id}
+                onclick={() => { mobileDrawerOpen = false; handleSidebarNavigate(item.id); }}
+                data-testid={`drawer-item-${item.id}`}
+              >{item.label}</button>
+            </li>
+          {/each}
         </ul>
       </nav>
     {/if}
@@ -1633,11 +1711,12 @@
     tick().then(() => openDetailPanel({ type: opts.entityType, id: opts.entityId, data }));
     return;
   }
-  // For section-based views, navigate to workspace home and scroll to the section
+  // For section-based views, navigate to workspace home and scroll to the section.
+  // Keep the sidebar active indicator in sync (HSI §1.3).
   if (mode !== 'workspace_home') goToWorkspaceHome(currentWorkspace);
-  if (v === 'inbox') tick().then(() => document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-  else if (v === 'briefing') tick().then(() => document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-  else if (v === 'specs') tick().then(() => document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  if (v === 'inbox') { workspaceActiveSection = 'inbox'; tick().then(() => document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }
+  else if (v === 'briefing') { workspaceActiveSection = 'briefing'; tick().then(() => document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }
+  else if (v === 'specs') { workspaceActiveSection = 'specs'; tick().then(() => document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }
   else goToWorkspaceHome(currentWorkspace);
 }} />
 <Toast />
@@ -1667,6 +1746,12 @@
       <div class="shortcuts-body">
         <dl class="shortcuts-list">
           <div class="shortcut-row"><dt><kbd>⌘K</kbd></dt><dd>{$t('shortcuts.global_search')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘1</kbd></dt><dd>Inbox</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘2</kbd></dt><dd>Briefing</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘3</kbd></dt><dd>Explorer</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘4</kbd></dt><dd>Specs</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘5</kbd></dt><dd>Meta-specs</dd></div>
+          <div class="shortcut-row"><dt><kbd>⌘6</kbd></dt><dd>Admin</dd></div>
           <div class="shortcut-row"><dt><kbd>g h</kbd></dt><dd>{$t('shortcuts.workspace_home')}</dd></div>
           <div class="shortcut-row"><dt><kbd>g s</kbd></dt><dd>{$t('shortcuts.workspace_settings')}</dd></div>
           <div class="shortcut-row"><dt><kbd>g a</kbd></dt><dd>{$t('shortcuts.agent_rules')}</dd></div>
@@ -1786,7 +1871,7 @@
     background: var(--color-bg);
   }
 
-  /* Main column (full width — no sidebar) */
+  /* Main column (content area beside sidebar) */
   .main {
     flex: 1;
     display: flex;
@@ -2704,16 +2789,28 @@
 
   .drawer-link {
     display: block;
+    width: 100%;
     padding: var(--space-3) var(--space-4);
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
     text-decoration: none;
+    text-align: left;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
     transition: background var(--transition-fast), color var(--transition-fast);
   }
 
   .drawer-link:hover {
     background: var(--color-surface-elevated);
     color: var(--color-text);
+  }
+
+  .drawer-link.active {
+    color: var(--color-text);
+    font-weight: 500;
+    border-left: 3px solid var(--color-primary);
   }
 
   .drawer-link:focus-visible {

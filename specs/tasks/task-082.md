@@ -2,7 +2,7 @@
 title: "HSI Stable Sidebar Navigation Model"
 spec_ref: "human-system-interface.md §1.3"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-082.md
 coverage_sections:
   - "human-system-interface.md §1.3 Stable Sidebar, Adaptive Content"
