@@ -65,7 +65,6 @@ impl LanguageExtractor for GoExtractor {
         // Pass 1: tree-sitter AST extraction (declarations + basic edges).
         ctx.extract_go_files();
 
-
         ExtractionResult {
             nodes: ctx.nodes,
             edges: ctx.edges,
@@ -662,7 +661,6 @@ impl GoExtractionContext {
             }
         });
     }
-
 }
 
 // ---------------------------------------------------------------------------

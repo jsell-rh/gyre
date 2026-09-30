@@ -735,8 +735,9 @@ mod tests {
         let state = crate::mem::test_state();
         let app = crate::api::api_router().with_state(state.clone());
 
-        // Create a workspace.
-        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w" });
+        // Create a Guided workspace (entity default is Supervised since
+        // TASK-077; pin Guided so the PUT below exercises a real transition).
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "Guided" });
         let create_resp = app
             .clone()
             .oneshot(
@@ -819,18 +820,20 @@ mod tests {
     /// then a PUT that changes the trust level must return 409.
     #[tokio::test]
     async fn update_workspace_trust_transition_failure_returns_409() {
-        use gyre_ports::WorkspaceRepository;
         let state = crate::mem::test_state_failing_trust();
-        // Seed a Guided workspace directly (default trust level).
-        let ws = gyre_domain::Workspace::new(
+        // Seed a Guided workspace directly. Trust level is pinned explicitly:
+        // the entity default is Supervised (HSI §2) and the test needs a
+        // Guided → Supervised transition below.
+        let mut ws = gyre_domain::Workspace::new(
             gyre_common::Id::new("ws-fail-1"),
             gyre_common::Id::new("t1"),
             "FailWs",
             "fail-ws",
             0,
         );
+        ws.trust_level = gyre_domain::TrustLevel::Guided;
         state.workspaces.create(&ws).await.unwrap();
-        let app = crate::api::api_router().with_state(state);
+        let app = crate::api::api_router().with_state(state.clone());
 
         // Changing Guided -> Supervised triggers a trust transition, which the
         // failing repo rejects; the handler must surface a 409 Conflict.
@@ -848,5 +851,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Rollback: the failed transition must leave the workspace unchanged
+        // (still Guided) and must not have partially applied trust policies.
+        let ws_after = state
+            .workspaces
+            .find_by_id(&gyre_common::Id::new("ws-fail-1"))
+            .await
+            .unwrap()
+            .expect("workspace still exists after failed transition");
+        assert_eq!(ws_after.trust_level, gyre_domain::TrustLevel::Guided);
+
+        let policies_after = state.policies.list().await.unwrap();
+        assert!(
+            !policies_after
+                .iter()
+                .any(|p| p.name.starts_with("trust:") && p.scope_id.as_deref() == Some("ws-fail-1")),
+            "failed transition must not partially apply trust: policies"
+        );
+    }
+
+    /// New workspaces default to Supervised trust (HSI §2) and are seeded
+    /// with the `trust:require-human-mr-review` policy atomically at create.
+    #[tokio::test]
+    async fn create_workspace_defaults_to_supervised_and_seeds_trust_policy() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w" });
+        let create_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        assert_eq!(created["trust_level"], "Supervised");
+
+        // The Supervised trust preset must be seeded with the workspace row.
+        let policies = state.policies.list().await.unwrap();
+        assert!(
+            policies
+                .iter()
+                .any(|p| p.name == "trust:require-human-mr-review"),
+            "Supervised default must seed trust:require-human-mr-review"
+        );
+    }
+
+    /// An explicit trust_level in the create body is honored and its preset
+    /// seeded accordingly (Guided → no trust: policies).
+    #[tokio::test]
+    async fn create_workspace_explicit_guided_has_no_trust_policies() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "Guided" });
+        let create_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        assert_eq!(created["trust_level"], "Guided");
+
+        let policies = state.policies.list().await.unwrap();
+        assert!(
+            !policies.iter().any(|p| p.name.starts_with("trust:")),
+            "Guided preset must not seed trust: policies"
+        );
     }
 }

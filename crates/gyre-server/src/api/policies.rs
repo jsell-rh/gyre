@@ -9,9 +9,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{
-    builtin_policies, Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
-};
+use gyre_domain::{Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -423,28 +421,6 @@ pub async fn effective_permissions(
         });
     }
     Ok(Json(results))
-}
-
-// ---------------------------------------------------------------------------
-// Bootstrap built-in policies
-// ---------------------------------------------------------------------------
-
-/// Seed the built-in system policies into the policy store.
-/// Idempotent — skips policies that already exist.
-pub async fn seed_builtin_policies(state: &AppState) {
-    let builtins = builtin_policies("system");
-    for policy in builtins {
-        if state
-            .policies
-            .find_by_id(policy.id.as_str())
-            .await
-            .ok()
-            .flatten()
-            .is_none()
-        {
-            let _ = state.policies.create(&policy).await;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

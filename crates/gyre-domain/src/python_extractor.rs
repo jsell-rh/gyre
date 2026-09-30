@@ -71,7 +71,6 @@ impl LanguageExtractor for PythonExtractor {
         // Pass 1: tree-sitter extraction (declarations + Contains edges).
         ctx.extract_python_files();
 
-
         ExtractionResult {
             nodes: ctx.nodes,
             edges: ctx.edges,
@@ -781,7 +780,6 @@ impl ExtractionContext {
         };
         self.edges.push(edge);
     }
-
 }
 
 // ---------------------------------------------------------------------------

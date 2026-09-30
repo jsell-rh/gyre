@@ -4,12 +4,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Trust level controlling how much autonomy agents have within a workspace.
+///
+/// Default is `Supervised` (HSI §2): a new workspace starts at Supervised —
+/// human reviews everything before merge — and is promoted from there.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum TrustLevel {
-    /// Human reviews everything before merge.
-    Supervised,
-    /// Agents merge if gates pass, alert on failures (default).
+    /// Human reviews everything before merge (default — HSI §2).
     #[default]
+    Supervised,
+    /// Agents merge if gates pass, alert on failures.
     Guided,
     /// Only interrupt for exceptions.
     Autonomous,
@@ -29,12 +32,14 @@ impl std::fmt::Display for TrustLevel {
 }
 
 impl TrustLevel {
+    /// Parse a stored trust level string. Unknown/legacy values fall back to
+    /// `Supervised` (HSI §2 default — safest level on ambiguity).
     pub fn from_db_str(s: &str) -> Self {
         match s {
-            "Supervised" => TrustLevel::Supervised,
+            "Guided" => TrustLevel::Guided,
             "Autonomous" => TrustLevel::Autonomous,
             "Custom" => TrustLevel::Custom,
-            _ => TrustLevel::Guided,
+            _ => TrustLevel::Supervised,
         }
     }
 }
@@ -50,7 +55,7 @@ pub struct Workspace {
     pub budget: Option<BudgetConfig>,
     pub max_repos: Option<u32>,
     pub max_agents_per_repo: Option<u32>,
-    /// How much autonomy agents have in this workspace (default: Guided).
+    /// How much autonomy agents have in this workspace (default: Supervised).
     pub trust_level: TrustLevel,
     /// LLM model override for workspace queries (default: GYRE_LLM_MODEL env).
     pub llm_model: Option<String>,
@@ -76,7 +81,7 @@ impl Workspace {
             budget: None,
             max_repos: None,
             max_agents_per_repo: None,
-            trust_level: TrustLevel::Guided,
+            trust_level: TrustLevel::default(),
             llm_model: None,
             created_at,
             compute_target_id: None,
@@ -191,7 +196,7 @@ mod tests {
         assert_eq!(ws.slug, "my-workspace");
         assert!(ws.description.is_none());
         assert!(ws.budget.is_none());
-        assert_eq!(ws.trust_level, TrustLevel::Guided);
+        assert_eq!(ws.trust_level, TrustLevel::Supervised); // HSI §2 default
         assert!(ws.llm_model.is_none());
     }
 
