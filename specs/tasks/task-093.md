@@ -2,12 +2,12 @@
 title: "Platform Model Orchestrator Lifecycle Protocol"
 spec_ref: "platform-model.md §3 Two-Level Orchestration"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
   - "platform-model.md §3 Repo Orchestrator"
-commits: []
+commits: ["2ae69e973fce1e3a316205af1f238c3a457bd458", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5"]
 ---
 
 ## Spec Excerpt
@@ -71,14 +71,14 @@ One per repo. Manages the Ralph loop for its repo. Uses the `repo-orchestrator` 
 
 ## Acceptance Criteria
 
-- [ ] OrchestratorType enum added to Agent domain
-- [ ] Workspace orchestrator spawn endpoint validates one-per-workspace
-- [ ] Workspace orchestrator gets workspace-scoped JWT
-- [ ] Repo orchestrator spawn validates one-per-repo
-- [ ] Repo orchestrator gets repo-scoped JWT
-- [ ] Stale orchestrator auto-restart works
-- [ ] Workspace orchestrator can spawn repo orchestrators via MCP
-- [ ] `cargo test --all` passes
+- [x] OrchestratorType enum added to Agent domain
+- [x] Workspace orchestrator spawn endpoint validates one-per-workspace
+- [x] Workspace orchestrator gets workspace-scoped JWT
+- [x] Repo orchestrator spawn validates one-per-repo
+- [x] Repo orchestrator gets repo-scoped JWT
+- [x] Stale orchestrator auto-restart works
+- [x] Workspace orchestrator can spawn repo orchestrators via MCP
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 

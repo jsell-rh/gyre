@@ -36,6 +36,9 @@ diesel::table! {
         usage_tokens_input -> Nullable<BigInt>,
         usage_tokens_output -> Nullable<BigInt>,
         usage_cost_usd -> Nullable<Double>,
+        orchestrator_type -> Text,
+        repo_id -> Nullable<Text>,
+        restart_on_failure -> Bool,
     }
 }
 

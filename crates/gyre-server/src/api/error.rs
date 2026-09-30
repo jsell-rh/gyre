@@ -72,6 +72,22 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiError::NotFound(m)
+            | ApiError::InvalidInput(m)
+            | ApiError::BadRequest(m)
+            | ApiError::Forbidden(m)
+            | ApiError::Conflict(m)
+            | ApiError::TooManyRequests(m) => f.write_str(m),
+            ApiError::RateLimited(secs) => write!(f, "rate limit exceeded, retry after {secs}s"),
+            ApiError::LlmUnavailable => f.write_str("llm unavailable"),
+            ApiError::Internal(err) => write!(f, "internal error: {err:#}"),
+        }
+    }
+}
+
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
         ApiError::Internal(err)

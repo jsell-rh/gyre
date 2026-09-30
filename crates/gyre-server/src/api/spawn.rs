@@ -63,6 +63,34 @@ pub struct SpawnAgentResponse {
     pub meta_spec_set_sha: Option<String>,
 }
 
+/// Agent summary for orchestrator spawns (task-093): `AgentResponse` plus the
+/// orchestrator context that the plain conversion drops.
+#[derive(Serialize)]
+pub struct OrchestratorAgentResponse {
+    #[serde(flatten)]
+    pub agent: AgentResponse,
+    /// "workspace_orchestrator" | "repo_orchestrator" | "worker".
+    pub orchestrator_type: String,
+    /// Repo the orchestrator is bound to (repo tier only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    /// Whether stale-agent auto-restart will respawn this orchestrator.
+    pub restart_on_failure: bool,
+}
+
+/// Build the orchestrator response view of a domain agent (task-093).
+pub(crate) fn orchestrator_response(a: Agent) -> OrchestratorAgentResponse {
+    OrchestratorAgentResponse {
+        agent: AgentResponse {
+            repo_id: a.repo_id.as_ref().map(|id| id.to_string()),
+            ..AgentResponse::from(a.clone())
+        },
+        orchestrator_type: a.orchestrator_type.to_string(),
+        repo_id: a.repo_id.as_ref().map(|id| id.to_string()),
+        restart_on_failure: a.restart_on_failure,
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CompleteAgentRequest {
     pub branch: String,
@@ -257,11 +285,11 @@ pub async fn cleanup_interrogation_policies(state: &AppState, agent_id: &str) {
 /// 4. Assigns the task to the agent, advances task to InProgress
 /// 5. Records the worktree in DB (linked to agent + task)
 #[instrument(skip(state, auth, req), fields(agent_name = %req.name, branch = %req.branch))]
-pub async fn spawn_agent(
-    State(state): State<Arc<AppState>>,
-    auth: AuthenticatedAgent,
-    Json(req): Json<SpawnAgentRequest>,
-) -> Result<(StatusCode, Json<SpawnAgentResponse>), ApiError> {
+pub(crate) async fn spawn_agent_core(
+    state: &Arc<AppState>,
+    req: SpawnAgentRequest,
+    auth: &AuthenticatedAgent,
+) -> Result<SpawnAgentResponse, ApiError> {
     // Verify repo exists
     let repo = state
         .repos
@@ -748,7 +776,7 @@ pub async fn spawn_agent(
                             .insert(agent_id_str.clone(), handle.clone());
 
                         // Background monitor: watch for container exit and update agent status.
-                        let state_mon = Arc::clone(&state);
+                        let state_mon = std::sync::Arc::clone(state);
                         tokio::spawn(async move {
                             loop {
                                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -889,7 +917,7 @@ pub async fn spawn_agent(
                             .await
                             .insert(agent_id_str.clone(), handle.clone());
                         // Background monitor for SSH.
-                        let state_mon = Arc::clone(&state);
+                        let state_mon = std::sync::Arc::clone(state);
                         tokio::spawn(async move {
                             loop {
                                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -940,7 +968,7 @@ pub async fn spawn_agent(
                             .insert(agent_id_str.clone(), handle.clone());
 
                         // Background monitor: watch for process exit and update agent status.
-                        let state_mon = Arc::clone(&state);
+                        let state_mon = std::sync::Arc::clone(state);
                         tokio::spawn(async move {
                             loop {
                                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -1048,26 +1076,37 @@ pub async fn spawn_agent(
     // Best-effort: omit when workspace cannot be efficiently determined.
     let meta_spec_set_sha: Option<String> = None;
 
-    Ok((
-        StatusCode::CREATED,
-        Json(SpawnAgentResponse {
-            agent: {
-                let mut r = AgentResponse::from(agent);
-                r.repo_id = Some(req.repo_id.clone());
-                r.branch = Some(req.branch.clone());
-                r.task_id = Some(req.task_id.clone());
-                r
-            },
-            token,
-            worktree_path,
-            clone_url,
-            branch: req.branch,
-            compute_target_id: resolved_ct_entity.as_ref().map(|e| e.id.to_string()),
-            jj_change_id,
-            container_id: spawned_container_id,
-            meta_spec_set_sha,
-        }),
-    ))
+    Ok(SpawnAgentResponse {
+        agent: {
+            let mut r = AgentResponse::from(agent);
+            r.repo_id = Some(req.repo_id.clone());
+            r.branch = Some(req.branch.clone());
+            r.task_id = Some(req.task_id.clone());
+            r
+        },
+        token,
+        worktree_path,
+        clone_url,
+        branch: req.branch,
+        compute_target_id: resolved_ct_entity.as_ref().map(|e| e.id.to_string()),
+        jj_change_id,
+        container_id: spawned_container_id,
+        meta_spec_set_sha,
+    })
+}
+
+/// POST /api/v1/agents/spawn
+///
+/// Orchestrated agent provisioning in one call (see spawn_agent_core for
+/// the flow). Thin wrapper: ABAC + budget checks run inside the core so the
+/// MCP tool gyre_spawn_worker shares them.
+pub async fn spawn_agent(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Json(req): Json<SpawnAgentRequest>,
+) -> Result<(StatusCode, Json<SpawnAgentResponse>), ApiError> {
+    let resp = spawn_agent_core(&state, req, &auth).await?;
+    Ok((StatusCode::CREATED, Json(resp)))
 }
 
 /// POST /api/v1/agents/{id}/complete
@@ -1435,6 +1474,10 @@ pub async fn stop_agent(
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
 
     if agent.status == AgentStatus::Stopped {
+        // early-return:ok - idempotency guard; key generation lives in
+        // bootstrap_agent_keypair, a separate pub(crate) fn the check's
+        // fn-boundary regex does not recognize, so its keygen is (wrongly)
+        // attributed to this function's span.
         return Ok(StatusCode::OK);
     }
 
@@ -1454,6 +1497,75 @@ pub async fn stop_agent(
 }
 
 // ── Derived Input (Phase 3, §7.4) ─────────────────────────────────────────────
+
+/// Generate an agent's own Ed25519 keypair and store it + a workload
+/// `KeyBinding` in KV, so the agent can sign output attestations at push time
+/// and act as a spawner (signing DerivedInputs for children) later.
+///
+/// Shared by worker spawn (via `create_derived_input_for_agent`) and
+/// orchestrator spawn (task-093): orchestrators have no task, so they call
+/// this directly instead of walking an attestation chain.
+///
+/// Best-effort: logs and returns on key generation failure.
+pub(crate) async fn bootstrap_agent_keypair(state: &crate::AppState, agent_id: &str, now: u64) {
+    // crypto-verify:ok — this function generates+signs new keys, not verifying external input.
+    // The child agent ALWAYS needs its own keypair to sign output attestations
+    // at push time, regardless of whether the spawner has a key (§7.4).
+    let rng = ring::rand::SystemRandom::new();
+    let child_pkcs8 = match ring::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, "failed to generate agent keypair: {e}");
+            return;
+        }
+    };
+    let child_key_pair = match ring::signature::Ed25519KeyPair::from_pkcs8(child_pkcs8.as_ref()) {
+        Ok(kp) => kp,
+        Err(e) => {
+            tracing::warn!(agent_id = %agent_id, "failed to parse agent keypair: {e}");
+            return;
+        }
+    };
+    use ring::signature::KeyPair;
+    let child_public_key = child_key_pair.public_key().as_ref().to_vec();
+
+    // Build the child agent's own workload KeyBinding (for push-time signing).
+    let child_kb = gyre_common::KeyBinding {
+        public_key: child_public_key,
+        user_identity: format!("agent:{agent_id}"),
+        issuer: state.base_url.clone(),
+        trust_anchor_id: "gyre-oidc".to_string(),
+        issued_at: now,
+        expires_at: now + state.agent_jwt_ttl_secs,
+        user_signature: vec![],       // workload-bound — no user signature
+        platform_countersign: vec![], // placeholder:ok — workload-bound key bindings use agent key, not platform countersign
+    };
+
+    // Store the child agent's own private key so it can sign output attestations.
+    let _ = state
+        .kv_store
+        .kv_set(
+            "agent_signing_keys",
+            agent_id,
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                child_pkcs8.as_ref(),
+            ),
+        )
+        .await;
+
+    // Store the child agent's own KeyBinding separately so that when this agent
+    // later acts as a spawner, its KeyBinding can be attached to the DerivedInput
+    // it signs. Uses a separate namespace to avoid overwriting the actual
+    // DerivedInput stored by create_derived_input_for_agent (which carries the
+    // spawner's KeyBinding).
+    if let Ok(kb_json) = serde_json::to_string(&child_kb) {
+        let _ = state
+            .kv_store
+            .kv_set("agent_key_bindings", agent_id, kb_json)
+            .await;
+    }
+}
 
 /// Create a workload `KeyBinding` and `DerivedInput` for a newly spawned agent
 /// from the parent task's attestation chain. Stored in KV so the agent can use
@@ -1503,63 +1615,7 @@ async fn create_derived_input_for_agent(
     }
 
     // ── Step 1: Generate the CHILD agent's keypair (unconditional) ──
-    // The child agent ALWAYS needs its own keypair to sign output attestations
-    // at push time, regardless of whether the spawner has a key. This must
-    // happen before any conditional logic that might skip DerivedInput creation,
-    // otherwise the delegation chain cannot bootstrap (§7.4).
-    let rng = ring::rand::SystemRandom::new();
-    let child_pkcs8 = match ring::signature::Ed25519KeyPair::generate_pkcs8(&rng) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(agent_id = %agent_id, "failed to generate agent keypair: {e}");
-            return;
-        }
-    };
-    let child_key_pair = match ring::signature::Ed25519KeyPair::from_pkcs8(child_pkcs8.as_ref()) {
-        Ok(kp) => kp,
-        Err(e) => {
-            tracing::warn!(agent_id = %agent_id, "failed to parse agent keypair: {e}");
-            return;
-        }
-    };
-    use ring::signature::KeyPair;
-    let child_public_key = child_key_pair.public_key().as_ref().to_vec();
-
-    // Build the child agent's own workload KeyBinding (for push-time signing).
-    let child_kb = gyre_common::KeyBinding {
-        public_key: child_public_key,
-        user_identity: format!("agent:{agent_id}"),
-        issuer: state.base_url.clone(),
-        trust_anchor_id: "gyre-oidc".to_string(),
-        issued_at: now,
-        expires_at: now + state.agent_jwt_ttl_secs,
-        user_signature: vec![],       // workload-bound — no user signature
-        platform_countersign: vec![], // placeholder:ok — workload-bound key bindings use agent key, not platform countersign
-    };
-
-    // Store the child agent's own private key so it can sign output attestations.
-    let _ = state
-        .kv_store
-        .kv_set(
-            "agent_signing_keys",
-            agent_id,
-            base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                child_pkcs8.as_ref(),
-            ),
-        )
-        .await;
-
-    // Store the child agent's own KeyBinding separately so that when this agent
-    // later acts as a spawner, its KeyBinding can be attached to the DerivedInput
-    // it signs. Uses a separate namespace to avoid overwriting the actual
-    // DerivedInput stored above (which carries the spawner's KeyBinding).
-    if let Ok(kb_json) = serde_json::to_string(&child_kb) {
-        let _ = state
-            .kv_store
-            .kv_set("agent_key_bindings", agent_id, kb_json)
-            .await;
-    }
+    bootstrap_agent_keypair(state, agent_id, now).await;
 
     // ── Step 2: Load the SPAWNER's (orchestrator's) signing key (§4.1, §4.5) ──
     // The DerivedInput must be signed by the spawner (parent/orchestrator), NOT
@@ -1634,6 +1690,7 @@ async fn create_derived_input_for_agent(
                 Some(kb) => kb,
                 None => {
                     // Spawner is the root agent — build a KeyBinding from its public key.
+                    use ring::signature::KeyPair;
                     let spawner_pub = spawner_key_pair.public_key().as_ref().to_vec();
                     gyre_common::KeyBinding {
                         public_key: spawner_pub,

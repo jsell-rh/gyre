@@ -32,6 +32,22 @@ fn str_to_status(s: &str) -> Result<AgentStatus> {
         other => Err(anyhow!("unknown agent status: {}", other)),
     }
 }
+fn orchestrator_type_to_str(t: &gyre_domain::OrchestratorType) -> &'static str {
+    match t {
+        gyre_domain::OrchestratorType::Worker => "worker",
+        gyre_domain::OrchestratorType::WorkspaceOrchestrator => "workspace_orchestrator",
+        gyre_domain::OrchestratorType::RepoOrchestrator => "repo_orchestrator",
+    }
+}
+
+fn str_to_orchestrator_type(s: &str) -> Result<gyre_domain::OrchestratorType> {
+    match s {
+        "worker" => Ok(gyre_domain::OrchestratorType::Worker),
+        "workspace_orchestrator" => Ok(gyre_domain::OrchestratorType::WorkspaceOrchestrator),
+        "repo_orchestrator" => Ok(gyre_domain::OrchestratorType::RepoOrchestrator),
+        other => Err(anyhow!("unknown orchestrator type: {}", other)),
+    }
+}
 
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = agents)]
@@ -55,6 +71,9 @@ struct AgentRow {
     usage_tokens_output: Option<i64>,
     #[allow(dead_code)]
     usage_cost_usd: Option<f64>,
+    orchestrator_type: String,
+    repo_id: Option<String>,
+    restart_on_failure: bool,
 }
 
 impl AgentRow {
@@ -73,6 +92,9 @@ impl AgentRow {
             workspace_id: Id::new(self.workspace_id),
             iteration: 0,
             loop_config: None,
+            orchestrator_type: str_to_orchestrator_type(&self.orchestrator_type)?,
+            repo_id: self.repo_id.map(Id::new),
+            restart_on_failure: self.restart_on_failure,
         })
     }
 }
@@ -91,6 +113,9 @@ struct NewAgentRow<'a> {
     tenant_id: &'a str,
     spawned_by: Option<&'a str>,
     workspace_id: &'a str,
+    orchestrator_type: &'a str,
+    repo_id: Option<&'a str>,
+    restart_on_failure: bool,
 }
 
 #[async_trait]
@@ -113,6 +138,9 @@ impl AgentRepository for PgStorage {
                 tenant_id: &tenant,
                 spawned_by: a.spawned_by.as_deref(),
                 workspace_id: a.workspace_id.as_str(),
+                orchestrator_type: orchestrator_type_to_str(&a.orchestrator_type),
+                repo_id: a.repo_id.as_ref().map(|id| id.as_str()),
+                restart_on_failure: a.restart_on_failure,
             };
             diesel::insert_into(agents::table)
                 .values(&row)
@@ -125,6 +153,11 @@ impl AgentRepository for PgStorage {
                     agents::current_task_id.eq(row.current_task_id),
                     agents::lifetime_budget_secs.eq(row.lifetime_budget_secs),
                     agents::last_heartbeat.eq(row.last_heartbeat),
+                    agents::spawned_by.eq(row.spawned_by),
+                    agents::workspace_id.eq(row.workspace_id),
+                    agents::orchestrator_type.eq(row.orchestrator_type),
+                    agents::repo_id.eq(row.repo_id),
+                    agents::restart_on_failure.eq(row.restart_on_failure),
                 ))
                 .execute(&mut *conn)
                 .context("insert agent")?;
@@ -217,6 +250,9 @@ impl AgentRepository for PgStorage {
                 agents::current_task_id.eq(a.current_task_id.as_ref().map(|id| id.as_str())),
                 agents::lifetime_budget_secs.eq(a.lifetime_budget_secs.map(|v| v as i64)),
                 agents::last_heartbeat.eq(a.last_heartbeat.map(|v| v as i64)),
+                agents::orchestrator_type.eq(orchestrator_type_to_str(&a.orchestrator_type)),
+                agents::repo_id.eq(a.repo_id.as_ref().map(|id| id.as_str())),
+                agents::restart_on_failure.eq(a.restart_on_failure),
             ))
             .execute(&mut *conn)
             .context("update agent")?;

@@ -33,6 +33,7 @@ pub mod messages;
 pub mod meta_specs;
 pub mod mr_timeline;
 pub mod network;
+pub mod orchestrator;
 pub mod personas;
 pub mod policies;
 pub mod provenance;
@@ -201,6 +202,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/jj/squash", post(jj::jj_squash))
         .route("/api/v1/repos/:id/jj/undo", post(jj::jj_undo))
         .route("/api/v1/repos/:id/jj/bookmark", post(jj::jj_bookmark))
+        // Orchestrator lifecycle (platform-model.md §3, task-093)
+        .route(
+            "/api/v1/repos/:id/orchestrator/spawn",
+            post(orchestrator::spawn_repo_orchestrator),
+        )
         .route(
             "/api/v1/repos/:id/commits/:sha/signature",
             get(jj::get_commit_signature),
@@ -648,6 +654,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/meta-spec-set",
             get(meta_specs::get_meta_spec_set).put(meta_specs::put_meta_spec_set),
+        )
+        // Orchestrator lifecycle (platform-model.md §3, task-093)
+        .route(
+            "/api/v1/workspaces/:id/orchestrator/spawn",
+            post(orchestrator::spawn_workspace_orchestrator),
         )
         // Meta-spec preview loop (S4.6 — §5 of meta-spec-reconciliation.md)
         // NOTE: the status route must be registered before the POST route to avoid
