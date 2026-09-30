@@ -237,6 +237,43 @@ async function coverageStats() {
   return out;
 }
 
+// --- Coverage history: the pct-over-time series from SUMMARY.md git history
+// The TOTAL row is rewritten by every audit/promotion commit; walking the
+// file's git log recovers the full trajectory (including audit demotions).
+// Cached on the file's mtime — the walk spawns one `git show` per commit
+// (76+ commits on a busy day) and must not run every 2s refresh.
+let covHistCache = { mtimeMs: 0, points: null };
+async function coverageHistory() {
+  try {
+    const s = await stat(join(ROOT, "specs/coverage/SUMMARY.md"));
+    if (covHistCache.points && covHistCache.mtimeMs === s.mtimeMs) return covHistCache.points;
+    const { stdout } = await execFileP("git",
+      ["log", "--reverse", "--format=%H%x00%cI", "--", "specs/coverage/SUMMARY.md"],
+      { cwd: ROOT, timeout: 10000, maxBuffer: 16 * 1024 * 1024 });
+    const commits = stdout.trim().split("\n").filter(Boolean).map((l) => {
+      const [hash, date] = l.split("\0");
+      return { hash, date };
+    });
+    const points = [];
+    await Promise.all(commits.map(async (c) => {
+      try {
+        const { stdout: body } = await execFileP("git",
+          ["show", `${c.hash}:specs/coverage/SUMMARY.md`],
+          { cwd: ROOT, timeout: 10000, maxBuffer: 8 * 1024 * 1024 });
+        const row = body.split("\n").find((l) => /^\|\s*\*\*TOTAL\*\*/.test(l));
+        if (!row) return;
+        const cells = row.split("|").map((x) => x.replace(/[^0-9]/g, "")).filter(Boolean);
+        if (cells.length >= 7) points.push({ t: c.date, pct: +cells[6], verified: +cells[5] });
+      } catch { /* commit dropped the file; skip */ }
+    }));
+    points.sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+    covHistCache = { mtimeMs: s.mtimeMs, points };
+    return points;
+  } catch {
+    return covHistCache.points || [];
+  }
+}
+
 // --- WIP guard: is the operator's uncommitted work stashed right now? -------
 async function wipGuarded() {
   try {
@@ -289,7 +326,7 @@ async function refreshSnapshot() {
       loopAlive: await loopAlive(),
       alerts: Array.from(alerts.values()),
       events: extractEvents(logText),
-      coverage: await coverageStats(),
+      coverage: await coverageStats(), coverageHistory: await coverageHistory(),
       wipGuarded: await wipGuarded(),
       error: null, when: now,
     };
@@ -382,8 +419,29 @@ const HTML = `<!doctype html>
     display: inline-flex; align-items: center; gap: var(--sp-1);
     padding: 2px var(--sp-3); border-radius: var(--pf-radius-pill);
     background: var(--pf-surface-2); border: 1px solid var(--pf-border);
-    color: var(--pf-text-muted); font-size: 12px; white-space: nowrap;
   }
+  .covspark {
+    flex: none; cursor: pointer; display: inline-flex; align-items: center;
+    border: 1px solid var(--pf-border); border-radius: 6px;
+    background: var(--pf-surface-2); padding: 2px 4px;
+  }
+  .covspark:hover { border-color: var(--pf-border-strong); }
+  .covspark svg { display: block; }
+  .covtext {
+    color: var(--pf-text-muted); font-size: 12px; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #filedlg .covchart-title {
+    font: 600 14px var(--pf-font); color: var(--pf-text);
+    padding: var(--sp-3) var(--sp-4) 0;
+  }
+  #filedlg .covchart-sub {
+    font: 12px var(--pf-font-mono); color: var(--pf-text-muted);
+    padding: 0 var(--sp-4) var(--sp-2);
+  }
+  #filedlg .covchart-wrap { padding: 0 var(--sp-4) var(--sp-4); }
+  #filedlg .covchart-wrap svg { width: 100%; height: auto; display: block; }
+  #filedlg .covchart-wrap text { font: 10px var(--pf-font-mono); fill: var(--pf-text-muted); }
   .chip.warn {
     color: var(--pf-warning); border-color: color-mix(in srgb, var(--pf-warning) 40%, var(--pf-border));
   }
@@ -607,9 +665,6 @@ const HTML = `<!doctype html>
   .md p  { margin: var(--sp-2) 0; }
   .md ul, .md ol { margin: var(--sp-2) 0; padding-left: var(--sp-5); }
   .md li { margin: var(--sp-1) 0; }
-  .md code {
-    font: 11px var(--pf-font-mono); background: var(--pf-surface-2);
-    border: 1px solid var(--pf-border); border-radius: 4px; padding: 1px 4px;
   }
   .md pre {
     margin: var(--sp-2) 0; padding: var(--sp-3); overflow-x: auto;
@@ -658,6 +713,7 @@ const HTML = `<!doctype html>
 </header>
 <div class="subhead" id="subhead">
   <div class="covbar"><div class="covfill" id="cov-fill"></div></div>
+  <span class="covspark" id="cov-spark" title="Spec coverage over time — click for detail" hidden></span>
   <span class="covtext" id="cov-text">coverage unknown</span>
 </div>
 <div id="alerts" role="alert"></div>
@@ -679,7 +735,6 @@ const HTML = `<!doctype html>
   <div id="dlg-body"></div>
 </dialog>
 <script>
-var grid = document.getElementById("grid");
 var statusEl = document.getElementById("status");
 var conn = document.getElementById("conn");
 var loopChip = document.getElementById("loop-chip");
@@ -689,6 +744,7 @@ var errText = document.getElementById("err-msg");
 var empty = document.getElementById("empty");
 var alertsBox = document.getElementById("alerts");
 var covFill = document.getElementById("cov-fill");
+var covSpark = document.getElementById("cov-spark");
 var covText = document.getElementById("cov-text");
 var muteBtn = document.getElementById("mute");
 var favicon = document.getElementById("favicon");
@@ -944,6 +1000,152 @@ dlgSrcBtn.addEventListener("click", function () {
   }
 });
 
+// --- Coverage-over-time sparkline + detail chart ---------------------------
+// Points come from the server (git history of specs/coverage/SUMMARY.md).
+// Sparkline: inline SVG polyline in the subhead; click -> detail chart in
+// the existing file modal. All SVG built with createElementNS (no innerHTML
+// for coordinates; data is trusted from our own git log anyway).
+function covPath(points, x0, y0, w, h, ymin, ymax) {
+  var span = ymax - ymin || 1;
+  return points.map(function (p, i) {
+    var x = x0 + (w * i) / Math.max(points.length - 1, 1);
+    var y = y0 + h - ((p.pct - ymin) / span) * h;
+    return x.toFixed(1) + "," + y.toFixed(1);
+  }).join(" ");
+}
+
+function renderCovSpark(points) {
+  if (!points || points.length < 2) { covSpark.hidden = true; return; }
+  covSpark.hidden = false;
+  var w = 96, h = 20, pad = 2;
+  var pcts = points.map(function (p) { return p.pct; });
+  var ymin = Math.min.apply(null, pcts), ymax = Math.max.apply(null, pcts);
+  var ns = "http://www.w3.org/2000/svg";
+  var svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("width", w); svg.setAttribute("height", h);
+  svg.setAttribute("viewBox", "0 0 " + w + " " + h);
+  var poly = document.createElementNS(ns, "polyline");
+  poly.setAttribute("points", covPath(points, pad, pad, w - 2 * pad, h - 2 * pad, ymin, ymax));
+  poly.setAttribute("fill", "none");
+  poly.setAttribute("stroke", "var(--pf-info)");
+  poly.setAttribute("stroke-width", "1.5");
+  poly.setAttribute("stroke-linejoin", "round");
+  var lastPt = points[points.length - 1];
+  var lx = pad + ((w - 2 * pad) * (points.length - 1)) / Math.max(points.length - 1, 1);
+  var ly = pad + (h - 2 * pad) - ((lastPt.pct - ymin) / (ymax - ymin || 1)) * (h - 2 * pad);
+  var dot = document.createElementNS(ns, "circle");
+  dot.setAttribute("cx", lx.toFixed(1)); dot.setAttribute("cy", ly.toFixed(1));
+  dot.setAttribute("r", "2"); dot.setAttribute("fill", "var(--pf-success)");
+  svg.append(poly, dot);
+  covSpark.replaceChildren(svg);
+}
+
+function fmtCovDate(iso) {
+  var d = new Date(iso);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) +
+    " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+function renderCovChart(points) {
+  if (!points || points.length < 2) return;
+  var W = 720, H = 300, padL = 36, padR = 12, padT = 12, padB = 28;
+  var pcts = points.map(function (p) { return p.pct; });
+  var ymin = Math.floor(Math.min.apply(null, pcts)), ymax = Math.ceil(Math.max.apply(null, pcts));
+  if (ymin === ymax) { ymin -= 1; ymax += 1; }
+  var ns = "http://www.w3.org/2000/svg";
+  var svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  // y gridlines + labels
+  var steps = 4;
+  for (var g = 0; g <= steps; g++) {
+    var v = ymin + ((ymax - ymin) * g) / steps;
+    var gy = padT + (H - padT - padB) - ((v - ymin) / (ymax - ymin)) * (H - padT - padB);
+    var line = document.createElementNS(ns, "line");
+    line.setAttribute("x1", padL); line.setAttribute("x2", W - padR);
+    line.setAttribute("y1", gy.toFixed(1)); line.setAttribute("y2", gy.toFixed(1));
+    line.setAttribute("stroke", "var(--pf-border)");
+    line.setAttribute("stroke-dasharray", g === 0 ? "" : "2 3");
+    var lab = document.createElementNS(ns, "text");
+    lab.setAttribute("x", padL - 6); lab.setAttribute("y", (gy + 3).toFixed(1));
+    lab.setAttribute("text-anchor", "end");
+    lab.textContent = Math.round(v) + "%";
+    svg.append(line, lab);
+  }
+  // x labels: first, middle, last
+  [0, Math.floor((points.length - 1) / 2), points.length - 1].forEach(function (i) {
+    if (i < 0 || i === undefined || (i === 0 && points.length < 2)) return;
+    var x = padL + ((W - padL - padR) * i) / Math.max(points.length - 1, 1);
+    var lab = document.createElementNS(ns, "text");
+    lab.setAttribute("x", x.toFixed(1)); lab.setAttribute("y", H - 8);
+    lab.setAttribute("text-anchor", i === 0 ? "start" : i === points.length - 1 ? "end" : "middle");
+    lab.textContent = fmtCovDate(points[i].t);
+    svg.appendChild(lab);
+  });
+  // area + line
+  var path = covPath(points, padL, padT, W - padL - padR, H - padT - padB, ymin, ymax);
+  var area = document.createElementNS(ns, "polygon");
+  var baseY = H - padB;
+  area.setAttribute("points", padL + "," + baseY + " " + path + " " + (W - padR) + "," + baseY);
+  area.setAttribute("fill", "color-mix(in srgb, var(--pf-info) 15%, transparent)");
+  var poly = document.createElementNS(ns, "polyline");
+  poly.setAttribute("points", path);
+  poly.setAttribute("fill", "none");
+  poly.setAttribute("stroke", "var(--pf-info)");
+  poly.setAttribute("stroke-width", "2");
+  poly.setAttribute("stroke-linejoin", "round");
+  svg.append(area, poly);
+  // hover: vertical marker + tooltip text
+  var marker = document.createElementNS(ns, "line");
+  marker.setAttribute("y1", padT); marker.setAttribute("y2", H - padB);
+  marker.setAttribute("stroke", "var(--pf-border-strong)");
+  marker.setAttribute("visibility", "hidden");
+  var tip = document.createElementNS(ns, "text");
+  tip.setAttribute("y", padT + 4);
+  tip.setAttribute("visibility", "hidden");
+  svg.append(marker, tip);
+  svg.addEventListener("mousemove", function (e) {
+    var rect = svg.getBoundingClientRect();
+    var relX = ((e.clientX - rect.left) / rect.width) * W;
+    var i = Math.round(((relX - padL) / (W - padL - padR)) * (points.length - 1));
+    i = Math.max(0, Math.min(points.length - 1, i));
+    var x = padL + ((W - padL - padR) * i) / Math.max(points.length - 1, 1);
+    marker.setAttribute("x1", x.toFixed(1)); marker.setAttribute("x2", x.toFixed(1));
+    marker.setAttribute("visibility", "visible");
+    tip.textContent = fmtCovDate(points[i].t) + " \\u00b7 " + points[i].pct + "% \\u00b7 " + points[i].verified + " verified";
+    tip.setAttribute("x", Math.min(x + 4, W - 200).toFixed(1));
+    tip.setAttribute("visibility", "visible");
+  });
+  svg.addEventListener("mouseleave", function () {
+    marker.setAttribute("visibility", "hidden");
+    tip.setAttribute("visibility", "hidden");
+  });
+  // open in the existing modal, markdown styling off
+  dlgContent = null;
+  dlgTitle.textContent = "Spec coverage over time";
+  dlgSrcBtn.hidden = true;
+  dlgBody.classList.remove("rendered", "md");
+  dlgBody.replaceChildren();
+  var title = document.createElement("div");
+  title.className = "covchart-title";
+  title.textContent = points[0].pct + "% \\u2192 " + points[points.length - 1].pct + "% over " + points.length + " commits";
+  var sub = document.createElement("div");
+  sub.className = "covchart-sub";
+  var first = points[0], last = points[points.length - 1];
+  sub.textContent = last.verified - first.verified >= 0 ? "+" : "";
+  sub.textContent += (last.verified - first.verified) + " sections verified \\u00b7 source: git history of specs/coverage/SUMMARY.md";
+  var wrap = document.createElement("div");
+  wrap.className = "covchart-wrap";
+  wrap.appendChild(svg);
+  dlgBody.append(title, sub, wrap);
+  dlg.showModal();
+}
+
+covSpark.addEventListener("click", function () {
+  fetch("/api/snapshot").then(function (r) { return r.json(); }).then(function (data) {
+    renderCovChart(data.coverageHistory);
+  });
+});
+
 function loadFile(path) {
   fetch("/api/file?path=" + encodeURIComponent(path))
     .then(function (r) { return r.json(); })
@@ -1050,6 +1252,7 @@ function render(data) {
   } else {
     covText.textContent = "coverage unknown";
   }
+  renderCovSpark(data.coverageHistory);
 
   // Promoted alerts.
   var alerts = data.alerts || [];
