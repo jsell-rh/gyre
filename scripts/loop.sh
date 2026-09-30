@@ -85,15 +85,41 @@ wt_guard_restore() {
     #     or committing a file the WIP also added) recreates a path in the
     #     stash's untracked arm — "already exists, no checkout", stash kept,
     #     tracked part partially applied.
-    # Recovery: abort any in-progress merge, restore every path the stash
-    # recorded (tracked arm, then untracked arm), unstage, drop the stash.
-    # Stash content wins over agent leftovers — the stashed WIP predates the
-    # agent run we are recovering from.
+    # Recovery: abort any in-progress merge, then restore ONLY the paths the
+    # stash recorded (tracked arm, then untracked arm), unstage, drop the
+    # stash. Path-scoped, never a bare `-- .`: agents run on main between
+    # stash and restore, and the stash-time snapshot contains their committed
+    # work in pre-commit state — checking out the full snapshot would revert
+    # those commits in the working tree (observed in the wild).
     git merge --abort >/dev/null 2>&1
-    git checkout "stash@{0}" -- . >/dev/null 2>&1
+    # Clear unmerged/partially-applied pop state in the index WITHOUT touching
+    # the working tree, so the path checkouts below are accepted (checkout
+    # refuses unmerged paths, which would leave conflict markers behind).
+    git reset -q
+    local _paths
+    # Tracked arm: paths the stash changed vs its base. `stash show` handles
+    # the stash commit's multi-parent shape; bare `diff-tree <stash>` on a
+    # multi-parent commit diffs parents against each other and returns junk.
+    # Modified and deleted paths are handled separately: deleted paths have
+    # no entry in the stash tree, and one bad pathspec fails the whole
+    # checkout, which would fall through to rm-ing the modified WIP.
+    local _mods _dels _st
+    while IFS=$'\t' read -r _st _paths; do
+      case "$_st" in
+        D) _dels="$_dels $_paths" ;;
+        *) _mods="$_mods $_paths" ;;
+      esac
+    done <<EOF
+$(git stash show --name-status "stash@{0}")
+EOF
+    [ -n "${_mods# }" ] && git checkout "stash@{0}" -- $_mods >/dev/null 2>&1
+    [ -n "${_dels# }" ] && git rm -q --ignore-unmatch -- $_dels >/dev/null 2>&1
+    # Untracked arm (third parent): restore untracked WIP files.
     if git rev-parse -q --verify "stash@{0}^3" >/dev/null 2>&1; then
-      git checkout "stash@{0}^3" -- . >/dev/null 2>&1
+      _paths="$(git ls-tree -r --name-only "stash@{0}^3")"
+      [ -n "$_paths" ] && git checkout "stash@{0}^3" -- $_paths >/dev/null 2>&1
     fi
+    # Unstage: restore the WIP to its original unstaged state.
     git reset -q
     git stash drop >/dev/null 2>&1
     log "WIP restore failed mid-pop (loop-wt-guard); recovered stash content by checkout"
