@@ -192,6 +192,19 @@ impl AnalyticsRepository for SqliteStorage {
         })
         .await?
     }
+
+    async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let n = diesel::delete(analytics_events::table)
+                .filter(analytics_events::timestamp.lt(cutoff_secs as i64))
+                .execute(&mut *conn)
+                .context("delete old analytics_events")?;
+            Ok(n as u64)
+        })
+        .await?
+    }
 }
 
 #[async_trait]
@@ -515,5 +528,34 @@ mod tests {
             .unwrap();
         let total = CostRepository::total_by_period(&s, 200, 600).await.unwrap();
         assert!((total - 200.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn analytics_delete_older_than_purges_old_keeps_new() {
+        let (_tmp, s) = setup();
+        AnalyticsRepository::record(&s, &make_event("old", "ev", 100))
+            .await
+            .unwrap();
+        AnalyticsRepository::record(&s, &make_event("new", "ev", 200))
+            .await
+            .unwrap();
+
+        let deleted = AnalyticsRepository::delete_older_than(&s, 150)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let results = AnalyticsRepository::query(&s, None, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, Id::new("new"));
+
+        assert_eq!(
+            AnalyticsRepository::delete_older_than(&s, 150)
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

@@ -280,4 +280,108 @@ impl NotificationRepository for SqliteStorage {
         })
         .await?
     }
+
+    async fn delete_older_than(
+        &self,
+        read_cutoff_secs: u64,
+        unread_cutoff_secs: u64,
+    ) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let read_cutoff = read_cutoff_secs as i64;
+            let unread_cutoff = unread_cutoff_secs as i64;
+            // A notification is "read" when the human acted on it (resolved) or
+            // explicitly dismissed it (business-continuity.md §5).
+            let is_read = notifications::resolved_at
+                .is_not_null()
+                .or(notifications::dismissed_at.is_not_null());
+            let read_old = is_read.and(notifications::created_at.lt(read_cutoff));
+            let unread_old = notifications::resolved_at
+                .is_null()
+                .and(notifications::dismissed_at.is_null())
+                .and(notifications::created_at.lt(unread_cutoff));
+            let n = diesel::delete(notifications::table)
+                .filter(read_old.or(unread_old))
+                .execute(&mut *conn)
+                .context("delete old notifications")?;
+            Ok(n as u64)
+        })
+        .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn setup() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, s)
+    }
+
+    fn make(id: &str, created_at: i64, read: bool) -> Notification {
+        let mut n = Notification::new(
+            Id::new(id),
+            Id::new("ws-1"),
+            Id::new("user-1"),
+            NotificationType::GateFailure,
+            format!("n {id}"),
+            "tenant-1",
+            created_at,
+        );
+        if read {
+            n.resolved_at = Some(created_at + 10);
+        }
+        n
+    }
+
+    #[tokio::test]
+    async fn delete_older_than_read_unread_split() {
+        let (_tmp, s) = setup();
+        let now = 1_800_000_000u64;
+        let read_cutoff = now - 90 * 86_400;
+        let unread_cutoff = now - 365 * 86_400;
+
+        // old + read → deleted (past the 90d read cutoff).
+        NotificationRepository::create(&s, &make("old-read", (read_cutoff - 1) as i64, true))
+            .await
+            .unwrap();
+        // old + unread → only deleted past the 365d unread cutoff; this one
+        // is past 90d but within 365d → kept.
+        NotificationRepository::create(
+            &s,
+            &make("mid-unread", (read_cutoff - 1) as i64, false),
+        )
+        .await
+        .unwrap();
+        // ancient + unread → deleted (past the 365d unread cutoff).
+        NotificationRepository::create(
+            &s,
+            &make("ancient-unread", (unread_cutoff - 1) as i64, false),
+        )
+        .await
+        .unwrap();
+        // recent + read → kept (within the 90d read cutoff).
+        NotificationRepository::create(&s, &make("new-read", (read_cutoff + 1) as i64, true))
+            .await
+            .unwrap();
+        // dismissed counts as read too.
+        let mut dismissed = make("old-dismissed", (read_cutoff - 1) as i64, false);
+        dismissed.dismissed_at = Some(read_cutoff as i64 - 5);
+        NotificationRepository::create(&s, &dismissed).await.unwrap();
+
+        let deleted = NotificationRepository::delete_older_than(&s, read_cutoff, unread_cutoff)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 3, "old-read, ancient-unread, old-dismissed");
+
+        let remaining = NotificationRepository::list_recent(&s, 100).await.unwrap();
+        let ids: Vec<&str> = remaining.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"mid-unread"));
+        assert!(ids.contains(&"new-read"));
+    }
 }

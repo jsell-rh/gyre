@@ -1037,6 +1037,13 @@ impl AnalyticsRepository for MemAnalyticsRepository {
         }
         Ok(by_day.into_iter().collect())
     }
+
+    async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
+        let mut store = self.store.lock().await;
+        let before = store.len();
+        store.retain(|e| e.timestamp >= cutoff_secs);
+        Ok((before - store.len()) as u64)
+    }
 }
 
 fn epoch_days_to_date(days: i64) -> String {
@@ -1171,6 +1178,13 @@ impl AuditRepository for MemAuditRepository {
         events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
         events.truncate(limit);
         Ok(events)
+    }
+
+    async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
+        let mut store = self.store.lock().await;
+        let before = store.len();
+        store.retain(|e| e.timestamp >= cutoff_secs);
+        Ok((before - store.len()) as u64)
     }
 }
 
@@ -2076,6 +2090,26 @@ impl NotificationRepository for MemNotificationRepository {
                 && n.notification_type.as_str() == notification_type
                 && n.dismissed_at.is_some_and(|d| d >= cutoff)
         }))
+    }
+
+    async fn delete_older_than(
+        &self,
+        read_cutoff_secs: u64,
+        unread_cutoff_secs: u64,
+    ) -> Result<u64> {
+        let mut store = self.store.lock().await;
+        let before = store.len();
+        // "Read" = the human resolved or dismissed it (business-continuity.md §5).
+        store.retain(|n| {
+            let read = n.resolved_at.is_some() || n.dismissed_at.is_some();
+            let cutoff = if read {
+                read_cutoff_secs
+            } else {
+                unread_cutoff_secs
+            };
+            (n.created_at as u64) >= cutoff
+        });
+        Ok((before - store.len()) as u64)
     }
 }
 

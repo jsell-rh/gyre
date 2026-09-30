@@ -23,6 +23,12 @@ pub struct JobDefinition {
     pub description: String,
     pub interval_secs: u64,
     pub enabled: bool,
+    /// When set, the scheduler runs this job once per day at this UTC hour
+    /// (wall-clock) instead of on a fixed `interval_secs` interval from
+    /// process start. Used by the nightly retention job (02:00 UTC,
+    /// business-continuity.md §5).
+    #[serde(default)]
+    pub run_at_utc_hour: Option<u8>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -152,23 +158,48 @@ impl JobRegistry {
 
 // ── Scheduler ─────────────────────────────────────────────────────────────────
 
+/// Seconds until the next daily occurrence of `utc_hour:00` UTC, from
+/// `now_secs`. At exactly `utc_hour:00` the next run is a full day away.
+pub(crate) fn next_daily_run_secs(now_secs: u64, utc_hour: u8) -> u64 {
+    debug_assert!(utc_hour < 24);
+    let day = 86_400u64;
+    let days_since_epoch = now_secs / day;
+    let today_target = days_since_epoch * day + (utc_hour as u64) * 3_600;
+    if today_target > now_secs {
+        today_target - now_secs
+    } else {
+        today_target + day - now_secs
+    }
+}
+
 /// Start the scheduler loop for a single job.
+///
+/// Jobs with `run_at_utc_hour: Some(h)` run once per day at h:00 UTC
+/// (wall-clock aligned); all others run on a fixed `interval_secs` interval
+/// from process start.
 pub fn spawn_job(registry: Arc<JobRegistry>, job_name: String, state: Arc<AppState>) {
     let registry = registry.clone();
     tokio::spawn(async move {
-        // Get interval from the registry
-        let interval_secs = {
+        // Get interval + wall-clock schedule from the registry
+        let (interval_secs, utc_hour) = {
             let inner = registry.inner.lock().await;
-            inner
-                .jobs
-                .get(&job_name)
-                .map(|j| j.def.interval_secs)
-                .unwrap_or(60)
+            let def = inner.jobs.get(&job_name).map(|j| j.def.clone());
+            match def {
+                Some(def) => (def.interval_secs, def.run_at_utc_hour),
+                None => (60, None),
+            }
         };
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
         loop {
-            interval.tick().await;
+            if let Some(hour) = utc_hour {
+                // Wall-clock schedule: sleep until the next h:00 UTC.
+                let now = now_secs();
+                let delay = next_daily_run_secs(now, hour);
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+            } else {
+                interval.tick().await;
+            }
 
             let handler = {
                 let inner = registry.inner.lock().await;
@@ -225,12 +256,7 @@ pub async fn start_job_registry(state: Arc<AppState>) {
     // Register merge_processor job
     registry
         .register(
-            JobDefinition {
-                name: "merge_processor".to_string(),
-                description: "Processes queued merge requests".to_string(),
-                interval_secs: 5,
-                enabled: true,
-            },
+            JobDefinition { name: "merge_processor".to_string(), description: "Processes queued merge requests".to_string(), interval_secs: 5, enabled: true, run_at_utc_hour: None },
             |state| async move { crate::merge_processor::run_once(&state).await },
         )
         .await;
@@ -238,41 +264,23 @@ pub async fn start_job_registry(state: Arc<AppState>) {
     // Register stale_agent_detector job
     registry
         .register(
-            JobDefinition {
-                name: "stale_agent_detector".to_string(),
-                description: "Marks agents dead when heartbeat times out (>60s)".to_string(),
-                interval_secs: 30,
-                enabled: true,
-            },
+            JobDefinition { name: "stale_agent_detector".to_string(), description: "Marks agents dead when heartbeat times out (>60s)".to_string(), interval_secs: 30, enabled: true, run_at_utc_hour: None },
             |state| async move { crate::stale_agents::run_once(&state).await },
         )
         .await;
 
-    // Register retention cleanup job (runs daily)
+    // Register retention cleanup job (nightly 02:00 UTC, business-continuity.md §5)
     registry
         .register(
-            JobDefinition {
-                name: "retention_cleanup".to_string(),
-                description: "Deletes data older than configured retention policies".to_string(),
-                interval_secs: 86400,
-                enabled: true,
-            },
-            |state| async move {
-                state.retention_store.run_cleanup().await;
-                Ok(())
-            },
+            JobDefinition { name: "retention_cleanup".to_string(), description: "Deletes data older than configured retention policies".to_string(), interval_secs: 86400, enabled: true, run_at_utc_hour: Some(2) },
+            |state| async move { state.retention_store.run_cleanup(&state).await },
         )
         .await;
 
     // Register mirror sync job (runs every 60 seconds)
     registry
         .register(
-            JobDefinition {
-                name: "mirror_sync".to_string(),
-                description: "Fetches latest refs for all mirror repositories".to_string(),
-                interval_secs: 60,
-                enabled: true,
-            },
+            JobDefinition { name: "mirror_sync".to_string(), description: "Fetches latest refs for all mirror repositories".to_string(), interval_secs: 60, enabled: true, run_at_utc_hour: None },
             |state| async move { crate::mirror_sync::run_once(&state).await },
         )
         .await;
@@ -280,13 +288,8 @@ pub async fn start_job_registry(state: Arc<AppState>) {
     // Register speculative merge job (runs every 60 seconds, M13.5)
     registry
         .register(
-            JobDefinition {
-                name: "speculative_merge".to_string(),
-                description: "Checks active agent branches for conflicts against main (M13.5)"
-                    .to_string(),
-                interval_secs: 60,
-                enabled: true,
-            },
+            JobDefinition { name: "speculative_merge".to_string(), description: "Checks active agent branches for conflicts against main (M13.5)"
+                .to_string(), interval_secs: 60, enabled: true, run_at_utc_hour: None },
             |state| async move { crate::speculative_merge::run_once(&state).await },
         )
         .await;
@@ -294,14 +297,8 @@ pub async fn start_job_registry(state: Arc<AppState>) {
     // Register abandoned_branch_check job (runs daily, ui-layout.md §3)
     registry
         .register(
-            JobDefinition {
-                name: "abandoned_branch_check".to_string(),
-                description:
-                    "Flags spec-edit/* MRs with no activity for >7 days as priority-9 Inbox items"
-                        .to_string(),
-                interval_secs: 86400,
-                enabled: true,
-            },
+            JobDefinition { name: "abandoned_branch_check".to_string(), description: "Flags spec-edit/* MRs with no activity for >7 days as priority-9 Inbox items"
+                .to_string(), interval_secs: 86400, enabled: true, run_at_utc_hour: None },
             |state| async move { crate::abandoned_branch::run_once(&state).await },
         )
         .await;
@@ -309,14 +306,8 @@ pub async fn start_job_registry(state: Arc<AppState>) {
     // Register cross_workspace_link_staleness_check job (runs daily, HSI §6)
     registry
         .register(
-            JobDefinition {
-                name: "cross_workspace_link_staleness_check".to_string(),
-                description:
-                    "Re-resolves cross-workspace spec links and marks stale entries (HSI §6)"
-                        .to_string(),
-                interval_secs: 86400,
-                enabled: true,
-            },
+            JobDefinition { name: "cross_workspace_link_staleness_check".to_string(), description: "Re-resolves cross-workspace spec links and marks stale entries (HSI §6)"
+                .to_string(), interval_secs: 86400, enabled: true, run_at_utc_hour: None },
             |state| async move { crate::spec_link_staleness::run_once(&state).await },
         )
         .await;
@@ -324,15 +315,9 @@ pub async fn start_job_registry(state: Arc<AppState>) {
     // Register trust_suggestion_check job (runs daily, HSI §2)
     registry
         .register(
-            JobDefinition {
-                name: "trust_suggestion_check".to_string(),
-                description:
-                    "Evaluates workspace trust escalation criteria and creates TrustSuggestion \
-                     notifications for Admin/Owner members when criteria are met (HSI §2)"
-                        .to_string(),
-                interval_secs: 86400,
-                enabled: true,
-            },
+            JobDefinition { name: "trust_suggestion_check".to_string(), description: "Evaluates workspace trust escalation criteria and creates TrustSuggestion \
+             notifications for Admin/Owner members when criteria are met (HSI §2)"
+                .to_string(), interval_secs: 86400, enabled: true, run_at_utc_hour: None },
             |state| async move { crate::trust_suggestion::run_once(&state).await },
         )
         .await;
@@ -340,14 +325,8 @@ pub async fn start_job_registry(state: Arc<AppState>) {
     // Register dep_staleness_check job (runs daily, dependency-graph.md §Version Drift)
     registry
         .register(
-            JobDefinition {
-                name: "dep_staleness_check".to_string(),
-                description:
-                    "Scans dependency edges for version drift and time-based staleness (TASK-021)"
-                        .to_string(),
-                interval_secs: 86400,
-                enabled: true,
-            },
+            JobDefinition { name: "dep_staleness_check".to_string(), description: "Scans dependency edges for version drift and time-based staleness (TASK-021)"
+                .to_string(), interval_secs: 86400, enabled: true, run_at_utc_hour: None },
             |state| async move { crate::dep_staleness::run_once(&state).await },
         )
         .await;
@@ -367,12 +346,7 @@ mod tests {
         let registry = JobRegistry::new();
         registry
             .register(
-                JobDefinition {
-                    name: "test_job".to_string(),
-                    description: "A test job".to_string(),
-                    interval_secs: 10,
-                    enabled: true,
-                },
+                JobDefinition { name: "test_job".to_string(), description: "A test job".to_string(), interval_secs: 10, enabled: true, run_at_utc_hour: None },
                 |_state| async move { Ok(()) },
             )
             .await;
@@ -387,12 +361,7 @@ mod tests {
         let registry = JobRegistry::new();
         registry
             .register(
-                JobDefinition {
-                    name: "ok_job".to_string(),
-                    description: "Always succeeds".to_string(),
-                    interval_secs: 60,
-                    enabled: true,
-                },
+                JobDefinition { name: "ok_job".to_string(), description: "Always succeeds".to_string(), interval_secs: 60, enabled: true, run_at_utc_hour: None },
                 |_state| async move { Ok(()) },
             )
             .await;
@@ -412,12 +381,7 @@ mod tests {
         let registry = JobRegistry::new();
         registry
             .register(
-                JobDefinition {
-                    name: "fail_job".to_string(),
-                    description: "Always fails".to_string(),
-                    interval_secs: 60,
-                    enabled: true,
-                },
+                JobDefinition { name: "fail_job".to_string(), description: "Always fails".to_string(), interval_secs: 60, enabled: true, run_at_utc_hour: None },
                 |_state| async move { Err(anyhow::anyhow!("intentional failure")) },
             )
             .await;
@@ -445,12 +409,7 @@ mod tests {
         let registry = JobRegistry::new();
         registry
             .register(
-                JobDefinition {
-                    name: "capped_job".to_string(),
-                    description: "Test capacity".to_string(),
-                    interval_secs: 1,
-                    enabled: true,
-                },
+                JobDefinition { name: "capped_job".to_string(), description: "Test capacity".to_string(), interval_secs: 1, enabled: true, run_at_utc_hour: None },
                 |_state| async move { Ok(()) },
             )
             .await;
@@ -474,12 +433,7 @@ mod tests {
             let n = name.to_string();
             registry
                 .register(
-                    JobDefinition {
-                        name: n.clone(),
-                        description: format!("{n} job"),
-                        interval_secs: 60,
-                        enabled: true,
-                    },
+                    JobDefinition { name: n.clone(), description: format!("{n} job"), interval_secs: 60, enabled: true, run_at_utc_hour: None },
                     |_state| async move { Ok(()) },
                 )
                 .await;
