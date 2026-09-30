@@ -1,29 +1,24 @@
 ---
-title: "Implement My Dashboard & user profile page"
-spec_ref: "user-management.md §My Dashboard"
+title: "Implement public user profile page (`/@{username}`)"
+spec_ref: "user-management.md §User Profile Page (`/@{username}`)"
 depends_on:
   - task-113
+  - task-208
 progress: not-started
 coverage_sections:
-  - "user-management.md §My Dashboard (Landing Page After Login)"
   - "user-management.md §User Profile Page (`/@{username}`)"
 commits: []
 ---
 
 ## Spec Excerpt
 
-From `user-management.md` §My Dashboard (Landing Page After Login):
+**RESCOPED (2026-09-30 PM cycle):** this task originally included the "My Dashboard" landing page with My Tasks / My MRs / My Agents sections. That model is superseded:
+- The landing-page role is taken by `ui-navigation.md` §2 — "The workspace home is a dashboard... It's the landing page after selecting a workspace." No separate `/dashboard` page is to be built.
+- My Tasks / My MRs / My Agents surfaces are **forbidden** in `/profile` by `human-system-interface.md` §12 ("What the Profile Is NOT"); task-208 removes them and amends `user-management.md` §"My Stuff" Views.
 
-| Section | Content |
-|---|---|
-| My Tasks | Tasks assigned to me, grouped by status |
-| My MRs | MRs I authored (or was spawned to create), with gate/merge status |
-| My Agents | Agents I spawned, with status and budget usage |
-| Pending Approvals | Specs and personas waiting for my approval |
-| My Notifications | Unread notifications, prioritized |
-| Recent Activity | My recent activity across all workspaces |
+The remaining scope is the public user profile page only.
 
-From §User Profile Page (`/@{username}`):
+From `user-management.md` §User Profile Page (`/@{username}`):
 
 Public within the tenant:
 - Display name, username, avatar, timezone
@@ -35,27 +30,11 @@ Public within the tenant:
 ## Implementation Plan
 
 1. **Backend API:**
-   - `GET /api/v1/users/me` already exists — verify it returns all needed fields
-   - `GET /api/v1/users/me/agents` — verify returns spawned agents with status/budget
-   - `GET /api/v1/users/me/tasks` — verify returns assigned tasks grouped by status
-   - `GET /api/v1/users/me/mrs` — verify returns authored MRs with gate status
-   - Add `GET /api/v1/users/me/pending-approvals` if not exists — specs and personas awaiting approval
    - Add `GET /api/v1/users/{username}` — public profile endpoint (tenant-scoped)
-   - Add `GET /api/v1/users/{username}/activity` — public activity feed
-   - Add `GET /api/v1/users/{username}/stats` — aggregate stats
+   - Add `GET /api/v1/users/{username}/activity` — public activity feed (public actions only)
+   - Add `GET /api/v1/users/{username}/stats` — aggregate stats: MRs reviewed, specs approved, agents spawned
 
-2. **My Dashboard page (Svelte):**
-   - Route: `/dashboard` (or root `/` after login)
-   - Six sections in a responsive grid layout
-   - Each section fetches data from the corresponding API
-   - Tasks section: grouped by status (InProgress, Review, Backlog)
-   - MRs section: status badges (Open, Approved, Merged), gate status indicators
-   - Agents section: status + budget usage bar
-   - Approvals section: action buttons to navigate to approval
-   - Notifications section: top 5 unread, link to full drawer
-   - Activity section: recent timeline
-
-3. **User Profile page (Svelte):**
+2. **User Profile page (Svelte):**
    - Route: `/@{username}`
    - Profile header: avatar, display name, username, timezone
    - Workspace memberships with role badges
@@ -63,16 +42,12 @@ Public within the tenant:
    - Activity feed (public actions)
    - Stats bar: counts of MRs reviewed, specs approved, agents spawned
 
-4. **Navigation integration:**
-   - After login, redirect to dashboard
+3. **Navigation integration:**
    - User avatar in top nav links to profile
    - Profile pages accessible from @mentions and activity feeds
 
 ## Acceptance Criteria
 
-- [ ] Dashboard page with 6 sections (tasks, MRs, agents, approvals, notifications, activity)
-- [ ] Each section fetches real data from APIs
-- [ ] Dashboard is the landing page after login
 - [ ] User profile page at `/@{username}`
 - [ ] Profile shows workspace memberships, teams, activity, stats
 - [ ] Profile is tenant-scoped (only visible to same-tenant users)
@@ -81,4 +56,6 @@ Public within the tenant:
 
 ## Agent Instructions
 
-Read `specs/system/user-management.md` §My Dashboard and §User Profile Page. Existing "my stuff" endpoints: `GET /api/v1/users/me/{agents,tasks,mrs}` — grep for these in `gyre-server/src/api/`. The Svelte app entry is in `web/src/App.svelte` or `web/src/routes/`. Check the existing router setup. User model: `gyre-domain/src/user.rs`. Route registration: `api/mod.rs`. ABAC mappings: `abac_middleware.rs`.
+Read `specs/system/user-management.md` §User Profile Page (`/@{username}`) — the "My Dashboard" section above it is superseded (see rescoping note). Public profile endpoints: add `GET /api/v1/users/{username}` (+`/activity`, `/stats`) in `crates/gyre-server/src/api/users.rs`; register routes in `crates/gyre-server/src/api/mod.rs`; add ABAC mappings in `crates/gyre-server/src/abac_middleware.rs`. The Svelte app entry is `web/src/App.svelte` (router is `parseUrl`/`urlFor`, App.svelte:183-270). User model: `crates/gyre-domain/src/user.rs`.
+
+Note: `/profile` (private settings surface) already exists and is governed by HSI §12 — do not add activity-hub features there (no My Tasks/MRs/Agents, per the HSI §12 NOT-list). This task's `/@{username}` page is a separate, public tenant-scoped surface.

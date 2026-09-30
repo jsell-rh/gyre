@@ -1,0 +1,86 @@
+---
+title: "Remove My Tasks/MRs/Agents from profile; amend user-management 'My Stuff'"
+spec_ref: "human-system-interface.md §12"
+depends_on: []
+progress: not-started
+coverage_sections:
+  - "human-system-interface.md §12 What the Profile Is NOT"
+commits: []
+---
+
+## Spec Excerpt
+
+From `specs/system/human-system-interface.md` §12 (lines 1423-1428):
+
+> ### What the Profile Is NOT
+>
+> - **Not "My Tasks"** — tasks are agent work units, not human artifacts
+> - **Not "My MRs"** — humans don't author MRs; they approve or reject them (that's in the judgment ledger)
+> - **Not "My Specs"** — specs owned by the user are discoverable via the Specs view with an `?owner=me` filter (no separate surface needed)
+> - **Not "My Agents"** — agents are system machinery; humans interrogate them (via Inbox) but don't manage them
+
+Conflicting text in `specs/system/user-management.md` §"My Stuff" Views → "My Dashboard (Landing Page After Login)" (lines 456-460) specs My Tasks / My MRs / My Agents sections, and the implementation placed exactly those three views inside `/profile` — the surface HSI §12 governs.
+
+**Why HSI §12 wins (evidence):**
+- user-management.md is M22-era; HSI is the later spec (milestone "HSI", after M35).
+- `ui-navigation.md` (the newest spec) preserves `/profile` explicitly citing "HSI §12" (§7 route table, line 507) and supersedes the landing-page concept entirely: "The workspace home is a **dashboard**, not a sidebar-driven view. It's the landing page after selecting a workspace" (§2, line 74). ui-navigation §10 supersedes `ui-layout.md` §1 "entrypoint flow".
+- HSI's position matches the platform vision: humans direct via specs and exercise judgment; they don't author code, MRs, or tasks.
+
+## Implementation Plan
+
+Two parts: spec amendment first (spec lifecycle), then code cutover.
+
+### Part 1 — Amend `specs/system/user-management.md`
+
+1. **§"My Stuff" Views → "My Dashboard (Landing Page After Login)"** (lines 452-463): rewrite the section to record supersession:
+   - The My Dashboard landing-page model is **superseded by `ui-navigation.md` §2** — the workspace home is the dashboard/landing page after selecting a workspace. No separate `/dashboard` page exists or will be built.
+   - My Tasks / My MRs / My Agents get **no per-user surface anywhere**: per `human-system-interface.md` §12 "What the Profile Is NOT", they must not appear in `/profile`. Humans who need agent/task/MR state use the workspace home, repo tabs, and the judgment ledger. Remove those three rows from the dashboard table.
+   - Pending Approvals / My Notifications / Recent Activity: these needs are served by the ui-navigation workspace home (Decisions section, notifications) — record that mapping and remove the standalone dashboard table.
+2. **§"Completeness Assessment (M22.8 Baseline)"** (line 628): the row `` `GET /api/v1/users/me/{agents,tasks,mrs}` — "my stuff" | ✅ Implemented `` — strike it or mark it **Removed per HSI §12** (the endpoints are deleted in Part 2).
+3. **§"UI Pages"** (line 575): check the table for references to the My Dashboard / my-stuff surfaces and align them with the amendment.
+4. Keep §"User Profile Page (`/@{username}`)" as-is — it is a separate public tenant-scoped surface, not governed by HSI §12, and is covered by task-114.
+
+Also update `specs/coverage/system/user-management.md` rows 22 ("My Dashboard (Landing Page After Login)") — reclassify to `n/a` with a note pointing at the amendment (superseded by `ui-navigation.md` §2 + HSI §12) — and row 23 stays `task-assigned` (task-114, /@{username} only).
+
+### Part 2 — Remove the violating surfaces (clean cutover)
+
+All three endpoints verified registered at `crates/gyre-server/src/api/mod.rs:772-774`.
+
+1. **Backend handlers** — `crates/gyre-server/src/api/users.rs`:
+   - Delete `get_my_agents` (line 164), `get_my_tasks` (line 186), `get_my_mrs` (line 215) and any private helpers used only by them.
+   - Update the module doc comment (lines 4-7) that lists these endpoints.
+2. **Routes** — `crates/gyre-server/src/api/mod.rs`:
+   - Delete the three `.route(...)` registrations (lines 772-774) and the now-unused imports `get_my_agents, get_my_mrs, get_my_tasks` (line 79).
+3. **ABAC mappings** — `crates/gyre-server/src/abac_middleware.rs`:
+   - Delete `RouteResourceMapping::api("/api/v1/users/me/agents", "agent", None)`, `.../tasks`, `.../mrs` (lines 452-454).
+4. **Frontend API client** — `web/src/lib/api.js`:
+   - Delete `myAgents`, `myTasks`, `myMrs` (lines 513-515).
+5. **Profile UI** — `web/src/components/UserProfile.svelte`:
+   - Remove the three tabs from the `tabs` array (lines 131-133), the three tab bodies (`my-agents` 342-361, `my-tasks` 363-385, `my-mrs` 387-412), the state vars (lines 27-29), the three `api.*` fetches in `Promise.allSettled` (lines 158-160) and their result assignments (lines 170-178).
+   - Preserve the remaining tabs: info, tokens, memberships, ledger, notif-prefs, notifications.
+6. **Tests** — `web/src/__tests__/UserProfile.test.js`:
+   - Remove the `myAgents/myTasks/myMrs` mocks (lines 10-12, 63-65) and any test cases asserting those tabs render. Grep the file first; only remove what exercises the deleted tabs.
+   - Grep `crates/` for tests hitting `/users/me/agents|tasks|mrs` and remove those cases too.
+7. **i18n** — grep `web/src/lib/i18n*` (or wherever `user_profile.tabs.*` lives) for keys used only by the removed tabs; delete orphaned keys.
+
+## Acceptance Criteria
+
+- [ ] `specs/system/user-management.md` §"My Stuff" Views records the supersession (ui-navigation.md §2 + HSI §12); the My Dashboard landing-page table with My Tasks/MRs/Agents rows is gone; the M22.8 completeness row for `/users/me/{agents,tasks,mrs}` marks the endpoints removed.
+- [ ] `specs/coverage/system/user-management.md` row 22 reclassified `n/a` with supersession note.
+- [ ] `GET /api/v1/users/me/agents`, `/tasks`, `/mrs` return 404 (routes, handlers, ABAC mappings all deleted — verified by a test or by route-table inspection in the test suite if a route-registry test exists).
+- [ ] `UserProfile.svelte` renders only: info, tokens, memberships, ledger, notif-prefs, notifications tabs; no references to `myAgents`/`myTasks`/`myMrs` remain in `web/src`.
+- [ ] No dead code: `grep -rn "get_my_agents\|get_my_tasks\|get_my_mrs\|myAgents\|myTasks\|myMrs" crates/ web/src/` returns nothing (excluding unrelated matches).
+- [ ] `cargo test --all` passes.
+- [ ] `cd web && npm test` passes.
+
+## Agent Instructions
+
+Read `specs/system/human-system-interface.md` §12 ("What the Profile Is NOT", lines 1423-1428) and `specs/system/ui-navigation.md` §2 + §10 for the supersession rationale. The conflict is documented in `specs/coverage/system/human-system-interface.md` row 54.
+
+Do the spec amendment (Part 1) BEFORE the code removal (Part 2) — the spec is the contract; the amendment is what makes the removal legitimate.
+
+Do NOT touch: the `/@{username}` public profile page scope (task-114), the `?owner=me` specs filter (HSI §12 "My Specs" row — separate concern), the judgment ledger, tokens, notification preferences, or memberships functionality.
+
+The `users/me/*` endpoints that remain (`/me`, `/me/tokens`, `/me/notifications`, `/me/judgments`, `/me/notification-preferences` if present) are per-handler-auth ABAC-exempt per HSI §2 amendments — do not change their auth model.
+
+After both parts, run the acceptance-criteria greps yourself and fix any stragglers (docs comments in `users.rs` header, i18n keys, test mocks).

@@ -27,8 +27,8 @@
 | 19 | In-App Notification UI | 3 | task-assigned | task-113 | |
 | 20 | Email Notifications | 3 | task-assigned | task-113 | |
 | 21 | "My Stuff" Views | 2 | n/a | - | Section heading only — no implementable requirement. |
-| 22 | My Dashboard (Landing Page After Login) | 3 | task-assigned | task-114 | |
-| 23 | User Profile Page (`/@{username}`) | 3 | task-assigned | task-114 | |
+| 22 | My Dashboard (Landing Page After Login) | 3 | task-assigned | task-208 | SUPERSEDED (2026-09-30 PM cycle, conflict resolution with HSI §12): landing-page role taken by ui-navigation.md §2 workspace home; My Tasks/MRs/Agents rows forbidden in /profile by HSI §12 "What the Profile Is NOT". task-208 amends user-management.md §"My Stuff" Views to record the supersession and removes the /users/me/{agents,tasks,mrs} endpoints + profile tabs; this row should be reclassified n/a when that amendment lands. task-114 (original assignee) rescoped to /@{username} only. |
+| 23 | User Profile Page (`/@{username}`) | 3 | task-assigned | task-114 | Rescoped 2026-09-30: task-114 now covers only the public /@{username} profile (My Dashboard scope removed as superseded). Depends on task-208 (spec amendment keeps /@{username} text unchanged). |
 | 24 | API | 2 | n/a | - | Section heading only — no implementable requirement. |
 | 25 | Tenant Invitations | 3 | task-assigned | task-110 | |
 | 26 | User Management | 3 | task-assigned | task-124 | |
