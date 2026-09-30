@@ -52,6 +52,65 @@ pub struct MrResponse {
     pub status: String,
 }
 
+// ── Bootstrap response types (platform-model.md §8) ──────────────────────────
+
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct TenantResponse {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    #[serde(default)]
+    pub oidc_issuer: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct WorkspaceResponse {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct RepoResponse {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub clone_url: Option<String>,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct PersonaResponse {
+    pub id: String,
+    pub slug: String,
+    pub approval_status: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct CreateUserResponse {
+    pub user: CreateUserUser,
+    pub api_key: CreatedApiKey,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct CreateUserUser {
+    pub id: String,
+    pub username: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct CreatedApiKey {
+    /// Plaintext key - returned exactly once.
+    pub key: String,
+    pub name: String,
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Percent-encode a spec path for use as a single URL path segment.
@@ -824,6 +883,266 @@ impl GyreClient {
             anyhow::bail!("release prepare failed (HTTP {status}): {text}");
         }
         serde_json::from_str(&text).context("parsing release prepare response")
+    }
+
+    // ── Bootstrap (platform-model.md §8) ─────────────────────────────────────
+
+    /// GET /health - no auth; verifies the server is up before bootstrap.
+    pub async fn health(&self) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!("{}/health", self.base_url))
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("health check failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing health response")
+    }
+
+    /// POST /api/v1/tenants - create the bootstrap tenant.
+    pub async fn create_tenant(
+        &self,
+        name: &str,
+        slug: &str,
+        oidc_issuer: Option<&str>,
+    ) -> Result<TenantResponse> {
+        let body = serde_json::json!({
+            "name": name,
+            "slug": slug,
+            "oidc_issuer": oidc_issuer,
+        });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/tenants", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create tenant failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing tenant response")
+    }
+
+    /// POST /api/v1/users - create the admin user; response contains the
+    /// API key exactly once.
+    pub async fn create_user(&self, username: &str) -> Result<CreateUserResponse> {
+        let body = serde_json::json!({ "username": username });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/users", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create user failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing create user response")
+    }
+
+    /// POST /api/v1/workspaces - create a workspace under a tenant.
+    pub async fn create_workspace(&self, tenant_id: &str, name: &str) -> Result<WorkspaceResponse> {
+        let body = serde_json::json!({
+            "tenant_id": tenant_id,
+            "name": name,
+        });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/workspaces", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create workspace failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing workspace response")
+    }
+
+    /// POST /api/v1/repos - register a repo in a workspace.
+    pub async fn create_repo(&self, workspace_id: &str, name: &str) -> Result<RepoResponse> {
+        let body = serde_json::json!({
+            "workspace_id": workspace_id,
+            "name": name,
+        });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/repos", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create repo failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing repo response")
+    }
+
+    /// POST /api/v1/personas - register a built-in persona.
+    pub async fn create_persona(
+        &self,
+        name: &str,
+        slug: &str,
+        tenant_id: &str,
+        system_prompt: &str,
+        capabilities: &[&str],
+        protocols: &[&str],
+    ) -> Result<PersonaResponse> {
+        let body = serde_json::json!({
+            "name": name,
+            "slug": slug,
+            "scope": { "kind": "Tenant", "id": tenant_id },
+            "system_prompt": system_prompt,
+            "capabilities": capabilities,
+            "protocols": protocols,
+        });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/personas", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create persona failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing persona response")
+    }
+
+    /// POST /api/v1/personas/:id/approve - pre-approve a registered persona.
+    pub async fn approve_persona(&self, persona_id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/v1/personas/{persona_id}/approve",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            anyhow::bail!("approve persona failed (HTTP {status}): {text}");
+        }
+        Ok(())
+    }
+
+    /// POST /api/v1/repos/:id/gates - configure a default quality gate.
+    pub async fn create_gate(
+        &self,
+        repo_id: &str,
+        name: &str,
+        gate_type: &str,
+        command: &str,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({
+            "name": name,
+            "gate_type": gate_type,
+            "command": command,
+        });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/repos/{repo_id}/gates", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create gate failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing gate response")
+    }
+
+    /// POST /api/v1/tasks - create the orchestrator's initial task.
+    /// task_type must be "implementation" or agent spawning is rejected.
+    pub async fn create_task(
+        &self,
+        title: &str,
+        workspace_id: &str,
+        repo_id: &str,
+    ) -> Result<TaskResponse> {
+        let body = serde_json::json!({
+            "title": title,
+            "task_type": "implementation",
+            "workspace_id": workspace_id,
+            "repo_id": repo_id,
+        });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/tasks", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("create task failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing task response")
+    }
+
+    /// POST /api/v1/agents/spawn - spawn the repo orchestrator agent.
+    pub async fn spawn_agent(
+        &self,
+        name: &str,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({
+            "name": name,
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+            "loop_config": {
+                "agent_review": true,
+                "reviewer_persona_id": null,
+                "max_iterations": 50,
+                "max_review_rejections": 5,
+            },
+        });
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/agents/spawn", self.base_url))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("spawn agent failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing spawn agent response")
     }
 }
 

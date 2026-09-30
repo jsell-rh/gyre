@@ -76,10 +76,10 @@ use discover::{discover_agents, get_agent_card, update_agent_card};
 use gyre_common::Id;
 use std::sync::Arc;
 use users::{
-    create_team, create_token, delete_team, delete_token, dismiss_notification, get_judgments,
-    get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks, get_notification_count,
-    get_notification_preferences, invite_member, list_members, list_teams, list_tokens,
-    remove_member, resolve_notification, update_me, update_member_role,
+    create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
+    get_judgments, get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks,
+    get_notification_count, get_notification_preferences, invite_member, list_members, list_teams,
+    list_tokens, remove_member, resolve_notification, update_me, update_member_role,
     update_notification_preferences, update_team,
 };
 
@@ -778,6 +778,8 @@ pub fn api_router() -> Router<Arc<AppState>> {
                 .put(policies::update_policy)
                 .delete(policies::delete_policy),
         )
+        // Bootstrap user provisioning - Admin-only, per-handler check.
+        .route("/api/v1/users", post(create_user))
         // User profile (M22.8 + HSI §12)
         .route("/api/v1/users/me", get(get_me).put(update_me))
         .route("/api/v1/users/me/agents", get(get_my_agents))
