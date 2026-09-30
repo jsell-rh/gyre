@@ -2,7 +2,7 @@
 title: "LSP Call Graph — Core Pipeline + Go Extractor Integration"
 spec_ref: "lsp-call-graph.md §1–6, §10 Phase 1, §11"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 review: specs/reviews/task-072.md
 coverage_sections:
   - "lsp-call-graph.md §1 Problem"
