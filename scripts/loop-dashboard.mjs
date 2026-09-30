@@ -133,11 +133,12 @@ async function loopAlive() {
 
 // --- Alerts: failure markers promoted out of the logs ----------------------
 // loop.sh / worker.sh emit `!!!`-prefixed lines on failure. Alerts are
-// non-sticky: rebuilt from the current log tails each refresh. A failure that
-// the loop recovered from (rebase abort → relaunch, merge abort → retry)
-// scrolls out of the tail and stops alerting — stale CRITICAL banners were
-// showing for hours after recovery. Worker logs are rewritten per round, so
-// their alerts clear as soon as the next round starts.
+// rebuilt fresh from the current log tails each refresh, and cleared by
+// a later recovery line: a rebase-unresolved alert is always followed by
+// worker.sh relaunching implementation ("Rebase unresolved … aborting to
+// pre-rebase base" → next line ">>> Implementation (round N)"), and merge
+// aborts by a retry. Without this, a self-recovered failure showed a
+// CRITICAL banner for hours.
 const ALERT_MARKERS = [
   { re: /!!! WARNING: failed to restore stashed WIP/, sev: "danger", label: "WIP restore failed" },
   { re: /!!! Unresolvable conflicts in: (.+)/, sev: "danger", label: "merge conflicts" },
@@ -146,17 +147,32 @@ const ALERT_MARKERS = [
   { re: /!!! Rebase unresolved after resolver agent/, sev: "danger", label: "rebase unresolved — worker aborted to pre-rebase base" },
   { re: /!!! Unknown status: (\S+)/, sev: "warning", label: "unknown status" },
 ];
+
+// An alert line is superseded (recovered) when a later line in the same
+// log matches one of these.
+const RECOVERY_MARKERS = [
+  />>> Implementation \(round \d+/,   // rebase abort → next round relaunched
+  /--- Rebasing onto main HEAD \(round \d+\)/, // retried the rebase
+  /<<< Merging (task-\S+) back to main/, // merge-retry eventually merged
+];
+
 function scanAlerts(source, lines, resultMap) {
+  const lineRe = /^\[([\d:]+)\] (?:\[[^\]]+\] )?(.*)$/;
+  const alerts = [];
+  let recovered = 0; // count of recovery lines seen
   for (const line of lines) {
-    const tsM = line.match(/^\[([\d:]+)\]/);
-    const ts = tsM ? tsM[1] : "";
-    for (const m of ALERT_MARKERS) {
-      if (m.re.test(line)) {
-        const text = (source ? `[${source}] ` : "") + line.replace(/^\[[\d:]+\] \[[^\]]+\] /, "");
-        const key = m.sev + ":" + text;
-        resultMap.set(key, { sev: m.sev, text, ts });
+    const m = line.match(lineRe);
+    if (!m) continue;
+    for (const r of RECOVERY_MARKERS) if (r.test(m[2])) recovered++;
+    for (const a of ALERT_MARKERS) {
+      if (a.re.test(m[2])) {
+        alerts.push({ sev: a.sev, ts: m[1], text: (source ? `[${source}] ` : "") + m[2].replace(/^!!! /, "!!! ") });
       }
     }
+  }
+  // Any recovery line after an alert clears it: the loop moved on.
+  for (const a of alerts) {
+    if (recovered === 0) resultMap.set(a.sev + ":" + a.text, a);
   }
   // bounded, insertion-ordered; oldest dropped
   while (resultMap.size > 30) resultMap.delete(resultMap.keys().next().value);
