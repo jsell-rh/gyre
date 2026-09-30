@@ -2,10 +2,10 @@
 title: "HSI Test-Time Trace Capture Gate"
 spec_ref: "human-system-interface.md §3 Test-Time Trace Capture"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Test-Time Trace Capture"
-commits: []
+commits: [998a3518, 4c868136]
 ---
 
 ## Spec Excerpt
@@ -69,18 +69,18 @@ The `TraceRepository` port already exists in `crates/gyre-ports/src/trace.rs` an
 
 ## Acceptance Criteria
 
-- [ ] `TraceCapture` gate type is parseable from gate configuration YAML
-- [ ] Gate runner starts OTLP gRPC receiver before test command
-- [ ] Test command receives `OTEL_EXPORTER_OTLP_ENDPOINT` env var
-- [ ] Spans collected from OTLP receiver are stored as `GateTrace`
-- [ ] Span-to-graph-node linkage resolves HTTP, function, and DB spans
-- [ ] Input/output summaries truncated to 4KB; full payloads stored separately
-- [ ] `GET /api/v1/merge-requests/:id/trace` returns complete GateTrace JSON
-- [ ] `GET /api/v1/trace-spans/:span_id/payload` returns full payloads
-- [ ] `TraceCapture` gate always passes (observational, not quality gate)
-- [ ] Max spans per trace capped at configured limit
-- [ ] Trace replaced on re-run for same MR
-- [ ] `cargo test --all` passes
+- [x] `TraceCapture` gate type is parseable from gate configuration YAML
+- [x] Gate runner starts OTLP gRPC receiver before test command
+- [x] Test command receives `OTEL_EXPORTER_OTLP_ENDPOINT` env var
+- [x] Spans collected from OTLP receiver are stored as `GateTrace`
+- [x] Span-to-graph-node linkage resolves HTTP, function, and DB spans
+- [x] Input/output summaries truncated to 4KB; full payloads stored separately
+- [x] `GET /api/v1/merge-requests/:id/trace` returns complete GateTrace JSON
+- [x] `GET /api/v1/trace-spans/:span_id/payload` returns full payloads
+- [x] `TraceCapture` gate always passes (observational, not quality gate)
+- [x] Max spans per trace capped at configured limit
+- [x] Trace replaced on re-run for same MR
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 

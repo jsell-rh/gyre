@@ -106,6 +106,19 @@ impl ActivityRepository for SqliteStorage {
         })
         .await?
     }
+
+    async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let n = diesel::delete(activity_events::table)
+                .filter(activity_events::timestamp.lt(cutoff_secs as i64))
+                .execute(&mut *conn)
+                .context("delete old activity_events")?;
+            Ok(n as u64)
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -244,5 +257,31 @@ mod tests {
             event_type: None,
         };
         assert!(s.query(&q).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_older_than_purges_old_keeps_new() {
+        let (_tmp, s) = setup();
+        s.append(&make_event("old", "agent-a", "task_started", 100))
+            .await
+            .unwrap();
+        s.append(&make_event("new", "agent-a", "task_started", 200))
+            .await
+            .unwrap();
+
+        let deleted = s.delete_older_than(150).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        let q = ActivityQuery {
+            since: None,
+            limit: None,
+            agent_id: None,
+            event_type: None,
+        };
+        let results = s.query(&q).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, Id::new("new"));
+
+        assert_eq!(s.delete_older_than(150).await.unwrap(), 0);
     }
 }

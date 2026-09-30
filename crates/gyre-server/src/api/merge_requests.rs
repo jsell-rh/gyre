@@ -599,11 +599,25 @@ pub async fn transition_mr_status(
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
     let new_status = parse_mr_status(&req.status)?;
     let is_merge = matches!(new_status, MrStatus::Merged);
+    let is_close = matches!(new_status, MrStatus::Closed);
     mr.transition_status(new_status)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     let ts = now_secs();
     mr.updated_at = ts;
     state.merge_requests.update(&mr).await?;
+
+    // HSI §3a trace lifecycle: on merge the gate trace is promoted to
+    // attestation (permanent); on close-without-merge it is deleted.
+    if is_merge {
+        if let Err(e) = state.traces.promote_to_attestation(&mr.id).await {
+            tracing::warn!(mr_id = %mr.id, error = %e, "failed to promote gate trace to attestation");
+        }
+    } else if is_close {
+        if let Err(e) = state.traces.delete_by_mr(&mr.id).await {
+            tracing::warn!(mr_id = %mr.id, error = %e, "failed to delete gate trace on MR close");
+        }
+    }
+
     {
         let ws_id = mr.workspace_id.clone();
         let kind = if is_merge {
@@ -987,6 +1001,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// HSI §3a trace lifecycle: closing an MR (close-without-merge) must
+    /// delete its gate trace.
+    #[tokio::test]
+    async fn closing_mr_deletes_gate_trace() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Close deletes trace").await;
+
+        // Pre-store a gate trace for the MR (as a TraceCapture gate would).
+        let trace = gyre_common::GateTrace {
+            id: gyre_common::Id::new("trace-close-1"),
+            mr_id: gyre_common::Id::new(&mr_id),
+            gate_run_id: gyre_common::Id::new("gr-close-1"),
+            commit_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            spans: vec![],
+            captured_at: 1000,
+        };
+        state.traces.store(&trace).await.unwrap();
+        assert!(state
+            .traces
+            .get_by_mr(&gyre_common::Id::new(&mr_id))
+            .await
+            .unwrap()
+            .is_some());
+
+        // Close the MR through the public API (Open → Closed is valid).
+        let body = serde_json::json!({ "status": "closed" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        assert!(
+            state
+                .traces
+                .get_by_mr(&gyre_common::Id::new(&mr_id))
+                .await
+                .unwrap()
+                .is_none(),
+            "closed MR's trace must be deleted (close-without-merge)"
+        );
     }
 
     #[tokio::test]

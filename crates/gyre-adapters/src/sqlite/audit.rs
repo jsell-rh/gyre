@@ -167,6 +167,19 @@ impl AuditRepository for SqliteStorage {
         })
         .await?
     }
+
+    async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let n = diesel::delete(audit_events::table)
+                .filter(audit_events::timestamp.lt(cutoff_secs as i64))
+                .execute(&mut *conn)
+                .context("delete old audit_events")?;
+            Ok(n as u64)
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -363,5 +376,34 @@ mod tests {
             results[0].event_type,
             AuditEventType::Custom("container_escape".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn audit_delete_older_than_purges_old_keeps_new() {
+        let (_tmp, s) = setup();
+        AuditRepository::record(
+            &s,
+            &make_event("old", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await
+        .unwrap();
+        AuditRepository::record(
+            &s,
+            &make_event("new", "agent-1", AuditEventType::FileAccess, 200),
+        )
+        .await
+        .unwrap();
+
+        let deleted = AuditRepository::delete_older_than(&s, 150).await.unwrap();
+        assert_eq!(deleted, 1);
+
+        let results = AuditRepository::query(&s, None, None, None, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, Id::new("new"));
+
+        // Second run is idempotent.
+        assert_eq!(AuditRepository::delete_older_than(&s, 150).await.unwrap(), 0);
     }
 }

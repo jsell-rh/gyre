@@ -25,4 +25,8 @@ pub trait AuditRepository: Send + Sync {
     /// Returns events with id > after_id ordered by timestamp ascending.
     /// Used by SIEM forwarding to stream new events.
     async fn since_timestamp(&self, since: u64, limit: usize) -> Result<Vec<AuditEvent>>;
+
+    /// Hard-delete events with timestamp < cutoff_secs. Returns the number of rows purged.
+    /// Used by the nightly retention job (business-continuity.md §5).
+    async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64>;
 }

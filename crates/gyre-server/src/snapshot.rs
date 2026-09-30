@@ -8,7 +8,7 @@ use crate::AppState;
 
 const DEFAULT_SNAPSHOT_PATH: &str = "./snapshots";
 
-fn snapshot_dir() -> PathBuf {
+pub(crate) fn snapshot_dir() -> PathBuf {
     std::env::var("GYRE_SNAPSHOT_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_SNAPSHOT_PATH))

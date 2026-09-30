@@ -50,4 +50,15 @@ pub trait NotificationRepository: Send + Sync {
         notification_type: &str,
         days: u32,
     ) -> Result<bool>;
+
+    /// Hard-delete notifications past their retention cutoffs, split by read state:
+    /// read (resolved or dismissed) notifications older than `read_cutoff_secs` are
+    /// deleted; unread ones only when older than `unread_cutoff_secs`.
+    /// Returns the number of rows purged. Used by the nightly retention job
+    /// (business-continuity.md §5 — 90 days read / 365 days unread by default).
+    async fn delete_older_than(
+        &self,
+        read_cutoff_secs: u64,
+        unread_cutoff_secs: u64,
+    ) -> Result<u64>;
 }

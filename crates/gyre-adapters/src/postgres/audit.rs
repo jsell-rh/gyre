@@ -167,4 +167,17 @@ impl AuditRepository for PgStorage {
         })
         .await?
     }
+
+    async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let n = diesel::delete(audit_events::table)
+                .filter(audit_events::timestamp.lt(cutoff_secs as i64))
+                .execute(&mut *conn)
+                .context("delete old audit_events")?;
+            Ok(n as u64)
+        })
+        .await?
+    }
 }

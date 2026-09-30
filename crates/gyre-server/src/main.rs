@@ -46,11 +46,26 @@ async fn main() -> Result<()> {
     // Seed built-in meta-specs on first startup (agent-runtime spec §2).
     seed_builtin_meta_specs(&state).await;
 
+    // Load persisted retention policies from KV (or seed defaults on first
+    // boot) before the job registry registers the nightly cleanup handler.
+    state
+        .retention_store
+        .init(state.kv_store.clone())
+        .await;
+
     // M25: Auto-register default container compute target if Docker/Podman is available.
     register_default_compute_target(&state).await;
 
     // Register jobs into the admin job registry so GET/POST /admin/jobs work.
     jobs::start_job_registry(state.clone()).await;
+
+    // Nightly retention cleanup at 02:00 UTC (business-continuity.md §5) —
+    // wall-clock scheduled, see jobs::spawn_job.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "retention_cleanup".to_string(),
+        Arc::clone(&state),
+    );
 
     // Background tasks.
     spawn_stale_agent_detector(state.clone());

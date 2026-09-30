@@ -308,6 +308,10 @@ pub async fn archive_repo(
             mr.status = MrStatus::Closed;
             mr.updated_at = now;
             state.merge_requests.update(&mr).await?;
+            // HSI §3a: delete the gate trace on close-without-merge.
+            if let Err(e) = state.traces.delete_by_mr(&mr.id).await {
+                tracing::warn!(mr_id = %mr.id, error = %e, "failed to delete gate trace on MR close");
+            }
         }
     }
 

@@ -20,6 +20,10 @@ pub trait AnalyticsRepository: Send + Sync {
         since: u64,
         until: u64,
     ) -> Result<Vec<(String, u64)>>;
+
+    /// Hard-delete events with timestamp < cutoff_secs. Returns the number of rows purged.
+    /// Used by the nightly retention job (business-continuity.md §5).
+    async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64>;
 }
 
 #[async_trait]

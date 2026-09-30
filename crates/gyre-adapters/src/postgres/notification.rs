@@ -280,4 +280,33 @@ impl NotificationRepository for PgStorage {
         })
         .await?
     }
+
+    async fn delete_older_than(
+        &self,
+        read_cutoff_secs: u64,
+        unread_cutoff_secs: u64,
+    ) -> Result<u64> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<u64> {
+            let mut conn = pool.get().context("get db connection")?;
+            let read_cutoff = read_cutoff_secs as i64;
+            let unread_cutoff = unread_cutoff_secs as i64;
+            // A notification is "read" when the human acted on it (resolved) or
+            // explicitly dismissed it (business-continuity.md §5).
+            let is_read = notifications::resolved_at
+                .is_not_null()
+                .or(notifications::dismissed_at.is_not_null());
+            let read_old = is_read.and(notifications::created_at.lt(read_cutoff));
+            let unread_old = notifications::resolved_at
+                .is_null()
+                .and(notifications::dismissed_at.is_null())
+                .and(notifications::created_at.lt(unread_cutoff));
+            let n = diesel::delete(notifications::table)
+                .filter(read_old.or(unread_old))
+                .execute(&mut *conn)
+                .context("delete old notifications")?;
+            Ok(n as u64)
+        })
+        .await?
+    }
 }

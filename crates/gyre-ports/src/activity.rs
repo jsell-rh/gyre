@@ -13,4 +13,8 @@ pub struct ActivityQuery {
 pub trait ActivityRepository: Send + Sync {
     async fn append(&self, event: &ActivityEvent) -> Result<()>;
     async fn query(&self, q: &ActivityQuery) -> Result<Vec<ActivityEvent>>;
+
+    /// Hard-delete events with timestamp < cutoff_secs. Returns the number of rows purged.
+    /// Used by the nightly retention job (business-continuity.md §5).
+    async fn delete_older_than(&self, cutoff_secs: u64) -> Result<u64>;
 }
