@@ -1478,7 +1478,7 @@ specs:
 
         let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
             Arc::new(MemSpecLedgerRepository::default());
-        let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
         let now = 2_000_000u64;
 
         // Set up: parent spec in ledger with NEW SHA (simulating it changed).
