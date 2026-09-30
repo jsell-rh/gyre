@@ -2,7 +2,7 @@
 title: "Platform Model Secrets Domain Types + Port"
 spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "platform-model.md §7 Secrets Delivery"
   - "platform-model.md §7 Principle"
@@ -11,6 +11,7 @@ coverage_sections:
   - "platform-model.md §7 Secret Types"
   - "platform-model.md §7 Storage Backend"
 commits: ["3a5be015", "a38170c9", "a3fde958"]
+review: specs/reviews/task-097.md
 ---
 
 ## Spec Excerpt
