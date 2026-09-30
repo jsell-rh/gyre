@@ -11,6 +11,16 @@ TASK_NAME=$(basename "$TASK_FILE" .md)
 
 cd "$WORKTREE"
 
+# Isolate the cargo target dir per worktree. Without this, all workers in
+# parallel worktrees share the main checkout's target/ — concurrent builds
+# poison the shared rmeta and abort sibling test runs with spurious E0432
+# "unresolved import" errors against types that exist (task-095 review R1:
+# `cargo test -p gyre-server --lib merge_processor` could not be completed;
+# verification had to fall back to code reading, weakening the review).
+# Per-worktree isolation also lets each worker build cleanly after a rebase
+# brings in a different dependency graph.
+export CARGO_TARGET_DIR="$WORKTREE/target"
+
 # Agent runner: omp in headless print mode with JSON event stream.
 # Raw events -> .agent.jsonl (dashboard reads this live);
 # formatted progress -> .agent.log (human-readable, also in the pane via tee).

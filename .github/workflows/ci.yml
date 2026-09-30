@@ -50,6 +50,10 @@ jobs:
         run: bash scripts/check-tenant-filter.sh || true
       - name: Hierarchy lint (M34)
         run: GYRE_CHECK_HIERARCHY=1 bash scripts/check-hierarchy.sh
+      - name: Dead parameter lint (advisory)
+        run: bash scripts/check-dead-parameters.sh || true
+      - name: Byte-slice truncation lint (advisory)
+        run: bash scripts/check-byte-slice-truncation.sh || true
       - name: Em-dash check                                                                                                                     
         run: |                                                                                                                                  
           find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true  

@@ -1,0 +1,24 @@
+# Byte-slice truncation exemptions
+# One `path:line` per line (relative to repo root), `#` starts a comment.
+# These are PRE-EXISTING constant byte-index slices of runtime strings.
+#
+# IMPORTANT: every entry below is a real F4-class hazard (panic on multibyte
+# UTF-8 at the boundary), NOT a false positive. They are exempted only so the
+# check runs green on main while their fixes are owned by the tasks below.
+# When you fix one, DELETE its exemption line — do not leave it behind.
+#
+# See: specs/reviews/task-095.md F4 (the finding that created this check)
+#
+# --- task-095 revision round owns these (gate output truncation) ---
+crates/gyre-server/src/gate_executor.rs:251   # &output[..GATE_ATTESTATION_OUTPUT_LIMIT]
+crates/gyre-server/src/gate_executor.rs:430   # &process_output[..4096]
+crates/gyre-server/src/gate_executor.rs:661   # &process_output[..4096]
+crates/gyre-server/src/gate_executor.rs:862   # &combined[..4096] — run_command (review F4 exact site)
+crates/gyre-server/src/gate_executor.rs:924   # &combined[..4096] — run_command_in_dir (review F4 exact site)
+#
+# --- unowned; fix opportunistically when touching these files ---
+crates/gyre-cli/src/main.rs:1246              # &sha[..10] — hex sha, ASCII-only in practice
+crates/gyre-server/src/api/specs.rs:282       # &e.current_sha[..8] — hex sha
+crates/gyre-server/src/explorer_ws.rs:2882    # &raw_preview[..500] — JSON preview
+crates/gyre-server/src/explorer_ws.rs:3437    # &d[..100] — doc_comment preview
+crates/gyre-server/src/pre_accept.rs:81       # &sample[..72] — commit message sample

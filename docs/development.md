@@ -55,6 +55,12 @@ cargo clippy --all-targets --all-features -- -D warnings
 # Architecture lint (enforces hexagonal boundaries)
 bash scripts/check-arch.sh
 
+# Decision-input parameter lint (flags parameters used only in log lines)
+bash scripts/check-dead-parameters.sh
+
+# Byte-slice truncation lint (flags &s[..N] panics on multibyte UTF-8)
+bash scripts/check-byte-slice-truncation.sh
+
 # Auto-format
 cargo fmt --all
 
