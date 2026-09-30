@@ -2,7 +2,7 @@
 title: "Platform Model Post-Merge Validation + Recovery Protocol"
 spec_ref: "platform-model.md §6 Rollback & Recovery"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 review: specs/reviews/task-095.md
 coverage_sections:
   - "platform-model.md §6 Rollback & Recovery"
