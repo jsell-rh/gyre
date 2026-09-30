@@ -132,9 +132,12 @@ async function loopAlive() {
 }
 
 // --- Alerts: failure markers promoted out of the logs ----------------------
-// loop.sh / worker.sh emit `!!!`-prefixed lines on failure. Scan the tailed
-// logs each refresh; alerts are sticky (they persist in the snapshot after
-// the line scrolls out of the tail) for the dashboard process's lifetime.
+// loop.sh / worker.sh emit `!!!`-prefixed lines on failure. Alerts are
+// non-sticky: rebuilt from the current log tails each refresh. A failure that
+// the loop recovered from (rebase abort → relaunch, merge abort → retry)
+// scrolls out of the tail and stops alerting — stale CRITICAL banners were
+// showing for hours after recovery. Worker logs are rewritten per round, so
+// their alerts clear as soon as the next round starts.
 const ALERT_MARKERS = [
   { re: /!!! WARNING: failed to restore stashed WIP/, sev: "danger", label: "WIP restore failed" },
   { re: /!!! Unresolvable conflicts in: (.+)/, sev: "danger", label: "merge conflicts" },
@@ -143,10 +146,7 @@ const ALERT_MARKERS = [
   { re: /!!! Rebase unresolved after resolver agent/, sev: "danger", label: "rebase unresolved — worker aborted to pre-rebase base" },
   { re: /!!! Unknown status: (\S+)/, sev: "warning", label: "unknown status" },
 ];
-
-const seenAlerts = new Map(); // key -> {sev, text, ts}; bounded, insertion-ordered
-
-function scanAlerts(source, lines, stickyMap) {
+function scanAlerts(source, lines, resultMap) {
   for (const line of lines) {
     const tsM = line.match(/^\[([\d:]+)\]/);
     const ts = tsM ? tsM[1] : "";
@@ -154,11 +154,12 @@ function scanAlerts(source, lines, stickyMap) {
       if (m.re.test(line)) {
         const text = (source ? `[${source}] ` : "") + line.replace(/^\[[\d:]+\] \[[^\]]+\] /, "");
         const key = m.sev + ":" + text;
-        stickyMap.set(key, { sev: m.sev, text, ts });
+        resultMap.set(key, { sev: m.sev, text, ts });
       }
     }
   }
-  while (stickyMap.size > 30) stickyMap.delete(stickyMap.keys().next().value); // drop oldest
+  // bounded, insertion-ordered; oldest dropped
+  while (resultMap.size > 30) resultMap.delete(resultMap.keys().next().value);
 }
 
 // --- Events: milestone lines for the timeline ------------------------------
@@ -262,13 +263,15 @@ async function refreshSnapshot() {
     );
     const logText = await tailBytes(LOG_PATH, 256 * 1024);
     const log = logText == null ? "" : logText.split("\n").slice(-TAIL_LINES).join("\n").trimEnd();
-    // Alerts from orchestrator + worker logs (worker markers carry task names)
-    scanAlerts(null, (logText || "").split("\n"), seenAlerts);
-    for (const w of workers) scanAlerts(w.name, (w.workerLog || "").split("\n"), seenAlerts);
+    // Alerts from orchestrator + worker logs (worker markers carry task
+    // names), rebuilt fresh each refresh so recovered failures clear.
+    const alerts = new Map();
+    scanAlerts(null, (logText || "").split("\n"), alerts);
+    for (const w of workers) scanAlerts(w.name, (w.workerLog || "").split("\n"), alerts);
     lastSnapshot = {
       workers, log, logAgeMs: await ageMs(LOG_PATH, now),
       loopAlive: await loopAlive(),
-      alerts: Array.from(seenAlerts.values()),
+      alerts: Array.from(alerts.values()),
       events: extractEvents(logText),
       coverage: await coverageStats(),
       wipGuarded: await wipGuarded(),
@@ -277,7 +280,7 @@ async function refreshSnapshot() {
   } catch (e) {
     lastSnapshot = {
       workers: prevWorkers, log: lastSnapshot.log, logAgeMs: null,
-      loopAlive: await loopAlive(), alerts: Array.from(seenAlerts.values()),
+      loopAlive: await loopAlive(), alerts: lastSnapshot.alerts || [],
       events: lastSnapshot.events || [], coverage: lastSnapshot.coverage || null,
       wipGuarded: lastSnapshot.wipGuarded || false,
       error: String(e.message || e), when: Date.now(),
