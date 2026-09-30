@@ -251,6 +251,28 @@ mod tests {
     }
 
     #[test]
+    fn migrations_create_previously_shadowed_columns() {
+        // 000051 collision (task-093 vs task-095, same-day merges): Diesel
+        // ran only post_merge_gates, silently dropping the orchestrator
+        // columns. Guard asserts they exist after the renumbered 000052.
+        let (_tmp, storage) = tmp_storage();
+        let mut conn = storage.pool.get().unwrap();
+        for (table, column) in [
+            ("agents", "orchestrator_type"),
+            ("agents", "repo_id"),
+            ("agents", "restart_on_failure"),
+            ("quality_gates", "gate_phase"),
+            ("quality_gates", "timeout_secs"),
+        ] {
+            use diesel::RunQueryDsl;
+            let ok = diesel::sql_query(format!("SELECT {column} FROM {table} LIMIT 0"))
+                .execute(&mut *conn)
+                .is_ok();
+            assert!(ok, "column '{table}.{column}' missing after migrations");
+        }
+    }
+
+    #[test]
     fn migration_is_idempotent() {
         let tmp = NamedTempFile::new().unwrap();
         let path = tmp.path().to_str().unwrap();

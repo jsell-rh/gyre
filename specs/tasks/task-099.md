@@ -2,14 +2,14 @@
 title: "Platform Model Bootstrap Command"
 spec_ref: "platform-model.md §8 Bootstrap & First-Run"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §8 Bootstrap & First-Run"
   - "platform-model.md §8 gyre bootstrap CLI Command"
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits: []
+commits: ["c903a80b", "e4a1cb6f", "39daf9a1", "c2755e1b"]
 ---
 
 ## Spec Excerpt
@@ -43,6 +43,7 @@ gyre bootstrap \
 ```bash
 gyre bootstrap --dev
 ```
+
 Skips OIDC. Uses static auth tokens. Single tenant, single workspace.
 
 ### Starter Kit
@@ -66,7 +67,7 @@ When any agent is spawned, the MCP server injects:
 
 2. **Bootstrap orchestration:**
    - Step 1: `POST /api/v1/tenants` (create tenant)
-   - Step 2: `POST /api/v1/users` (create admin user) + `POST /api/v1/users/me/tokens` (API key)
+   - Step 2: `POST /api/v1/users` (create admin user + API key in one call)
    - Step 3: `POST /api/v1/workspaces` (create workspace under tenant)
    - Step 4: `POST /api/v1/repos` (register repo)
    - Step 5: Create built-in personas via `POST /api/v1/personas` (workspace-orchestrator, repo-orchestrator, accountability, security) — auto-approve each
@@ -94,16 +95,59 @@ When any agent is spawned, the MCP server injects:
 
 ## Acceptance Criteria
 
-- [ ] `gyre bootstrap` creates tenant, workspace, repo, admin user in sequence
-- [ ] Built-in personas registered and auto-approved
-- [ ] Spec registry initialized from manifest or starter kit
-- [ ] Default gates configured based on project type
-- [ ] Repo orchestrator spawned on completion
-- [ ] Summary printed with all IDs and URLs
-- [ ] `--dev` mode works without OIDC
-- [ ] `--starter-kit` creates spec directory structure
-- [ ] Config saved to `~/.gyre/config`
-- [ ] `cargo test --all` passes
+- [x] `gyre bootstrap` creates tenant, workspace, repo, admin user in sequence
+- [x] Built-in personas registered and auto-approved
+- [x] Spec registry initialized from manifest or starter kit
+- [x] Default gates configured based on project type
+- [x] Repo orchestrator spawned on completion
+- [x] Summary printed with all IDs and URLs
+- [x] `--dev` mode works without OIDC
+- [x] `--starter-kit` creates spec directory structure
+- [x] Config saved to `~/.gyre/config`
+- [x] `cargo test --all` passes
+
+## Implementation Notes
+
+- **Server**: `POST /api/v1/users` added in `crates/gyre-server/src/api/users.rs::create_user`
+  — Admin-only (per-handler role check), mints an authenticating API key in the
+  same call (stored via `state.api_keys`, the store the auth extractor consults;
+  only the SHA-256 hash is persisted). `external_id = "local:{username}"` gives
+  stable duplicate detection. Route registered in `api/mod.rs`.
+- **CLI**: `crates/gyre-cli/src/bootstrap.rs` holds pure logic (persona prompt
+  registry via `include_str!`, slug derivation, gate detection, starter-kit
+  writer, summary renderer); orchestration lives in `main.rs::run_bootstrap`
+  with a `StepTracker` reporting completed steps + resume hint on failure.
+- **Client**: 10 new `GyreClient` methods (`health`, `create_tenant`,
+  `create_user`, `create_workspace`, `create_repo`, `create_persona`,
+  `approve_persona`, `create_gate`, `create_task`, `spawn_agent`).
+- **Personas**: `specs/personas/repo-orchestrator.md` authored (referenced by
+  platform-model.md §3 but previously missing); all four prompts embedded in
+  the CLI at `crates/gyre-cli/src/bootstrap/personas/`.
+- **Spec registry step**: report-only — no REST registration endpoint exists;
+  the spec ledger syncs on push to the default branch (stated in output).
+- **Orchestrator spawn**: creates task first with `task_type: "implementation"`
+  (spawn rejects tasks without it), then `POST /api/v1/agents/spawn`.
+- Tests: 3 server handler tests (key authenticates as new user, duplicate
+  rejected, unknown role rejected) + 11 CLI tests (parse/flags, slug, gates,
+  starter kit, manifest shape, summary rendering, persona coverage).
+
+## Verification
+
+- `cargo build --all` — zero warnings
+- `cargo test --all` — all pass (server: 1159, cli: 93+1)
+- Check scripts: arch, cli-spec-parity, assertionless-tests, no-em-dash,
+  api-auth, type-discriminator-values, notification-priority all pass
+  (dead-components exit 0 with pre-existing findings only)
+- End-to-end smoke test against a live server:
+  - `gyre bootstrap --dev --repo gyre-demo --repo-path ... --starter-kit`:
+    tenant dev, workspace default, repo, 4 personas pre-approved, 3 gates
+    detected from Cargo.toml + check-arch.sh, starter kit written,
+    orchestrator spawned, summary printed, exit 0
+  - `gyre bootstrap --tenant "Acme Corp" --admin-user jsell`: admin user
+    created, API key minted and shown once, config saved to `~/.gyre/config`,
+    subsequent steps authenticated as the new admin, exit 0
+  - Failure paths: server down → exit 1; `--dev --tenant` → rejected;
+    missing `--tenant` without `--dev` → rejected
 
 ## Agent Instructions
 

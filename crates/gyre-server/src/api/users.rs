@@ -1,5 +1,6 @@
 //! User management, workspace membership, teams, and notification endpoints (HSI §2 + §12).
 //!
+//! POST /api/v1/users                 (bootstrap admin user creation - Admin-only)
 //! GET  /api/v1/users/me
 //! PUT  /api/v1/users/me
 //! GET  /api/v1/users/me/agents
@@ -708,6 +709,117 @@ pub async fn create_token(
     ))
 }
 
+// ─── Bootstrap: admin user creation ──────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateUserRequest {
+    pub username: String,
+    /// Role names (UserRole variants). Defaults to ["Admin"] when omitted.
+    pub roles: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+pub struct CreateUserApiKeyResponse {
+    /// Plaintext API key - returned exactly once. Only the SHA-256 hash is stored.
+    pub key: String,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct CreateUserResponse {
+    pub user: UserProfileResponse,
+    pub api_key: CreateUserApiKeyResponse,
+}
+
+/// POST /api/v1/users
+///
+/// Creates a user (bootstrap: the admin user of a new tenant) and mints an
+/// API key in the same call so the CLI can authenticate as this user
+/// immediately. Admin-only: this is the user-provisioning path for first-run
+/// setup; the caller must already hold the Admin role (global dev token or
+/// an existing admin's API key).
+///
+/// The API key is registered in `state.api_keys` (not `user_tokens`) because
+/// that is the store the auth extractor consults when resolving API keys.
+pub async fn create_user(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateUserRequest>,
+) -> Result<(StatusCode, Json<CreateUserResponse>), ApiError> {
+    // Admin-only: arbitrary user creation is a provisioning privilege.
+    // Enforced here (not in ABAC middleware) so the check holds regardless
+    // of route registry state - the global token bypasses ABAC as system,
+    // and Developer-role users would pass developer-write-access otherwise.
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may create users".to_string(),
+        ));
+    }
+
+    let username = req.username.trim().to_string();
+    if username.is_empty() || username.len() > 64 {
+        return Err(ApiError::InvalidInput(
+            "username must be 1-64 characters".to_string(),
+        ));
+    }
+
+    // Parse roles; default to Admin (this is the bootstrap admin-user path).
+    let mut roles: Vec<UserRole> = Vec::new();
+    for r in req.roles.unwrap_or_else(|| vec!["Admin".to_string()]) {
+        let parsed = UserRole::from_str(&r)
+            .ok_or_else(|| ApiError::InvalidInput(format!("unknown role: {r}")))?;
+        if !roles.contains(&parsed) {
+            roles.push(parsed);
+        }
+    }
+    if roles.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "at least one role must be specified".to_string(),
+        ));
+    }
+
+    // Synthetic external_id: this user is created locally by an admin, not
+    // provisioned from OIDC. Stable + namespaced so re-running bootstrap with
+    // the same username is detectable via find_by_external_id.
+    let external_id = format!("local:{username}");
+    if let Some(existing) = state.users.find_by_external_id(&external_id).await? {
+        return Err(ApiError::InvalidInput(format!(
+            "user with external id {external_id} already exists (id {})",
+            existing.id
+        )));
+    }
+
+    let now = now_secs();
+    let mut user = User::new(new_id(), external_id, username, now);
+    user.roles = roles;
+    user.global_role = if user.roles.contains(&UserRole::Admin) {
+        gyre_domain::GlobalRole::TenantAdmin
+    } else {
+        gyre_domain::GlobalRole::Member
+    };
+    state.users.create(&user).await?;
+
+    // Mint an API key registered in the auth-resolving store. Raw key is
+    // generated from a UUID v4 (CSPRNG); only the hash is persisted.
+    let raw_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+    let key_name = "bootstrap";
+    state
+        .api_keys
+        .create(&crate::auth::hash_api_key(&raw_key), &user.id, key_name)
+        .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateUserResponse {
+            user: UserProfileResponse::from(user),
+            api_key: CreateUserApiKeyResponse {
+                key: raw_key,
+                name: key_name.to_string(),
+            },
+        }),
+    ))
+}
+
 /// DELETE /api/v1/users/me/tokens/:id
 pub async fn delete_token(
     auth: AuthenticatedAgent,
@@ -1066,5 +1178,89 @@ mod tests {
             "should return only ConflictingInterpretations: got {notifs:?}"
         );
         assert_eq!(notifs[0]["notification_type"], "ConflictingInterpretations");
+    }
+
+    #[tokio::test]
+    async fn admin_creates_user_with_authenticating_api_key() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"username":"jsell"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["user"]["username"], "jsell");
+        assert_eq!(json["user"]["global_role"], "TenantAdmin");
+        let user_id = json["user"]["id"].as_str().unwrap().to_string();
+        assert!(!user_id.is_empty());
+
+        // The minted API key must authenticate as the new user via the
+        // auth extractor's API-key path (state.api_keys hash lookup).
+        let raw_key = json["api_key"]["key"].as_str().unwrap().to_string();
+        assert!(raw_key.starts_with("gyre_"), "key: {raw_key}");
+        let resolved = state
+            .api_keys
+            .find_user_id(&crate::auth::hash_api_key(&raw_key))
+            .await
+            .unwrap()
+            .expect("API key must resolve to the new user");
+        assert_eq!(resolved.to_string(), user_id);
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_duplicate_external_id() {
+        let state = test_state();
+        let body = r#"{"username":"dup"}"#;
+        for i in 0..2 {
+            let resp = crate::api::api_router()
+                .with_state(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/users")
+                        .header("Authorization", "Bearer test-token")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if i == 0 {
+                assert_eq!(resp.status(), StatusCode::CREATED);
+            } else {
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::BAD_REQUEST,
+                    "duplicate external_id must be rejected"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_unknown_role() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"username":"x","roles":["Superuser"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

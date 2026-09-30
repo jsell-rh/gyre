@@ -150,6 +150,15 @@ impl GitOpsPort for NoopGitOps {
     ) -> Result<Option<Vec<u8>>> {
         Ok(None)
     }
+
+    async fn revert_commit(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _sha_to_revert: &str,
+    ) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
+    }
 }
 
 /// Configurable git operations adapter for tests that need to control
@@ -285,6 +294,15 @@ impl GitOpsPort for ConfigurableGitOps {
         _file_path: &str,
     ) -> Result<Option<Vec<u8>>> {
         Ok(None)
+    }
+
+    async fn revert_commit(
+        &self,
+        _repo_path: &str,
+        _branch: &str,
+        _sha_to_revert: &str,
+    ) -> Result<String> {
+        Ok("0000000000000000000000000000000000000000".to_string())
     }
 }
 

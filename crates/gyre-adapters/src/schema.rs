@@ -466,6 +466,8 @@ diesel::table! {
         required_approvals -> Nullable<Integer>,
         persona -> Nullable<Text>,
         required -> Integer,
+        gate_phase -> Text,
+        timeout_secs -> Nullable<BigInt>,
         created_at -> BigInt,
     }
 }

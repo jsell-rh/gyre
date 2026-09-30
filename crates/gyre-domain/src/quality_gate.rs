@@ -26,7 +26,50 @@ pub struct QualityGate {
     /// Defaults to true (blocking).
     #[serde(default = "default_required")]
     pub required: bool,
+    /// When this gate runs: before merge (blocking, per-MR) or after merge
+    /// (validation against the new default-branch HEAD). Defaults to pre-merge.
+    #[serde(default)]
+    pub gate_phase: GatePhase,
+    /// Timeout in seconds for TestCommand/LintCommand execution.
+    /// `None` uses the system default (300s).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
     pub created_at: u64,
+}
+
+/// The phase a quality gate runs in (platform-model.md §6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatePhase {
+    /// Runs before merge against the MR's speculative merge commit.
+    PreMerge,
+    /// Runs after merge against the new HEAD of the default branch.
+    PostMerge,
+}
+
+impl Default for GatePhase {
+    fn default() -> Self {
+        Self::PreMerge
+    }
+}
+
+impl GatePhase {
+    /// Parses the wire/DB string representation.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pre_merge" => Some(Self::PreMerge),
+            "post_merge" => Some(Self::PostMerge),
+            _ => None,
+        }
+    }
+
+    /// Canonical snake_case string for DB storage.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PreMerge => "pre_merge",
+            Self::PostMerge => "post_merge",
+        }
+    }
 }
 
 fn default_required() -> bool {

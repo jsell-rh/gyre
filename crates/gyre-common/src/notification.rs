@@ -55,6 +55,12 @@ pub enum NotificationType {
     /// Priority 2 — two humans edited the same spec concurrently and the second
     /// save was rejected (HSI §7 Conflict Prevention). Created for both editors.
     SpecConflict,
+    /// Priority 2 — a merged MR was reverted by the post-merge recovery
+    /// protocol (platform-model.md §6). Sent to the author's spawner.
+    MrReverted,
+    /// Priority 1 — post-merge revert re-validation failed on the reverted
+    /// HEAD; queue stays paused until a human intervenes (platform-model.md §6).
+    MergeQueueEscalation,
 }
 
 impl NotificationType {
@@ -81,6 +87,8 @@ impl NotificationType {
             Self::DependencyChainTooDeep => "DependencyChainTooDeep",
             Self::AtomicGroupFailure => "AtomicGroupFailure",
             Self::SpecConflict => "SpecConflict",
+            Self::MrReverted => "MrReverted",
+            Self::MergeQueueEscalation => "MergeQueueEscalation",
         }
     }
 
@@ -107,6 +115,8 @@ impl NotificationType {
             "DependencyChainTooDeep" => Some(Self::DependencyChainTooDeep),
             "AtomicGroupFailure" => Some(Self::AtomicGroupFailure),
             "SpecConflict" => Some(Self::SpecConflict),
+            "MrReverted" => Some(Self::MrReverted),
+            "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
             _ => None,
         }
     }
@@ -134,6 +144,8 @@ impl NotificationType {
             Self::DependencyChainTooDeep => 7,
             Self::AtomicGroupFailure => 3,
             Self::SpecConflict => 2,
+            Self::MrReverted => 2,
+            Self::MergeQueueEscalation => 1,
         }
     }
 }
@@ -217,7 +229,8 @@ mod tests {
             4
         );
         assert_eq!(NotificationType::SuggestedSpecLink.default_priority(), 10);
-        assert_eq!(NotificationType::SpecConflict.default_priority(), 2);
+        assert_eq!(NotificationType::MrReverted.default_priority(), 2);
+        assert_eq!(NotificationType::MergeQueueEscalation.default_priority(), 1);
     }
 
     #[test]
@@ -243,6 +256,8 @@ mod tests {
             NotificationType::DependencyChainTooDeep,
             NotificationType::AtomicGroupFailure,
             NotificationType::SpecConflict,
+            NotificationType::MrReverted,
+            NotificationType::MergeQueueEscalation,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));

@@ -1,3 +1,4 @@
+mod bootstrap;
 mod client;
 mod config;
 mod tui;
@@ -59,6 +60,43 @@ enum Commands {
         /// Use this token to authenticate the registration call (dev/system token)
         #[arg(long, default_value = DEFAULT_TOKEN)]
         token: String,
+    },
+    /// Bootstrap a fresh Gyre platform: tenant, workspace, repo, personas, gates,
+    /// and a repo orchestrator, all in one run (platform-model.md §8)
+    Bootstrap {
+        /// Gyre server base URL
+        #[arg(long, default_value = "http://localhost:3000")]
+        server: String,
+        /// Token used to authenticate bootstrap API calls. Defaults to
+        /// $GYRE_AUTH_TOKEN when set, else the static dev token.
+        #[arg(long)]
+        token: Option<String>,
+        /// Tenant display name (e.g. "Acme Corp")
+        #[arg(long)]
+        tenant: Option<String>,
+        /// Workspace display name (e.g. "Platform Team")
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Repository name to register
+        #[arg(long)]
+        repo: Option<String>,
+        /// Local path to the repo checkout (used for gate + spec detection,
+        /// starter kit target)
+        #[arg(long)]
+        repo_path: Option<String>,
+        /// Admin username to create (non-dev mode)
+        #[arg(long)]
+        admin_user: Option<String>,
+        /// OIDC issuer URL for the tenant
+        #[arg(long)]
+        oidc_issuer: Option<String>,
+        /// Dev mode: skip OIDC and admin user, use static tokens, tenant "dev",
+        /// workspace "default"
+        #[arg(long)]
+        dev: bool,
+        /// Create a starter spec structure in the repo path (or --repo-path)
+        #[arg(long)]
+        starter_kit: bool,
     },
     /// Clone a Gyre-hosted repository
     Clone {
@@ -398,6 +436,38 @@ async fn main() -> Result<()> {
             println!("  Name:   {}", resp.name);
             println!("  Status: {}", resp.status);
             println!("Config saved to {}", path.display());
+        }
+
+        Commands::Bootstrap {
+            server,
+            token,
+            tenant,
+            workspace,
+            repo,
+            repo_path,
+            admin_user,
+            oidc_issuer,
+            dev,
+            starter_kit,
+        } => {
+            // GYRE_AUTH_TOKEN pattern (server-config.md): explicit flag >
+            // env > static dev token.
+            let token = token
+                .or_else(|| std::env::var("GYRE_AUTH_TOKEN").ok())
+                .unwrap_or_else(|| DEFAULT_TOKEN.to_string());
+            run_bootstrap(BootstrapArgs {
+                server,
+                token,
+                tenant,
+                workspace,
+                repo,
+                repo_path,
+                admin_user,
+                oidc_issuer,
+                dev,
+                starter_kit,
+            })
+            .await?;
         }
 
         Commands::Clone { repo, dir } => {
@@ -1268,6 +1338,303 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// ── Bootstrap (platform-model.md §8) ──────────────────────────────────────────
+
+struct BootstrapArgs {
+    server: String,
+    token: String,
+    tenant: Option<String>,
+    workspace: Option<String>,
+    repo: Option<String>,
+    repo_path: Option<String>,
+    admin_user: Option<String>,
+    oidc_issuer: Option<String>,
+    dev: bool,
+    starter_kit: bool,
+}
+
+/// One bootstrap step, named for the failure report (spec §8: "on failure,
+/// report which steps succeeded, which failed, how to resume").
+struct StepTracker {
+    done: Vec<&'static str>,
+    current: &'static str,
+}
+
+impl StepTracker {
+    fn new(current: &'static str) -> Self {
+        Self {
+            done: Vec::new(),
+            current,
+        }
+    }
+
+    fn advance(&mut self, next: &'static str) {
+        self.done.push(self.current);
+        self.current = next;
+    }
+
+    fn fail(&self, err: anyhow::Error) -> anyhow::Error {
+        let succeeded = if self.done.is_empty() {
+            "none".to_string()
+        } else {
+            self.done.join(", ")
+        };
+        anyhow::anyhow!(
+            "bootstrap failed at step '{}' (completed: {succeeded}): {err}\n\
+             Resume hint: re-run `gyre bootstrap` after fixing the issue; \
+             already-created resources keep their IDs and slugs, so \
+             re-running skips or fails gracefully on duplicates.",
+            self.current
+        )
+    }
+}
+
+async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
+    // ── Flag validation ──
+    if args.dev {
+        if args.tenant.is_some() {
+            anyhow::bail!("--dev cannot be combined with --tenant (dev mode uses tenant \"dev\")");
+        }
+        if args.workspace.is_some() {
+            anyhow::bail!(
+                "--dev cannot be combined with --workspace (dev mode uses workspace \"default\")"
+            );
+        }
+        if args.admin_user.is_some() {
+            anyhow::bail!("--dev cannot be combined with --admin-user (dev mode uses static tokens)");
+        }
+        if args.oidc_issuer.is_some() {
+            anyhow::bail!("--dev cannot be combined with --oidc-issuer (dev mode skips OIDC)");
+        }
+    } else if args.tenant.is_none() {
+        anyhow::bail!("--tenant is needed to name the tenant (or pass --dev for defaults)");
+    }
+
+    let repo_name = args.repo.clone().unwrap_or_else(|| "main".to_string());
+    let tenant_name = args.tenant.clone().unwrap_or_else(|| "dev".to_string());
+    let workspace_name = args.workspace.clone().unwrap_or_else(|| "default".to_string());
+    let repo_path = args.repo_path.as_deref().map(std::path::PathBuf::from);
+
+    let api = client::GyreClient::new(args.server.clone(), args.token.clone());
+    let mut summary = bootstrap::BootstrapSummary {
+        server_url: args.server.clone(),
+        repo_name: repo_name.clone(),
+        tenant_name: tenant_name.clone(),
+        workspace_name: workspace_name.clone(),
+        ..Default::default()
+    };
+
+    // ── Step 0: health check ──
+    println!("Checking server health at {}...", args.server);
+    let health = api.health().await?;
+    if health["status"].as_str() != Some("ok") {
+        anyhow::bail!("server health check returned unexpected status: {health}");
+    }
+    println!("  Server healthy (version {}).", health["version"].as_str().unwrap_or("?"));
+
+    let mut step = StepTracker::new("create tenant");
+
+    // ── Step 1: create tenant (resume: reuse existing by slug) ──
+    let tenant_slug = bootstrap::derive_slug(&tenant_name);
+    let tenant = match api
+        .create_tenant(&tenant_name, &tenant_slug, args.oidc_issuer.as_deref())
+        .await
+    {
+        Ok(t) => {
+            println!("  Tenant '{}' created ({})", t.name, t.id);
+            t
+        }
+        Err(create_err) => match api.find_tenant_by_slug(&tenant_slug).await {
+            Ok(Some(existing)) => {
+                println!("  Tenant '{}' already exists ({}) - reusing", existing.name, existing.id);
+                existing
+            }
+            _ => return Err(step.fail(create_err)),
+        },
+    };
+    summary.tenant_id = tenant.id.clone();
+
+    // ── Step 2: create admin user + API key (skipped in dev mode) ──
+    step.advance("create admin user");
+    let mut client_api = api;
+    if !args.dev {
+        let username = args.admin_user.as_deref().unwrap_or("admin");
+        match client_api.create_user(username).await {
+            Ok(created) => {
+                summary.admin_username = Some(created.user.username.clone());
+                summary.api_key = Some(created.api_key.key.clone());
+                // Save credentials to ~/.gyre/config for subsequent CLI calls.
+                let cfg = config::Config {
+                    server: args.server.clone(),
+                    token: Some(created.api_key.key.clone()),
+                    agent_id: Some(created.user.id.clone()),
+                    agent_name: Some(created.user.username.clone()),
+                };
+                cfg.save()?;
+                println!("  Admin user '{}' created; credentials saved to {}",
+                    created.user.username,
+                    config::Config::path().display());
+                // Continue authenticating as the new admin via its API key.
+                client_api =
+                    client::GyreClient::new(args.server.clone(), created.api_key.key.clone());
+            }
+            Err(e) => {
+                // Resume path: the user already exists from a prior run. The
+                // API key minted then was saved to ~/.gyre/config — reuse it.
+                let saved = config::Config::load().ok();
+                let reuse = saved
+                    .filter(|c| c.server == args.server)
+                    .and_then(|c| c.token)
+                    .filter(|t| !t.is_empty());
+                match reuse {
+                    Some(token) => {
+                        println!("  Admin user '{username}' already exists - reusing saved credentials");
+                        summary.admin_username = Some(username.to_string());
+                        client_api = client::GyreClient::new(args.server.clone(), token);
+                    }
+                    None => return Err(step.fail(e)),
+                }
+            }
+        }
+    }
+
+    // ── Step 3: create workspace (resume: reuse existing by name) ──
+    step.advance("create workspace");
+    let workspace = match client_api
+        .create_workspace(&summary.tenant_id, &workspace_name)
+        .await
+    {
+        Ok(ws) => {
+            println!("  Workspace '{}' created ({})", ws.name, ws.id);
+            ws
+        }
+        Err(create_err) => {
+            match client_api
+                .find_workspace_by_name(&summary.tenant_id, &workspace_name)
+                .await
+            {
+                Ok(Some(existing)) => {
+                    println!(
+                        "  Workspace '{}' already exists ({}) - reusing",
+                        existing.name, existing.id
+                    );
+                    existing
+                }
+                _ => return Err(step.fail(create_err)),
+            }
+        }
+    };
+    summary.workspace_id = workspace.id.clone();
+    step.advance("register repo");
+
+    // ── Step 4: add repo (resume: reuse existing by name) ──
+    let repo = match client_api.create_repo(&summary.workspace_id, &repo_name).await {
+        Ok(r) => {
+            println!("  Repo '{}' created ({})", r.name, r.id);
+            r
+        }
+        Err(create_err) => match client_api
+            .find_repo_by_name(&summary.workspace_id, &repo_name)
+            .await
+        {
+            Ok(Some(existing)) => {
+                println!("  Repo '{}' already exists ({}) - reusing", existing.name, existing.id);
+                existing
+            }
+            _ => return Err(step.fail(create_err)),
+        },
+    };
+    summary.repo_id = repo.id.clone();
+    summary.clone_url = repo.clone_url.clone();
+    step.advance("register personas");
+
+    // ── Step 5: register built-in personas (pre-approved; resume: skip existing) ──
+    for persona in bootstrap::BUILTIN_PERSONAS {
+        match client_api.find_persona_by_slug(persona.slug).await? {
+            Some(_) => {
+                println!("  Persona '{}' already registered - skipping", persona.slug);
+            }
+            None => {
+                let created = client_api
+                    .create_persona(
+                        persona.name,
+                        persona.slug,
+                        &summary.tenant_id,
+                        persona.prompt,
+                        persona.capabilities,
+                        persona.protocols,
+                    )
+                    .await
+                    .map_err(|e| step.fail(e))?;
+                client_api.approve_persona(&created.id).await.map_err(|e| step.fail(e))?;
+            }
+        }
+        summary.personas_registered.push(persona.slug.to_string());
+    }
+    println!(
+        "  {} personas registered and pre-approved",
+        bootstrap::BUILTIN_PERSONAS.len()
+    );
+    step.advance("init spec registry");
+
+    // ── Step 6: spec registry (report-only; sync happens on push) ──
+    match &repo_path {
+        Some(path) if path.join("specs").join("manifest.yaml").exists() => {
+            println!("  Spec manifest found at {} - ledger syncs on push to the default branch",
+                path.join("specs").join("manifest.yaml").display());
+        }
+        _ => println!("  No spec manifest found - spec registry stays empty until specs are pushed"),
+    }
+    if args.starter_kit {
+        let target = repo_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(&repo_name));
+        bootstrap::write_starter_kit(&target)?;
+        println!("  Starter kit written to {}", target.display());
+    }
+    step.advance("configure gates");
+
+    // ── Step 7: configure default gates ──
+    if let Some(path) = &repo_path {
+        for gate in bootstrap::detect_default_gates(path) {
+            client_api
+                .create_gate(&summary.repo_id, gate.name, gate.gate_type, gate.command)
+                .await
+                .map_err(|e| step.fail(e))?;
+            summary.gates_configured.push(gate.name.to_string());
+        }
+    }
+    if summary.gates_configured.is_empty() {
+        println!("  No default gates detected (no Cargo.toml or check-arch.sh in repo path)");
+    } else {
+        println!("  Gates configured: {}", summary.gates_configured.join(", "));
+    }
+    step.advance("spawn repo orchestrator");
+
+    // ── Step 8: spawn repo orchestrator ──
+    // Task-093 endpoint: repo-tier orchestrator with exactly-one-live
+    // semantics, repo-scoped JWT, and restart-on-failure — no synthetic task.
+    let orchestrator_name = format!("{repo_name}-orchestrator");
+    match client_api
+        .spawn_repo_orchestrator(&summary.repo_id, Some(&orchestrator_name))
+        .await
+    {
+        Ok(client::SpawnRepoOrchestratorOutcome::Spawned(spawned)) => {
+            summary.orchestrator_agent_id = Some(spawned.agent.id.clone());
+        }
+        Ok(client::SpawnRepoOrchestratorOutcome::AlreadyLive) => {
+            println!("  A repo orchestrator is already active for this repo - keeping it");
+        }
+        Err(e) => return Err(step.fail(e)),
+    }
+    step.advance("done");
+
+    // ── Step 9: summary ──
+    println!();
+    print!("{}", summary.render());
+    Ok(())
+}
+
 /// Infer workspace slug and repo name from the git remote URL.
 /// Gyre git URLs have the form: {server}/git/{workspace_slug}/{repo_name}.git
 fn infer_repo_from_git_remote() -> Option<(String, String)> {
@@ -1933,6 +2300,101 @@ mod tests {
             assert_eq!(token, DEFAULT_TOKEN);
         } else {
             panic!("Expected Init");
+        }
+    }
+
+    #[test]
+    fn cli_bootstrap_parses_with_defaults() {
+        let args = Cli::try_parse_from(["gyre", "bootstrap", "--tenant", "Acme Corp"]);
+        assert!(args.is_ok());
+        if let Commands::Bootstrap {
+            server,
+            token,
+            tenant,
+            workspace,
+            repo,
+            repo_path,
+            admin_user,
+            oidc_issuer,
+            dev,
+            starter_kit,
+        } = args.unwrap().command
+        {
+            assert_eq!(token.as_deref(), None);
+            assert_eq!(server, "http://localhost:3000");
+            assert_eq!(tenant.as_deref(), Some("Acme Corp"));
+            assert!(workspace.is_none());
+            assert!(repo.is_none());
+            assert!(repo_path.is_none());
+            assert!(admin_user.is_none());
+            assert!(oidc_issuer.is_none());
+            assert!(!dev);
+            assert!(!starter_kit);
+        } else {
+            panic!("Expected Bootstrap");
+        }
+    }
+
+    #[test]
+    fn cli_bootstrap_parses_all_flags() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "bootstrap",
+            "--server",
+            "http://boothost:9100",
+            "--token",
+            "boot-tok",
+            "--tenant",
+            "Acme Corp",
+            "--workspace",
+            "Platform Team",
+            "--repo",
+            "gyre",
+            "--repo-path",
+            "/tmp/checkout",
+            "--admin-user",
+            "jsell",
+            "--oidc-issuer",
+            "https://sso.acme.test",
+            "--starter-kit",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Bootstrap {
+            server,
+            token,
+            tenant,
+            workspace,
+            repo,
+            repo_path,
+            admin_user,
+            oidc_issuer,
+            dev,
+            starter_kit,
+        } = args.unwrap().command
+        {
+            assert_eq!(server, "http://boothost:9100");
+            assert_eq!(token.as_deref(), Some("boot-tok"));
+            assert_eq!(tenant.as_deref(), Some("Acme Corp"));
+            assert_eq!(workspace.as_deref(), Some("Platform Team"));
+            assert_eq!(repo.as_deref(), Some("gyre"));
+            assert_eq!(repo_path.as_deref(), Some("/tmp/checkout"));
+            assert_eq!(admin_user.as_deref(), Some("jsell"));
+            assert_eq!(oidc_issuer.as_deref(), Some("https://sso.acme.test"));
+            assert!(!dev);
+            assert!(starter_kit);
+        } else {
+            panic!("Expected Bootstrap");
+        }
+    }
+
+    #[test]
+    fn cli_bootstrap_dev_mode_parses() {
+        let args = Cli::try_parse_from(["gyre", "bootstrap", "--dev"]);
+        assert!(args.is_ok());
+        if let Commands::Bootstrap { dev, .. } = args.unwrap().command {
+            assert!(dev);
+        } else {
+            panic!("Expected Bootstrap");
         }
     }
 
