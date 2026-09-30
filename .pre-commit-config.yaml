@@ -475,6 +475,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: relative-path-defaults
+        name: relative path defaults lint
+        description: Detect relative "./..." path literals fed to subprocesses or stored at rest
+        entry: scripts/check-relative-path-defaults.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

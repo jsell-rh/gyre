@@ -50,6 +50,7 @@ See [docs/server-config.md](docs/server-config.md) for all configuration options
 - Every new migration MUST use the next unused 6-digit sequence number (`ls crates/gyre-adapters/migrations/ | sort | tail -3`); duplicate versions silently never run (`scripts/check-migration-versions.sh`).
 - Every `MessageKind` variant MUST have an emitter — a kind that is never constructed is a dead spec delivery link (`scripts/check-dead-message-kinds.sh`).
 - Never slice strings at fixed byte indexes (`&s[..N]`) — panics on non-char-boundary UTF-8 (`scripts/check-byte-slice-truncation.sh`).
+- Never store or pass relative `"./..."` path literals that a child process or filesystem consumer will resolve — canonicalize at rest or at the call site (`scripts/check-relative-path-defaults.sh`); relative defaults break default deployments while absolute-tempdir tests stay green.
 
 These checks have exemption files (`scripts/*-exemptions.txt`) for pre-existing violations; never add new entries.
 

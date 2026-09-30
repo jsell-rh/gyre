@@ -1,0 +1,22 @@
+# Relative-path-defaults exemptions
+# One `path:line` per line (relative to repo root), `#` starts a comment.
+# These are PRE-EXISTING "./..." string literals in non-test Rust.
+#
+# IMPORTANT: every entry below is a real R2-F6-class hazard (a relative
+# path a child process or the filesystem will resolve against an
+# unpredictable cwd), NOT a false positive. They are exempted only so the
+# check runs green on main while their fixes are owned by the tasks below.
+# When you fix one, DELETE its exemption line — do not leave it behind.
+#
+# See: specs/reviews/task-106.md R2 F6 (the finding that created this check)
+#
+# --- task-106 revision round owns these (repos_root / repo.path) ---
+crates/gyre-server/src/lib.rs:1042        # repos_root default "./repos" — F6 root cause; stored verbatim into repo.path
+crates/gyre-server/src/main.rs:35         # GYRE_REPOS_PATH default "./repos" — F6 root cause; only create_dir_all'd, never canonicalized
+# --- unowned; fix opportunistically when touching these files ---
+crates/gyre-adapters/src/sqlite/conversation.rs:191   # GYRE_CONVERSATIONS_PATH default "./conversations" — relative at rest
+crates/gyre-server/src/api/spawn.rs:597   # comment quoting the "./repos/" default in prose — not a path value; canonicalize call lives at :598-600
+crates/gyre-server/src/snapshot.rs:9                  # DEFAULT_SNAPSHOT_PATH "./snapshots" — relative at rest
+crates/gyre-server/src/api/admin.rs:451               # seed repo path "./repos/default/gyre-core.git" — relative seed data
+crates/gyre-server/src/api/admin.rs:458               # seed repo path "./repos/default/gyre-web.git" — relative seed data
+crates/gyre-server/src/api/admin.rs:465               # seed repo path "./repos/default/infra-config.git" — relative seed data
