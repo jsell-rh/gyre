@@ -1,8 +1,8 @@
 # Coverage: User Management & Notifications
 
 **Spec:** [`system/user-management.md`](../../system/user-management.md)
-**Last audited:** 2026-04-13
-**Coverage:** 0/36 (9 n/a)
+**Last audited:** 2026-09-29 (full audit — all 10 `n/a` rows spot-checked correct: Problem/Notifications-Problem are context, Notifications/"My Stuff"/API are heading-only, Remaining-Gaps subsections explicitly "Not Yet Specced" per spec, Relationship is cross-reference, M22.8 Baseline is a status assessment with no implementable requirement. All 26 task-assigned rows verified against existing not-started task files (task-110/111/112/113/114/120/121/122/123/124/125/126/127/208). Row 22/23 supersession notes confirmed current — spec §"My Stuff" still carries My Dashboard content pending task-208's amendment. Header n/a count corrected 9→10. No status changes: 0 implemented, 0 verified rows in file.)
+**Coverage:** 0/36 (10 n/a, 0 not-started, 26 task-assigned, 0 implemented, 0 verified)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
