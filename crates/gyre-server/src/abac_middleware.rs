@@ -688,9 +688,25 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
     ]
 }
 
+/// TASK-077 (HSI §2): the immutable `builtin:require-human-spec-approval`
+/// policy lives in the domain builtin set
+/// (`gyre_domain::builtin_policies`) — that set is the single source of truth
+/// for its definition. Only this policy is spliced into the startup seed:
+/// the remaining domain-set policies are owned by their own task-specific
+/// seeding flows and enabling them here would change authorization behavior
+/// beyond TASK-077's scope.
+fn domain_builtin_policies() -> Vec<Policy> {
+    gyre_domain::builtin_policies("system")
+        .into_iter()
+        .filter(|p| p.name == "builtin:require-human-spec-approval")
+        .collect()
+}
+
 /// Seed built-in M34 policies into the policy store at startup. Idempotent.
 pub async fn seed_builtin_policies(state: &Arc<AppState>) {
-    for policy in m34_builtin_policies() {
+    let mut policies = m34_builtin_policies();
+    policies.extend(domain_builtin_policies());
+    for policy in policies {
         match state.policies.find_by_id(&policy.id.to_string()).await {
             Ok(None) => {
                 if let Err(e) = state.policies.create(&policy).await {
@@ -799,6 +815,12 @@ pub async fn abac_middleware(
     let action = action_override.unwrap_or_else(|| method_to_action(&method));
 
     // Load policies and evaluate.
+    // Policies are loaded from the shared store on EVERY request — there is
+    // no ABAC policy-result cache in gyre-server (only JWKS / graph /
+    // dep-staleness caches exist, none of which cache policy decisions).
+    // Trust-level transitions write workspace row + trust: policies through
+    // this same store in one transaction, so any transition is visible to the
+    // next request with no cache invalidation needed (TASK-077 review note).
     let policies = state.policies.list().await.unwrap_or_default();
     let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
 
@@ -1137,5 +1159,37 @@ pub mod tests {
         assert!(rsa.actions.contains(&"push".to_string()));
         assert!(rsa.actions.contains(&"merge".to_string()));
         assert!(rsa.resource_types.contains(&"attestation".to_string()));
+    }
+
+    /// TASK-077 (HSI §2): `builtin:require-human-spec-approval` must be
+    /// seeded at server startup, immutable, and idempotent across restarts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn builtin_require_human_spec_approval_seeded() {
+        let state = test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state));
+            h.block_on(seed_builtin_policies(&state)); // idempotent
+        });
+
+        let policies = state.policies.list().await.unwrap();
+        let p = policies
+            .iter()
+            .find(|p| p.name == "builtin:require-human-spec-approval")
+            .expect("builtin:require-human-spec-approval must be seeded");
+
+        assert_eq!(p.priority, 999);
+        assert!(p.immutable, "must be immutable");
+        assert!(p.built_in, "must be built-in");
+        assert_eq!(p.effect, PolicyEffect::Deny);
+        assert_eq!(p.actions, vec!["approve".to_string()]);
+        assert_eq!(p.resource_types, vec!["spec".to_string()]);
+
+        // Not duplicated by the second seed call.
+        let count = policies
+            .iter()
+            .filter(|p| p.name == "builtin:require-human-spec-approval")
+            .count();
+        assert_eq!(count, 1);
     }
 }

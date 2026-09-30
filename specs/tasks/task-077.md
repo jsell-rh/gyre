@@ -2,7 +2,7 @@
 title: "HSI Trust Gradient — Trust Levels, Enforcement & Mechanical Implementation"
 spec_ref: "human-system-interface.md §9–13"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-077.md
 coverage_sections:
   - "human-system-interface.md §9 2. Trust Gradient"
@@ -10,7 +10,7 @@ coverage_sections:
   - "human-system-interface.md §11 Trust Levels"
   - "human-system-interface.md §12 What Each Level Controls"
   - "human-system-interface.md §13 Mechanical Implementation"
-commits: ["1d599ac9"]
+commits: ["1d599ac9", "32edb3f1", "931c0c57"]
 ---
 
 ## Spec Excerpt
