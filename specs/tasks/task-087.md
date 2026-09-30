@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Test-Time Trace Capture"
-commits: [efb14033, 6a1fed9d]
+commits: [998a3518, 4c868136]
 ---
 
 ## Spec Excerpt
