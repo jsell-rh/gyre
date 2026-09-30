@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Schema"
-commits: ["4aaad27543b81ac3d02e9102242d5a4b6419dd10"]
+commits: ["4bd9e6cd9767a24aaa00850054415fe4e7f7d314"]
 ---
 
 ## Spec Excerpt
