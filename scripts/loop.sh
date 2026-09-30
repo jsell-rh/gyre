@@ -103,7 +103,7 @@ wt_guard_restore() {
     # Modified and deleted paths are handled separately: deleted paths have
     # no entry in the stash tree, and one bad pathspec fails the whole
     # checkout, which would fall through to rm-ing the modified WIP.
-    local _mods _dels _st
+    local _mods="" _dels="" _st
     while IFS=$'\t' read -r _st _paths; do
       case "$_st" in
         D) _dels="$_dels $_paths" ;;
@@ -191,6 +191,16 @@ spawn_worker() {
   local task_name
   task_name=$(basename "$task_file" .md)
   local worktree="$WORKTREE_BASE/$task_name"
+  # Orphan adoption: a worker from a previous loop instance may still be
+  # running in this worktree (loop restarts don't kill workers, and the
+  # loop's own EXIT trap only detaches worktrees that are registered in
+  # ACTIVE_WORKERS). Never steal or remove its worktree — register it so
+  # the normal merge/monitor cycle picks it up when it finishes.
+  if pgrep -f "$worktree" >/dev/null 2>&1; then
+    log "    Worker for $task_name already running (orphan from prior loop) — adopting"
+    ACTIVE_WORKERS[$task_name]="$worktree"
+    return 0
+  fi
 
   # Drop registrations for worktree directories that no longer exist on
   # disk (e.g. after a crash or manual cleanup). Without this, a prunable
@@ -224,6 +234,19 @@ spawn_worker() {
     fi
   fi
 
+  # Execute a frozen COPY of the worker script, not
+  # $REPO_ROOT/scripts/worker.sh. Bash pre-parses the whole `while…done`
+  # loop at parse time but reads the epilogue (after `done`) from a byte
+  # offset — if the main script is rewritten mid-run (e.g. committed fixes
+  # while workers are in-flight), bash re-reads from a stale offset in the
+  # now-longer file and the worker dies silently at loop exit (no epilogue
+  # log, no .done, tmux window just vanishes). The copy is written once at
+  # spawn time under /tmp (outside the worktree so worker agents can't
+  # `git add -A` it into a commit) and never rewritten, so workers are
+  # immune to mid-run edits of the main script.
+  local worker_copy="/tmp/gyre-worker-$task_name.sh"
+  cp "$REPO_ROOT/scripts/worker.sh" "$worker_copy" && chmod +x "$worker_copy"
+
   log ">>> Spawning worker: $task_name (worktree: $worktree)"
 
   # Ensure the loop's tmux session exists (new-window needs a running server)
@@ -231,19 +254,17 @@ spawn_worker() {
     tmux has-session -t "$TMUX_SESSION" 2>/dev/null || \
       tmux new-session -d -s "$TMUX_SESSION" "exec sleep infinity"
   fi
-
   if command -v tmux >/dev/null 2>&1 && \
      tmux new-window -t "$TMUX_SESSION" -n "$task_name" \
-       "bash '$REPO_ROOT/scripts/worker.sh' '$task_file' '$worktree'; echo 'Worker $task_name exited'; sleep 5"; then
+       "bash '/tmp/gyre-worker-$task_name.sh' '$task_file' '$worktree'; echo 'Worker $task_name exited'; sleep 5"; then
     :
   else
     # No tmux (or window spawn failed) — run the worker as a background
-    # process. Output goes to the worker's own .worker.log and
-    # /tmp/gyre-loop.log (see worker.sh log()).
-    log "    (tmux unavailable — backgrounding worker)"
-    nohup bash "$REPO_ROOT/scripts/worker.sh" "$task_file" "$worktree" \
+    nohup bash "/tmp/gyre-worker-$task_name.sh" "$task_file" "$worktree" \
       > "$worktree/.spawn.log" 2>&1 &
+    log "    (tmux unavailable — backgrounding worker)"
   fi
+
 
   ACTIVE_WORKERS[$task_name]="$worktree"
   return 0
@@ -275,9 +296,12 @@ merge_worker() {
     if [ -n "$conflicts" ]; then
       log "    !!! Unresolvable conflicts in: $conflicts"
       git merge --abort 2>/dev/null
-      log "    Merge aborted for $task_name — will retry next cycle"
+      # Keep the branch: the respawn path in spawn_worker reuses branches
+      # with unmerged commits ("Reusing branch worker/$task_name"), so the
+      # next cycle's worker re-rebases onto the new main and retries the
+      # merge. Deleting the branch here would lose all the work.
+      log "    Merge aborted for $task_name — branch kept for retry via respawn"
       git worktree remove "$worktree" --force 2>/dev/null
-      git branch -D "$branch" 2>/dev/null
       unset "ACTIVE_WORKERS[$task_name]"
       return 1
     fi
@@ -295,13 +319,28 @@ merge_worker() {
 
 cleanup_all() {
   log "Loop exiting — detaching worktrees (branches preserved for recovery)"
+  local task_name worktree live
   for task_name in "${!ACTIVE_WORKERS[@]}"; do
-    local worktree="${ACTIVE_WORKERS[$task_name]}"
+    worktree="${ACTIVE_WORKERS[$task_name]}"
+    # Never delete a worktree that still has a live worker process in it —
+    # rm -rf on a live agent's cwd kills it mid-run (observed: task-106's
+    # round-5 verifier had its worktree deleted under it by this path).
+    # Orphan the worker instead; a restarted loop adopts it via the
+    # orphan-adoption guard in spawn_worker.
+    live=$(pgrep -f "$worktree" | head -1)
+    if [ -n "$live" ]; then
+      log "    Worker for $task_name still live (pid $live) — orphaning, NOT deleting its worktree"
+      unset "ACTIVE_WORKERS[$task_name]"
+      continue
+    fi
     git worktree remove "$worktree" --force 2>/dev/null
     # Intentionally NOT deleting worker branches — commits are preserved
     log "    Detached worktree for $task_name (branch worker/$task_name intact)"
   done
-  rm -rf "$WORKTREE_BASE" 2>/dev/null
+  # Only sweep the base dir if no worker process remains anywhere under it
+  if ! pgrep -f "$WORKTREE_BASE" >/dev/null 2>&1; then
+    rm -rf "$WORKTREE_BASE" 2>/dev/null
+  fi
 }
 trap cleanup_all EXIT
 
