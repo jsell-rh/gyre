@@ -2,10 +2,10 @@
 title: "Business Continuity §5 — Data Retention: Real Enforcement for All 7 Data Types"
 spec_ref: "business-continuity.md §5. Data Retention Policies"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "business-continuity.md §5. Data Retention Policies"
-commits: []
+commits: [6a908460]
 ---
 
 ## Spec Excerpt
