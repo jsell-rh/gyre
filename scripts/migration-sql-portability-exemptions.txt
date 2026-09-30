@@ -1,0 +1,29 @@
+# migration-sql-portability-exemptions.txt — legacy dialect-only SQL
+#
+# Each entry line: <path>:<line>
+#
+# Sites flagged by specs/reviews/task-102.md F1. The migrations
+# directory is embedded once and executed by BOTH storage backends
+# (sqlite and postgres adapters embed the same dir), so a statement
+# that runs on only one backend breaks the other at startup. These
+# are product code; the process revision round cannot change
+# crates/ — the portable-SQL rewrite is owned by task-102's revision
+# round. This file exists so the check can land BEFORE the product
+# fix without being born red.
+#
+# FROZEN at 5 entries. It must SHRINK, never grow:
+#   - Fix a site by rewriting the statement in portable SQL (CASE
+#     WHEN + string concatenation, ON CONFLICT instead of INSERT OR
+#     ...) or splitting per-backend migration directories, then
+#     delete the line and lower FROZEN_EXEMPTION_COUNT in
+#     scripts/check-migration-sql-portability.sh.
+#   - NEVER add a new entry.
+#
+# 2026-03-24-000013/down.sql:15 — pre-existing INSERT OR IGNORE (noted by the task-102 review as pre-existing PG breakage).
+crates/gyre-adapters/migrations/2026-03-24-000013_remove_projects/down.sql:15
+# 2026-09-30-000054/up.sql:37 — json_patch/json_object SQLite JSON1 (F1 headline; introduced by renumber commit f1340baf reproducing SQLite-only SQL).
+crates/gyre-adapters/migrations/2026-09-30-000054_audit_event_envelope/up.sql:37
+# 2026-09-30-000054/down.sql:20-22 — json_extract/json_remove SQLite JSON1 (F1).
+crates/gyre-adapters/migrations/2026-09-30-000054_audit_event_envelope/down.sql:20
+crates/gyre-adapters/migrations/2026-09-30-000054_audit_event_envelope/down.sql:21
+crates/gyre-adapters/migrations/2026-09-30-000054_audit_event_envelope/down.sql:22

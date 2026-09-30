@@ -530,6 +530,29 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: migration-sql-portability
+        name: migration SQL portability lint
+        description: Detect dialect-only SQL (SQLite JSON1, INSERT OR IGNORE, PG-only jsonb/casts) in the shared embedded migrations dir
+        entry: scripts/check-migration-sql-portability.sh
+        language: script
+        pass_filenames: false
+
+      - id: forged-scope-fields
+        name: unguarded req scope-field lint
+        description: Detect req.tenant_id/workspace_id/repo_id reads in authenticated handlers without a caller-scope guard
+        entry: scripts/check-forged-scope-fields.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: forwarded-header-trust
+        name: ungated forwarded-header lint
+        description: Detect X-Forwarded-For/X-Real-Ip/Forwarded header reads without a trusted-proxy gate
+        entry: scripts/check-forwarded-header-trust.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

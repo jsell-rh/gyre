@@ -1,0 +1,23 @@
+# forwarded-header-trust-exemptions.txt — legacy ungated forwarded-header reads
+#
+# Each entry line: <path>:<line>
+#
+# These are the two record_audit_event sites flagged by
+# specs/reviews/task-102.md F3. They are product code; the process
+# revision round cannot change crates/ — the trusted-proxy gate /
+# socket-peer fix is owned by task-102's revision round. This file
+# exists so the check can land BEFORE the product fix without being
+# born red.
+#
+# FROZEN at 2 entries. It must SHRINK, never grow:
+#   - Fix a site by recording the socket peer address
+#     (ConnectInfo<SocketAddr>) and honoring X-Forwarded-For /
+#     X-Real-Ip only when the immediate peer is a configured trusted
+#     proxy, then delete the lines here and lower
+#     FROZEN_EXEMPTION_COUNT in scripts/check-forwarded-header-trust.sh.
+#   - NEVER add a new entry.
+#
+# crates/gyre-server/src/api/audit.rs:114 — X-Forwarded-For read, first hop, no proxy gate (F3 headline).
+crates/gyre-server/src/api/audit.rs:114
+# crates/gyre-server/src/api/audit.rs:121 — X-Real-Ip fallback read, no proxy gate (F3).
+crates/gyre-server/src/api/audit.rs:121
