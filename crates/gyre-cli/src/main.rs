@@ -67,9 +67,10 @@ enum Commands {
         /// Gyre server base URL
         #[arg(long, default_value = "http://localhost:3000")]
         server: String,
-        /// Token used to authenticate bootstrap API calls (dev/system token)
-        #[arg(long, default_value = DEFAULT_TOKEN)]
-        token: String,
+        /// Token used to authenticate bootstrap API calls. Defaults to
+        /// $GYRE_AUTH_TOKEN when set, else the static dev token.
+        #[arg(long)]
+        token: Option<String>,
         /// Tenant display name (e.g. "Acme Corp")
         #[arg(long)]
         tenant: Option<String>,
@@ -449,6 +450,11 @@ async fn main() -> Result<()> {
             dev,
             starter_kit,
         } => {
+            // GYRE_AUTH_TOKEN pattern (server-config.md): explicit flag >
+            // env > static dev token.
+            let token = token
+                .or_else(|| std::env::var("GYRE_AUTH_TOKEN").ok())
+                .unwrap_or_else(|| DEFAULT_TOKEN.to_string());
             run_bootstrap(BootstrapArgs {
                 server,
                 token,
@@ -1428,73 +1434,141 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
 
     let mut step = StepTracker::new("create tenant");
 
-    // ── Step 1: create tenant ──
+    // ── Step 1: create tenant (resume: reuse existing by slug) ──
     let tenant_slug = bootstrap::derive_slug(&tenant_name);
-    let tenant = api
+    let tenant = match api
         .create_tenant(&tenant_name, &tenant_slug, args.oidc_issuer.as_deref())
         .await
-        .map_err(|e| step.fail(e))?;
+    {
+        Ok(t) => {
+            println!("  Tenant '{}' created ({})", t.name, t.id);
+            t
+        }
+        Err(create_err) => match api.find_tenant_by_slug(&tenant_slug).await {
+            Ok(Some(existing)) => {
+                println!("  Tenant '{}' already exists ({}) - reusing", existing.name, existing.id);
+                existing
+            }
+            _ => return Err(step.fail(create_err)),
+        },
+    };
     summary.tenant_id = tenant.id.clone();
-    println!("  Tenant '{}' created ({})", tenant.name, tenant.id);
-    step.advance("create workspace");
 
     // ── Step 2: create admin user + API key (skipped in dev mode) ──
+    step.advance("create admin user");
     let mut client_api = api;
     if !args.dev {
-        step.advance("create admin user");
         let username = args.admin_user.as_deref().unwrap_or("admin");
-        let created = client_api.create_user(username).await.map_err(|e| step.fail(e))?;
-        summary.admin_username = Some(created.user.username.clone());
-        summary.api_key = Some(created.api_key.key.clone());
-        // Save credentials to ~/.gyre/config for subsequent CLI calls.
-        let cfg = config::Config {
-            server: args.server.clone(),
-            token: Some(created.api_key.key.clone()),
-            agent_id: Some(created.user.id.clone()),
-            agent_name: Some(created.user.username.clone()),
-        };
-        cfg.save()?;
-        println!("  Admin user '{}' created; credentials saved to {}",
-            created.user.username,
-            config::Config::path().display());
-        // Continue authenticating as the new admin via its API key.
-        client_api = client::GyreClient::new(args.server.clone(), created.api_key.key.clone());
+        match client_api.create_user(username).await {
+            Ok(created) => {
+                summary.admin_username = Some(created.user.username.clone());
+                summary.api_key = Some(created.api_key.key.clone());
+                // Save credentials to ~/.gyre/config for subsequent CLI calls.
+                let cfg = config::Config {
+                    server: args.server.clone(),
+                    token: Some(created.api_key.key.clone()),
+                    agent_id: Some(created.user.id.clone()),
+                    agent_name: Some(created.user.username.clone()),
+                };
+                cfg.save()?;
+                println!("  Admin user '{}' created; credentials saved to {}",
+                    created.user.username,
+                    config::Config::path().display());
+                // Continue authenticating as the new admin via its API key.
+                client_api =
+                    client::GyreClient::new(args.server.clone(), created.api_key.key.clone());
+            }
+            Err(e) => {
+                // Resume path: the user already exists from a prior run. The
+                // API key minted then was saved to ~/.gyre/config — reuse it.
+                let saved = config::Config::load().ok();
+                let reuse = saved
+                    .filter(|c| c.server == args.server)
+                    .and_then(|c| c.token)
+                    .filter(|t| !t.is_empty());
+                match reuse {
+                    Some(token) => {
+                        println!("  Admin user '{username}' already exists - reusing saved credentials");
+                        summary.admin_username = Some(username.to_string());
+                        client_api = client::GyreClient::new(args.server.clone(), token);
+                    }
+                    None => return Err(step.fail(e)),
+                }
+            }
+        }
     }
-    step.advance("create workspace");
 
-    // ── Step 3: create workspace ──
-    let workspace = client_api
+    // ── Step 3: create workspace (resume: reuse existing by name) ──
+    step.advance("create workspace");
+    let workspace = match client_api
         .create_workspace(&summary.tenant_id, &workspace_name)
         .await
-        .map_err(|e| step.fail(e))?;
+    {
+        Ok(ws) => {
+            println!("  Workspace '{}' created ({})", ws.name, ws.id);
+            ws
+        }
+        Err(create_err) => {
+            match client_api
+                .find_workspace_by_name(&summary.tenant_id, &workspace_name)
+                .await
+            {
+                Ok(Some(existing)) => {
+                    println!(
+                        "  Workspace '{}' already exists ({}) - reusing",
+                        existing.name, existing.id
+                    );
+                    existing
+                }
+                _ => return Err(step.fail(create_err)),
+            }
+        }
+    };
     summary.workspace_id = workspace.id.clone();
-    println!("  Workspace '{}' created ({})", workspace.name, workspace.id);
     step.advance("register repo");
 
-    // ── Step 4: add repo ──
-    let repo = client_api
-        .create_repo(&summary.workspace_id, &repo_name)
-        .await
-        .map_err(|e| step.fail(e))?;
+    // ── Step 4: add repo (resume: reuse existing by name) ──
+    let repo = match client_api.create_repo(&summary.workspace_id, &repo_name).await {
+        Ok(r) => {
+            println!("  Repo '{}' created ({})", r.name, r.id);
+            r
+        }
+        Err(create_err) => match client_api
+            .find_repo_by_name(&summary.workspace_id, &repo_name)
+            .await
+        {
+            Ok(Some(existing)) => {
+                println!("  Repo '{}' already exists ({}) - reusing", existing.name, existing.id);
+                existing
+            }
+            _ => return Err(step.fail(create_err)),
+        },
+    };
     summary.repo_id = repo.id.clone();
     summary.clone_url = repo.clone_url.clone();
-    println!("  Repo '{}' created ({})", repo.name, repo.id);
     step.advance("register personas");
 
-    // ── Step 5: register built-in personas (pre-approved) ──
+    // ── Step 5: register built-in personas (pre-approved; resume: skip existing) ──
     for persona in bootstrap::BUILTIN_PERSONAS {
-        let created = client_api
-            .create_persona(
-                persona.name,
-                persona.slug,
-                &summary.tenant_id,
-                persona.prompt,
-                persona.capabilities,
-                persona.protocols,
-            )
-            .await
-            .map_err(|e| step.fail(e))?;
-        client_api.approve_persona(&created.id).await.map_err(|e| step.fail(e))?;
+        match client_api.find_persona_by_slug(persona.slug).await? {
+            Some(_) => {
+                println!("  Persona '{}' already registered - skipping", persona.slug);
+            }
+            None => {
+                let created = client_api
+                    .create_persona(
+                        persona.name,
+                        persona.slug,
+                        &summary.tenant_id,
+                        persona.prompt,
+                        persona.capabilities,
+                        persona.protocols,
+                    )
+                    .await
+                    .map_err(|e| step.fail(e))?;
+                client_api.approve_persona(&created.id).await.map_err(|e| step.fail(e))?;
+            }
+        }
         summary.personas_registered.push(persona.slug.to_string());
     }
     println!(
@@ -1538,21 +1612,21 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     step.advance("spawn repo orchestrator");
 
     // ── Step 8: spawn repo orchestrator ──
+    // Task-093 endpoint: repo-tier orchestrator with exactly-one-live
+    // semantics, repo-scoped JWT, and restart-on-failure — no synthetic task.
     let orchestrator_name = format!("{repo_name}-orchestrator");
-    let task = client_api
-        .create_task(
-            &format!("Orchestrate repo {repo_name}"),
-            &summary.workspace_id,
-            &summary.repo_id,
-        )
+    match client_api
+        .spawn_repo_orchestrator(&summary.repo_id, Some(&orchestrator_name))
         .await
-        .map_err(|e| step.fail(e))?;
-    let default_branch = repo.default_branch.clone().unwrap_or_else(|| "main".to_string());
-    let spawn_resp = client_api
-        .spawn_agent(&orchestrator_name, &summary.repo_id, &task.id, &default_branch)
-        .await
-        .map_err(|e| step.fail(e))?;
-    summary.orchestrator_agent_id = spawn_resp["agent"]["id"].as_str().map(String::from);
+    {
+        Ok(client::SpawnRepoOrchestratorOutcome::Spawned(spawned)) => {
+            summary.orchestrator_agent_id = Some(spawned.agent.id.clone());
+        }
+        Ok(client::SpawnRepoOrchestratorOutcome::AlreadyLive) => {
+            println!("  A repo orchestrator is already active for this repo - keeping it");
+        }
+        Err(e) => return Err(step.fail(e)),
+    }
     step.advance("done");
 
     // ── Step 9: summary ──
@@ -2246,7 +2320,7 @@ mod tests {
             starter_kit,
         } = args.unwrap().command
         {
-            assert_eq!(token, DEFAULT_TOKEN);
+            assert_eq!(token.as_deref(), None);
             assert_eq!(server, "http://localhost:3000");
             assert_eq!(tenant.as_deref(), Some("Acme Corp"));
             assert!(workspace.is_none());
@@ -2299,7 +2373,7 @@ mod tests {
         } = args.unwrap().command
         {
             assert_eq!(server, "http://boothost:9100");
-            assert_eq!(token, "boot-tok");
+            assert_eq!(token.as_deref(), Some("boot-tok"));
             assert_eq!(tenant.as_deref(), Some("Acme Corp"));
             assert_eq!(workspace.as_deref(), Some("Platform Team"));
             assert_eq!(repo.as_deref(), Some("gyre"));

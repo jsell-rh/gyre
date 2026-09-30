@@ -111,6 +111,28 @@ pub struct CreatedApiKey {
     pub name: String,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct SpawnOrchestratorResponse {
+    /// Flattened agent summary (id, name, orchestrator_type, ...).
+    pub agent: SpawnOrchestratorAgent,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SpawnOrchestratorAgent {
+    pub id: String,
+    #[allow(dead_code)]
+    pub name: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub orchestrator_type: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub repo_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub restart_on_failure: Option<bool>,
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Percent-encode a spec path for use as a single URL path segment.
@@ -931,6 +953,99 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing tenant response")
     }
 
+    /// GET /api/v1/tenants - find an existing tenant by slug (resume path:
+    /// bootstrap re-runs skip creation when the tenant already exists).
+    pub async fn find_tenant_by_slug(&self, slug: &str) -> Result<Option<TenantResponse>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/tenants", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list tenants failed (HTTP {status}): {text}");
+        }
+        let tenants: Vec<TenantResponse> =
+            serde_json::from_str(&text).context("parsing tenant list")?;
+        Ok(tenants.into_iter().find(|t| t.slug == slug))
+    }
+
+    /// GET /api/v1/workspaces?tenant_id=... - find an existing workspace by
+    /// name within a tenant (resume path for bootstrap re-runs).
+    pub async fn find_workspace_by_name(
+        &self,
+        tenant_id: &str,
+        name: &str,
+    ) -> Result<Option<WorkspaceResponse>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/workspaces?tenant_id={}",
+                self.base_url, tenant_id
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list workspaces failed (HTTP {status}): {text}");
+        }
+        let workspaces: Vec<WorkspaceResponse> =
+            serde_json::from_str(&text).context("parsing workspace list")?;
+        Ok(workspaces.into_iter().find(|w| w.name == name))
+    }
+
+    /// GET /api/v1/repos?workspace_id=... - find an existing repo by name
+    /// within a workspace (resume path for bootstrap re-runs).
+    pub async fn find_repo_by_name(
+        &self,
+        workspace_id: &str,
+        name: &str,
+    ) -> Result<Option<RepoResponse>> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/repos?workspace_id={}",
+                self.base_url, workspace_id
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list repos failed (HTTP {status}): {text}");
+        }
+        let repos: Vec<RepoResponse> = serde_json::from_str(&text).context("parsing repo list")?;
+        Ok(repos.into_iter().find(|r| r.name == name))
+    }
+
+    /// GET /api/v1/personas - find an existing persona by slug (resume path:
+    /// bootstrap re-runs skip re-registering built-in personas).
+    pub async fn find_persona_by_slug(&self, slug: &str) -> Result<Option<PersonaResponse>> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/personas", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("list personas failed (HTTP {status}): {text}");
+        }
+        let personas: Vec<PersonaResponse> =
+            serde_json::from_str(&text).context("parsing persona list")?;
+        Ok(personas.into_iter().find(|p| p.slug == slug))
+    }
+
     /// POST /api/v1/users - create the admin user; response contains the
     /// API key exactly once.
     pub async fn create_user(&self, username: &str) -> Result<CreateUserResponse> {
@@ -1079,23 +1194,24 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing gate response")
     }
 
-    /// POST /api/v1/tasks - create the orchestrator's initial task.
-    /// task_type must be "implementation" or agent spawning is rejected.
-    pub async fn create_task(
+    /// POST /api/v1/repos/:id/orchestrator/spawn - spawn the repo-tier
+    /// orchestrator for the bootstrapped repo (platform-model.md §8 step 8,
+    /// endpoint from task-093). 409 when a live one already exists.
+    pub async fn spawn_repo_orchestrator(
         &self,
-        title: &str,
-        workspace_id: &str,
         repo_id: &str,
-    ) -> Result<TaskResponse> {
-        let body = serde_json::json!({
-            "title": title,
-            "task_type": "implementation",
-            "workspace_id": workspace_id,
-            "repo_id": repo_id,
-        });
+        name: Option<&str>,
+    ) -> Result<SpawnRepoOrchestratorOutcome> {
+        let mut body = serde_json::json!({});
+        if let Some(n) = name {
+            body["name"] = serde_json::Value::String(n.to_string());
+        }
         let resp = self
             .client
-            .post(format!("{}/api/v1/tasks", self.base_url))
+            .post(format!(
+                "{}/api/v1/repos/{repo_id}/orchestrator/spawn",
+                self.base_url
+            ))
             .header("Authorization", self.auth_header())
             .json(&body)
             .send()
@@ -1103,47 +1219,23 @@ impl GyreClient {
             .context("connecting to Gyre server")?;
         let status = resp.status();
         let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("create task failed (HTTP {status}): {text}");
+        if status == reqwest::StatusCode::CONFLICT {
+            return Ok(SpawnRepoOrchestratorOutcome::AlreadyLive);
         }
-        serde_json::from_str(&text).context("parsing task response")
+        if !status.is_success() {
+            anyhow::bail!("spawn repo orchestrator failed (HTTP {status}): {text}");
+        }
+        let parsed: SpawnOrchestratorResponse =
+            serde_json::from_str(&text).context("parsing repo orchestrator response")?;
+        Ok(SpawnRepoOrchestratorOutcome::Spawned(parsed))
     }
+}
 
-    /// POST /api/v1/agents/spawn - spawn the repo orchestrator agent.
-    pub async fn spawn_agent(
-        &self,
-        name: &str,
-        repo_id: &str,
-        task_id: &str,
-        branch: &str,
-    ) -> Result<serde_json::Value> {
-        let body = serde_json::json!({
-            "name": name,
-            "repo_id": repo_id,
-            "task_id": task_id,
-            "branch": branch,
-            "loop_config": {
-                "agent_review": true,
-                "reviewer_persona_id": null,
-                "max_iterations": 50,
-                "max_review_rejections": 5,
-            },
-        });
-        let resp = self
-            .client
-            .post(format!("{}/api/v1/agents/spawn", self.base_url))
-            .header("Authorization", self.auth_header())
-            .json(&body)
-            .send()
-            .await
-            .context("connecting to Gyre server")?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("spawn agent failed (HTTP {status}): {text}");
-        }
-        serde_json::from_str(&text).context("parsing spawn agent response")
-    }
+/// Outcome of `spawn_repo_orchestrator`: fresh spawn, or a live orchestrator
+/// already exists for the repo (HTTP 409 — bootstrap resume path).
+pub enum SpawnRepoOrchestratorOutcome {
+    Spawned(SpawnOrchestratorResponse),
+    AlreadyLive,
 }
 
 #[cfg(test)]
@@ -1156,6 +1248,34 @@ mod tests {
         assert_eq!(c.base_url, "http://localhost:3333");
     }
 
+
+    #[test]
+    fn spawn_orchestrator_response_parses() {
+        // Exact shape from POST /api/v1/repos/:id/orchestrator/spawn after
+        // the server-side fix: flattened AgentResponse (with repo_id left
+        // None to avoid a duplicate key) + orchestrator fields + token.
+        let body = r#"{
+            "agent": {
+                "id": "0eea0f49-8faa-4b16-a020-6ec24913c197",
+                "name": "probe3",
+                "status": "active",
+                "parent_id": null,
+                "current_task_id": null,
+                "spawned_at": 1790770653,
+                "last_heartbeat": null,
+                "workspace_id": "ws",
+                "orchestrator_type": "repo_orchestrator",
+                "repo_id": "repo",
+                "restart_on_failure": true
+            },
+            "token": "jwt"
+        }"#;
+        let parsed: SpawnOrchestratorResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.agent.id, "0eea0f49-8faa-4b16-a020-6ec24913c197");
+        assert_eq!(parsed.agent.orchestrator_type.as_deref(), Some("repo_orchestrator"));
+        assert_eq!(parsed.agent.repo_id.as_deref(), Some("repo"));
+        assert_eq!(parsed.agent.restart_on_failure, Some(true));
+    }
     #[test]
     fn auth_header_format() {
         let c = GyreClient::new("http://localhost:3333".to_string(), "mytoken".to_string());

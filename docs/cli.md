@@ -19,14 +19,57 @@ gyre push                              # pushes to origin
 gyre push --remote gyre
 ```
 
-Config file is stored at `~/.gyre/config` (TOML):
+Config file is stored at `~/.gyre/config` (JSON):
 
-```toml
-server = "http://localhost:3000"
-token = "<per-agent-auth-token>"
-agent_id = "<uuid>"
-agent_name = "my-agent"
+```json
+{
+  "server": "http://localhost:3000",
+  "token": "<per-agent-auth-token>",
+  "agent_id": "<uuid>",
+  "agent_name": "my-agent"
+}
 ```
+
+### Bootstrap (platform-model.md §8)
+
+```bash
+# Full non-dev bootstrap: tenant, admin user, workspace, repo, built-in
+# personas, default gates, and a repo orchestrator — one command.
+gyre bootstrap \
+  --tenant "Acme Corp" \
+  --workspace "Platform Team" \
+  --repo gyre \
+  --repo-path /home/user/code/gyre \
+  --admin-user jsell \
+  --oidc-issuer https://keycloak.example.com/realms/acme \
+  --server http://localhost:3000 \
+  --token gyre-dev-token
+
+# Dev mode: skips OIDC + admin user, uses static tokens, tenant "dev",
+# workspace "default"
+gyre bootstrap --dev
+
+# Also write a starter spec structure (specs/manifest.yaml, specs/index.md,
+# specs/system/design-principles.md, AGENTS.md, .prek.yaml) into --repo-path
+gyre bootstrap --dev --starter-kit --repo-path ./myrepo
+```
+
+Steps performed in order: health check → create tenant → create admin user
+(skipped in `--dev`) + API key saved to `~/.gyre/config` → create workspace →
+register repo (bare repo initialized server-side) → register + pre-approve the
+four built-in personas (workspace-orchestrator, repo-orchestrator,
+accountability, security) → spec registry check (syncs on first push) →
+default gates (`cargo test`, `cargo clippy`, `scripts/check-arch.sh`, detected
+from `--repo-path`) → spawn the repo orchestrator → print summary with all
+IDs, the one-time API key, and URLs.
+
+The run is resumable: re-running `gyre bootstrap` with the same names reuses
+already-created resources (tenant, workspace, repo, personas are matched by
+slug/name; the admin user's saved API key in `~/.gyre/config` is reused; a
+live repo orchestrator is kept rather than re-spawned). If a step still fails,
+the CLI reports which steps completed. The admin API key is shown exactly
+once. Auth token precedence: `--token` flag > `GYRE_AUTH_TOKEN` env var >
+`gyre-dev-token` default.
 
 ---
 
