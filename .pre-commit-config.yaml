@@ -498,6 +498,30 @@ repos:
         language: script
         pass_filenames: false
 
+      - id: mem-port-contracts
+        name: mem adapter port-contract lint
+        description: Detect mem adapter create() methods missing port-documented duplicate guards
+        entry: scripts/check-mem-port-contracts.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: fabricated-scope-defaults
+        name: fabricated scope-identity default lint
+        description: Detect literal "default" tenant/workspace scope-identity fallbacks on lookup failure
+        entry: scripts/check-fabricated-scope-defaults.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: lossy-secret-conversion
+        name: lossy secret-conversion lint
+        description: Detect from_utf8_lossy applied to secret-domain byte material
+        entry: scripts/check-lossy-secret-conversion.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
