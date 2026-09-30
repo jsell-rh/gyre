@@ -1943,12 +1943,12 @@ pub(crate) async fn apply_revert_side_effects(
         .unwrap_or_default()
         .as_secs();
 
-    // Step 4: mark the MR Reverted. The revert_mr_id references the revert
+    // Step 4: mark the MR Reverted. revert_commit_sha records the revert
     // commit that undid this MR (a full revert MR object is not created —
-    // the forge pushed the revert directly to the default branch).
-    let revert_mr_id = Id::new(revert_sha.to_string());
+    // the forge pushed the revert directly to the default branch; task-095
+    // R2-3: this is a git SHA, not an MR id).
     let mut updated = mr.clone();
-    if let Err(e) = updated.revert(revert_mr_id.clone(), now) {
+    if let Err(e) = updated.revert(revert_sha.to_string(), now) {
         warn!(mr_id = %mr.id, error = %e, "MR could not transition to Reverted (already reverted?)");
     } else {
         if let Err(e) = state.merge_requests.update(&updated).await {
@@ -5517,7 +5517,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated.status, MrStatus::Reverted);
         assert!(updated.reverted_at.is_some());
-        assert!(updated.revert_mr_id.is_some());
+        assert!(updated.revert_commit_sha.is_some());
 
         // 4. Author's spawner got a MrReverted notification and (re-run
         //    failed on the noop revert SHA) a MergeQueueEscalation.
@@ -5804,7 +5804,7 @@ mod tests {
                 .unwrap();
             assert_eq!(updated.status, MrStatus::Reverted, "{mr_id} should be Reverted");
             assert!(updated.reverted_at.is_some());
-            assert!(updated.revert_mr_id.is_some());
+            assert!(updated.revert_commit_sha.is_some());
         }
 
         // 3. Events: MergeQueuePaused (workspace) + MrReverted per member.
@@ -5900,6 +5900,93 @@ mod tests {
             tasks.iter().any(|t| t.priority == TaskPriority::Critical
                 && t.labels.contains(&"circuit-breaker".to_string())),
             "circuit-breaker critical task must be created"
+        );
+    }
+
+    /// TASK-095 R2-1: post-merge gates must execute against the exact
+    /// `head_sha` tree, in a detached worktree, not against whatever the
+    /// first registered worktree happens to have checked out.
+    ///
+    /// Uses a real git repository: base commit has no `marker` file, head
+    /// commit adds it. The gate command `test -f marker` passes only when
+    /// run in a checkout of head_sha.
+    #[tokio::test]
+    async fn post_merge_gates_run_against_head_sha_tree() {
+        use std::process::Command as ShellCommand;
+
+        // Real git repo: init, base commit, then head commit adding `marker`.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_path = dir.path().join("gate-repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let git = |args: &[&str]| {
+            let out = ShellCommand::new("git")
+                .args(["-C", repo_path.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "test@gyre.local"]);
+        git(&["config", "user.name", "Gyre Test"]);
+        std::fs::write(repo_path.join("base.txt"), "base").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "base"]);
+        std::fs::write(repo_path.join("marker"), "post-merge content").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "head with marker"]);
+        let head_sha = git(&["rev-parse", "HEAD"]);
+        let base_sha = git(&["rev-parse", "HEAD~1"]);
+
+        // State with the real git ops adapter and the repo registered at
+        // its on-disk path.
+        let state = crate::mem::test_state_with_git_ops(std::sync::Arc::new(
+            gyre_adapters::Git2OpsAdapter::new(),
+        ));
+        let repo = Repository::new(
+            Id::new("repo-gate-r21"),
+            Id::new("ws-1"),
+            "gate-repo",
+            repo_path.to_str().unwrap().to_string(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // The gate only passes when `marker` exists in the checkout — true
+        // for head_sha's tree, false for the base tree.
+        create_post_merge_gate(&state, &repo.id, "test -f marker", true).await;
+
+        // Gates run at head_sha: marker exists → pass.
+        crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
+            .await
+            .expect("gates must pass at head_sha");
+
+        // Gates run at the base SHA: marker absent → required gate fails.
+        let err = crate::gate_executor::run_post_merge_gates(&state, &repo, &base_sha)
+            .await
+            .expect_err("gates must fail at base sha");
+        assert!(
+            err.contains("post-merge-tests"),
+            "failure should name the gate: {err}"
+        );
+
+        // The detached gate worktree was deregistered: the only registered
+        // worktree is the repo itself.
+        let worktrees = state
+            .git_ops
+            .list_worktrees(repo_path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            worktrees,
+            vec![repo_path.to_str().unwrap().to_string()],
+            "gate worktree should be removed"
         );
     }
 }

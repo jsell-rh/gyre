@@ -2238,7 +2238,7 @@ mod tests {
         mr.workspace_id = Id::new("ws-briefing");
         mr.transition_status(MrStatus::Approved).unwrap();
         mr.transition_status(MrStatus::Merged).unwrap();
-        mr.revert(Id::new("revert-mr-1"), 2100).unwrap();
+        mr.revert("f".repeat(40).to_string(), 2100).unwrap();
         state.merge_requests.create(&mr).await.unwrap();
 
         let briefing = assemble_briefing(&state, &ws_id, 1500)
@@ -2310,7 +2310,7 @@ mod tests {
         mr.workspace_id = Id::new("ws-briefing");
         mr.transition_status(MrStatus::Approved).unwrap();
         mr.transition_status(MrStatus::Merged).unwrap();
-        mr.revert(Id::new("revert-old"), 500).unwrap();
+        mr.revert("0".repeat(40).to_string(), 500).unwrap();
         state.merge_requests.create(&mr).await.unwrap();
 
         let briefing = assemble_briefing(&state, &ws_id, 1500)

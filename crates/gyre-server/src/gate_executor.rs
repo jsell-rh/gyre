@@ -246,12 +246,9 @@ async fn produce_gate_attestation(
         return;
     };
 
-    // Build the output hash from the gate output text.
-    let output_truncated = if output.len() > GATE_ATTESTATION_OUTPUT_LIMIT {
-        &output[..GATE_ATTESTATION_OUTPUT_LIMIT]
-    } else {
-        output
-    };
+    // Build the output hash from the gate output text, truncated on a UTF-8
+    // char boundary (external process output may be multibyte).
+    let output_truncated = truncate_bytes(output, GATE_ATTESTATION_OUTPUT_LIMIT);
     let output_hash = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -427,7 +424,7 @@ async fn run_review_agent_process(
             let stderr = String::from_utf8_lossy(&output.stderr);
             let process_output = format!("{stdout}{stderr}");
             let process_output = if process_output.len() > 4096 {
-                format!("{}...(truncated)", &process_output[..4096])
+                format!("{}...(truncated)", truncate_bytes(&process_output, 4096))
             } else {
                 process_output
             };
@@ -658,7 +655,7 @@ async fn run_validation_agent_process(
             let stderr = String::from_utf8_lossy(&output.stderr);
             let process_output = format!("{stdout}{stderr}");
             let process_output = if process_output.len() > 4096 {
-                format!("{}...(truncated)", &process_output[..4096])
+                format!("{}...(truncated)", truncate_bytes(&process_output, 4096))
             } else {
                 process_output
             };
@@ -841,6 +838,22 @@ async fn resolve_source_commit_sha(state: &Arc<AppState>, mr_id: &Id) -> String 
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Truncate a string to at most `limit` bytes on a UTF-8 char boundary.
+/// External process output may be multibyte — a fixed byte index would
+/// panic ("byte index N is not a char boundary").
+fn truncate_bytes(s: &str, limit: usize) -> &str {
+    if s.len() <= limit {
+        return s;
+    }
+    let end = s
+        .char_indices()
+        .take_while(|(i, _)| *i <= limit)
+        .map(|(i, _)| i)
+        .last()
+        .unwrap_or(0);
+    &s[..end]
+}
+
 async fn run_command(cmd: &str) -> (GateStatus, String) {
     // Split command on whitespace to avoid shell injection via `sh -c`.
     let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -859,7 +872,7 @@ async fn run_command(cmd: &str) -> (GateStatus, String) {
             let combined = format!("{stdout}{stderr}");
             // Truncate to 4 KiB.
             let truncated = if combined.len() > 4096 {
-                format!("{}...(truncated)", &combined[..4096])
+                format!("{}...(truncated)", truncate_bytes(&combined, 4096))
             } else {
                 combined
             };
@@ -922,13 +935,7 @@ async fn run_command_in_dir(
             // Truncate to 4 KiB, on a UTF-8 char boundary (external process
             // output may be multibyte — a fixed byte index would panic).
             let truncated = if combined.len() > 4096 {
-                let end = combined
-                    .char_indices()
-                    .take_while(|(i, _)| *i <= 4096)
-                    .map(|(i, _)| i)
-                    .last()
-                    .unwrap_or(0);
-                format!("{}...(truncated)", &combined[..end])
+                format!("{}...(truncated)", truncate_bytes(&combined, 4096))
             } else {
                 combined
             };
@@ -956,9 +963,10 @@ async fn run_command_in_dir(
 /// (platform-model.md §6). Non-required gates are advisory: failures are
 /// logged but do not fail validation.
 ///
-/// When a worktree exists for the repo (registered via GitOpsPort), commands
-/// run inside it so tests execute against the new HEAD's checkout. Otherwise
-/// they run in the server's working directory, matching pre-merge gates.
+/// Gates run inside a detached git worktree checked out at `head_sha`, so
+/// they validate the exact merged tree (platform-model.md §6, task-095
+/// R2-1). If worktree preparation fails (e.g. mem mode without a repo on
+/// disk), gates fall back to the server's working directory.
 pub async fn run_post_merge_gates(
     state: &AppState,
     repo: &gyre_domain::Repository,
@@ -974,22 +982,72 @@ pub async fn run_post_merge_gates(
         return Ok(());
     }
 
-    // Prefer a registered worktree as the command working directory.
-    let cwd: Option<std::path::PathBuf> = state
-        .git_ops
-        .list_worktrees(repo.path.as_str())
-        .await
-        .ok()
-        .and_then(|paths| paths.into_iter().next())
-        .map(std::path::PathBuf::from);
+    // Post-merge validation must run against the exact merged tree, not
+    // whatever a long-lived agent worktree happens to have checked out
+    // (platform-model.md §6, task-095 R2-1). Create a detached worktree at
+    // the merge head SHA, run the gates there, and remove it afterwards.
+    // Worktree prep is best-effort: without it (e.g. mem mode), gates fall
+    // back to running in the server working directory.
+    let gate_dir: Option<(std::path::PathBuf, tempfile::TempDir)> = {
+        let tmp = tempfile::tempdir()
+            .map_err(|e| format!("failed to create temp dir for post-merge gate worktree: {e}"))?;
+        let worktree_path = tmp.path().join("gate");
+        match state
+            .git_ops
+            .create_detached_worktree(
+                repo.path.as_str(),
+                worktree_path.to_str().unwrap_or_default(),
+                head_sha,
+            )
+            .await
+        {
+            // The TempDir stays alive in `gate_dir` until the gates finish.
+            Ok(()) => Some((worktree_path, tmp)),
+            Err(e) => {
+                warn!(
+                    repo_id = %repo.id, head = %head_sha, error = %e,
+                    "could not create detached worktree at merge head; post-merge gates fall back to server cwd"
+                );
+                None
+            }
+        }
+    };
+    let cwd: Option<std::path::PathBuf> = gate_dir.as_ref().map(|(p, _)| p.clone());
+    let result = run_post_merge_gate_commands(&gates, cwd.as_deref()).await;
 
-    for gate in &gates {
+    // Remove the detached gate worktree (if created) after gates finish:
+    // deregister it from the repo's worktree list; the tempdir is removed
+    // when `gate_dir` drops at the end of this function. This runs on both
+    // the pass and fail paths — a failed gate must not leak the worktree.
+    if let Some((path, _tmp)) = &gate_dir {
+        if let Err(e) = state
+            .git_ops
+            .remove_worktree(repo.path.as_str(), path.to_str().unwrap_or_default())
+            .await
+        {
+            warn!(
+                repo_id = %repo.id, worktree = %path.display(), error = %e,
+                "failed to remove post-merge gate worktree"
+            );
+        }
+    }
+
+    result?;
+    info!(repo_id = %repo.id, head = %head_sha, "post-merge gates passed");
+    Ok(())
+}
+
+async fn run_post_merge_gate_commands(
+    gates: &[gyre_domain::QualityGate],
+    cwd: Option<&std::path::Path>,
+) -> Result<(), String> {
+    for gate in gates {
         match &gate.gate_type {
             GateType::TestCommand | GateType::LintCommand => {
                 let timeout = gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS);
                 let (status, output) = run_command_in_dir(
                     gate.command.as_deref().unwrap_or("true"),
-                    cwd.as_deref(),
+                    cwd,
                     timeout,
                 )
                 .await;
@@ -1010,8 +1068,6 @@ pub async fn run_post_merge_gates(
             }
         }
     }
-
-    info!(repo_id = %repo.id, head = %head_sha, "post-merge gates passed");
     Ok(())
 }
 
@@ -1092,6 +1148,38 @@ mod tests {
 
     fn make_mr_id() -> Id {
         Id::new(Uuid::new_v4().to_string())
+    }
+
+    // ── truncate_bytes: UTF-8 char-boundary truncation (task-095 F4) ────────
+
+    #[test]
+    fn truncate_bytes_ascii_under_limit_untouched() {
+        assert_eq!(truncate_bytes("hello", 4096), "hello");
+        assert_eq!(truncate_bytes("", 4096), "");
+    }
+
+    #[test]
+    fn truncate_bytes_multibyte_boundary_does_not_panic() {
+        // Each 'é' is 2 bytes; 2048 of them = 4096 bytes exactly.
+        let s: String = "é".repeat(2048);
+        assert_eq!(truncate_bytes(&s, 4096).len(), 4096);
+        // 2049 chars = 4098 bytes: byte 4096 falls mid-character, so the
+        // cut backs off to the previous boundary (4096) — no panic.
+        let s: String = "é".repeat(2049);
+        assert_eq!(truncate_bytes(&s, 4096).len(), 4096);
+        // 3-byte chars: 1366 × 3 = 4098 bytes; cut backs to 4095.
+        let s: String = "字".repeat(1366);
+        let t = truncate_bytes(&s, 4096);
+        assert!(t.len() <= 4096 && (4096 - t.len()) < 3);
+        assert!(t.chars().all(|c| c == '字'));
+    }
+
+    #[test]
+    fn truncate_bytes_leading_multibyte_backs_to_zero() {
+        // A 4-byte char at offset 0 with limit 2: no boundary fits, cut = "".
+        let s = "\u{1F600}".repeat(3);
+        let t = truncate_bytes(&s, 2);
+        assert_eq!(t, "");
     }
 
     // ── AgentReview stub path (no command) ──────────────────────────────────

@@ -43,6 +43,16 @@ pub trait GitOpsPort: Send + Sync {
         branch: &str,
     ) -> Result<()>;
 
+    /// Add a git worktree at `worktree_path` checked out (detached) at `sha`.
+    /// Used by post-merge validation to run gates against an exact commit
+    /// (platform-model.md §6, task-095 R2-1).
+    async fn create_detached_worktree(
+        &self,
+        repo_path: &str,
+        worktree_path: &str,
+        sha: &str,
+    ) -> Result<()>;
+
     /// Remove a git worktree at `worktree_path`.
     async fn remove_worktree(&self, repo_path: &str, worktree_path: &str) -> Result<()>;
 

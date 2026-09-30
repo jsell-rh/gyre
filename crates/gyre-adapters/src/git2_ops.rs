@@ -273,18 +273,14 @@ impl GitOpsPort for Git2OpsAdapter {
                 });
             }
 
-            // Fast-forward: if target is ancestor of source, just advance target ref.
-            if repo.merge_base(source_commit.id(), target_commit.id())? == target_commit.id() {
-                let refname = format!("refs/heads/{}", target);
-                let mut target_ref = repo.find_reference(&refname)?;
-                target_ref.set_target(
-                    source_commit.id(),
-                    &format!("merge: fast-forward {} into {}", source, target),
-                )?;
-                return Ok(MergeResult::Success {
-                    merge_commit_sha: source_commit.id().to_string(),
-                });
-            }
+            // No fast-forward: even when target is an ancestor of source, we
+            // create a true merge commit. The recovery protocol reverts the
+            // reported merge SHA by restoring parent(0)'s tree
+            // (platform-model.md §6), so the merge SHA must be a commit whose
+            // first parent is the pre-merge target tip — a fast-forward would
+            // report the source branch tip, whose parent(0) is the previous
+            // source-branch commit, and reverting it would reset main to a
+            // tree that never existed there (task-095 R2-2).
 
             // Three-way merge using trees (works for bare and non-bare repos).
             let merge_base_oid = repo.merge_base(source_commit.id(), target_commit.id())?;
@@ -370,6 +366,37 @@ impl GitOpsPort for Git2OpsAdapter {
                 return Ok(());
             }
             anyhow::bail!("git worktree add failed: {stderr}");
+        })
+        .await?
+    }
+
+    async fn create_detached_worktree(
+        &self,
+        repo_path: &str,
+        worktree_path: &str,
+        sha: &str,
+    ) -> Result<()> {
+        let repo_path = repo_path.to_string();
+        let worktree_path = worktree_path.to_string();
+        let sha = sha.to_string();
+        tokio::task::spawn_blocking(move || {
+            let output = std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &repo_path,
+                    "worktree",
+                    "add",
+                    "--detach",
+                    &worktree_path,
+                    &sha,
+                ])
+                .output()
+                .context("failed to run git worktree add --detach")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git worktree add --detach failed: {stderr}");
+            }
+            Ok(())
         })
         .await?
     }
@@ -935,27 +962,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_merge_branches_fast_forward() {
+    async fn test_merge_branches_fast_forward_creates_true_merge_commit() {
         let dir = TempDir::new().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
-        make_commit(&repo, "initial");
-        let branch_name = repo.head().unwrap().shorthand().unwrap().to_string();
+        repo.set_head("refs/heads/main").unwrap();
+        make_file_commit(&repo, "base.txt", "base", "initial");
+        let pre_merge_tip = repo.head().unwrap().peel_to_commit().unwrap().id();
+        let pre_merge_tree = repo.head().unwrap().peel_to_commit().unwrap().tree_id();
 
-        // Create feature branch from main
+        // Feature branch with commits ahead of main (FF-able).
         create_branch(&repo, "feature");
-        // Checkout feature and add a commit
         repo.set_head("refs/heads/feature").unwrap();
         repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
             .unwrap();
         make_file_commit(&repo, "feat.txt", "feature content", "feat: add feature");
 
         let adapter = Git2OpsAdapter::new();
+        let workdir = repo.workdir().unwrap().to_str().unwrap().to_string();
         let result = adapter
-            .merge_branches(dir.path().to_str().unwrap(), "feature", &branch_name)
+            .merge_branches(&workdir, "feature", "main")
             .await
             .unwrap();
 
-        assert!(matches!(result, MergeResult::Success { .. }));
+        let MergeResult::Success { merge_commit_sha } = result else {
+            panic!("expected merge success");
+        };
+
+        // The merge is a true merge commit: two parents, parent(0) = pre-merge
+        // main tip (task-095 R2-2 — no fast-forward to the source tip).
+        let repo = Repository::open(&workdir).unwrap();
+        let merge_commit = repo
+            .find_commit(git2::Oid::from_str(&merge_commit_sha).unwrap())
+            .unwrap();
+        assert_eq!(merge_commit.parent_count(), 2);
+        assert_eq!(merge_commit.parent(0).unwrap().id(), pre_merge_tip);
+
+        // Reverting the merge restores the pre-merge default-branch tree.
+        let revert_sha = adapter
+            .revert_commit(&workdir, "main", &merge_commit_sha)
+            .await
+            .unwrap();
+        let repo = Repository::open(&workdir).unwrap();
+        let branch = repo.find_branch("main", git2::BranchType::Local).unwrap();
+        let tip = branch.get().peel_to_commit().unwrap();
+        assert_eq!(tip.id().to_string(), revert_sha);
+        assert_eq!(tip.tree_id(), pre_merge_tree);
     }
 
     #[tokio::test]

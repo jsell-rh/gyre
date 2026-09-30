@@ -291,7 +291,7 @@ mod tests {
             created_at,
             updated_at: created_at,
             reverted_at: None,
-            revert_mr_id: None,
+            revert_commit_sha: None,
         }
     }
 

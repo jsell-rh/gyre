@@ -94,6 +94,19 @@ impl GitOpsPort for NoopGitOps {
         Ok(())
     }
 
+    async fn create_detached_worktree(
+        &self,
+        _repo_path: &str,
+        _worktree_path: &str,
+        _sha: &str,
+    ) -> Result<()> {
+        // In-memory mode has no git repository on disk; post-merge gates fall
+        // back to running in the server cwd (task-095 R2-1).
+        Err(anyhow::anyhow!(
+            "create_detached_worktree not supported in mem mode"
+        ))
+    }
+
     async fn remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
         Ok(())
     }
@@ -229,7 +242,6 @@ impl GitOpsPort for ConfigurableGitOps {
             merge_commit_sha: "0000000000000000000000000000000000000000".to_string(),
         })
     }
-
     async fn create_worktree(
         &self,
         _repo_path: &str,
@@ -237,6 +249,19 @@ impl GitOpsPort for ConfigurableGitOps {
         _branch: &str,
     ) -> Result<()> {
         Ok(())
+    }
+
+    async fn create_detached_worktree(
+        &self,
+        _repo_path: &str,
+        _worktree_path: &str,
+        _sha: &str,
+    ) -> Result<()> {
+        // Test double without a real repository; callers fall back to the
+        // server-cwd path (task-095 R2-1).
+        Err(anyhow::anyhow!(
+            "create_detached_worktree not supported by ConfigurableGitOps"
+        ))
     }
 
     async fn remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
