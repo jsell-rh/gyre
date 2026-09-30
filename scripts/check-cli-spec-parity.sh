@@ -177,7 +177,10 @@ SERVER_MOD="crates/gyre-server/src/api/mod.rs"
 if [ -f "$CLI_CLIENT" ] && [ -f "$SERVER_MOD" ]; then
     # Extract URL path patterns from client.rs (after base_url):
     # e.g., /api/v1/merge-requests/{mr_id}/timeline
-    CLIENT_ENDPOINTS=$(grep -oP '"\{\}/api/v1/\K[^"]+' "$CLI_CLIENT" 2>/dev/null | \
+    # Query strings embedded in format! URLs (e.g. /api/v1/repos?workspace_id=)
+    # are stripped: the route path is what must match a server route; query
+    # params are validated separately by Check 6 against Query extractor structs.
+    CLIENT_ENDPOINTS=$(grep -oP '"\{\}/api/v1/\K[^"?]*' "$CLI_CLIENT" 2>/dev/null | \
         sed 's/{[^}]*}/:param/g' | sort -u || true)
 
     if [ -n "$CLIENT_ENDPOINTS" ]; then
