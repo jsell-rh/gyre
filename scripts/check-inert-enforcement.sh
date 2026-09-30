@@ -11,10 +11,19 @@
 # fix-class rule: an evaluation exists to gate an action; a call whose
 # return value is not bound and not branched on gates nothing.
 #
-# Flagged: evaluate_*/enforce_*/verify_* calls in statement position (line
-# starts with the call, not `let`/`if`/`return`/`match`), in non-test code.
-# Both free-function form (evaluate_x(...) at statement start) and method
-# form (expr.evaluate_x(...) as the whole statement).
+# Flagged: evaluate_*/enforce_*/verify_*/validate_* calls in statement
+# position (line starts with the call, not `let`/`if`/`return`/`match`),
+# in non-test code. Both free-function form (evaluate_x(...) at statement
+# start) and method form (expr.evaluate_x(...) as the whole statement).
+#
+# validate_* (added by the task-099 process revision, F2: orchestrator.rs
+# called validate_persona(...) and discarded the () result — and it read
+# state.meta_specs, a store the bootstrap never populates for personas)
+# excludes consumption shapes on the same line: `?` propagation,
+# `.map_err`/`.await`/`.map(`/`.ok_` chains, and `&mut` arguments (the
+# errors-accumulator pattern where the validator's effect flows through
+# the mutable argument, not the return value); it also skips a call whose
+# next line starts with `.` (a rustfmt continuation of a consumed chain).
 #
 # NOT flagged: calls in #[cfg(test)]/mod tests regions; calls bound to a
 # variable, branched on, or returned; lines carrying `// x:ok`.
@@ -40,15 +49,19 @@ from pathlib import Path
 TEST_START = re.compile(r'\s*(#\[[^\]]*\]\s*)?(mod tests|#\[cfg\(test\)\])')
 
 # Statement-position free-function call: line begins (after whitespace) with
-# evaluate_*/enforce_*/verify_* followed by '('.
-FN_CALL = re.compile(r'^\s*(evaluate_|enforce_|verify_)\w*\s*\(')
+# evaluate_*/enforce_*/verify_*/validate_* followed by '('.
+FN_CALL = re.compile(r'^\s*(evaluate_|enforce_|verify_|validate_)\w*\s*\(')
 
 # Statement-position method call: a receiver chain ending in .evaluate_x(...)
 # as the whole statement. The line must not start with let/if/return/match.
-METH_CALL = re.compile(r'^\s*[\w.\[\]()]+\.((evaluate_|enforce_|verify_)\w*)\s*\(')
+METH_CALL = re.compile(r'^\s*[\w.\[\]()]+\.((evaluate_|enforce_|verify_|validate_)\w*)\s*\(')
 
 # Things that make a call non-inert on the same line.
-BOUND = re.compile(r'^\s*(let|if|return|match|while|\.map|Ok|Err)\b|\?\s*;')
+# validate_* consumption shapes on the same line: `?` anywhere, a method
+# chain on the result, or an errors-accumulator `&mut` argument. NOTE:
+# `.await` alone is NOT consumption — an awaited-but-discarded result is
+# still inert (task-099 F2: validate_persona(...).await;).
+VALIDATE_CONSUMED = re.compile(r'\?|\.map_err\(|\.map\(|\.ok_|&mut')
 
 def find_files(paths):
     for p in paths:
@@ -87,9 +100,18 @@ def main():
             hit = FN_CALL.match(line) or (METH_CALL.match(line) and not BOUND.search(line))
             if not hit:
                 continue
+            if line.lstrip().startswith('validate_'):
+                # validate_* consumption shapes: `?`/chain on the same line,
+                # or a rustfmt continuation whose next line starts with '.'
+                # (the result feeds a consumed method chain).
+                if VALIDATE_CONSUMED.search(line):
+                    continue
+                nxt = lines[lineno] if lineno < len(lines) else ''
+                if nxt.lstrip().startswith('.'):
+                    continue
             print(f"ERROR: discarded evaluation result at {path}:{lineno}")
             print(f"  {line.strip()}")
-            print("  this evaluate_/enforce_/verify_ call is in statement position — its")
+            print("  this evaluate_/enforce_/verify_/validate_ call is in statement position —")
             print("  result is not bound, branched on, or returned, so it gates nothing.")
             print("  This is the specs/reviews/task-077.md F5 flaw class (audit-only")
             print("  enforcement: merge proceeds regardless of the policy decision).")

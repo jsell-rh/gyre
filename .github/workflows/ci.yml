@@ -64,6 +64,8 @@ jobs:
         run: bash scripts/check-id-from-sha.sh || true
       - name: ABAC-exempt handler authorization lint (advisory)
         run: bash scripts/check-abac-exempt-handlers.sh || true
+      - name: Scope-literal defaults lint (advisory)
+        run: bash scripts/check-scope-literal-defaults.sh || true
       - name: Unwritten adapter store-field lint (advisory)
         run: bash scripts/check-unwritten-store-fields.sh || true
       - name: ABAC route registry lint

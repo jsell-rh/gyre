@@ -20,3 +20,8 @@ crates/gyre-server/src/snapshot.rs:9                  # DEFAULT_SNAPSHOT_PATH ".
 crates/gyre-server/src/api/admin.rs:451               # seed repo path "./repos/default/gyre-core.git" — relative seed data
 crates/gyre-server/src/api/admin.rs:458               # seed repo path "./repos/default/gyre-web.git" — relative seed data
 crates/gyre-server/src/api/admin.rs:465               # seed repo path "./repos/default/infra-config.git" — relative seed data
+
+# --- task-099 revision round owns this (F6: starter kit written to a
+# relative "./<repo-name>" when --repo-path is omitted — dynamic
+# PathBuf::from default, flagged by Check 2) ---
+crates/gyre-cli/src/main.rs:1737          # .unwrap_or_else(|| PathBuf::from(&repo_name)) — relative default when --repo-path omitted (task-099 F6 exact site)

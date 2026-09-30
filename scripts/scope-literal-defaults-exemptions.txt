@@ -1,0 +1,36 @@
+# scope-literal-defaults-exemptions.txt — legacy pre-existing sites that
+# fabricate a "default" tenant/workspace identity at construction time.
+# Frozen at 24 entries (seeded when this check was introduced by the
+# task-099 process revision). Fix a site by resolving the real scope (or
+# refusing to create the entity without it), then DELETE its line and
+# lower FROZEN_EXEMPTION_COUNT in scripts/check-scope-literal-defaults.sh.
+# NEVER add entries; NEVER raise the frozen count.
+
+# task-099 F1 revision round owns these (admin user is never bound to a
+# tenant; AuthenticatedAgent for API-key users hardcodes the fabricated
+# identity; emit_event/emit_telemetry messages carry it):
+crates/gyre-server/src/auth.rs:512
+crates/gyre-server/src/auth.rs:550
+crates/gyre-server/src/auth.rs:583
+crates/gyre-server/src/auth.rs:624
+crates/gyre-server/src/auth.rs:654
+crates/gyre-server/src/auth.rs:678
+crates/gyre-server/src/auth.rs:1001
+crates/gyre-server/src/lib.rs:490
+crates/gyre-server/src/lib.rs:534
+
+# Unowned legacy (record-conversion `From` impls fabricating tenant on the
+# wire; domain constructor defaults) — opportunistic fixes welcome:
+crates/gyre-adapters/src/sqlite/activity.rs:56
+crates/gyre-adapters/src/sqlite/analytics.rs:115
+crates/gyre-adapters/src/sqlite/analytics.rs:225
+crates/gyre-adapters/src/sqlite/merge_request.rs:163
+crates/gyre-adapters/src/sqlite/repository.rs:94
+crates/gyre-adapters/src/postgres/activity.rs:56
+crates/gyre-adapters/src/postgres/analytics.rs:115
+crates/gyre-adapters/src/postgres/analytics.rs:225
+crates/gyre-adapters/src/postgres/merge_request.rs:163
+crates/gyre-adapters/src/postgres/repository.rs:94
+crates/gyre-domain/src/agent.rs:147
+crates/gyre-domain/src/merge_request.rs:119
+crates/gyre-domain/src/task.rs:92

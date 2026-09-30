@@ -437,7 +437,7 @@ repos:
 
       - id: inert-enforcement
         name: inert enforcement lint
-        description: Detect evaluate_/enforce_/verify_ calls whose results are discarded and gate nothing
+        description: Detect evaluate_/enforce_/verify_/validate_ calls whose results are discarded and gate nothing
         entry: scripts/check-inert-enforcement.sh
         language: script
         types: [rust]
@@ -518,6 +518,14 @@ repos:
         name: lossy secret-conversion lint
         description: Detect from_utf8_lossy applied to secret-domain byte material
         entry: scripts/check-lossy-secret-conversion.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: scope-literal-defaults
+        name: scope-literal defaults lint
+        description: Detect struct-literal "default" tenant/workspace scope fabrication at construction time
+        entry: scripts/check-scope-literal-defaults.sh
         language: script
         types: [rust]
         pass_filenames: false
