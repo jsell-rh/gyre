@@ -381,3 +381,66 @@ class on this task; the underlying cause is committing doc updates against a
 detached/pre-merge base instead of the worker branch tip.
 
 Setting `progress: ready-for-review` (no open findings).
+
+## Round 10
+
+Adversarial re-verification of the F4/F5 resolutions plus a fix-class-exhaustion
+sweep over the remaining frontend computed-reference code.
+
+- **F4 (re-verified)**: `web/src/lib/canvas-filters.js` `edgePassesFilter`
+  carries the restored `dependencies` case (`depends_on` || `calls`);
+  `ExplorerCanvas.svelte:1614-1616` `filterEdge` delegates to it;
+  `filterOpacity` (:1597-1610) keeps the aligned node-dimming cases. The 7-test
+  regression suite `canvas-filters.test.js` pins every filter's included and
+  excluded edge types.
+- **F5 (re-verified, boundary-level)**: backend `compute_test_reachable`
+  (resolver.rs:405-436) inserts at depth ≤100 (`if depth > 100 { continue; }`
+  before insert); frontend `computeTestReachable` (test-reachability.js:53-68)
+  uses `depth > maxDepth` with `REACHABLE_MAX_DEPTH = 100` — identical
+  boundary, node at exactly 100 reachable on both. Backend
+  `compute_all_test_fragility` (rs:441-466) traverses via
+  `bfs_traverse(..., 20, ...)`, where `bfs_traverse_with_depths` (rs:257-307)
+  inserts the start at 0 and expands only while `d < depth` — nodes at depth
+  ≤20 included, and the test node's own `visited` seed means it counts toward
+  its own fragility. Frontend `computeTestFragilityCounts` (js:96-117) seeds
+  `reached = new Set([tn.id])` and gates expansion on
+  `depth >= maxDepth` (`FRAGILITY_MAX_DEPTH = 20`) — identical boundary and
+  identical self-inclusion. Pinning tests at
+  `test-reachability.test.js:147-182`: 21-hop chain → zero fragility at cap 20
+  (node at exactly 20 still counted); 101-hop chain → unreachable at cap 100
+  (node at exactly 100 reachable); raising caps recovers the deep nodes.
+- **Wiring**: `ExplorerCanvas.svelte:11-17` imports `buildAdjacency`,
+  `computeTestFragilityCounts`, `computeTestGaps`, and the reachability pair
+  from `./test-reachability.js`; delegation at :1697-1703, fragility cache at
+  :1805-1814, `test_gaps` scope at :1965-1969. `TESTABLE_TYPES` frontend set
+  matches the backend `$test_unreachable` NodeType filter (rs:978-988);
+  reachable-set non-filtering matches the backend on both surfaces.
+- **`$test_fragility(node)` contract (triaged, not a finding)**: frontend
+  `computeTestFragility` (:1816-1823) returns set membership (`count > 0` →
+  node id), byte-matching the backend contract at rs:1485-1503, which likewise
+  returns a membership set and populates real counts only into dry-run
+  `node_metrics` for `$where(test_fragility, ...)`.
+- **Pre-existing divergences (checked, defused — predate task-062)**: frontend
+  `computeWhere` (:1705-1736) resolves raw node properties with a string
+  fallback where the backend (rs:998-1088) special-cases `node_type` /
+  `visibility` / `spec_confidence` and computes graph-derived metrics
+  (`incoming_calls`, `test_fragility`, `risk_score`) via traversal; frontend
+  `computeGovernedBy` (:1674-1692) matches name/spec_path without the
+  backend's (rs:1299-1371) directory-boundary/exact-path rules or
+  spec-node-inclusion; frontend set-op operand fallbacks
+  (`a ?? b ?? new Set()` at :1910-1927) vs backend strict empty-set on
+  unparseable operands. All three blocks originate in `d7940e85` (the
+  pre-task-062 explorer-canvas commit) and are untouched by every task-062
+  commit (verified: `git show <commit> -- ExplorerCanvas.svelte` matches none
+  of these symbols outside diff context). Per the R1–R9 scope precedent
+  (findings filed only where task-062 commits introduced or touched the
+  divergent code, e.g. F4/F5 vs the untouched-by-F5 parts in R9's "not filed"
+  notes), these are task-063 territory (frontend §3 parity), not task-062
+  regressions. The spec's own `$where` example (complexity > 20, a serialized
+  GraphNode field) resolves identically on both surfaces.
+
+Verified: `cargo test -p gyre-domain --lib view_query_resolver`: 116 passed,
+0 failed. `npx vitest run src/__tests__/test-reachability.test.js
+src/__tests__/canvas-filters.test.js`: 16 passed, 0 failed.
+
+No open findings. Setting `progress: complete`.
