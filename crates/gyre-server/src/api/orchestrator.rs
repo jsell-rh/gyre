@@ -339,7 +339,7 @@ mod tests {
     /// Seed ws-1 with tenant t1 plus two repos r-1, r-2.
     async fn seed(state: &crate::AppState) {
         let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
-        state.workspaces.create(&ws).await.unwrap();
+        state.workspaces.create(&ws).await.unwrap(); // non-atomic-create:ok — test seed, in-memory test state
         for rid in ["r-1", "r-2"] {
             let repo = gyre_domain::Repository::new(
                 Id::new(rid),
@@ -348,7 +348,7 @@ mod tests {
                 format!("/tmp/{rid}"),
                 0,
             );
-            state.repos.create(&repo).await.unwrap();
+            state.repos.create(&repo).await.unwrap(); // non-atomic-create:ok — test seed, in-memory test state
         }
     }
 
