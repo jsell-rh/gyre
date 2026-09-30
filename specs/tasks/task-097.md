@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §7 Secret Scoping"
   - "platform-model.md §7 Secret Types"
   - "platform-model.md §7 Storage Backend"
-commits: ["d20c3238b43ffd4856a0b2c50df559ebad2e0f1f", "b4bf656c8636d57a47e8c815e35abb8b774aea95", "b5257d5032ebf0504ce5325ddac70d4d77652810", "43f13c602b07fc2f843e23efe353a52a91c02270"]
+commits: ["b5d26094bb14f2a62ceed3f5a2b47fc0878f502a", "a36320406a58977af4a06f58d73103f61457808d", "8d09c48eadbb45c534653655d2d2ab948e845ba7", "0612eb02e72ffde96e63a1ee6647ed538ccfbe7b"]
 ---
 
 ## Spec Excerpt
