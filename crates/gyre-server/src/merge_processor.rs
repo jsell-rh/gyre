@@ -28,6 +28,105 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
     process_next(state).await
 }
 
+// ── Circuit Breaker (platform-model.md §6) ──
+
+const REVERT_COUNTS_NS: &str = "revert_counts";
+
+/// Increment and return the MR's revert count (circuit breaker, §6).
+async fn increment_revert_count(state: &AppState, mr_id: &str) -> anyhow::Result<u64> {
+    let current = state
+        .kv_store
+        .kv_get(REVERT_COUNTS_NS, mr_id)
+        .await?
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let next = current + 1;
+    state
+        .kv_store
+        .kv_set(REVERT_COUNTS_NS, mr_id, next.to_string())
+        .await?;
+    Ok(next)
+}
+
+
+/// Circuit breaker tripped: cancel the MR's queue entries permanently and
+/// escalate to a human (platform-model.md §6 Circuit Breaker).
+async fn trip_circuit_breaker(
+    state: &AppState,
+    workspace_id: &Id,
+    repo_id: &str,
+    mr_id: &str,
+) -> anyhow::Result<()> {
+    warn!(mr_id, "circuit breaker tripped: MR reverted 3 times");
+
+    // Cancel all queue entries for this MR (permanent removal).
+    let queue = state.merge_queue.list_queue().await?;
+    for entry in queue
+        .iter()
+        .filter(|e| e.merge_request_id.as_str() == mr_id)
+    {
+        let _ = state
+            .merge_queue
+            .update_status(
+                &entry.id,
+                MergeQueueEntryStatus::Cancelled,
+                Some("circuit breaker: failed post-merge validation 3 times".to_string()),
+            )
+            .await;
+    }
+
+    // Escalate to humans.
+    let members = state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+    for member in &members {
+        crate::notifications::notify_rich(
+            state,
+            member.workspace_id.clone(),
+            member.user_id.clone(),
+            gyre_common::NotificationType::AgentEscalation,
+            format!("MR {mr_id} has failed post-merge validation 3 times"),
+            "default",
+            Some(
+                serde_json::json!({
+                    "repo_id": repo_id,
+                    "mr_id": mr_id,
+                    "circuit_breaker": true,
+                })
+                .to_string(),
+            ),
+            Some(mr_id.to_string()),
+            Some(repo_id.to_string()),
+        )
+        .await;
+    }
+
+    // Escalation task: the referenced spec may need revisiting.
+    let now = crate::api::now_secs();
+    let task_id = Id::new(Uuid::new_v4().to_string());
+    let mut task = gyre_domain::Task::new(
+        task_id,
+        format!("MR {mr_id} has failed post-merge validation 3 times"),
+        now,
+    );
+    task.priority = TaskPriority::Critical;
+    task.labels = vec!["circuit-breaker".to_string(), "auto-created".to_string()];
+    task.description = Some(format!(
+        "MR {mr_id} in repo {repo_id} was reverted 3 times by the post-merge \
+         recovery protocol. The MR has been removed from the merge queue. \
+         The spec it references may need revisiting."
+    ));
+    task.workspace_id = workspace_id.clone();
+    task.repo_id = Id::new(repo_id.to_string());
+    if let Err(e) = state.tasks.create(&task).await {
+        warn!(mr_id, error = %e, "failed to create circuit-breaker task");
+    }
+
+    Ok(())
+}
+
 /// Check if all `depends_on` for the given MR have status `Merged`.
 /// Returns `Ok(true)` if all dependencies are satisfied, `Ok(false)` if any are pending.
 async fn dependencies_satisfied(state: &AppState, mr_id: &Id) -> anyhow::Result<bool> {
@@ -672,6 +771,7 @@ async fn merge_atomic_group(
         }
     }
 
+
     info!(
         group = %group_name,
         merged_count = merged_entries.len(),
@@ -927,6 +1027,17 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     continue;
                 }
             };
+
+            // Step 4b': Recovery protocol — skip entries in paused repos
+            // (broken main; queue stays paused until main is green).
+            if merge_queue_paused(state, &candidate_mr.repository_id).await {
+                info!(
+                    entry_id = %candidate.id,
+                    repo_id = %candidate_mr.repository_id,
+                    "merge queue paused for repo, skipping candidate"
+                );
+                continue;
+            }
 
             // Step 4c: Is this part of an atomic group? If so, are all members ready?
             if let Some(ref group) = candidate_mr.atomic_group {
@@ -1682,7 +1793,7 @@ async fn merge_queue_paused(state: &AppState, repo_id: &Id) -> bool {
 /// Pause the merge queue for this repo (no more merges until main is green).
 /// Persists the pause state and emits a `MergeQueuePaused` event so the
 /// Workspace Orchestrator can reprioritize work (platform-model.md §6).
-async fn pause_merge_queue(state: &AppState, repo: &gyre_domain::Repository, reason: &str) {
+pub(crate) async fn pause_merge_queue(state: &AppState, repo: &gyre_domain::Repository, reason: &str) {
     let payload = serde_json::json!({ "paused": true, "reason": reason }).to_string();
     if let Err(e) = state
         .kv_store
@@ -1706,7 +1817,7 @@ async fn pause_merge_queue(state: &AppState, repo: &gyre_domain::Repository, rea
 
 /// Resume the merge queue for this repo: clear the pause state and emit
 /// `MergeQueueResumed` so watchers know main is green again.
-async fn resume_merge_queue(state: &AppState, repo: &gyre_domain::Repository) {
+pub(crate) async fn resume_merge_queue(state: &AppState, repo: &gyre_domain::Repository) {
     if let Err(e) = state
         .kv_store
         .kv_remove(MERGE_QUEUE_PAUSE_NS, repo.id.as_str())
@@ -1793,6 +1904,19 @@ async fn recover_from_post_merge_failure(
         .await;
     }
 
+    // Circuit breaker (platform-model.md §6): the same MR reverted 3 times
+    // is removed from the merge queue permanently and escalated to a human.
+    if let Ok(revert_count) = increment_revert_count(state, mr.id.as_str()).await {
+        if revert_count >= 3 {
+            if let Err(e) =
+                trip_circuit_breaker(state, &mr.workspace_id, repo.id.as_str(), mr.id.as_str())
+                    .await
+            {
+                error!(mr_id = %mr.id, error = %e, "failed to trip circuit breaker");
+            }
+        }
+    }
+
     // Steps 4–7: per-MR side effects (mark Reverted, notify, remediation
     // task, invalidate gate results).
     apply_revert_side_effects(state, repo, mr, merge_commit_sha, &revert_sha, failure_reason)
@@ -1806,7 +1930,7 @@ async fn recover_from_post_merge_failure(
 ///
 /// `revert_sha` is the revert commit that undid the MR's merge (for atomic
 /// groups, the final revert commit of the group run).
-async fn apply_revert_side_effects(
+pub(crate) async fn apply_revert_side_effects(
     state: &AppState,
     repo: &gyre_domain::Repository,
     mr: &MergeRequest,
@@ -1819,12 +1943,12 @@ async fn apply_revert_side_effects(
         .unwrap_or_default()
         .as_secs();
 
-    // Step 4: mark the MR Reverted. The revert_mr_id references the revert
+    // Step 4: mark the MR Reverted. revert_commit_sha records the revert
     // commit that undid this MR (a full revert MR object is not created —
-    // the forge pushed the revert directly to the default branch).
-    let revert_mr_id = Id::new(revert_sha.to_string());
+    // the forge pushed the revert directly to the default branch; task-095
+    // R2-3: this is a git SHA, not an MR id).
     let mut updated = mr.clone();
-    if let Err(e) = updated.revert(revert_mr_id.clone(), now) {
+    if let Err(e) = updated.revert(revert_sha.to_string(), now) {
         warn!(mr_id = %mr.id, error = %e, "MR could not transition to Reverted (already reverted?)");
     } else {
         if let Err(e) = state.merge_requests.update(&updated).await {
@@ -1999,6 +2123,21 @@ async fn recover_atomic_group_from_post_merge_failure(
     for (i, (_, mr)) in merged_entries.iter().enumerate() {
         let merge_sha = group_merge_shas.get(i).map(String::as_str).unwrap_or("");
         apply_revert_side_effects(state, repo, mr, merge_sha, &revert_sha, failure_reason).await;
+    }
+
+    // Circuit breaker (platform-model.md §6): per member, 3 reverts →
+    // permanent queue removal + human escalation.
+    for (_, mr) in merged_entries {
+        if let Ok(revert_count) = increment_revert_count(state, mr.id.as_str()).await {
+            if revert_count >= 3 {
+                if let Err(e) =
+                    trip_circuit_breaker(state, &mr.workspace_id, repo.id.as_str(), mr.id.as_str())
+                        .await
+                {
+                    error!(mr_id = %mr.id, error = %e, "failed to trip circuit breaker");
+                }
+            }
+        }
     }
 }
 
@@ -2413,6 +2552,7 @@ mod tests {
             format!("/tmp/{name}.git"),
             0,
         );
+        std::fs::create_dir_all(&format!("/tmp/{name}.git")).ok();
         state.repos.create(&repo).await.unwrap();
         repo
     }
@@ -5377,7 +5517,7 @@ mod tests {
             .unwrap();
         assert_eq!(updated.status, MrStatus::Reverted);
         assert!(updated.reverted_at.is_some());
-        assert!(updated.revert_mr_id.is_some());
+        assert!(updated.revert_commit_sha.is_some());
 
         // 4. Author's spawner got a MrReverted notification and (re-run
         //    failed on the noop revert SHA) a MergeQueueEscalation.
@@ -5664,7 +5804,7 @@ mod tests {
                 .unwrap();
             assert_eq!(updated.status, MrStatus::Reverted, "{mr_id} should be Reverted");
             assert!(updated.reverted_at.is_some());
-            assert!(updated.revert_mr_id.is_some());
+            assert!(updated.revert_commit_sha.is_some());
         }
 
         // 3. Events: MergeQueuePaused (workspace) + MrReverted per member.
@@ -5712,5 +5852,141 @@ mod tests {
         // 6. Escalation branch: the noop adapter's revert SHA fails the
         // re-run, so the queue stays paused (escalated to a human).
         assert!(merge_queue_paused(&state, &repo.id).await);
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_trips_at_three_reverts() {
+        let state = test_state();
+        let (repo, mr) = setup_recovery_mr(&state).await;
+
+        // Passing post-merge gate: recovery runs, but the noop adapter's
+        // revert SHA is not HEAD, so the re-run fails → escalation path
+        // (queue stays paused) while the revert count still increments on
+        // every successful revert.
+        create_post_merge_gate(&state, &repo.id, "true", true).await;
+
+        for i in 0..3 {
+            recover_from_post_merge_failure(
+                &state,
+                &repo,
+                &mr,
+                &format!("fail-{i}-0000000000000000000000000000000"),
+                "post-merge-tests failed",
+            )
+            .await;
+        }
+
+        // Revert count reached 3 → circuit breaker tripped.
+        let count = state
+            .kv_store
+            .kv_get(REVERT_COUNTS_NS, "mr-recov")
+            .await
+            .unwrap()
+            .expect("revert count recorded");
+        assert_eq!(count, "3");
+
+        // Queue entry cancelled permanently.
+        let cancelled = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-recov"))
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert_eq!(cancelled.status, MergeQueueEntryStatus::Cancelled);
+
+        // Critical circuit-breaker escalation task created.
+        let tasks = state.tasks.list_by_repo(&repo.id).await.unwrap();
+        assert!(
+            tasks.iter().any(|t| t.priority == TaskPriority::Critical
+                && t.labels.contains(&"circuit-breaker".to_string())),
+            "circuit-breaker critical task must be created"
+        );
+    }
+
+    /// TASK-095 R2-1: post-merge gates must execute against the exact
+    /// `head_sha` tree, in a detached worktree, not against whatever the
+    /// first registered worktree happens to have checked out.
+    ///
+    /// Uses a real git repository: base commit has no `marker` file, head
+    /// commit adds it. The gate command `test -f marker` passes only when
+    /// run in a checkout of head_sha.
+    #[tokio::test]
+    async fn post_merge_gates_run_against_head_sha_tree() {
+        use std::process::Command as ShellCommand;
+
+        // Real git repo: init, base commit, then head commit adding `marker`.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_path = dir.path().join("gate-repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let git = |args: &[&str]| {
+            let out = ShellCommand::new("git")
+                .args(["-C", repo_path.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "test@gyre.local"]);
+        git(&["config", "user.name", "Gyre Test"]);
+        std::fs::write(repo_path.join("base.txt"), "base").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "base"]);
+        std::fs::write(repo_path.join("marker"), "post-merge content").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "head with marker"]);
+        let head_sha = git(&["rev-parse", "HEAD"]);
+        let base_sha = git(&["rev-parse", "HEAD~1"]);
+
+        // State with the real git ops adapter and the repo registered at
+        // its on-disk path.
+        let state = crate::mem::test_state_with_git_ops(std::sync::Arc::new(
+            gyre_adapters::Git2OpsAdapter::new(),
+        ));
+        let repo = Repository::new(
+            Id::new("repo-gate-r21"),
+            Id::new("ws-1"),
+            "gate-repo",
+            repo_path.to_str().unwrap().to_string(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // The gate only passes when `marker` exists in the checkout — true
+        // for head_sha's tree, false for the base tree.
+        create_post_merge_gate(&state, &repo.id, "test -f marker", true).await;
+
+        // Gates run at head_sha: marker exists → pass.
+        crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
+            .await
+            .expect("gates must pass at head_sha");
+
+        // Gates run at the base SHA: marker absent → required gate fails.
+        let err = crate::gate_executor::run_post_merge_gates(&state, &repo, &base_sha)
+            .await
+            .expect_err("gates must fail at base sha");
+        assert!(
+            err.contains("post-merge-tests"),
+            "failure should name the gate: {err}"
+        );
+
+        // The detached gate worktree was deregistered: the only registered
+        // worktree is the repo itself.
+        let worktrees = state
+            .git_ops
+            .list_worktrees(repo_path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            worktrees,
+            vec![repo_path.to_str().unwrap().to_string()],
+            "gate worktree should be removed"
+        );
     }
 }

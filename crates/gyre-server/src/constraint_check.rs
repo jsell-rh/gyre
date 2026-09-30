@@ -1922,7 +1922,7 @@ mod tests {
             updated_at: 0,
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
-            revert_mr_id: None,
+            revert_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -1984,7 +1984,7 @@ mod tests {
             updated_at: 0,
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
-            revert_mr_id: None,
+            revert_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -2599,7 +2599,7 @@ mod tests {
             updated_at: 0,
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
-            revert_mr_id: None,
+            revert_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 
@@ -2656,7 +2656,7 @@ mod tests {
             updated_at: 0,
             workspace_id: Id::new("ws-1"),
             reverted_at: None,
-            revert_mr_id: None,
+            revert_commit_sha: None,
         };
         state.merge_requests.create(&mr).await.unwrap();
 

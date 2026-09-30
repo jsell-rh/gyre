@@ -1229,6 +1229,85 @@ impl GyreClient {
             serde_json::from_str(&text).context("parsing repo orchestrator response")?;
         Ok(SpawnRepoOrchestratorOutcome::Spawned(parsed))
     }
+
+    /// GET /api/v1/repos/:id/status — main health + merge queue state.
+    pub async fn repo_status(&self, repo_id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/repos/{repo_id}/status", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("repo status failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing repo status response")
+    }
+
+    /// PUT /api/v1/repos/:id/queue/pause — manually pause the merge queue.
+    pub async fn pause_queue(&self, repo_id: &str, reason: Option<&str>) -> Result<()> {
+        let body = serde_json::json!({ "reason": reason });
+        let resp = self
+            .client
+            .put(format!(
+                "{}/api/v1/repos/{repo_id}/queue/pause",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .json(&body)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            anyhow::bail!("pause queue failed (HTTP {status}): {text}");
+        }
+        Ok(())
+    }
+
+    /// PUT /api/v1/repos/:id/queue/resume — manually resume the merge queue.
+    pub async fn resume_queue(&self, repo_id: &str) -> Result<()> {
+        let resp = self
+            .client
+            .put(format!(
+                "{}/api/v1/repos/{repo_id}/queue/resume",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await?;
+            anyhow::bail!("resume queue failed (HTTP {status}): {text}");
+        }
+        Ok(())
+    }
+
+    /// POST /api/v1/repos/:id/revert/:mr_id — manual revert of a merged MR.
+    pub async fn revert_mr(&self, repo_id: &str, mr_id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/v1/repos/{repo_id}/revert/{mr_id}",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("revert MR failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing revert response")
+    }
 }
 
 /// Outcome of `spawn_repo_orchestrator`: fresh spawn, or a live orchestrator

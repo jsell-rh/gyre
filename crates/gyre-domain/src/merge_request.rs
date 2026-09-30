@@ -85,8 +85,10 @@ pub struct MergeRequest {
     pub workspace_id: Id,
     /// Unix timestamp when this MR was reverted via recovery protocol.
     pub reverted_at: Option<u64>,
-    /// ID of the revert MR that undid this MR's changes.
-    pub revert_mr_id: Option<Id>,
+    /// SHA of the revert commit that undid this MR's changes (task-095 R2-3:
+    /// holds a git commit SHA, not an MR id — the recovery protocol creates
+    /// the revert commit directly without a shadow revert MR).
+    pub revert_commit_sha: Option<String>,
 }
 
 impl MergeRequest {
@@ -115,8 +117,8 @@ impl MergeRequest {
             created_at,
             updated_at: created_at,
             workspace_id: Id::new("default"),
+            revert_commit_sha: None,
             reverted_at: None,
-            revert_mr_id: None,
         }
     }
 
@@ -149,12 +151,13 @@ impl MergeRequest {
     pub fn dep_target_ids(&self) -> Vec<&Id> {
         self.depends_on.iter().map(|d| &d.target_mr_id).collect()
     }
-
     /// Mark this MR as reverted via the recovery protocol.
-    pub fn revert(&mut self, revert_mr_id: Id, now: u64) -> Result<(), MrError> {
+    /// `revert_commit_sha` is the git SHA of the revert commit that undid
+    /// this MR's changes on the default branch (task-095 R2-3).
+    pub fn revert(&mut self, revert_commit_sha: String, now: u64) -> Result<(), MrError> {
         self.transition_status(MrStatus::Reverted)?;
         self.reverted_at = Some(now);
-        self.revert_mr_id = Some(revert_mr_id);
+        self.revert_commit_sha = Some(revert_commit_sha);
         self.updated_at = now;
         Ok(())
     }

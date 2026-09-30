@@ -54,7 +54,7 @@ struct MergeRequestRow {
     atomic_group: Option<String>,
     workspace_id: String,
     reverted_at: Option<i64>,
-    revert_mr_id: Option<String>,
+    revert_commit_sha: Option<String>,
     spec_ref: Option<String>,
 }
 
@@ -104,7 +104,7 @@ impl MergeRequestRow {
             updated_at: self.updated_at as u64,
             workspace_id: Id::new(self.workspace_id),
             reverted_at: self.reverted_at.map(|v| v as u64),
-            revert_mr_id: self.revert_mr_id.map(Id::new),
+            revert_commit_sha: self.revert_commit_sha,
         })
     }
 }
@@ -131,7 +131,7 @@ struct NewMergeRequestRow<'a> {
     atomic_group: Option<&'a str>,
     workspace_id: &'a str,
     reverted_at: Option<i64>,
-    revert_mr_id: Option<&'a str>,
+    revert_commit_sha: Option<&'a str>,
     spec_ref: Option<&'a str>,
 }
 
@@ -165,7 +165,7 @@ impl MergeRequestRepository for SqliteStorage {
                 atomic_group: m.atomic_group.as_deref(),
                 workspace_id: m.workspace_id.as_str(),
                 reverted_at: m.reverted_at.map(|v| v as i64),
-                revert_mr_id: m.revert_mr_id.as_ref().map(|id| id.as_str()),
+                revert_commit_sha: m.revert_commit_sha.as_deref(),
                 spec_ref: m.spec_ref.as_deref(),
             };
             diesel::insert_into(merge_requests::table)
@@ -188,7 +188,7 @@ impl MergeRequestRepository for SqliteStorage {
                     merge_requests::atomic_group.eq(row.atomic_group),
                     merge_requests::workspace_id.eq(row.workspace_id),
                     merge_requests::reverted_at.eq(row.reverted_at),
-                    merge_requests::revert_mr_id.eq(row.revert_mr_id),
+                    merge_requests::revert_commit_sha.eq(row.revert_commit_sha),
                     merge_requests::spec_ref.eq(row.spec_ref),
                 ))
                 .execute(&mut *conn)
@@ -293,7 +293,7 @@ impl MergeRequestRepository for SqliteStorage {
                     merge_requests::depends_on.eq(&depends_on_json),
                     merge_requests::atomic_group.eq(m.atomic_group.as_deref()),
                     merge_requests::reverted_at.eq(m.reverted_at.map(|v| v as i64)),
-                    merge_requests::revert_mr_id.eq(m.revert_mr_id.as_ref().map(|id| id.as_str())),
+                    merge_requests::revert_commit_sha.eq(m.revert_commit_sha.as_deref()),
                     merge_requests::spec_ref.eq(m.spec_ref.as_deref()),
                 ))
                 .execute(&mut *conn)

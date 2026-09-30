@@ -45,6 +45,14 @@ See [docs/server-config.md](docs/server-config.md) for all configuration options
 
 **Hexagonal boundary invariant:** `gyre-domain` MUST NOT import `gyre-adapters` or any infrastructure crate. Enforced by `scripts/check-arch.sh` and CI.
 
+**Other invariants enforced mechanically (pre-commit + CI):**
+- Every route registered in `api/mod.rs` MUST have an ABAC `RouteResourceMapping` entry in `abac_middleware.rs` (`scripts/check-abac-route-registry.sh`) — unregistered routes get NO policy evaluation.
+- Every new migration MUST use the next unused 6-digit sequence number (`ls crates/gyre-adapters/migrations/ | sort | tail -3`); duplicate versions silently never run (`scripts/check-migration-versions.sh`).
+- Every `MessageKind` variant MUST have an emitter — a kind that is never constructed is a dead spec delivery link (`scripts/check-dead-message-kinds.sh`).
+- Never slice strings at fixed byte indexes (`&s[..N]`) — panics on non-char-boundary UTF-8 (`scripts/check-byte-slice-truncation.sh`).
+
+These checks have exemption files (`scripts/*-exemptions.txt`) for pre-existing violations; never add new entries.
+
 ---
 
 ## Documentation Index

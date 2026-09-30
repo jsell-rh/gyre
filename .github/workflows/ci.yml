@@ -66,6 +66,14 @@ jobs:
         run: bash scripts/check-abac-exempt-handlers.sh || true
       - name: Unwritten adapter store-field lint (advisory)
         run: bash scripts/check-unwritten-store-fields.sh || true
+      - name: ABAC route registry lint
+        run: bash scripts/check-abac-route-registry.sh
+      - name: Migration version uniqueness lint
+        run: bash scripts/check-migration-versions.sh
+      - name: Byte-slice truncation lint
+        run: bash scripts/check-byte-slice-truncation.sh
+      - name: Dead MessageKind lint
+        run: bash scripts/check-dead-message-kinds.sh
       - name: Em-dash check                                                                                                                     
         run: |                                                                                                                                  
           find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true  
