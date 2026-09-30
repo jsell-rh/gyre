@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §7 Secret Scoping"
   - "platform-model.md §7 Secret Types"
   - "platform-model.md §7 Storage Backend"
-commits: [8709bfee26e680f6f92cc6ff95e8f1183c4ee243]
+commits: ["8709bfee26e680f6f92cc6ff95e8f1183c4ee243", "ce4f232d4122bca3317a4437ec259ba384a019d7"]
 ---
 
 ## Spec Excerpt
@@ -91,14 +91,14 @@ Default: secrets encrypted at rest with SOPS in database. Optional Vault integra
 
 ## Acceptance Criteria
 
-- [ ] Secret, SecretScope, SecretType domain types defined
-- [ ] SecretRepository port trait with all methods
-- [ ] SQLite adapter with AES-256-GCM encryption at rest
-- [ ] Database migration for secrets table
-- [ ] resolve_for_agent collects secrets from all scopes
-- [ ] Agent spawn uses resolved secrets instead of hardcoded GYRE_CRED_*
-- [ ] Secret values never logged or serialized to JSON
-- [ ] `cargo test --all` passes
+- [x] Secret, SecretScope, SecretType domain types defined
+- [x] SecretRepository port trait with all methods
+- [x] SQLite adapter with AES-256-GCM encryption at rest
+- [x] Database migration for secrets table
+- [x] resolve_for_agent collects secrets from all scopes
+- [x] Agent spawn uses resolved secrets instead of hardcoded GYRE_CRED_*
+- [x] Secret values never logged or serialized to JSON
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 
