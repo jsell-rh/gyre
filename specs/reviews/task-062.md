@@ -370,4 +370,14 @@ decb0353 -- web/` = empty), and the frontmatter `commits` list now points at
 the reachable SHA, following the task-092 precedent
 (`e1e23df9`/`79e216bb`).
 
+Correction (pre-merge): the R9 replacement SHAs (`4a16b621`, `23a59fa1`,
+`14e153ab`, `77389ee6`) are themselves unreachable from `worker/task-062`
+HEAD — the branch carries byte-equivalent duplicates (`2bf5eb20`, `2d0cff8f`,
+`7364e938`, `a7303e58`; verified: `git diff` per pair is empty for `web/` and
+`crates/`, differing only in an unrelated task-077 `ui-navigation.md` coverage
+edit present on the branch side). The frontmatter `commits` list now points at
+the branch-ancestral SHAs. Fourth recorded instance of the SHA-drift flaw
+class on this task; the underlying cause is committing doc updates against a
+detached/pre-merge base instead of the worker branch tip.
+
 Setting `progress: ready-for-review` (no open findings).
