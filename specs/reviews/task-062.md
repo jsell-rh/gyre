@@ -237,7 +237,7 @@ F3 verified resolved — adversarially, including collateral damage from the fix
 However, the R7 "all checks verified" sweep missed two defects in the code `cbcbd6ab`
 actually touched. Findings:
 
-- [ ] **F4 — `cbcbd6ab` deleted `filterEdge`'s `'dependencies'` case: unexplained
+- [x] **F4 — `cbcbd6ab` deleted `filterEdge`'s `'dependencies'` case: unexplained
   out-of-scope deletion inconsistent with its surviving `filterOpacity` counterpart.**
 
   The F3 fix's stated scope was extracting test-reachability semantics (commit message:
@@ -274,7 +274,7 @@ actually touched. Findings:
   `filterOpacity` case too and document why — either way the two functions must agree).
   A regression test for `filterEdge`'s filter→edge-type mapping would prevent recurrence.
 
-- [ ] **F5 — Depth caps diverge between backend resolver and frontend module for
+- [x] **F5 — Depth caps diverge between backend resolver and frontend module for
   `$test_reachable`/`$test_fragility`: same reference resolves differently per surface,
   violating determinism (§3 line 17).**
 
@@ -318,3 +318,56 @@ actually touched. Findings:
   remains true.
 
 Setting `progress: needs-revision` (F4, F5 open; F3 remains resolved).
+
+## Round 9
+
+F4 and F5 resolved by commit `decb0353` ("fix(web): resolve task-062 F4/F5 —
+filterEdge dependencies case, backend depth caps"):
+
+- **F4**: the filter→edge-type mapping is extracted to
+  `web/src/lib/canvas-filters.js` (`edgePassesFilter`) with the restored
+  `case 'dependencies': return et === 'depends_on' || et === 'calls';` —
+  byte-faithful to the pre-`cbcbd6ab` mapping (verified against
+  `git show cbcbd6ab^:web/src/lib/ExplorerCanvas.svelte`). `filterEdge`
+  (`ExplorerCanvas.svelte:1614-1616`) delegates to it, and the module header
+  documents that `filterOpacity`'s node-dimming cases must stay in agreement —
+  the two functions now handle the same filter values. Regression test
+  `web/src/__tests__/canvas-filters.test.js` pins every filter value's edge
+  set, included and excluded types (the F4 contrast: `dependencies` must NOT
+  pass `contains`/`governed_by`/`renders`).
+- **F5**: `web/src/lib/test-reachability.js` exports
+  `REACHABLE_MAX_DEPTH = 100` and `FRAGILITY_MAX_DEPTH = 20` with doc comments
+  cross-referencing `view_query_resolver.rs:421` (compute_test_reachable depth
+  cap) and `:457` (bfs_traverse(..., 20, ...)). `computeTestReachable`,
+  `computeTestUnreachable`, `computeTestGaps`, and `computeTestFragilityCounts`
+  all take `maxDepth` parameters defaulting to the backend-mirroring constants,
+  so a reference resolves identically on both surfaces (§3 "All computations
+  are deterministic"). Pinning tests in
+  `web/src/__tests__/test-reachability.test.js`: a >20-hop Calls chain accrues
+  zero fragility at the default cap and a >100-hop chain is unreachable and a
+  coverage gap, both recovered by raising the cap.
+
+Verified: `cargo test -p gyre-domain --lib view_query_resolver`: 116 passed,
+0 failed. `npx vitest run src/__tests__/test-reachability.test.js
+src/__tests__/canvas-filters.test.js`: 16 passed, 0 failed. Full
+`cd web && npm test`: 1501 passed, 17 failed — the exact pre-existing R6/R8
+baseline (5 `ExplorerViewAskViewSpec` + 6 `FlowRenderer` + 5
+`MoldableViewNodeTypeFilter` + 1 `ExplorerCanvas-performance`), all in files
+untouched by task-062 commits. `scripts/check-cross-surface-parity.sh` passes;
+`check-arch`, `check-mirrored-logic-tests(-js)`, `check-dead-test-variables-js`,
+`check-conditional-test-guards`, `check-tautological-assertions-js`,
+`check-phantom-test-apis-js`, `check-dead-test-code`,
+`check-comparative-test-claims-js`, `check-assertionless-tests`,
+`check-aspirational-test-names`, `check-self-confirming-tests`,
+`check-self-contradicting-test-comments-js`, `check-stale-mechanism-claims-js`
+all pass.
+
+Process note: the original fix commit was recorded in the task frontmatter as
+`c08e3011`, a commit parented on the pre-merge base that became unreachable
+after rebasing onto `main` (`9df46795`). The identical fix landed as
+`decb0353` (web files byte-identical, verified by `git diff c08e3011
+decb0353 -- web/` = empty), and the frontmatter `commits` list now points at
+the reachable SHA, following the task-092 precedent
+(`e1e23df9`/`79e216bb`).
+
+Setting `progress: ready-for-review` (no open findings).
