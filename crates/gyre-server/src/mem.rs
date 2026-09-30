@@ -1515,9 +1515,7 @@ impl MemWorkspaceRepository {
     /// Construct a workspace repo that shares its policy store with a paired
     /// `MemPolicyRepository`, giving `apply_trust_transition` real policy-write
     /// behavior in in-memory mode.
-    pub fn with_policy_store(
-        policies: Arc<Mutex<HashMap<String, gyre_domain::Policy>>>,
-    ) -> Self {
+    pub fn with_policy_store(policies: Arc<Mutex<HashMap<String, gyre_domain::Policy>>>) -> Self {
         Self {
             store: Arc::new(Mutex::new(HashMap::new())),
             policies,

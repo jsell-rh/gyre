@@ -63,7 +63,6 @@ impl LanguageExtractor for TypeScriptExtractor {
         // Pass 1: tree-sitter based extraction (declarations + API call sites)
         ctx.extract_ts_files();
 
-
         ExtractionResult {
             nodes: ctx.nodes,
             edges: ctx.edges,
@@ -154,7 +153,6 @@ impl ExtractionContext {
             deleted_at: None,
         }
     }
-
 
     // -----------------------------------------------------------------------
     // File discovery

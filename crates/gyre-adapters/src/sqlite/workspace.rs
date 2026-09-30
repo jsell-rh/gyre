@@ -276,7 +276,10 @@ impl WorkspaceRepository for SqliteStorage {
                     .execute(conn)
                     .context("upsert workspace")?;
                 if delete_trust_policies {
-                    crate::sqlite::policy::delete_trust_policies_for_scope_txn(conn, w.id.as_str())?;
+                    crate::sqlite::policy::delete_trust_policies_for_scope_txn(
+                        conn,
+                        w.id.as_str(),
+                    )?;
                 }
                 for p in &policies {
                     crate::sqlite::policy::insert_policy_row_txn(conn, p)?;

@@ -2780,7 +2780,10 @@ mod tests {
             &incoming,
             None,
         );
-        assert!(reachable.contains("n1"), "Calls-reached node is test-reachable");
+        assert!(
+            reachable.contains("n1"),
+            "Calls-reached node is test-reachable"
+        );
         assert!(
             !reachable.contains("n2"),
             "Implements-only path must NOT be test-reachable (spec: via Calls)"
@@ -2830,14 +2833,8 @@ mod tests {
         );
         assert_eq!(result, HashSet::from(["n2".to_string()]));
         // With no selection, $clicked resolves to the empty set.
-        let empty = resolve_computed_expression(
-            "$clicked",
-            &active,
-            &edges,
-            &outgoing,
-            &incoming,
-            None,
-        );
+        let empty =
+            resolve_computed_expression("$clicked", &active, &edges, &outgoing, &incoming, None);
         assert!(empty.is_empty());
     }
 

@@ -125,23 +125,38 @@ fn line_diff(current: &str, submitted: &str) -> Vec<SpecDiffLine> {
     let (mut i, mut j) = (0usize, 0usize);
     while i < n && j < m {
         if a[i] == b[j] {
-            out.push(SpecDiffLine { op: "context".to_string(), text: a[i].to_string() });
+            out.push(SpecDiffLine {
+                op: "context".to_string(),
+                text: a[i].to_string(),
+            });
             i += 1;
             j += 1;
         } else if lcs[i + 1][j] >= lcs[i][j + 1] {
-            out.push(SpecDiffLine { op: "remove".to_string(), text: a[i].to_string() });
+            out.push(SpecDiffLine {
+                op: "remove".to_string(),
+                text: a[i].to_string(),
+            });
             i += 1;
         } else {
-            out.push(SpecDiffLine { op: "add".to_string(), text: b[j].to_string() });
+            out.push(SpecDiffLine {
+                op: "add".to_string(),
+                text: b[j].to_string(),
+            });
             j += 1;
         }
     }
     while i < n {
-        out.push(SpecDiffLine { op: "remove".to_string(), text: a[i].to_string() });
+        out.push(SpecDiffLine {
+            op: "remove".to_string(),
+            text: a[i].to_string(),
+        });
         i += 1;
     }
     while j < m {
-        out.push(SpecDiffLine { op: "add".to_string(), text: b[j].to_string() });
+        out.push(SpecDiffLine {
+            op: "add".to_string(),
+            text: b[j].to_string(),
+        });
         j += 1;
     }
     out
@@ -217,7 +232,8 @@ async fn spec_conflict_response(
     // editors get a diff view in their Inbox (HSI §7 item 3) — not just the
     // second editor who receives the transient 409 response. `to_value` borrows
     // `diff` so it remains available for the HTTP response below.
-    let diff_value = serde_json::to_value(&diff).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+    let diff_value =
+        serde_json::to_value(&diff).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
     let body = serde_json::json!({
         "spec_path": spec_path,
         "base_sha": base_sha,
@@ -1489,7 +1505,11 @@ mod tests {
         // Ledger records the spec at a NEWER sha than what the client loaded.
         state
             .spec_ledger
-            .save(&ledger_entry("system/conflict.md", "server-sha-2", "ws-conf"))
+            .save(&ledger_entry(
+                "system/conflict.md",
+                "server-sha-2",
+                "ws-conf",
+            ))
             .await
             .unwrap();
 
@@ -1519,7 +1539,8 @@ mod tests {
         assert!(!diff.is_empty(), "diff must not be empty");
         // The submitted lines appear as `add` entries.
         assert!(
-            diff.iter().any(|d| d["op"] == "add" && d["text"] == "My local edit."),
+            diff.iter()
+                .any(|d| d["op"] == "add" && d["text"] == "My local edit."),
             "diff should include the submitted line as an add: {diff:?}"
         );
     }
@@ -1607,7 +1628,11 @@ mod tests {
         state.repos.create(&repo).await.unwrap();
         state
             .spec_ledger
-            .save(&ledger_entry("system/conflict.md", "server-sha-2", "ws-conf"))
+            .save(&ledger_entry(
+                "system/conflict.md",
+                "server-sha-2",
+                "ws-conf",
+            ))
             .await
             .unwrap();
 

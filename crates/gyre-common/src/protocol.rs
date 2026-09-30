@@ -329,7 +329,10 @@ mod tests {
             assert_eq!(workspace_id, Id::new("ws-99"));
             assert_eq!(view, "specs");
             assert_eq!(timestamp, 1_711_324_800_000);
-            assert_eq!(editing_entity.as_deref(), Some("spec:specs/system/payments.md"));
+            assert_eq!(
+                editing_entity.as_deref(),
+                Some("spec:specs/system/payments.md")
+            );
         } else {
             panic!("expected UserPresence variant");
         }
@@ -349,7 +352,10 @@ mod tests {
             editing_entity: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(!json.contains("editing_entity"), "None must be skipped: {json}");
+        assert!(
+            !json.contains("editing_entity"),
+            "None must be skipped: {json}"
+        );
         // A payload with no editing_entity key decodes to None (serde default).
         let decoded: WsMessage =
             serde_json::from_str(r#"{"type":"UserPresence","user_id":"u","session_id":"s","workspace_id":"w","view":"inbox","timestamp":1}"#).unwrap();

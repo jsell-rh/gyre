@@ -18,10 +18,10 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use opentelemetry_proto::tonic::common::v1::{any_value::Value as OtlpValue, AnyValue, KeyValue};
+use parking_lot::Mutex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use parking_lot::Mutex;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -578,10 +578,7 @@ mod tests {
         }
     }
 
-    fn make_request(
-        service: &str,
-        spans: Vec<OtlpSpan>,
-    ) -> ExportTraceServiceRequest {
+    fn make_request(service: &str, spans: Vec<OtlpSpan>) -> ExportTraceServiceRequest {
         ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
                 resource: Some(Resource {
@@ -713,8 +710,9 @@ mod tests {
     #[tokio::test]
     async fn grpc_receiver_accepts_export() {
         let accumulator: SpanAccumulator = Arc::new(Mutex::new(Vec::new()));
-        let (addr, shutdown_tx, server) =
-            spawn_receiver(0, Arc::clone(&accumulator), 100).await.unwrap();
+        let (addr, shutdown_tx, server) = spawn_receiver(0, Arc::clone(&accumulator), 100)
+            .await
+            .unwrap();
 
         let mut client = TraceServiceClient::connect(format!("http://{addr}"))
             .await

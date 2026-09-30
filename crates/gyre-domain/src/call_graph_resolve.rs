@@ -314,7 +314,11 @@ mod tests {
     fn resolve_go_cross_package_edge() {
         let nodes = vec![
             func_node("h", "example.com/x/api.Handler.Handle", "api/handler.go"),
-            func_node("p", "example.com/x/service.ProcessRequest", "service/svc.go"),
+            func_node(
+                "p",
+                "example.com/x/service.ProcessRequest",
+                "service/svc.go",
+            ),
         ];
         let raw = vec![CallEdge {
             from: "example.com/x/api.Handler.Handle".to_string(),

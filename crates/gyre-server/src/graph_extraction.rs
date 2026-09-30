@@ -1229,9 +1229,9 @@ mod tests {
 
     // ── Pass 2 sync → graph storage integration (lsp-call-graph.md §6) ──────────
 
+    use gyre_adapters::mem_graph::MemGraphStore;
     use gyre_common::call_graph::{CallEdge, Language};
     use gyre_common::graph::{EdgeType, GraphEdge};
-    use gyre_adapters::mem_graph::MemGraphStore;
 
     /// Fake [`CallGraphExtractor`] standing in for the subprocess adapter, so the
     /// resolve→persist pipeline can be exercised hermetically (no Go toolchain).
@@ -1261,7 +1261,11 @@ mod tests {
     async fn sync_go_repo_persists_calls_edges_in_graph_store() {
         // A repo with a go.mod → detect_all_languages reports Go.
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("go.mod"), "module example.com/app\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n",
+        )
+        .unwrap();
 
         let repo_id = Id::new("repo-go");
         let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
@@ -1284,7 +1288,10 @@ mod tests {
 
         let persisted =
             extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
-        assert_eq!(persisted, 1, "one cross-package Calls edge should be persisted");
+        assert_eq!(
+            persisted, 1,
+            "one cross-package Calls edge should be persisted"
+        );
 
         // The Calls edge must actually appear in the graph store, resolved to the
         // Pass 1 node IDs.
@@ -1301,7 +1308,11 @@ mod tests {
     #[tokio::test]
     async fn pass2_dedups_calls_edge_already_present_from_pass1() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("go.mod"), "module example.com/app\n\ngo 1.21\n").unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n",
+        )
+        .unwrap();
 
         let repo_id = Id::new("repo-go");
         let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
@@ -1336,7 +1347,10 @@ mod tests {
         let persisted =
             extract_and_persist_call_graph(dir.path(), &nodes, &existing, &repo_id, &store, &fake)
                 .await;
-        assert_eq!(persisted, 0, "duplicate of a Pass 1 Calls edge must be skipped");
+        assert_eq!(
+            persisted, 0,
+            "duplicate of a Pass 1 Calls edge must be skipped"
+        );
 
         let calls = store
             .list_edges(&repo_id, Some(EdgeType::Calls))
