@@ -46,7 +46,9 @@ See [docs/server-config.md](docs/server-config.md) for all configuration options
 **Hexagonal boundary invariant:** `gyre-domain` MUST NOT import `gyre-adapters` or any infrastructure crate. Enforced by `scripts/check-arch.sh` and CI.
 
 **Other invariants enforced mechanically (pre-commit + CI):**
-- Every route registered in `api/mod.rs` MUST have an ABAC `RouteResourceMapping` entry in `abac_middleware.rs` (`scripts/check-abac-route-registry.sh`) — unregistered routes get NO policy evaluation.
+- Every route registered in `api/mod.rs` MUST have an ABAC `RouteResourceMapping` entry in `abac_middleware.rs` (`scripts/check-abac-route-registry.sh`) — unregistered routes get NO policy evaluation. The registry exemption file is FROZEN at its committed baseline count: adding a route there instead of the resolver converts a CI failure into a silent grandfather (`scripts/check-abac-route-registry.sh` fails on any growth).
+- Every route that runs without middleware ABAC (resolver-exempt OR listed in the frozen exemption file) MUST enforce per-handler authorization in the handler body: load the scoped entity, compare tenant/workspace against the caller, return Forbidden on mismatch. `auth.agent_id` bookkeeping and permissive-default `check_*_abac` helpers are NOT containment (`scripts/check-abac-exempt-handlers.sh`).
+- Every MCP tool whose handler performs repository writes MUST be in the `needs_write` RBAC gate in `mcp.rs` — gate membership is derived from handler effects, never hand-maintained beside the dispatch (`scripts/check-mcp-write-tools.sh`).
 - Every new migration MUST use the next unused 6-digit sequence number (`ls crates/gyre-adapters/migrations/ | sort | tail -3`); duplicate versions silently never run (`scripts/check-migration-versions.sh`).
 - Every `MessageKind` variant MUST have an emitter — a kind that is never constructed is a dead spec delivery link (`scripts/check-dead-message-kinds.sh`).
 - Never slice strings at fixed byte indexes (`&s[..N]`) — panics on non-char-boundary UTF-8 (`scripts/check-byte-slice-truncation.sh`).

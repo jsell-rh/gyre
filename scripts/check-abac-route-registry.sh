@@ -22,6 +22,15 @@
 # that predate this check. It should SHRINK as routes are added to the
 # resolver — never grow. Do not add new routes to the exemption file.
 #
+# The exemption file is FROZEN at the baseline count below. Growing it —
+# adding even one new route — is how task-093 F1 slipped through: the two
+# orchestrator-spawn routes shipped in 2ae69e97 and were retro-exempted in
+# 088e7048, converting a hard CI failure into a silent grandfather. The
+# count must never rise; it must shrink as routes are moved into the
+# resolver (delete the entry when you register a route).
+FROZEN_EXEMPTION_COUNT=53
+
+#
 # Run by pre-commit and CI.
 
 set -euo pipefail
@@ -73,10 +82,25 @@ MISSING_COUNT=$(wc -l < /tmp/.abac-missing.$$)
 
 # Stale exemptions: exempted routes that ARE now in the resolver (or no
 # longer registered at all) should be removed from the exemption file.
+# Freeze enforcement input (task-093 F1): capture before the temp files are removed.
+EXEMPT_TOTAL=$(wc -l < /tmp/.abac-exempt-paths.$$)
 STALE_EXEMPTIONS=$(comm -23 /tmp/.abac-exempt-paths.$$ /tmp/.abac-uncovered.$$)
 
 rm -f /tmp/.abac-router-paths.$$ /tmp/.abac-resolver-paths.$$ \
     /tmp/.abac-exempt-paths.$$ /tmp/.abac-uncovered.$$ /tmp/.abac-missing.$$
+
+# Freeze enforcement (task-093 F1): the exemption file must never grow.
+if [ "$EXEMPT_TOTAL" -gt "$FROZEN_EXEMPTION_COUNT" ]; then
+    echo "FAIL: abac-route-registry-exemptions.txt grew to $EXEMPT_TOTAL entries (baseline: $FROZEN_EXEMPTION_COUNT)."
+    echo ""
+    echo "Adding routes to the exemption file is how specs/reviews/task-093.md F1"
+    echo "shipped: new routes landed unregistered, then were retro-exempted so the"
+    echo "check stays green. A new route MUST ship with a RouteResourceMapping (or"
+    echo "RouteResourceMapping::exempt) in abac_middleware.rs — never an exemption"
+    echo "file entry. If you removed an entry from the baseline, lower"
+    echo "FROZEN_EXEMPTION_COUNT to the new count; never raise it."
+    FAIL=1
+fi
 
 # ── Result ──────────────────────────────────────────────────────────────
 

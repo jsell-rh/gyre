@@ -16,3 +16,23 @@
 #
 # --- task-087 revision round owns these (span payload endpoint) ---
 crates/gyre-server/src/api/traces.rs:150   # get_span_payload: span → gate_run → MR → workspace resolution deferred to a follow-up; "tenant-scoped so cross-tenant access returns None naturally" claim unbacked (shared AppState repo is not tenant-scoped). Fix: resolve the span's MR and check workspace/tenant, return Forbidden on mismatch.
+
+# --- task-093 revision round owns these (orchestrator spawn routes) ---
+# Routes retro-exempted into abac-route-registry-exemptions.txt (F1); the
+# handlers shipped without per-handler tenant containment:
+crates/gyre-server/src/api/orchestrator.rs:208   # spawn_workspace_orchestrator (F2): consults only auth.agent_id for spawned_by bookkeeping — any authenticated principal in any tenant can mint a workspace-scoped orchestrator JWT. Fix: load the workspace, compare its tenant against auth.tenant_id, return Forbidden on mismatch.
+crates/gyre-server/src/api/orchestrator.rs:304   # spawn_repo_orchestrator (F3): gates only on check_repo_abac, which returns Ok when no per-repo policies are stored ("No policies = unrestricted") and bypasses for global tokens/API keys. Fix: load the repo, compare repo.workspace_id's tenant against auth.tenant_id, return Forbidden on mismatch.
+
+# --- frozen-baseline legacy debt (routes in abac-route-registry-exemptions.txt
+# before the task-093 extension of this check; handlers never had per-handler
+# authorization). Each is a real F1b-class hazard; exemptions keep the check
+# green on main while fixes are dispatched to the owning routes' revision. ---
+crates/gyre-server/src/api/llm_config.rs:82    # list_workspace_llm_configs: workspace-scoped LLM config list with no tenant/workspace containment. Fix: compare workspace tenant against auth.tenant_id.
+crates/gyre-server/src/api/llm_config.rs:98    # get_effective_llm_config: same class as :82.
+crates/gyre-server/src/api/llm_config.rs:136   # put_workspace_llm_config: same class as :82 (write path).
+crates/gyre-server/src/api/llm_config.rs:171   # delete_workspace_llm_config: same class as :82 (write path).
+crates/gyre-server/src/api/llm_prompts.rs:65   # list_workspace_prompts: same class (workspace-scoped prompt list).
+crates/gyre-server/src/api/llm_prompts.rs:115  # upsert_workspace_prompt: same class (write path).
+crates/gyre-server/src/api/meta_specs.rs:964   # list_meta_specs_registry: registry-wide list with no containment. Fix: admin-role gate or tenant containment per spec.
+crates/gyre-server/src/api/meta_specs.rs:995   # create_meta_spec_registry: same class (write path).
+crates/gyre-server/src/api/meta_specs.rs:1107  # delete_meta_spec_registry: same class (delete path).

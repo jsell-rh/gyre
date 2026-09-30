@@ -41,6 +41,26 @@
 # docs) are listed in the PUBLIC_EXEMPT array below; SCIM user routes
 # authenticate via the SCIM bearer token (check_scim_auth).
 #
+# Extension (specs/reviews/task-093.md F2/F3): routes listed in
+# scripts/abac-route-registry-exemptions.txt are treated EXACTLY like
+# RouteResourceMapping::exempt routes — they run with NO middleware policy
+# evaluation, so the handler body is the only authorization surface, and the
+# same per-handler rules apply. Two routes reached the exemption file by
+# shipping unregistered and being retro-exempted (task-093 F1), then ran
+# with broken handler checks: `spawn_workspace_orchestrator` consulted only
+# `auth.agent_id` (any principal in any tenant could mint a
+# workspace-scoped JWT), and `spawn_repo_orchestrator` relied on
+# `check_repo_abac`, which returns Ok(()) when no per-repo policies exist
+# ("No policies = unrestricted") and never verifies tenant containment.
+# Rule 1b is correspondingly tightened: referencing `auth.agent_id` alone
+# (an identity string, not a scope) is NOT an authorization decision —
+# using it as `spawned_by` bookkeeping leaves every cross-tenant request
+# authorized. Scope fields are tenant_id / workspace_id / user_id / role.
+# Rule 4 (new): an ABAC-policy helper call (`check_repo_abac` etc.) is not
+# a substitute for tenant containment — the policy engine's default is
+# permissive when no policies are stored. The handler must compare the
+# loaded entity's tenant/workspace against the caller's regardless.
+#
 # NOT flagged: handlers inside #[cfg(test)]/mod tests regions; lines
 # carrying `// exempt-auth:ok`.
 #
@@ -118,9 +138,10 @@ def strip_tests(text):
             return lines, i
     return lines, None
 
-def parse_handler(text, name):
-    """Find `async fn NAME` (or `fn NAME`) and return (start, end, lines)."""
-    lines = text.splitlines()
+def parse_handler(lines, name):
+    """Find `async fn NAME` (or `fn NAME`) in pre-split `lines`; return
+    (start, end) or None. Lines are split once per file by the caller —
+    splitting inside made the check O(files × handlers × filesize)."""
     fn_re = re.compile(r'^\s*(pub\s+)?(async\s+)?fn\s+' + re.escape(name) + r'\s*[\(<]')
     for i, line in enumerate(lines):
         if fn_re.match(line):
@@ -132,8 +153,8 @@ def parse_handler(text, name):
                 if '{' in lines[j]:
                     started = True
                 if started and depth <= 0:
-                    return i, j, lines
-            return i, len(lines) - 1, lines
+                    return i, j
+            return i, len(lines) - 1
     return None
 
 def doc_comment_above(lines, fn_start):
@@ -167,6 +188,17 @@ def main():
     exempt_patterns = set(EXEMPT_ROUTE.findall(mw_text))
     # api-mapped routes are ABAC-enforced; excluded
     exempt_patterns -= PUBLIC_EXEMPT
+
+    # Routes exempted via the registry-check's exemption file (task-093
+    # F2/F3): these run with NO middleware policy evaluation at all, so the
+    # per-handler rules apply to them exactly as to ::exempt routes.
+    reg_exempt_path = Path(os.environ.get('GYRE_SCRIPT_DIR', '.')) / 'abac-route-registry-exemptions.txt'
+    if reg_exempt_path.exists():
+        for raw in reg_exempt_path.read_text().splitlines():
+            raw = raw.split('#', 1)[0].strip()
+            if raw.startswith('/api/'):
+                exempt_patterns.add(raw)
+
     if not exempt_patterns:
         print("check-abac-exempt-handlers: OK (no non-public exempt routes)")
         return
@@ -240,11 +272,12 @@ def main():
             text = src.read_text(encoding='utf-8', errors='replace')
         except OSError:
             continue
+        lines = text.splitlines()
         for handler, pattern in sorted(targets.items()):
-            parsed = parse_handler(text, handler.split('::')[-1])
+            parsed = parse_handler(lines, handler.split('::')[-1])
             if parsed is None:
                 continue
-            fn_start, fn_end, lines = parsed
+            fn_start, fn_end = parsed
             checked += 1
             sig = '\n'.join(lines[fn_start:fn_start + 10])
             body = '\n'.join(lines[fn_start:fn_end + 1])
@@ -277,16 +310,53 @@ def main():
                     errors += 1
 
             # Rule 1: an auth parameter (bound or _) requires a real decision.
+            # Tightened per task-093 F2: `auth.agent_id` alone is NOT a
+            # decision — it is an identity string, not a scope. Using it as
+            # bookkeeping (`spawned_by: &auth.agent_id`) leaves every
+            # cross-tenant request authorized. Only scope fields count.
             has_auth_param = re.search(r'_?\s*auth\s*:\s*(AuthenticatedAgent|AuthContext)', sig) is not None
             if not has_auth_param:
                 continue  # no auth identity at all is a different check's job
             decision = (
                 re.search(r'check_\w*_auth\(|authorize\w*\(|verify_access\(|require_\w+\(', body)
-                or re.search(r'auth\.(tenant_id|workspace_id|user_id|agent_id|role)', body)
+                or re.search(r'auth\.(tenant_id|workspace_id|user_id|role)', body)
                 or re.search(r'resolve_\w+\(&auth\)', body)
                 or re.search(r'Forbidden|NotFound', body)
             )
             if decision:
+                # Rule 4 (task-093 F3): an ABAC-policy helper call is not a
+                # substitute for tenant containment. The policy engine's
+                # default is permissive when no policies are stored for the
+                # entity ("No policies = unrestricted"), and the global
+                # token / API-key paths bypass it entirely. A handler that
+                # ONLY calls check_*_abac (or similar) without also comparing
+                # the loaded entity's scope against the caller's is
+                # cross-tenant reachable in default deployments. The Forbidden
+                # scan ignores `.map_err(ApiError::Forbidden)` lines: merely
+                # mapping a policy error type is not an added decision branch.
+                abac_only = (
+                    re.search(r'check_\w*abac\w*\(', body)
+                    and not re.search(r'auth\.(tenant_id|workspace_id|user_id|role)', body)
+                    and not re.search(r'Forbidden', '\n'.join(
+                        l for l in body.splitlines() if '.map_err(' not in l))
+                )
+                if not abac_only:
+                    continue
+                key = f"{src}:{fn_start + 1}"
+                if key not in exempt_lines and '// exempt-auth:ok' not in docs:
+                    print(f"ERROR: ABAC-policy helper is not tenant containment at {key}")
+                    print(f"  handler `{handler}` (route {pattern}) gates on an ABAC policy")
+                    print("  check (e.g. check_repo_abac) but never compares the loaded")
+                    print("  entity's tenant/workspace against the caller's scope. The policy")
+                    print("  engine returns Ok when no per-entity policies are stored")
+                    print("  (\"No policies = unrestricted\") and bypasses entirely for global")
+                    print("  tokens / API keys — so in default deployments any authenticated")
+                    print("  principal in any tenant passes. This is the")
+                    print("  specs/reviews/task-093.md F3 flaw class.")
+                    print("  Add an explicit tenant/workspace containment check, or exempt")
+                    print("  with: // exempt-auth:ok — <reason>")
+                    print()
+                    errors += 1
                 continue
             key = f"{src}:{fn_start + 1}"
             if key not in exempt_lines and '// exempt-auth:ok' not in docs:

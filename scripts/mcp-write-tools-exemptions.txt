@@ -1,0 +1,12 @@
+# MCP write-tool gate exemptions
+# One MCP tool name per line, `#` starts a comment.
+# A tool listed here performs repository write effects but is NOT yet in the
+# needs_write RBAC gate in crates/gyre-server/src/mcp.rs — a real F7-class
+# hazard (a ReadOnly-role principal can invoke this write). Exempted only so
+# check-mcp-write-tools.sh runs green on main while the fix is owned by the
+# task recorded below. When the tool is added to the gate, DELETE its line.
+#
+# See: specs/reviews/task-093.md F7 (the finding that created this check)
+#
+# --- task-093 revision round owns this ---
+gyre_message_send   # writes via state.messages.store in handle_message_send; gate lists gyre_message_ack but not send. Fix: add "gyre_message_send" to the needs_write match.
