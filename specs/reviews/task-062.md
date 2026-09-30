@@ -210,3 +210,111 @@ ExplorerCanvas.svelte (lines 4297/4322) are blast-radius/focus-scope view
 queries, unrelated to test reachability.
 
 Setting `progress: ready-for-review` (no open findings).
+
+## Round 8
+
+F3 verified resolved — adversarially, including collateral damage from the fix commit
+`cbcbd6ab` and cross-surface semantic parity beyond the edge set:
+
+- `web/src/lib/test-reachability.js` is genuinely Calls-only
+  (`TEST_REACHABILITY_EDGES = new Set(['calls'])`, doc comment cites §3), pure over
+  (nodes, adjacency), and consumed by ExplorerCanvas for `computeTestUnreachable`/
+  `computeTestReachable`/`computeAllTestFragility` (via `computeTestFragilityCounts`) and
+  the `test_gaps` scope. Grep of `ExplorerCanvas.svelte` for `FRONTEND_TEST_EDGES` and the
+  three-edge `TEST_REACHABILITY_EDGES`: zero hits. The stale "matches backend" comments are
+  gone. `computeTestFragility(nodeName)` correctly delegates to the cached
+  `computeAllTestFragility()` and returns set-membership (count > 0), matching the backend
+  `$test_fragility(...)` semantics at `view_query_resolver.rs:1485-1500`.
+- Pinning tests exercise the real production module (not a re-implementation): 7/7 pass
+  (`npx vitest run src/__tests__/test-reachability.test.js`).
+- `cargo test -p gyre-domain --lib view_query_resolver`: 116 passed, 0 failed.
+  `scripts/check-cross-surface-parity.sh`: passes.
+- Full `cd web && npm test`: 1492 passed, 17 failed — exactly the R6 baseline
+  (`MoldableViewNodeTypeFilter` ×5, `FlowRenderer` ×6, `ExplorerViewAskViewSpec` ×5,
+  `ExplorerCanvas-performance` ×1), all in files untouched by task-062 commits. No new
+  failures attributable to `cbcbd6ab`.
+
+However, the R7 "all checks verified" sweep missed two defects in the code `cbcbd6ab`
+actually touched. Findings:
+
+- [ ] **F4 — `cbcbd6ab` deleted `filterEdge`'s `'dependencies'` case: unexplained
+  out-of-scope deletion inconsistent with its surviving `filterOpacity` counterpart.**
+
+  The F3 fix's stated scope was extracting test-reachability semantics (commit message:
+  "extract test-reachability to module, align frontend with spec §3"). But the diff also
+  removed, from `web/src/lib/ExplorerCanvas.svelte`, the line
+
+  `case 'dependencies': return et === 'depends_on' || et === 'calls';`
+
+  from `filterEdge` (function at :1611) — collateral damage from a hunk whose real target
+  was the adjacency builder directly below it. Current state:
+
+  - `filterEdge` (`:1611-1619`) has no `'dependencies'` case → falls to
+    `default: return true`, so under `filter='dependencies'` **all** edges render,
+    including `contains`/`governed_by`/`renders`/etc., instead of only
+    `depends_on`/`calls`.
+  - `filterOpacity` (`:1596-1608`) **still has** `case 'dependencies': return 0.1;`
+    (:1606) — the node-dimming counterpart to a filter whose edge case no longer exists.
+    Pre-fix (`git show cbcbd6ab^`), both functions handled `'dependencies'`.
+
+  Severity context (why this is filed rather than noted): `'dependencies'` is currently
+  unreachable as a filter value — `explorerFilter` in `ExplorerView.svelte:48` is
+  `$state('all')` with no setter found anywhere in `web/` (toolbar presets were removed
+  per the comment at `ExplorerCanvas.svelte:5010`), and MoldableView instantiates
+  ExplorerCanvas without a `filter` prop. So no user-visible behavior changes today. But
+  this is exactly the fix-introduced-regression flaw class: a fix commit deleted adjacent
+  behavior it did not own, with no justification in the message, no test covering
+  `filterEdge`, and leaving the codebase in an inconsistent state (one half of the
+  `'dependencies'` filter survives) that will misfire the moment any caller sets the
+  filter. Note `filterEdge` is a real rendering-path function — called from `drawEdges`
+  at :3465 — not dead code.
+
+  Fix: restore `case 'dependencies': return et === 'depends_on' || et === 'calls';` to
+  `filterEdge` (or, if `'dependencies'` is confirmed dead as a filter value, delete the
+  `filterOpacity` case too and document why — either way the two functions must agree).
+  A regression test for `filterEdge`'s filter→edge-type mapping would prevent recurrence.
+
+- [ ] **F5 — Depth caps diverge between backend resolver and frontend module for
+  `$test_reachable`/`$test_fragility`: same reference resolves differently per surface,
+  violating determinism (§3 line 17).**
+
+  Backend (`crates/gyre-domain/src/view_query_resolver.rs`):
+
+  - `compute_test_reachable` caps BFS at depth 100 (`if depth > 100 { continue; }`, :421).
+  - `compute_all_test_fragility` traverses with `bfs_traverse(..., 20, ...)` — depth cap
+    20 (:453-460), used by both `$where(test_fragility, ...)` and `$test_fragility(node)`.
+
+  Frontend (`web/src/lib/test-reachability.js`): `computeTestReachable` (:42-55) and
+  `computeTestFragilityCounts` (:80-100) are unbounded BFS (visited-set prevents infinite
+  loops on cycles, so no hang — but no depth cap).
+
+  Consequence: on a Calls chain longer than 20 hops from any test (deep call stacks are
+  exactly what fragility is for), the frontend reports fragility ≥ 1 while the backend
+  dry-run reports 0 — `$where(test_fragility, '>', 0)` highlights a different node set in
+  the canvas than in the server-resolved query result. Same class of cross-surface
+  divergence F3 was filed under, one level deeper than the edge set: the module's header
+  claims to implement §3, and §3 says "All computations are deterministic". Chains
+  longer than 100 hops diverge for `$test_reachable`/`test_gaps` the same way.
+
+  This is pre-existing on the node-iteration side (the deleted inline BFS was also
+  unbounded) — but `cbcbd6ab` is the commit that consolidated these traversals into a
+  module explicitly presented as the frontend counterpart of the backend resolver, so
+  aligning the caps belonged in it.
+
+  Fix: pass the caps through — e.g. `computeTestReachable(nodes, adjacency, maxDepth =
+  100)` and `computeTestFragilityCounts(nodes, adjacency, maxDepth = 20)` mirroring the
+  backend constants, with a comment cross-referencing `view_query_resolver.rs`; add a
+  pinning test with a >20-hop chain (frontend count must be 0, matching backend).
+
+  Not filed (checked and defused): the new module does not filter `n.deleted_at` /
+  `e.deleted_at` where the backend does (`active_nodes` at resolver.rs:553,
+  `build_adjacency` at :226). Both graph store adapters already exclude tombstoned
+  rows server-side — SQLite `list_nodes`/`list_edges` filter `deleted_at IS NULL`
+  (`gyre-adapters/src/sqlite/graph.rs:412/:475`), and `mem_graph.rs` does the same — so
+  deleted nodes/edges never reach the canvas through `/repos/{id}/graph`, and the
+  backend's own `deleted_at` filters are defense-in-depth for the resolver's internal
+  callers. No observable divergence exists on any current data path; the module's
+  parity claim ("matches backend TEST_REACHABILITY_EDGES") is scoped to the edge set and
+  remains true.
+
+Setting `progress: needs-revision` (F4, F5 open; F3 remains resolved).
