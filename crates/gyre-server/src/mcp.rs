@@ -501,6 +501,81 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["repo_id", "spec_path", "instruction"]
                 }
+            },
+            {
+                "name": "gyre_spawn_repo_orchestrator",
+                "description": "Spawn the single repo orchestrator for a repo in the caller's workspace. Requires a workspace-orchestrator JWT. Returns 409-style error when a live repo orchestrator already exists for that repo.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID (must belong to the caller's workspace)" },
+                        "name": { "type": "string", "description": "Optional free-form display name" },
+                        "parent_id": { "type": "string", "description": "Optional parent agent id" }
+                    },
+                    "required": ["repo_id"]
+                }
+            },
+            {
+                "name": "gyre_list_repo_orchestrators",
+                "description": "List live repo orchestrators in the caller's workspace. Requires a workspace-orchestrator JWT.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "gyre_cross_repo_task",
+                "description": "Create a cross-repo coordination task visible across the workspace. Requires a workspace-orchestrator JWT.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Task title" },
+                        "description": { "type": "string", "description": "Task description" },
+                        "priority": { "type": "string", "description": "low | medium | high | urgent" },
+                        "labels": { "type": "array", "items": { "type": "string" }, "description": "Task labels" }
+                    },
+                    "required": ["title"]
+                }
+            },
+            {
+                "name": "gyre_decompose_spec",
+                "description": "Decompose a spec into child implementation tasks under a parent task. Requires a repo-orchestrator JWT. Only the repo orchestrator's own repo may be referenced.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "parent_task_id": { "type": "string", "description": "Parent task to attach the child tasks to" },
+                        "subtasks": {
+                            "type": "array",
+                            "description": "Child tasks to create",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": { "type": "string" },
+                                    "description": { "type": "string" },
+                                    "priority": { "type": "string" },
+                                    "order": { "type": "integer" }
+                                },
+                                "required": ["title"]
+                            }
+                        }
+                    },
+                    "required": ["parent_task_id", "subtasks"]
+                }
+            },
+            {
+                "name": "gyre_spawn_worker",
+                "description": "Spawn a worker agent for an implementation task in the caller's repo. Requires a repo-orchestrator JWT. Delegates to the standard agent spawn flow (worktree, scoped JWT, compute target resolution).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string", "description": "Implementation task id to assign the worker to" },
+                        "name": { "type": "string", "description": "Worker agent name" },
+                        "branch": { "type": "string", "description": "Git branch for the worker's worktree" },
+                        "parent_id": { "type": "string", "description": "Optional parent agent id" },
+                        "compute_target_id": { "type": "string", "description": "Optional compute target id" }
+                    },
+                    "required": ["task_id", "name", "branch"]
+                }
             }
         ]
     })
@@ -556,6 +631,28 @@ fn is_agent_jwt(auth: &AuthenticatedAgent) -> bool {
         .and_then(|c| c.get("scope"))
         .and_then(|s| s.as_str())
         == Some("agent")
+}
+
+/// Workspace-orchestrator scope from an agent JWT (task-093): the caller's
+/// workspace_id. `None` when the caller is not a workspace orchestrator.
+fn workspace_orchestrator_scope(auth: &AuthenticatedAgent) -> Option<String> {
+    let claims = auth.jwt_claims.as_ref()?;
+    if claims.get("orchestrator_type")?.as_str()? != "workspace_orchestrator" {
+        return None;
+    }
+    claims.get("workspace_id")?.as_str().map(|w| w.to_string())
+}
+
+/// Repo-orchestrator scope from an agent JWT (task-093): the caller's
+/// (workspace_id, repo_id). `None` when the caller is not a repo orchestrator.
+fn repo_orchestrator_scope(auth: &AuthenticatedAgent) -> Option<(String, String)> {
+    let claims = auth.jwt_claims.as_ref()?;
+    if claims.get("orchestrator_type")?.as_str()? != "repo_orchestrator" {
+        return None;
+    }
+    let ws = claims.get("workspace_id")?.as_str()?.to_string();
+    let repo = claims.get("repo_id")?.as_str()?.to_string();
+    Some((ws, repo))
 }
 
 fn parse_priority(s: &str) -> TaskPriority {
@@ -629,6 +726,238 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
     match state.tasks.create(&task).await {
         Ok(()) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
         Err(e) => tool_error(format!("Failed to create task: {e}")),
+    }
+}
+
+/// gyre_spawn_repo_orchestrator (task-093): workspace-orchestrator only.
+/// Target repo must belong to the caller's workspace.
+async fn handle_spawn_repo_orchestrator(
+    state: &AppState,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    let caller_ws = match workspace_orchestrator_scope(auth) {
+        Some(ws) => ws,
+        None => return tool_error("requires a workspace-orchestrator token"),
+    };
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    // Scope: the target repo must live in the caller's workspace (§3.1).
+    let repo = match state.repos.find_by_id(&Id::new(&repo_id)).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return tool_error(format!("repo {repo_id} not found")),
+        Err(e) => return tool_error(format!("Failed to look up repo: {e}")),
+    };
+    if repo.workspace_id.to_string() != caller_ws {
+        return tool_error(format!(
+            "PERMISSION_DENIED: repo {repo_id} is not in workspace {caller_ws}"
+        ));
+    }
+    let req = crate::api::orchestrator::SpawnOrchestratorRequest {
+        name: get_str(args, "name").map(|s| s.to_string()),
+        parent_id: get_str(args, "parent_id").map(|s| s.to_string()),
+    };
+    match crate::api::orchestrator::spawn_repo_orchestrator_core(
+        state,
+        &repo_id,
+        req,
+        &auth.agent_id,
+    )
+    .await
+    {
+        Ok((agent, token)) => tool_result(
+            serde_json::to_string(&crate::api::orchestrator::SpawnOrchestratorResponse {
+                agent: crate::api::spawn::orchestrator_response(agent),
+                token,
+            })
+            .unwrap_or_default(),
+        ),
+        Err(e) => tool_error(format!("Failed to spawn repo orchestrator: {e}")),
+    }
+}
+
+/// gyre_list_repo_orchestrators (task-093): workspace-orchestrator only.
+async fn handle_list_repo_orchestrators(
+    state: &AppState,
+    _args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    let caller_ws = match workspace_orchestrator_scope(auth) {
+        Some(ws) => ws,
+        None => return tool_error("requires a workspace-orchestrator token"),
+    };
+    match crate::api::orchestrator::list_repo_orchestrators_core(state, &caller_ws).await {
+        Ok(list) => {
+            let items: Vec<crate::api::spawn::OrchestratorAgentResponse> = list
+                .into_iter()
+                .map(crate::api::spawn::orchestrator_response)
+                .collect();
+            tool_result(serde_json::to_string_pretty(&items).unwrap_or_default())
+        }
+        Err(e) => tool_error(format!("Failed to list repo orchestrators: {e}")),
+    }
+}
+
+/// gyre_cross_repo_task (task-093): workspace-orchestrator only. Creates a
+/// coordination task scoped to the caller's workspace.
+async fn handle_cross_repo_task(
+    state: &AppState,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    let caller_ws = match workspace_orchestrator_scope(auth) {
+        Some(ws) => ws,
+        None => return tool_error("requires a workspace-orchestrator token"),
+    };
+    let title = match require_str(args, "title") {
+        Ok(t) => t.to_string(),
+        Err(_) => return tool_error("missing required field: title"),
+    };
+    let now = now_secs();
+    let mut task = Task::new(new_id(), title, now);
+    task.description = get_str(args, "description").map(|s| s.to_string());
+    if let Some(p) = get_str(args, "priority") {
+        task.priority = parse_priority(p);
+    }
+    if let Some(labels) = args.get("labels").and_then(|v| v.as_array()) {
+        task.labels = labels
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+    task.task_type = Some(gyre_domain::TaskType::Coordination);
+    task.workspace_id = Id::new(&caller_ws);
+    match state.tasks.create(&task).await {
+        Ok(()) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
+        Err(e) => tool_error(format!("Failed to create task: {e}")),
+    }
+}
+
+/// gyre_decompose_spec (task-093): repo-orchestrator only. Creates child
+/// implementation tasks under a parent task in the caller's repo.
+async fn handle_decompose_spec(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
+    let (caller_ws, repo_id) = match repo_orchestrator_scope(auth) {
+        Some(scope) => scope,
+        None => return tool_error("requires a repo-orchestrator token"),
+    };
+    let parent_id = match require_str(args, "parent_task_id") {
+        Ok(t) => t.to_string(),
+        Err(_) => return tool_error("missing required field: parent_task_id"),
+    };
+    let parent = match state.tasks.find_by_id(&Id::new(&parent_id)).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return tool_error(format!("Task not found: {parent_id}")),
+        Err(e) => return tool_error(format!("Error: {e}")),
+    };
+    // Scope: parent task must belong to the caller's repo or workspace.
+    if !parent.repo_id.to_string().is_empty() {
+        if parent.repo_id.to_string() != repo_id {
+            return tool_error(format!(
+                "PERMISSION_DENIED: task {parent_id} belongs to a different repo"
+            ));
+        }
+    } else if parent.workspace_id.to_string() != caller_ws {
+        return tool_error(format!(
+            "PERMISSION_DENIED: task {parent_id} belongs to a different workspace"
+        ));
+    }
+    let subtasks = match args.get("subtasks").and_then(|v| v.as_array()) {
+        Some(s) => s,
+        None => return tool_error("missing required field: subtasks"),
+    };
+    let now = now_secs();
+    let mut created = Vec::new();
+    for st in subtasks {
+        let title = match st.get("title").and_then(|v| v.as_str()) {
+            Some(t) => t.to_string(),
+            None => return tool_error("each subtask requires a title"),
+        };
+        let mut task = Task::new(new_id(), title, now);
+        task.description = st
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(p) = st.get("priority").and_then(|v| v.as_str()) {
+            task.priority = parse_priority(p);
+        }
+        if let Some(order) = st.get("order").and_then(|v| v.as_u64()) {
+            task.order = Some(order as u32);
+        }
+        task.parent_task_id = Some(Id::new(&parent_id));
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        task.repo_id = Id::new(&repo_id);
+        task.workspace_id = Id::new(&caller_ws);
+        if let Err(e) = state.tasks.create(&task).await {
+            return tool_error(format!("Failed to create subtask: {e}"));
+        }
+        created.push(task.id.to_string());
+    }
+    tool_result(format!(
+        "Created {} subtasks under {}: {}",
+        created.len(),
+        parent_id,
+        created.join(", ")
+    ))
+}
+
+/// gyre_spawn_worker (task-093): repo-orchestrator only. Delegates to the
+/// REST spawn core so worktree creation, JWT minting, and compute target
+/// resolution are identical to POST /api/v1/agents/spawn.
+async fn handle_spawn_worker(
+    state: &Arc<AppState>,
+    args: &Value,
+    auth: &AuthenticatedAgent,
+) -> Value {
+    let (caller_ws, repo_id) = match repo_orchestrator_scope(auth) {
+        Some(scope) => scope,
+        None => return tool_error("requires a repo-orchestrator token"),
+    };
+    let task_id = match require_str(args, "task_id") {
+        Ok(t) => t.to_string(),
+        Err(_) => return tool_error("missing required field: task_id"),
+    };
+    // Scope: the task must belong to the caller's repo.
+    let task = match state.tasks.find_by_id(&Id::new(&task_id)).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return tool_error(format!("Task not found: {task_id}")),
+        Err(e) => return tool_error(format!("Error: {e}")),
+    };
+    if !task.repo_id.to_string().is_empty() {
+        if task.repo_id.to_string() != repo_id {
+            return tool_error(format!(
+                "PERMISSION_DENIED: task {task_id} belongs to a different repo"
+            ));
+        }
+    } else if task.workspace_id.to_string() != caller_ws {
+        return tool_error(format!(
+            "PERMISSION_DENIED: task {task_id} belongs to a different workspace"
+        ));
+    }
+    let name = match require_str(args, "name") {
+        Ok(n) => n.to_string(),
+        Err(_) => return tool_error("missing required field: name"),
+    };
+    let branch = match require_str(args, "branch") {
+        Ok(b) => b.to_string(),
+        Err(_) => return tool_error("missing required field: branch"),
+    };
+    let req = crate::api::spawn::SpawnAgentRequest {
+        name,
+        task_id,
+        repo_id,
+        branch,
+        parent_id: get_str(args, "parent_id").map(|s| s.to_string()),
+        agent_type: None,
+        compute_target_id: get_str(args, "compute_target_id").map(|s| s.to_string()),
+        disconnected_behavior: None,
+        loop_config: None,
+        conversation_sha: None,
+    };
+    match crate::api::spawn::spawn_agent_core(state, req, auth).await {
+        Ok(resp) => tool_result(serde_json::to_string(&resp).unwrap_or_default()),
+        Err(e) => tool_error(format!("Failed to spawn worker: {e}")),
     }
 }
 
@@ -2612,8 +2941,11 @@ pub async fn mcp_handler(
                     | "gyre_agent_heartbeat"
                     | "gyre_agent_complete"
                     | "conversation_upload"
-                    | "gyre_message_send"
                     | "gyre_message_ack"
+                    | "gyre_spawn_repo_orchestrator"
+                    | "gyre_cross_repo_task"
+                    | "gyre_decompose_spec"
+                    | "gyre_spawn_worker"
             );
             if needs_write && !has_role_at_least(&auth.roles, UserRole::Agent) {
                 return Json(JsonRpcResponse::err(
@@ -2688,6 +3020,15 @@ pub async fn mcp_handler(
                 "gyre_message_send" => handle_message_send(&state, &args, &auth).await,
                 "gyre_message_poll" => handle_message_poll(&state, &args, &auth).await,
                 "gyre_message_ack" => handle_message_ack(&state, &args, &auth).await,
+                "gyre_spawn_repo_orchestrator" => {
+                    handle_spawn_repo_orchestrator(&state, &args, &auth).await
+                }
+                "gyre_list_repo_orchestrators" => {
+                    handle_list_repo_orchestrators(&state, &args, &auth).await
+                }
+                "gyre_cross_repo_task" => handle_cross_repo_task(&state, &args, &auth).await,
+                "gyre_decompose_spec" => handle_decompose_spec(&state, &args, &auth).await,
+                "gyre_spawn_worker" => handle_spawn_worker(&state, &args, &auth).await,
                 "graph_summary" => handle_graph_summary(&state, &args).await,
                 "graph_query_dryrun" => handle_graph_query_dryrun(&state, &args).await,
                 "graph_nodes" => handle_graph_nodes(&state, &args).await,
@@ -4591,5 +4932,305 @@ mod tests {
             "must list graph_concept tool"
         );
         assert!(names.contains(&"spec_assist"), "must list spec_assist tool");
+    }
+
+    // -- TASK-093: orchestrator tier tools -----------------------------------
+
+    /// Seed ws-1 (+ repos r-1, r-2, and r-x in ws-2) and return the state.
+    async fn orch_state() -> std::sync::Arc<crate::AppState> {
+        let state = test_state();
+        for wid in ["ws-1", "ws-2"] {
+            let ws = gyre_domain::Workspace::new(
+                gyre_common::Id::new(wid),
+                gyre_common::Id::new("t1"),
+                wid,
+                wid,
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap(); // non-atomic-create:ok - test fixture seeding, independent records
+        }
+        for (rid, wid) in [("r-1", "ws-1"), ("r-2", "ws-1"), ("r-x", "ws-2")] {
+            let repo = gyre_domain::Repository::new(
+                gyre_common::Id::new(rid),
+                gyre_common::Id::new(wid),
+                rid,
+                format!("/tmp/{rid}"),
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+        }
+        state
+    }
+
+    /// Register an orchestrator agent (entity + scoped JWT in agent_tokens)
+    /// and return (agent_id, token).
+    async fn register_orchestrator(
+        state: &std::sync::Arc<crate::AppState>,
+        name: &str,
+        workspace_id: &str,
+        repo_id: Option<&str>,
+        orchestrator_type: &str,
+    ) -> (String, String) {
+        let agent_id = format!("orch-{name}");
+        let mut agent = gyre_domain::Agent::new(gyre_common::Id::new(&agent_id), name, 0);
+        agent.workspace_id = gyre_common::Id::new(workspace_id);
+        agent.repo_id = repo_id.map(gyre_common::Id::new);
+        agent.orchestrator_type = match orchestrator_type {
+            "workspace_orchestrator" => gyre_domain::OrchestratorType::WorkspaceOrchestrator,
+            "repo_orchestrator" => gyre_domain::OrchestratorType::RepoOrchestrator,
+            _ => gyre_domain::OrchestratorType::Worker,
+        };
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        let token = state
+            .agent_signing_key
+            .mint_orchestrator(
+                &agent_id,
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                workspace_id,
+                repo_id,
+                orchestrator_type,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &agent_id, token.clone())
+            .await
+            .unwrap();
+        (agent_id, token)
+    }
+
+    fn tool_call(name: &str, args: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 200,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        })
+    }
+
+    #[tokio::test]
+    async fn mcp_spawn_repo_orchestrator_happy_and_wrong_workspace() {
+        let state = orch_state().await;
+        let (_id, token) =
+            register_orchestrator(&state, "ws-orch", "ws-1", None, "workspace_orchestrator").await;
+        let app = crate::build_router(state.clone());
+
+        // Happy path: r-1 is in the caller's workspace.
+        let (status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call("gyre_spawn_repo_orchestrator", json!({ "repo_id": "r-1" })),
+            &token,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repo_orchestrator"), "got: {text}");
+
+        // Wrong workspace: r-x belongs to ws-2.
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_spawn_repo_orchestrator", json!({ "repo_id": "r-x" })),
+            &token,
+        )
+        .await;
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("PERMISSION_DENIED"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn mcp_spawn_repo_orchestrator_denies_repo_tier() {
+        let state = orch_state().await;
+        let (_id, token) = register_orchestrator(
+            &state,
+            "repo-orch",
+            "ws-1",
+            Some("r-1"),
+            "repo_orchestrator",
+        )
+        .await;
+        let app = crate::build_router(state);
+
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_spawn_repo_orchestrator", json!({ "repo_id": "r-2" })),
+            &token,
+        )
+        .await;
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("workspace-orchestrator"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn mcp_list_repo_orchestrators_lists_live_only() {
+        let state = orch_state().await;
+        let (_id, token) =
+            register_orchestrator(&state, "ws-orch", "ws-1", None, "workspace_orchestrator").await;
+        // A live and a dead repo orchestrator in ws-1.
+        let (_id2, _t2) = register_orchestrator(
+            &state,
+            "repo-live",
+            "ws-1",
+            Some("r-1"),
+            "repo_orchestrator",
+        )
+        .await;
+        let (_id3, _t3) = register_orchestrator(
+            &state,
+            "repo-dead",
+            "ws-1",
+            Some("r-2"),
+            "repo_orchestrator",
+        )
+        .await;
+        let mut dead = state
+            .agents
+            .find_by_name("repo-dead")
+            .await
+            .unwrap()
+            .unwrap();
+        dead.transition_status(gyre_domain::AgentStatus::Dead)
+            .unwrap();
+        state.agents.update(&dead).await.unwrap();
+
+        let app = crate::build_router(state);
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_list_repo_orchestrators", json!({})),
+            &token,
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repo-live"), "got: {text}");
+        assert!(
+            !text.contains("repo-dead"),
+            "dead orchestrator must not be listed: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_cross_repo_task_scoped_to_workspace() {
+        let state = orch_state().await;
+        let (_id, token) =
+            register_orchestrator(&state, "ws-orch", "ws-1", None, "workspace_orchestrator").await;
+        let app = crate::build_router(state.clone());
+
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_cross_repo_task",
+                json!({ "title": "Coordinate release" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        let tasks = state.tasks.list().await.unwrap();
+        let t = tasks
+            .iter()
+            .find(|t| t.title == "Coordinate release")
+            .expect("coordination task created");
+        assert_eq!(t.workspace_id, gyre_common::Id::new("ws-1"));
+        assert_eq!(t.task_type, Some(gyre_domain::TaskType::Coordination));
+    }
+
+    #[tokio::test]
+    async fn mcp_decompose_spec_creates_subtasks_in_repo_scope() {
+        let state = orch_state().await;
+        let (_id, token) = register_orchestrator(
+            &state,
+            "repo-orch",
+            "ws-1",
+            Some("r-1"),
+            "repo_orchestrator",
+        )
+        .await;
+
+        // Parent task in the caller's repo.
+        let mut parent = gyre_domain::Task::new(gyre_common::Id::new("parent-1"), "Parent", 0);
+        parent.workspace_id = gyre_common::Id::new("ws-1");
+        parent.repo_id = gyre_common::Id::new("r-1");
+        state.tasks.create(&parent).await.unwrap();
+
+        // A task in a different repo must be rejected.
+        let mut foreign = gyre_domain::Task::new(gyre_common::Id::new("parent-2"), "Foreign", 0);
+        foreign.workspace_id = gyre_common::Id::new("ws-2");
+        foreign.repo_id = gyre_common::Id::new("r-x");
+        state.tasks.create(&foreign).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_decompose_spec",
+                json!({
+                    "parent_task_id": "parent-2",
+                    "subtasks": [{ "title": "Nope" }]
+                }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["result"]["isError"].as_bool().unwrap());
+
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_decompose_spec",
+                json!({
+                    "parent_task_id": "parent-1",
+                    "subtasks": [
+                        { "title": "Sub A", "description": "first" },
+                        { "title": "Sub B" }
+                    ]
+                }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+
+        let tasks = state.tasks.list().await.unwrap();
+        for title in ["Sub A", "Sub B"] {
+            let t = tasks
+                .iter()
+                .find(|t| t.title == title)
+                .unwrap_or_else(|| panic!("subtask {title} created"));
+            assert_eq!(t.parent_task_id, Some(gyre_common::Id::new("parent-1")));
+            assert_eq!(t.repo_id, gyre_common::Id::new("r-1"));
+            assert_eq!(t.workspace_id, gyre_common::Id::new("ws-1"));
+            assert_eq!(t.task_type, Some(gyre_domain::TaskType::Implementation));
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_spawn_worker_denies_workspace_tier() {
+        let state = orch_state().await;
+        let (_id, token) =
+            register_orchestrator(&state, "ws-orch", "ws-1", None, "workspace_orchestrator").await;
+        let app = crate::build_router(state);
+
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_spawn_worker",
+                json!({ "task_id": "t-1", "name": "w", "branch": "b" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repo-orchestrator"), "got: {text}");
     }
 }

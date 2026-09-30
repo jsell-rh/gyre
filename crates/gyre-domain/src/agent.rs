@@ -22,6 +22,29 @@ pub enum DisconnectedBehavior {
     /// Abort immediately: mark self Dead, clean worktrees.
     Abort,
 }
+/// Which orchestration tier an agent operates at (platform-model.md §3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OrchestratorType {
+    /// Regular worker agent - no orchestration duties (default).
+    #[default]
+    Worker,
+    /// One per workspace. Cross-repo concerns, spawns repo orchestrators.
+    WorkspaceOrchestrator,
+    /// One per repo. Runs the Ralph loop, spawns worker agents.
+    RepoOrchestrator,
+}
+
+impl fmt::Display for OrchestratorType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            OrchestratorType::Worker => "worker",
+            OrchestratorType::WorkspaceOrchestrator => "workspace_orchestrator",
+            OrchestratorType::RepoOrchestrator => "repo_orchestrator",
+        };
+        write!(f, "{s}")
+    }
+}
 
 /// Agent status enum per agent-runtime.md §1 Phase 4.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +118,17 @@ pub struct Agent {
     pub iteration: u32,
     /// Ralph loop configuration (when present, server manages session cycle).
     pub loop_config: Option<LoopConfig>,
+    /// Orchestration tier (platform-model.md §3). Workers by default.
+    #[serde(default)]
+    pub orchestrator_type: OrchestratorType,
+    /// Repo this agent is bound to. Set only for repo orchestrators: workers
+    /// link repos via worktrees, orchestrators have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<Id>,
+    /// Auto-restart via the stale agent detector when the agent dies.
+    /// Defaults to true for orchestrators (exactly-one-live semantics).
+    #[serde(default)]
+    pub restart_on_failure: bool,
 }
 
 impl Agent {
@@ -113,7 +147,15 @@ impl Agent {
             workspace_id: Id::new("default"),
             iteration: 0,
             loop_config: None,
+            orchestrator_type: OrchestratorType::default(),
+            repo_id: None,
+            restart_on_failure: false,
         }
+    }
+
+    /// True when this agent is an orchestrator (workspace or repo tier).
+    pub fn is_orchestrator(&self) -> bool {
+        self.orchestrator_type != OrchestratorType::Worker
     }
 
     /// Returns true if the agent has sent a heartbeat within `timeout_secs`.
@@ -155,6 +197,50 @@ impl Agent {
                 to: new_status,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod orchestrator_tests {
+    use super::*;
+
+    #[test]
+    fn new_agent_defaults_to_worker() {
+        let a = Agent::new(Id::new("a1"), "worker", 1000);
+        assert_eq!(a.orchestrator_type, OrchestratorType::Worker);
+        assert!(!a.is_orchestrator());
+        assert!(a.repo_id.is_none());
+        assert!(!a.restart_on_failure);
+    }
+
+    #[test]
+    fn orchestrator_type_serde_roundtrip() {
+        for (t, s) in [
+            (OrchestratorType::Worker, "worker"),
+            (
+                OrchestratorType::WorkspaceOrchestrator,
+                "workspace_orchestrator",
+            ),
+            (OrchestratorType::RepoOrchestrator, "repo_orchestrator"),
+        ] {
+            assert_eq!(serde_json::to_string(&t).unwrap(), format!("\"{s}\""));
+            let back: OrchestratorType = serde_json::from_str(&format!("\"{s}\"")).unwrap();
+            assert_eq!(back, t);
+        }
+    }
+
+    #[test]
+    fn orchestrator_fields_survive_serde_default() {
+        // Legacy JSON without the new fields deserializes with defaults.
+        let a: Agent = serde_json::from_str(
+            r#"{"id":"a1","name":"old","status":"Active","parent_id":null,"current_task_id":null,
+                "lifetime_budget_secs":null,"spawned_at":1,"last_heartbeat":null,"spawned_by":null,
+                "workspace_id":"ws-1","iteration":0,"loop_config":null}"#,
+        )
+        .unwrap();
+        assert_eq!(a.orchestrator_type, OrchestratorType::Worker);
+        assert!(!a.restart_on_failure);
+        assert!(a.repo_id.is_none());
     }
 }
 

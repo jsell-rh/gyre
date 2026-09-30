@@ -61,6 +61,19 @@ pub struct AgentJwtClaims {
     /// Identity that called POST /api/v1/agents/spawn.
     pub spawned_by: String,
 
+    // -- TASK-093: Orchestrator scope claims (platform-model.md §3) -----------
+    /// Workspace the orchestrator governs. Present on orchestrator JWTs only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Repo a repo orchestrator is bound to. Absent on workspace orchestrator
+    /// JWTs (they see all repos in the workspace) and on worker JWTs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    /// Orchestrator tier: "workspace_orchestrator" or "repo_orchestrator".
+    /// Absent on worker JWTs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator_type: Option<String>,
+
     // -- G10: Workload attestation claims -------------------------------------
     /// OS PID of the agent process (workload identity, G10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,6 +212,9 @@ impl AgentSigningKey {
             scope: "agent".to_string(),
             task_id: task_id.to_string(),
             spawned_by: spawned_by.to_string(),
+            workspace_id: None,
+            repo_id: None,
+            orchestrator_type: None,
             wl_pid,
             wl_hostname,
             wl_compute_target,
@@ -220,6 +236,51 @@ impl AgentSigningKey {
         jsonwebtoken::decode::<AgentJwtClaims>(token, &self.decoding_key, &validation)
             .map(|td| td.claims)
             .map_err(|e| format!("agent JWT validation: {e}"))
+    }
+
+    /// Mint an orchestrator JWT with scope claims (platform-model.md §3).
+    ///
+    /// Workspace orchestrators carry `workspace_id` only (they see all repos
+    /// in the workspace); repo orchestrators carry both `workspace_id` and
+    /// `repo_id`. `task_id` carries the orchestrator's own agent id.
+    /// Orchestrators are not bound to a task, but the claim is required on
+    /// all agent JWTs for `gyre_agent_complete` compatibility.
+    pub fn mint_orchestrator(
+        &self,
+        agent_id: &str,
+        spawned_by: &str,
+        issuer: &str,
+        ttl_secs: u64,
+        workspace_id: &str,
+        repo_id: Option<&str>,
+        orchestrator_type: &str,
+    ) -> Result<String, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let claims = AgentJwtClaims {
+            sub: agent_id.to_string(),
+            iss: issuer.to_string(),
+            iat: now,
+            exp: now + ttl_secs,
+            scope: "agent".to_string(),
+            task_id: agent_id.to_string(),
+            spawned_by: spawned_by.to_string(),
+            workspace_id: Some(workspace_id.to_string()),
+            repo_id: repo_id.map(|r| r.to_string()),
+            orchestrator_type: Some(orchestrator_type.to_string()),
+            wl_pid: None,
+            wl_hostname: None,
+            wl_compute_target: None,
+            wl_stack_hash: None,
+            wl_container_id: None,
+            wl_image_hash: None,
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some(self.kid.clone());
+        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| format!("JWT mint error: {e}"))
     }
 }
 
@@ -1758,6 +1819,9 @@ mod tests {
             scope: "agent".to_string(),
             task_id: "task-1".to_string(),
             spawned_by: "system".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            orchestrator_type: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
