@@ -37,6 +37,7 @@ pub mod quality_gate;
 pub mod repository;
 pub mod review;
 pub mod saved_view;
+pub mod secret;
 pub mod spawn_log;
 pub mod spec_approval;
 pub mod spec_approval_event;

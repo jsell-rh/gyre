@@ -2,7 +2,7 @@
 title: "Platform Model Secrets Domain Types + Port"
 spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §7 Secrets Delivery"
   - "platform-model.md §7 Principle"
@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §7 Secret Scoping"
   - "platform-model.md §7 Secret Types"
   - "platform-model.md §7 Storage Backend"
-commits: []
+commits: ["3a5be015", "a38170c9", "a3fde958"]
 ---
 
 ## Spec Excerpt
@@ -91,14 +91,14 @@ Default: secrets encrypted at rest with SOPS in database. Optional Vault integra
 
 ## Acceptance Criteria
 
-- [ ] Secret, SecretScope, SecretType domain types defined
-- [ ] SecretRepository port trait with all methods
-- [ ] SQLite adapter with AES-256-GCM encryption at rest
-- [ ] Database migration for secrets table
-- [ ] resolve_for_agent collects secrets from all scopes
-- [ ] Agent spawn uses resolved secrets instead of hardcoded GYRE_CRED_*
-- [ ] Secret values never logged or serialized to JSON
-- [ ] `cargo test --all` passes
+- [x] Secret, SecretScope, SecretType domain types defined
+- [x] SecretRepository port trait with all methods
+- [x] SQLite adapter with AES-256-GCM encryption at rest
+- [x] Database migration for secrets table
+- [x] resolve_for_agent collects secrets from all scopes
+- [x] Agent spawn uses resolved secrets instead of hardcoded GYRE_CRED_*
+- [x] Secret values never logged or serialized to JSON
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 

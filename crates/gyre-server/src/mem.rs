@@ -3316,8 +3316,122 @@ fn test_state_inner(
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
+        secrets: Arc::new(MemSecretRepository::default()),
         ws_tickets: crate::auth::WsTicketStore::new(),
     })
+}
+
+// ── In-memory SecretRepository ──────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemSecretRepository {
+    /// (tenant_id, Secret, encrypted-at-rest-equivalent value).
+    /// Plaintext is held only here in the adapter-equivalent layer, never in
+    /// the Secret metadata.
+    store: Arc<Mutex<Vec<(String, gyre_common::Secret, Vec<u8>)>>>,
+}
+
+fn mem_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[async_trait]
+impl gyre_ports::SecretRepository for MemSecretRepository {
+    async fn create(&self, secret: &gyre_common::Secret, value: &[u8]) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .push((secret.tenant_id.clone(), secret.clone(), value.to_vec()));
+        Ok(())
+    }
+
+    async fn get_value(&self, id: &Id, tenant_id: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|(tid, s, _)| tid == tenant_id && s.id == *id)
+            .map(|(_, _, v)| v.clone()))
+    }
+
+    async fn list_by_scope(
+        &self,
+        scope: gyre_common::SecretScope,
+        scope_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<gyre_common::Secret>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|(tid, s, _)| tid == tenant_id && s.scope == scope && s.scope_id == scope_id)
+            .map(|(_, s, _)| s.clone())
+            .collect())
+    }
+
+    async fn delete(&self, id: &Id, tenant_id: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .retain(|(tid, s, _)| !(tid == tenant_id && s.id == *id));
+        Ok(())
+    }
+
+    async fn rotate(&self, id: &Id, new_value: &[u8], tenant_id: &str) -> Result<()> {
+        let mut store = self.store.lock().await;
+        let entry = store
+            .iter_mut()
+            .find(|(tid, s, _)| tid == tenant_id && s.id == *id);
+        match entry {
+            Some((_, s, v)) => {
+                *v = new_value.to_vec();
+                s.last_rotated_at = Some(mem_now_secs());
+                Ok(())
+            }
+            None => anyhow::bail!("secret {} not found in tenant {}", id, tenant_id),
+        }
+    }
+
+    async fn resolve_for_agent(
+        &self,
+        tenant_id: &str,
+        workspace_id: &str,
+        repo_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        let now = mem_now_secs();
+        let store = self.store.lock().await;
+        // Coarse-to-fine: later entries overwrite same-name finer-scope wins.
+        let mut targets: Vec<(&str, &str)> = vec![
+            (gyre_common::SecretScope::Tenant.as_str(), tenant_id),
+            (gyre_common::SecretScope::Workspace.as_str(), workspace_id),
+            (gyre_common::SecretScope::Repo.as_str(), repo_id),
+        ];
+        if let Some(tid) = task_id {
+            targets.push((gyre_common::SecretScope::Task.as_str(), tid));
+        }
+        let mut by_name: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
+        for (scope, sid) in targets {
+            for (tid, s, v) in store.iter() {
+                if tid == tenant_id
+                    && s.scope.as_str() == scope
+                    && s.scope_id == sid
+                    && !s.is_expired(now)
+                {
+                    by_name.insert(s.name.clone(), v.clone());
+                }
+            }
+        }
+        let mut resolved: Vec<(String, Vec<u8>)> = by_name.into_iter().collect();
+        resolved.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(resolved)
+    }
 }
 
 // ── In-memory TraceRepository ────────────────────────────────────────────────
