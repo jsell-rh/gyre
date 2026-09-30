@@ -35,7 +35,7 @@ pub fn spawn_procfs_monitor(state: Arc<AppState>) {
         info!("procfs monitor disabled via GYRE_PROCFS_MONITOR=false");
         return;
     }
-    info!("procfs monitor started — watching agent processes via /proc");
+    info!("procfs monitor started - watching agent processes via /proc");
     tokio::spawn(async move {
         // pid -> (agent_id, per-pid observation state)
         let mut pid_states: HashMap<u32, (String, PidState)> = HashMap::new();
@@ -87,11 +87,23 @@ async fn poll_agents(
         for (path, fd_num) in poll_fds(pid, &mut ps.seen_fds) {
             let event = AuditEvent::new(
                 Id::new(uuid::Uuid::new_v4().to_string()),
-                Id::new(agent_id.clone()),
                 AuditEventType::FileAccess,
-                Some(path),
-                serde_json::json!({ "fd": fd_num, "source": "procfs" }),
-                Some(pid),
+                Some(Id::new(agent_id.clone())),
+                None,
+                None,
+                None,
+                None,
+                "process".to_string(),
+                Some(pid.to_string()),
+                gyre_domain::AuditOutcome::Success,
+                serde_json::json!({
+                    "path": path,
+                    "fd": fd_num,
+                    "pid": pid,
+                    "source": "procfs",
+                }),
+                None,
+                None,
                 now,
             );
             let _ = state.audit.record(&event).await;
@@ -102,11 +114,23 @@ async fn poll_agents(
         for (local, remote) in poll_tcp(pid, &mut ps.seen_tcp) {
             let event = AuditEvent::new(
                 Id::new(uuid::Uuid::new_v4().to_string()),
-                Id::new(agent_id.clone()),
                 AuditEventType::NetworkConnect,
-                Some(remote.clone()),
-                serde_json::json!({ "local": local, "remote": remote, "source": "procfs" }),
-                Some(pid),
+                Some(Id::new(agent_id.clone())),
+                None,
+                None,
+                None,
+                None,
+                "process".to_string(),
+                Some(pid.to_string()),
+                gyre_domain::AuditOutcome::Success,
+                serde_json::json!({
+                    "local": local,
+                    "remote": remote,
+                    "pid": pid,
+                    "source": "procfs",
+                }),
+                None,
+                None,
                 now,
             );
             let _ = state.audit.record(&event).await;
@@ -120,24 +144,15 @@ async fn poll_agents(
 
 /// Push an audit event onto the SSE broadcast channel.
 fn broadcast(state: &AppState, event: &AuditEvent) {
-    let _ = state.audit_broadcast_tx.send(
-        serde_json::to_string(&serde_json::json!({
-            "id": event.id.as_str(),
-            "agent_id": event.agent_id.as_str(),
-            "event_type": event.event_type.as_str(),
-            "path": event.path,
-            "timestamp": event.timestamp,
-            "pid": event.pid,
-            "source": "procfs",
-        }))
-        .unwrap_or_default(),
-    );
+    // Full envelope JSON - SSE consumers get every field.
+    let _ = state
+        .audit_broadcast_tx
+        .send(serde_json::to_string(event).unwrap_or_default());
 }
-
 // ── Linux procfs readers ───────────────────────────────────────────────────────
 
 /// Read `/proc/{pid}/fd/` and return newly-observed real file paths
-/// (sockets and pipes are skipped — only paths starting with `/` are returned).
+/// (sockets and pipes are skipped - only paths starting with `/` are returned).
 ///
 /// `seen` is updated in place so subsequent calls do not re-emit the same path.
 #[cfg(target_os = "linux")]
@@ -289,7 +304,7 @@ mod tests {
             let events = poll_fds(pid, &mut seen);
             // Our process has stdin/stdout/stderr plus some library files open.
             // At minimum we expect at least one real path (the test binary itself).
-            // This is a smoke test — just check it doesn't panic.
+            // This is a smoke test - just check it doesn't panic.
             let _ = events; // may be empty in sandboxed envs
         }
         #[cfg(not(target_os = "linux"))]

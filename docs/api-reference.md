@@ -282,8 +282,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `PUT` | `/scim/v2/Users/{id}` | SCIM 2.0 replace user attributes; auth via `GYRE_SCIM_TOKEN` Bearer (M23) |
 | `DELETE` | `/scim/v2/Users/{id}` | SCIM 2.0 deprovision user; auth via `GYRE_SCIM_TOKEN` Bearer (M23) |
 | `POST` | `/api/v1/release/prepare` | Admin: compute next semver version from conventional commits + generate changelog with agent/task attribution; optionally open a release MR. Request: `{repo_id, branch?, from?, create_mr?, mr_title?}`; `branch` and `from` validated against git argument injection — must not start with `-` or contain `..` (M16-A). Response: `{next_version, changelog, commit_count, mr?}` (M16) |
-| `POST/GET` | `/api/v1/audit/events` | Record / query eBPF audit events (`?agent_id=&event_type=&since=`) |
-| `GET` | `/api/v1/audit/stream` | SSE stream of live audit events |
+| `POST/GET` | `/api/v1/audit/events` | Record / query audit events. POST body: `{event_type, session_id?, workspace_id?, repo_id?, resource_type?, resource_id?, outcome?, detail?, path?, pid?}` - legacy top-level `path`/`pid` are folded into `detail` server-side; `agent_id` in the body is ignored and bound to the caller's authenticated identity (NEW-31); `source_ip` derived from `X-Forwarded-For` (first hop) or `X-Real-Ip`; `user_agent` from the `User-Agent` header. GET filters: `?agent_id=&event_type=&workspace_id=&user_id=&resource_type=&outcome=&since=&until=&limit=` (limit default 100, max 1000). Responses use the 14-field envelope (observability.md §Audit Event Schema): `id, event_type, agent_id, user_id, session_id, workspace_id, repo_id, resource_type, resource_id, outcome, detail, source_ip, user_agent, timestamp` |
+| `GET` | `/api/v1/audit/stream` | SSE stream of live audit events (full envelope JSON per event, plus heartbeat comments) |
 | `GET` | `/api/v1/audit/stats` | Audit event statistics and counts |
 | `POST/GET` | `/api/v1/network/peers` | Register / list WireGuard mesh peers |
 | `GET` | `/api/v1/network/peers/agent/{agent_id}` | Get peer record for a specific agent |
@@ -386,11 +386,15 @@ The same events are also queryable via `GET /api/v1/activity?since=<ts>&limit=<n
 | `file_access` | Agent accessed a file path (procfs monitor, G7) |
 | `network_connect` | Agent made a network connection (procfs monitor, G7) |
 | `process_exec` | Agent exec'd a subprocess |
+| `syscall` | Raw syscall observation |
 | `container_started` | Container successfully started for an agent (M23) |
 | `container_stopped` | Container exited cleanly (M23) |
 | `container_crashed` | Container exited with non-zero code or was force-killed (M23) |
 | `container_oom` | Container OOM-killed by the kernel (M23) |
 | `container_network_blocked` | Outbound network attempt blocked by `--network=none` (G8, M23) |
+
+`outcome` is `success` | `failure` | `blocked` (default `success`). Unrecognized
+`event_type` strings are preserved as custom events.
 
 ---
 

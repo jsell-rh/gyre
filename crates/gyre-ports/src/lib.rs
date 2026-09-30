@@ -66,7 +66,7 @@ pub use agent::AgentRepository;
 pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
 pub use analytics::{AnalyticsRepository, CostRepository};
 pub use attestation_repo::AttestationRepository;
-pub use audit::AuditRepository;
+pub use audit::{AuditQueryFilter, AuditRepository};
 pub use breaking_change::BreakingChangeRepository;
 pub use budget::BudgetRepository;
 pub use budget_usage::BudgetUsageRepository;

@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Text};
 use gyre_common::Id;
-use gyre_domain::{AuditEvent, AuditEventType};
-use gyre_ports::AuditRepository;
+use gyre_domain::{AuditEvent, AuditEventType, AuditOutcome};
+use gyre_ports::{AuditQueryFilter, AuditRepository};
 use std::sync::Arc;
 
 use super::SqliteStorage;
@@ -15,25 +15,39 @@ use crate::schema::audit_events;
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 struct AuditEventRow {
     id: String,
-    agent_id: String,
     event_type: String,
-    path: Option<String>,
-    details: String,
-    pid: Option<i32>,
+    agent_id: Option<String>,
+    user_id: Option<String>,
+    session_id: Option<String>,
+    workspace_id: Option<String>,
+    repo_id: Option<String>,
+    resource_type: String,
+    resource_id: Option<String>,
+    outcome: String,
+    detail: String,
+    source_ip: Option<String>,
+    user_agent: Option<String>,
     timestamp: i64,
 }
 
 impl From<AuditEventRow> for AuditEvent {
     fn from(r: AuditEventRow) -> Self {
-        let details: serde_json::Value = serde_json::from_str(&r.details)
+        let detail: serde_json::Value = serde_json::from_str(&r.detail)
             .unwrap_or(serde_json::Value::Object(Default::default()));
         AuditEvent {
             id: Id::new(r.id),
-            agent_id: Id::new(r.agent_id),
             event_type: AuditEventType::from_str(&r.event_type),
-            path: r.path,
-            details,
-            pid: r.pid.map(|v| v as u32),
+            agent_id: r.agent_id.map(Id::new),
+            user_id: r.user_id.map(Id::new),
+            session_id: r.session_id,
+            workspace_id: r.workspace_id.map(Id::new),
+            repo_id: r.repo_id.map(Id::new),
+            resource_type: r.resource_type,
+            resource_id: r.resource_id,
+            outcome: AuditOutcome::from_str(&r.outcome).unwrap_or(AuditOutcome::Success),
+            detail,
+            source_ip: r.source_ip,
+            user_agent: r.user_agent,
             timestamp: r.timestamp as u64,
         }
     }
@@ -43,11 +57,18 @@ impl From<AuditEventRow> for AuditEvent {
 #[diesel(table_name = audit_events)]
 struct AuditEventRecord<'a> {
     id: &'a str,
-    agent_id: &'a str,
-    event_type: &'a str,
-    path: Option<&'a str>,
-    details: String,
-    pid: Option<i32>,
+    event_type: String,
+    agent_id: Option<&'a str>,
+    user_id: Option<&'a str>,
+    session_id: Option<&'a str>,
+    workspace_id: Option<&'a str>,
+    repo_id: Option<&'a str>,
+    resource_type: &'a str,
+    resource_id: Option<&'a str>,
+    outcome: &'a str,
+    detail: String,
+    source_ip: Option<&'a str>,
+    user_agent: Option<&'a str>,
     timestamp: i64,
 }
 
@@ -59,6 +80,25 @@ struct EventTypeStat {
     cnt: i64,
 }
 
+fn to_record(e: &AuditEvent) -> AuditEventRecord<'_> {
+    AuditEventRecord {
+        id: e.id.as_str(),
+        event_type: e.event_type.as_str(),
+        agent_id: e.agent_id.as_ref().map(|id| id.as_str()),
+        user_id: e.user_id.as_ref().map(|id| id.as_str()),
+        session_id: e.session_id.as_deref(),
+        workspace_id: e.workspace_id.as_ref().map(|id| id.as_str()),
+        repo_id: e.repo_id.as_ref().map(|id| id.as_str()),
+        resource_type: &e.resource_type,
+        resource_id: e.resource_id.as_deref(),
+        outcome: e.outcome.as_str(),
+        detail: serde_json::to_string(&e.detail).unwrap_or_else(|_| "{}".to_string()),
+        source_ip: e.source_ip.as_deref(),
+        user_agent: e.user_agent.as_deref(),
+        timestamp: e.timestamp as i64,
+    }
+}
+
 #[async_trait]
 impl AuditRepository for SqliteStorage {
     async fn record(&self, event: &AuditEvent) -> Result<()> {
@@ -66,19 +106,8 @@ impl AuditRepository for SqliteStorage {
         let e = event.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            let details = serde_json::to_string(&e.details)?;
-            let event_type_str = e.event_type.as_str().to_string();
-            let record = AuditEventRecord {
-                id: e.id.as_str(),
-                agent_id: e.agent_id.as_str(),
-                event_type: &event_type_str,
-                path: e.path.as_deref(),
-                details,
-                pid: e.pid.map(|p| p as i32),
-                timestamp: e.timestamp as i64,
-            };
             diesel::insert_into(audit_events::table)
-                .values(&record)
+                .values(&to_record(&e))
                 .execute(&mut *conn)
                 .context("insert audit_event")?;
             Ok(())
@@ -86,35 +115,14 @@ impl AuditRepository for SqliteStorage {
         .await?
     }
 
-    async fn query(
-        &self,
-        agent_id: Option<&str>,
-        event_type: Option<&str>,
-        since: Option<u64>,
-        until: Option<u64>,
-        limit: usize,
-    ) -> Result<Vec<AuditEvent>> {
+    async fn query(&self, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>> {
         let pool = Arc::clone(&self.pool);
-        let agent_id = agent_id.map(|s| s.to_string());
-        let event_type = event_type.map(|s| s.to_string());
+        let filter = filter.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<AuditEvent>> {
             let mut conn = pool.get().context("get db connection")?;
-            let mut query = audit_events::table.into_boxed();
-            if let Some(s) = since {
-                query = query.filter(audit_events::timestamp.ge(s as i64));
-            }
-            if let Some(u) = until {
-                query = query.filter(audit_events::timestamp.le(u as i64));
-            }
-            if let Some(ref a) = agent_id {
-                query = query.filter(audit_events::agent_id.eq(a.as_str()));
-            }
-            if let Some(ref et) = event_type {
-                query = query.filter(audit_events::event_type.eq(et.as_str()));
-            }
-            let rows = query
+            let rows = apply_filters(audit_events::table.into_boxed(), &filter)
                 .order(audit_events::timestamp.desc())
-                .limit(limit as i64)
+                .limit(filter.limit as i64)
                 .load::<AuditEventRow>(&mut *conn)
                 .context("query audit_events")?;
             Ok(rows.into_iter().map(AuditEvent::from).collect())
@@ -135,6 +143,7 @@ impl AuditRepository for SqliteStorage {
         .await?
     }
 
+
     async fn stats_by_type(&self) -> Result<Vec<(String, u64)>> {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
@@ -152,7 +161,6 @@ impl AuditRepository for SqliteStorage {
         })
         .await?
     }
-
     async fn since_timestamp(&self, since: u64, limit: usize) -> Result<Vec<AuditEvent>> {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<AuditEvent>> {
@@ -182,14 +190,50 @@ impl AuditRepository for SqliteStorage {
     }
 }
 
+type BoxedAuditQuery = diesel::dsl::IntoBoxed<
+    'static,
+    crate::schema::audit_events::table,
+    diesel::sqlite::Sqlite,
+>;
+
+fn apply_filters(
+    mut query: BoxedAuditQuery,
+    filter: &AuditQueryFilter,
+) -> BoxedAuditQuery {
+    if let Some(s) = filter.since {
+        query = query.filter(audit_events::timestamp.ge(s as i64));
+    }
+    if let Some(u) = filter.until {
+        query = query.filter(audit_events::timestamp.le(u as i64));
+    }
+    if let Some(a) = &filter.agent_id {
+        query = query.filter(audit_events::agent_id.eq(a.clone()));
+    }
+    if let Some(et) = &filter.event_type {
+        query = query.filter(audit_events::event_type.eq(et.clone()));
+    }
+    if let Some(w) = &filter.workspace_id {
+        query = query.filter(audit_events::workspace_id.eq(w.clone()));
+    }
+    if let Some(u) = &filter.user_id {
+        query = query.filter(audit_events::user_id.eq(u.clone()));
+    }
+    if let Some(rt) = &filter.resource_type {
+        query = query.filter(audit_events::resource_type.eq(rt.clone()));
+    }
+    if let Some(o) = filter.outcome {
+        query = query.filter(audit_events::outcome.eq(o.as_str()));
+    }
+    query
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sqlite::SqliteStorage;
     use gyre_domain::AuditEventType;
     use tempfile::NamedTempFile;
 
-    fn setup() -> (NamedTempFile, SqliteStorage) {
+fn setup() -> (NamedTempFile, SqliteStorage) {
         let tmp = NamedTempFile::new().unwrap();
         let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
         (tmp, s)
@@ -198,99 +242,193 @@ mod tests {
     fn make_event(id: &str, agent: &str, et: AuditEventType, ts: u64) -> AuditEvent {
         AuditEvent::new(
             Id::new(id),
-            Id::new(agent),
             et,
-            Some("/tmp/test".to_string()),
-            serde_json::json!({ "action": "read" }),
-            Some(1000),
+            Some(Id::new(agent)),
+            None,
+            None,
+            None,
+            None,
+            "agent".to_string(),
+            Some(agent.to_string()),
+            AuditOutcome::Success,
+            serde_json::json!({ "path": "/tmp/test", "action": "read", "pid": 1000 }),
+            None,
+            None,
             ts,
         )
+    }
+
+    async fn record(s: &SqliteStorage, e: &AuditEvent) {
+        AuditRepository::record(s, e).await.unwrap();
+    }
+
+    fn all() -> AuditQueryFilter {
+        AuditQueryFilter {
+            limit: 100,
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
     async fn audit_record_and_query_all() {
         let (_tmp, s) = setup();
-        AuditRepository::record(
-            &s,
-            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
-        )
-        .await
-        .unwrap();
-        AuditRepository::record(
-            &s,
-            &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200),
-        )
-        .await
-        .unwrap();
-        let results = AuditRepository::query(&s, None, None, None, None, 100)
-            .await
-            .unwrap();
+        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
+        record(&s, &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200)).await;
+        let results = AuditRepository::query(&s, &all()).await.unwrap();
         assert_eq!(results.len(), 2);
     }
 
     #[tokio::test]
     async fn audit_query_by_agent() {
         let (_tmp, s) = setup();
-        AuditRepository::record(
+        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
+        record(&s, &make_event("e2", "agent-2", AuditEventType::ProcessExec, 200)).await;
+        let results = AuditRepository::query(
             &s,
-            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
+            &AuditQueryFilter {
+                agent_id: Some("agent-1".to_string()),
+                ..all()
+            },
         )
         .await
         .unwrap();
-        AuditRepository::record(
-            &s,
-            &make_event("e2", "agent-2", AuditEventType::ProcessExec, 200),
-        )
-        .await
-        .unwrap();
-        let results = AuditRepository::query(&s, Some("agent-1"), None, None, None, 100)
-            .await
-            .unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].agent_id.as_str(), "agent-1");
+        assert_eq!(results[0].agent_id, Some(Id::new("agent-1")));
     }
 
     #[tokio::test]
     async fn audit_query_by_event_type() {
         let (_tmp, s) = setup();
-        AuditRepository::record(
+        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
+        record(&s, &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200)).await;
+        let results = AuditRepository::query(
             &s,
-            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
+            &AuditQueryFilter {
+                event_type: Some("file_access".to_string()),
+                ..all()
+            },
         )
         .await
         .unwrap();
-        AuditRepository::record(
-            &s,
-            &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200),
-        )
-        .await
-        .unwrap();
-        let results = AuditRepository::query(&s, None, Some("file_access"), None, None, 100)
-            .await
-            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].event_type, AuditEventType::FileAccess);
+    }
+
+    #[tokio::test]
+    async fn audit_query_by_workspace_user_resource_outcome() {
+        // Each new filter dimension independently narrows the result set.
+        let (_tmp, s) = setup();
+        let mut e1 = make_event("e1", "agent-1", AuditEventType::FileAccess, 100);
+        e1.workspace_id = Some(Id::new("ws-1"));
+        e1.user_id = Some(Id::new("user-1"));
+        e1.outcome = AuditOutcome::Failure;
+        record(&s, &e1).await;
+        let mut e2 = make_event("e2", "agent-2", AuditEventType::FileAccess, 200);
+        e2.workspace_id = Some(Id::new("ws-2"));
+        e2.user_id = Some(Id::new("user-2"));
+        e2.outcome = AuditOutcome::Success;
+        e2.resource_type = "container".to_string();
+        record(&s, &e2).await;
+
+        let by_ws = AuditRepository::query(
+            &s,
+            &AuditQueryFilter {
+                workspace_id: Some("ws-1".to_string()),
+                ..all()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_ws.len(), 1);
+        assert_eq!(by_ws[0].id, Id::new("e1"));
+
+        let by_user = AuditRepository::query(
+            &s,
+            &AuditQueryFilter {
+                user_id: Some("user-2".to_string()),
+                ..all()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_user.len(), 1);
+        assert_eq!(by_user[0].id, Id::new("e2"));
+
+        let by_rt = AuditRepository::query(
+            &s,
+            &AuditQueryFilter {
+                resource_type: Some("container".to_string()),
+                ..all()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_rt.len(), 1);
+        assert_eq!(by_rt[0].id, Id::new("e2"));
+
+        let by_outcome = AuditRepository::query(
+            &s,
+            &AuditQueryFilter {
+                outcome: Some(AuditOutcome::Failure),
+                ..all()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_outcome.len(), 1);
+        assert_eq!(by_outcome[0].id, Id::new("e1"));
+    }
+
+    #[tokio::test]
+    async fn audit_server_initiated_event_has_null_agent() {
+        // agent_id NULL must persist and round-trip (spec: server-initiated).
+        let (_tmp, s) = setup();
+        let e = AuditEvent::new(
+            Id::new("e1"),
+            AuditEventType::Custom("auth_failure".to_string()),
+            None,
+            Some(Id::new("user-1")),
+            None,
+            None,
+            None,
+            "user".to_string(),
+            Some("user-1".to_string()),
+            AuditOutcome::Failure,
+            serde_json::json!({ "rejection_reason": "revoked" }),
+            Some("10.0.0.1".to_string()),
+            Some("curl/8.0".to_string()),
+            100,
+        );
+        record(&s, &e).await;
+        let results = AuditRepository::query(&s, &all()).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].agent_id, None);
+        assert_eq!(results[0].user_id, Some(Id::new("user-1")));
+        assert_eq!(results[0].source_ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(results[0].user_agent.as_deref(), Some("curl/8.0"));
+        assert_eq!(results[0].outcome, AuditOutcome::Failure);
     }
 
     #[tokio::test]
     async fn audit_query_since_until() {
         let (_tmp, s) = setup();
         for i in 1u64..=5 {
-            AuditRepository::record(
+            record(
                 &s,
-                &make_event(
-                    &format!("e{}", i),
-                    "agent-1",
-                    AuditEventType::Syscall,
-                    i * 100,
-                ),
+                &make_event(&format!("e{}", i), "agent-1", AuditEventType::Syscall, i * 100),
             )
-            .await
-            .unwrap();
+            .await;
         }
-        let results = AuditRepository::query(&s, None, None, Some(200), Some(400), 100)
-            .await
-            .unwrap();
+        let results = AuditRepository::query(
+            &s,
+            &AuditQueryFilter {
+                since: Some(200),
+                until: Some(400),
+                ..all()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(results.len(), 3);
         assert!(results
             .iter()
@@ -300,18 +438,8 @@ mod tests {
     #[tokio::test]
     async fn audit_count() {
         let (_tmp, s) = setup();
-        AuditRepository::record(
-            &s,
-            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
-        )
-        .await
-        .unwrap();
-        AuditRepository::record(
-            &s,
-            &make_event("e2", "agent-1", AuditEventType::Syscall, 200),
-        )
-        .await
-        .unwrap();
+        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
+        record(&s, &make_event("e2", "agent-1", AuditEventType::Syscall, 200)).await;
         let count = AuditRepository::count(&s).await.unwrap();
         assert_eq!(count, 2);
     }
@@ -319,18 +447,9 @@ mod tests {
     #[tokio::test]
     async fn audit_stats_by_type() {
         let (_tmp, s) = setup();
-        AuditRepository::record(&s, &make_event("e1", "a1", AuditEventType::FileAccess, 100))
-            .await
-            .unwrap();
-        AuditRepository::record(&s, &make_event("e2", "a1", AuditEventType::FileAccess, 200))
-            .await
-            .unwrap();
-        AuditRepository::record(
-            &s,
-            &make_event("e3", "a1", AuditEventType::NetworkConnect, 300),
-        )
-        .await
-        .unwrap();
+        record(&s, &make_event("e1", "a1", AuditEventType::FileAccess, 100)).await;
+        record(&s, &make_event("e2", "a1", AuditEventType::FileAccess, 200)).await;
+        record(&s, &make_event("e3", "a1", AuditEventType::NetworkConnect, 300)).await;
         let stats = AuditRepository::stats_by_type(&s).await.unwrap();
         let fa = stats.iter().find(|(t, _)| t == "file_access").unwrap();
         assert_eq!(fa.1, 2);
@@ -342,12 +461,11 @@ mod tests {
     async fn audit_since_timestamp() {
         let (_tmp, s) = setup();
         for i in 1u64..=5 {
-            AuditRepository::record(
+            record(
                 &s,
                 &make_event(&format!("e{}", i), "a1", AuditEventType::Syscall, i * 100),
             )
-            .await
-            .unwrap();
+            .await;
         }
         let results = AuditRepository::since_timestamp(&s, 300, 10).await.unwrap();
         assert_eq!(results.len(), 2); // timestamps 400, 500
@@ -357,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn audit_custom_event_type() {
         let (_tmp, s) = setup();
-        AuditRepository::record(
+        record(
             &s,
             &make_event(
                 "e1",
@@ -366,11 +484,16 @@ mod tests {
                 100,
             ),
         )
+        .await;
+        let results = AuditRepository::query(
+            &s,
+            &AuditQueryFilter {
+                event_type: Some("container_escape".to_string()),
+                ..all()
+            },
+        )
         .await
         .unwrap();
-        let results = AuditRepository::query(&s, None, Some("container_escape"), None, None, 100)
-            .await
-            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].event_type,
@@ -381,25 +504,13 @@ mod tests {
     #[tokio::test]
     async fn audit_delete_older_than_purges_old_keeps_new() {
         let (_tmp, s) = setup();
-        AuditRepository::record(
-            &s,
-            &make_event("old", "agent-1", AuditEventType::FileAccess, 100),
-        )
-        .await
-        .unwrap();
-        AuditRepository::record(
-            &s,
-            &make_event("new", "agent-1", AuditEventType::FileAccess, 200),
-        )
-        .await
-        .unwrap();
+        record(&s, &make_event("old", "agent-1", AuditEventType::FileAccess, 100)).await;
+        record(&s, &make_event("new", "agent-1", AuditEventType::FileAccess, 200)).await;
 
         let deleted = AuditRepository::delete_older_than(&s, 150).await.unwrap();
         assert_eq!(deleted, 1);
 
-        let results = AuditRepository::query(&s, None, None, None, None, 100)
-            .await
-            .unwrap();
+        let results = AuditRepository::query(&s, &all()).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, Id::new("new"));
 

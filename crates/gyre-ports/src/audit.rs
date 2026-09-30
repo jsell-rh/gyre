@@ -1,20 +1,29 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use gyre_domain::AuditEvent;
+use gyre_domain::{AuditEvent, AuditOutcome};
+use serde::Deserialize;
+
+/// Filter dimensions for querying audit events (observability.md §Audit Event
+/// Schema). Every field is optional; `None` means "no constraint".
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AuditQueryFilter {
+    pub agent_id: Option<String>,
+    pub event_type: Option<String>,
+    pub workspace_id: Option<String>,
+    pub user_id: Option<String>,
+    pub resource_type: Option<String>,
+    pub outcome: Option<AuditOutcome>,
+    pub since: Option<u64>,
+    pub until: Option<u64>,
+    pub limit: usize,
+}
 
 /// Port for recording and querying audit events.
 #[async_trait]
 pub trait AuditRepository: Send + Sync {
     async fn record(&self, event: &AuditEvent) -> Result<()>;
 
-    async fn query(
-        &self,
-        agent_id: Option<&str>,
-        event_type: Option<&str>,
-        since: Option<u64>,
-        until: Option<u64>,
-        limit: usize,
-    ) -> Result<Vec<AuditEvent>>;
+    async fn query(&self, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>>;
 
     /// Total count of all audit events.
     async fn count(&self) -> Result<u64>;

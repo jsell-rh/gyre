@@ -13,12 +13,13 @@ use gyre_domain::{
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository, AuditRepository,
-    BudgetRepository, BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
-    NetworkPeerRepository, PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
+    AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
+    DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
+    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
+    RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
+    TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
+    WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -1146,27 +1147,36 @@ impl AuditRepository for MemAuditRepository {
         Ok(())
     }
 
-    async fn query(
-        &self,
-        agent_id: Option<&str>,
-        event_type: Option<&str>,
-        since: Option<u64>,
-        until: Option<u64>,
-        limit: usize,
-    ) -> Result<Vec<AuditEvent>> {
+    async fn query(&self, filter: &AuditQueryFilter) -> Result<Vec<AuditEvent>> {
         let store = self.store.lock().await;
         let mut events: Vec<AuditEvent> = store
             .iter()
             .filter(|e| {
-                agent_id.is_none_or(|a| e.agent_id.as_str() == a)
-                    && event_type.is_none_or(|t| e.event_type.as_str() == t)
-                    && since.is_none_or(|s| e.timestamp >= s)
-                    && until.is_none_or(|u| e.timestamp <= u)
+                filter.agent_id.as_ref().is_none_or(|a| {
+                    e.agent_id.as_ref().is_some_and(|id| id.as_str() == a)
+                }) && filter
+                    .event_type
+                    .as_ref()
+                    .is_none_or(|t| e.event_type.as_str() == *t)
+                    && filter.workspace_id.as_ref().is_none_or(|w| {
+                        e.workspace_id.as_ref().is_some_and(|id| id.as_str() == w)
+                    })
+                    && filter
+                        .user_id
+                        .as_ref()
+                        .is_none_or(|u| e.user_id.as_ref().is_some_and(|id| id.as_str() == u))
+                    && filter
+                        .resource_type
+                        .as_ref()
+                        .is_none_or(|rt| e.resource_type == *rt)
+                    && filter.outcome.is_none_or(|o| e.outcome == o)
+                    && filter.since.is_none_or(|s| e.timestamp >= s)
+                    && filter.until.is_none_or(|u| e.timestamp <= u)
             })
             .cloned()
             .collect();
         events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        events.truncate(limit);
+        events.truncate(filter.limit);
         Ok(events)
     }
 
@@ -3440,7 +3450,7 @@ impl gyre_ports::SecretRepository for MemSecretRepository {
 pub struct MemTraceRepository {
     store: Arc<Mutex<HashMap<String, gyre_common::GateTrace>>>,
     payloads: Arc<Mutex<HashMap<(String, String), gyre_ports::trace::SpanPayload>>>,
-    /// MR IDs whose traces were promoted to attestation — mirrors the SQLite
+    /// MR IDs whose traces were promoted to attestation - mirrors the SQLite
     /// adapter's `permanent=1` flag: promoted traces survive `delete_by_mr`.
     permanent: Arc<Mutex<std::collections::HashSet<String>>>,
 }

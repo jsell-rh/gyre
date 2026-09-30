@@ -1,4 +1,4 @@
-//! M19.3 + M23: Container audit trail — records lifecycle events for agent containers.
+//! M19.3 + M23: Container audit trail - records lifecycle events for agent containers.
 //!
 //! M23 adds typed `AuditEventType` variants for container lifecycle transitions
 //! (Started, Stopped, Crashed, OOM, NetworkBlocked) that flow through the shared
@@ -85,7 +85,7 @@ async fn get_image_hash(runtime: &str, container_id: &str) -> Option<String> {
 }
 
 /// Retrieve exit code and finish timestamp from container inspect.
-/// Returns `(exit_code, stopped_at_secs)` — both `None` on failure.
+/// Returns `(exit_code, stopped_at_secs)` - both `None` on failure.
 async fn get_exit_info(runtime: &str, container_id: &str) -> (Option<i32>, Option<u64>) {
     let output = tokio::process::Command::new(runtime)
         .args([
@@ -105,7 +105,7 @@ async fn get_exit_info(runtime: &str, container_id: &str) -> (Option<i32>, Optio
         return (None, None);
     }
     let exit_code: Option<i32> = parts[0].parse().ok();
-    // "0001-01-01T00:00:00Z" is Docker's zero time — container still running.
+    // "0001-01-01T00:00:00Z" is Docker's zero time - container still running.
     let stopped_at = if parts[1].starts_with("0001") {
         None
     } else {
@@ -158,35 +158,38 @@ async fn emit(
     ctx: &AuditCtx<'_>,
     agent_id: &str,
     event_type: AuditEventType,
+    outcome: gyre_domain::AuditOutcome,
     details: serde_json::Value,
 ) {
     let event = AuditEvent::new(
         Id::new(uuid::Uuid::new_v4().to_string()),
-        Id::new(agent_id),
         event_type,
+        Some(Id::new(agent_id)),
         None,
+        None,
+        None,
+        None,
+        "container".to_string(),
+        details.get("container_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        outcome,
         details,
+        None,
         None,
         now_secs(),
     );
     let _ = ctx.audit.record(&event).await;
-    if let Ok(json) = serde_json::to_string(&serde_json::json!({
-        "id": event.id.to_string(),
-        "agent_id": event.agent_id.to_string(),
-        "event_type": event.event_type.as_str(),
-        "details": event.details,
-        "timestamp": event.timestamp,
-    })) {
+    if let Ok(json) = serde_json::to_string(&event) {
         let _ = ctx.broadcast_tx.send(json);
     }
 }
 
-/// Emit `container_started` — call immediately after a successful container spawn.
+/// Emit `container_started` - call immediately after a successful container spawn.
 pub async fn emit_started(ctx: &AuditCtx<'_>, agent_id: &str, container_id: &str, image: &str) {
     emit(
         ctx,
         agent_id,
         AuditEventType::ContainerStarted,
+        gyre_domain::AuditOutcome::Success,
         serde_json::json!({
             "container_id": container_id,
             "image": image,
@@ -196,7 +199,7 @@ pub async fn emit_started(ctx: &AuditCtx<'_>, agent_id: &str, container_id: &str
     .await;
 }
 
-/// Emit `container_stopped` — call when a container exits cleanly.
+/// Emit `container_stopped` - call when a container exits cleanly.
 pub async fn emit_stopped(
     ctx: &AuditCtx<'_>,
     agent_id: &str,
@@ -207,6 +210,7 @@ pub async fn emit_stopped(
         ctx,
         agent_id,
         AuditEventType::ContainerStopped,
+        gyre_domain::AuditOutcome::Success,
         serde_json::json!({
             "container_id": container_id,
             "exit_code": exit_code,
@@ -216,12 +220,13 @@ pub async fn emit_stopped(
     .await;
 }
 
-/// Emit `container_crashed` — call when a container exits with a non-zero code unexpectedly.
+/// Emit `container_crashed` - call when a container exits with a non-zero code unexpectedly.
 pub async fn emit_crashed(ctx: &AuditCtx<'_>, agent_id: &str, container_id: &str, error: &str) {
     emit(
         ctx,
         agent_id,
         AuditEventType::ContainerCrashed,
+        gyre_domain::AuditOutcome::Failure,
         serde_json::json!({
             "container_id": container_id,
             "error": error,
@@ -231,12 +236,13 @@ pub async fn emit_crashed(ctx: &AuditCtx<'_>, agent_id: &str, container_id: &str
     .await;
 }
 
-/// Emit `container_oom` — call when a container is killed by the OOM killer.
+/// Emit `container_oom` - call when a container is killed by the OOM killer.
 pub async fn emit_oom(ctx: &AuditCtx<'_>, agent_id: &str, container_id: &str, memory_limit: &str) {
     emit(
         ctx,
         agent_id,
         AuditEventType::ContainerOom,
+        gyre_domain::AuditOutcome::Failure,
         serde_json::json!({
             "container_id": container_id,
             "memory_limit": memory_limit,
@@ -246,7 +252,7 @@ pub async fn emit_oom(ctx: &AuditCtx<'_>, agent_id: &str, container_id: &str, me
     .await;
 }
 
-/// Emit `container_network_blocked` — call when the network policy drops a connection.
+/// Emit `container_network_blocked` - call when the network policy drops a connection.
 pub async fn emit_network_blocked(
     ctx: &AuditCtx<'_>,
     agent_id: &str,
@@ -257,6 +263,7 @@ pub async fn emit_network_blocked(
         ctx,
         agent_id,
         AuditEventType::ContainerNetworkBlocked,
+        gyre_domain::AuditOutcome::Blocked,
         serde_json::json!({
             "container_id": container_id,
             "destination": destination,
@@ -283,7 +290,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_spawn_audit_fills_fields() {
-        // Container inspect will fail (no real daemon) — image_hash will be None.
+        // Container inspect will fail (no real daemon) - image_hash will be None.
         let rec = capture_spawn_audit("agent-1", "abc123", "alpine:latest", "docker").await;
         assert_eq!(rec.agent_id, "agent-1");
         assert_eq!(rec.container_id, "abc123");

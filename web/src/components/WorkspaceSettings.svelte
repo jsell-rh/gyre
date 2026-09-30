@@ -956,7 +956,7 @@
               <div class="audit-row" data-testid="audit-row">
                 <span class="audit-type">{evt.event_type ?? evt.type ?? '—'}</span>
                 <span class="audit-actor">{evt.actor ?? evt.user_id ?? '—'}</span>
-                <span class="audit-detail">{evt.details ?? evt.message ?? ''}</span>
+                <span class="audit-detail">{evt.detail ?? evt.details ?? evt.message ?? ''}</span>
                 <span class="audit-time">{fmtDate(evt.timestamp ?? evt.created_at)}</span>
               </div>
             {/each}

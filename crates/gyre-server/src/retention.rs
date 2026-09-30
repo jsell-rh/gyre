@@ -457,11 +457,18 @@ mod tests {
     fn audit_event(id: &str, ts: u64) -> AuditEvent {
         AuditEvent::new(
             Id::new(id),
-            Id::new("agent-1"),
             AuditEventType::FileAccess,
-            Some("/tmp/x".to_string()),
-            serde_json::json!({}),
-            Some(123),
+            Some(Id::new("agent-1")),
+            None,
+            None,
+            None,
+            None,
+            "agent".to_string(),
+            Some("agent-1".to_string()),
+            gyre_domain::AuditOutcome::Success,
+            serde_json::json!({ "path": "/tmp/x", "pid": 123 }),
+            None,
+            None,
             ts,
         )
     }
@@ -581,7 +588,7 @@ mod tests {
         state.retention_store.run_cleanup(&state).await.unwrap();
 
         // audit: old gone, new kept.
-        let audit = gyre_ports::AuditRepository::query(&*state.audit, None, None, None, None, 100)
+        let audit = gyre_ports::AuditRepository::query(&*state.audit, &gyre_ports::AuditQueryFilter { limit: 100, ..Default::default() })
             .await
             .unwrap();
         let ids: Vec<&str> = audit.iter().map(|e| e.id.as_str()).collect();
@@ -632,7 +639,7 @@ mod tests {
             .await
             .unwrap()
             .len();
-        let audit_first = gyre_ports::AuditRepository::query(&*state.audit, None, None, None, None, 100)
+        let audit_first = gyre_ports::AuditRepository::query(&*state.audit, &gyre_ports::AuditQueryFilter { limit: 100, ..Default::default() })
             .await
             .unwrap()
             .len();
@@ -643,7 +650,7 @@ mod tests {
             .await
             .unwrap()
             .len();
-        let audit_second = gyre_ports::AuditRepository::query(&*state.audit, None, None, None, None, 100)
+        let audit_second = gyre_ports::AuditRepository::query(&*state.audit, &gyre_ports::AuditQueryFilter { limit: 100, ..Default::default() })
             .await
             .unwrap()
             .len();

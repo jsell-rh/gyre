@@ -307,8 +307,8 @@ describe('RepoSettings', () => {
 
     it('shows audit rows when events exist', async () => {
       api.auditEvents.mockResolvedValue([
-        { id: 'e1', event_type: 'agent_spawned', actor: 'alice', details: 'spawned', timestamp: 1700000000 },
-        { id: 'e2', event_type: 'mr_merged', actor: 'bob', details: 'merged PR #42', timestamp: 1700001000 },
+        { id: 'e1', event_type: 'agent_spawned', user_id: 'alice', detail: { path: 'spawned' }, timestamp: 1700000000 },
+        { id: 'e2', event_type: 'mr_merged', user_id: 'bob', detail: { path: 'merged PR #42' }, timestamp: 1700001000 },
       ]);
       const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
       await openAuditTab(container);

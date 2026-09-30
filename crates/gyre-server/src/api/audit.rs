@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use futures_util::stream;
-use gyre_domain::{AuditEvent, AuditEventType};
+use gyre_domain::{AuditEvent, AuditEventType, AuditOutcome};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,12 +21,22 @@ use super::{new_id, now_secs};
 
 // ─── Audit Events ─────────────────────────────────────────────────────────────
 
+/// Inbound audit event (agent-side push). `agent_id` is accepted but ignored -
+/// the caller identity from auth is always used (NEW-31).
 #[derive(Deserialize)]
 pub struct RecordAuditEventRequest {
-    pub agent_id: String,
+    pub agent_id: Option<String>,
     pub event_type: String,
+    pub session_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
+    pub resource_type: Option<String>,
+    pub resource_id: Option<String>,
+    pub outcome: Option<AuditOutcome>,
+    pub detail: Option<serde_json::Value>,
+    // Legacy fields (pre-envelope schema): folded into `detail` so old
+    // agent clients keep working.
     pub path: Option<String>,
-    pub details: Option<serde_json::Value>,
     pub pid: Option<u32>,
 }
 
@@ -34,6 +44,10 @@ pub struct RecordAuditEventRequest {
 pub struct QueryAuditParams {
     pub agent_id: Option<String>,
     pub event_type: Option<String>,
+    pub workspace_id: Option<String>,
+    pub user_id: Option<String>,
+    pub resource_type: Option<String>,
+    pub outcome: Option<AuditOutcome>,
     pub since: Option<u64>,
     pub until: Option<u64>,
     pub limit: Option<usize>,
@@ -42,11 +56,18 @@ pub struct QueryAuditParams {
 #[derive(Serialize)]
 pub struct AuditEventResponse {
     pub id: String,
-    pub agent_id: String,
     pub event_type: String,
-    pub path: Option<String>,
-    pub details: serde_json::Value,
-    pub pid: Option<u32>,
+    pub agent_id: Option<String>,
+    pub user_id: Option<String>,
+    pub session_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub outcome: AuditOutcome,
+    pub detail: serde_json::Value,
+    pub source_ip: Option<String>,
+    pub user_agent: Option<String>,
     pub timestamp: u64,
 }
 
@@ -54,11 +75,18 @@ impl From<AuditEvent> for AuditEventResponse {
     fn from(e: AuditEvent) -> Self {
         Self {
             id: e.id.to_string(),
-            agent_id: e.agent_id.to_string(),
             event_type: e.event_type.as_str(),
-            path: e.path,
-            details: e.details,
-            pid: e.pid,
+            agent_id: e.agent_id.map(|id| id.to_string()),
+            user_id: e.user_id.map(|id| id.to_string()),
+            session_id: e.session_id,
+            workspace_id: e.workspace_id.map(|id| id.to_string()),
+            repo_id: e.repo_id.map(|id| id.to_string()),
+            resource_type: e.resource_type,
+            resource_id: e.resource_id,
+            outcome: e.outcome,
+            detail: e.detail,
+            source_ip: e.source_ip,
+            user_agent: e.user_agent,
             timestamp: e.timestamp,
         }
     }
@@ -67,20 +95,68 @@ impl From<AuditEvent> for AuditEventResponse {
 pub async fn record_audit_event(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
+    headers: axum::http::HeaderMap,
     Json(req): Json<RecordAuditEventRequest>,
 ) -> Result<(StatusCode, Json<AuditEventResponse>), ApiError> {
     // Bind agent_id to the verified caller identity to prevent audit trail forgery
-    // (NEW-31). The request body agent_id field is ignored — the audit record always
+    // (NEW-31). The request body agent_id field is ignored - the audit record always
     // reflects who actually made the call, not what the caller claims.
-    let agent_id = auth.agent_id.to_string();
+    // Agent JWT callers carry an agent identity; user/API-key callers carry user_id.
+    let agent_id = if auth.agent_id.is_empty() {
+        None
+    } else {
+        Some(gyre_common::Id::new(auth.agent_id.clone()))
+    };
+    let user_id = auth.user_id.clone();
+
+    // source_ip: prefer X-Forwarded-For (first hop), fall back to X-Real-Ip.
+    let source_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+        });
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Event-specific payload: merge legacy path/pid into detail so the
+    // envelope stays the storage contract while old clients keep working.
+    let mut detail = req
+        .detail
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+    if let (Some(obj), path) = (detail.as_object_mut(), req.path) {
+        if let Some(p) = path {
+            obj.entry("path").or_insert(serde_json::json!(p));
+        }
+    }
+    if let (Some(obj), pid) = (detail.as_object_mut(), req.pid) {
+        if let Some(p) = pid {
+            obj.entry("pid").or_insert(serde_json::json!(p));
+        }
+    }
+
     let event = AuditEvent::new(
         new_id(),
-        gyre_common::Id::new(agent_id),
         AuditEventType::from_str(&req.event_type),
-        req.path,
-        req.details
-            .unwrap_or(serde_json::Value::Object(Default::default())),
-        req.pid,
+        agent_id,
+        user_id,
+        req.session_id,
+        req.workspace_id.map(gyre_common::Id::new),
+        req.repo_id.map(gyre_common::Id::new),
+        req.resource_type.unwrap_or_else(|| "agent".to_string()),
+        req.resource_id,
+        req.outcome.unwrap_or(AuditOutcome::Success),
+        detail,
+        source_ip,
+        user_agent,
         now_secs(),
     );
     state.audit.record(&event).await?;
@@ -97,17 +173,18 @@ pub async fn query_audit_events(
     State(state): State<Arc<AppState>>,
     Query(params): Query<QueryAuditParams>,
 ) -> Result<Json<Vec<AuditEventResponse>>, ApiError> {
-    let limit = params.limit.unwrap_or(100).min(1000);
-    let events = state
-        .audit
-        .query(
-            params.agent_id.as_deref(),
-            params.event_type.as_deref(),
-            params.since,
-            params.until,
-            limit,
-        )
-        .await?;
+    let filter = gyre_ports::AuditQueryFilter {
+        agent_id: params.agent_id,
+        event_type: params.event_type,
+        workspace_id: params.workspace_id,
+        user_id: params.user_id,
+        resource_type: params.resource_type,
+        outcome: params.outcome,
+        since: params.since,
+        until: params.until,
+        limit: params.limit.unwrap_or(100).min(1000),
+    };
+    let events = state.audit.query(&filter).await?;
     Ok(Json(
         events.into_iter().map(AuditEventResponse::from).collect(),
     ))
@@ -139,7 +216,7 @@ pub async fn audit_stream(
             }
             Ok(Err(_)) => None, // channel closed
             Err(_) => {
-                // Timeout — send a heartbeat comment
+                // Timeout - send a heartbeat comment
                 let event = Event::default().comment("heartbeat");
                 Some((Ok(event), rx))
             }
@@ -265,12 +342,72 @@ mod tests {
     #[tokio::test]
     async fn record_audit_event_returns_201() {
         let app = app();
-        // agent_id in body is ignored — caller identity from token is used (NEW-31).
+        // agent_id in body is ignored - caller identity from token is used (NEW-31).
         let body = serde_json::json!({
             "agent_id": "forged-agent-id",
             "event_type": "file_access",
+            "detail": { "mode": "read", "path": "/etc/hosts", "pid": 1234 },
+            "resource_type": "agent"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/audit/events")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .header("X-Forwarded-For", "198.51.100.7, 10.0.0.1")
+                    .header("User-Agent", "gyre-agent/1.0")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Verify the recorded agent_id reflects the token identity, not the forged body value.
+        assert_ne!(
+            json["agent_id"].as_str().unwrap(),
+            "forged-agent-id",
+            "audit event must not allow caller to forge agent_id (NEW-31)"
+        );
+        // Envelope fields extracted from the request context.
+        assert_eq!(json["source_ip"].as_str().unwrap(), "198.51.100.7");
+        assert_eq!(json["user_agent"].as_str().unwrap(), "gyre-agent/1.0");
+        assert_eq!(json["resource_type"].as_str().unwrap(), "agent");
+        assert_eq!(json["outcome"].as_str().unwrap(), "success");
+        // All 14 envelope fields present in the response.
+        for key in [
+            "id",
+            "event_type",
+            "agent_id",
+            "user_id",
+            "session_id",
+            "workspace_id",
+            "repo_id",
+            "resource_type",
+            "resource_id",
+            "outcome",
+            "detail",
+            "source_ip",
+            "user_agent",
+            "timestamp",
+        ] {
+            assert!(json.get(key).is_some(), "response missing envelope field {key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn record_audit_event_legacy_path_pid_folded_into_detail() {
+        // Pre-envelope clients send path/pid at the top level; the server
+        // folds them into detail so the data is not lost.
+        let app = app();
+        let body = serde_json::json!({
+            "event_type": "file_access",
             "path": "/etc/hosts",
-            "details": { "mode": "read" },
             "pid": 1234
         });
         let resp = app
@@ -286,16 +423,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
-        // Verify the recorded agent_id reflects the token identity, not the forged body value.
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_ne!(
-            json["agent_id"].as_str().unwrap(),
-            "forged-agent-id",
-            "audit event must not allow caller to forge agent_id (NEW-31)"
-        );
+        assert_eq!(json["detail"]["path"].as_str().unwrap(), "/etc/hosts");
+        assert_eq!(json["detail"]["pid"].as_u64().unwrap(), 1234);
+        assert!(json.get("path").is_none(), "path must not be a top-level field");
+        assert!(json.get("pid").is_none(), "pid must not be a top-level field");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -365,6 +500,53 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(json.is_array());
+    }
+
+    #[tokio::test]
+    async fn query_audit_events_filters_by_outcome() {
+        // Record two events with different outcomes, then filter.
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+        for (outcome, et) in [("failure", "auth_failure"), ("success", "file_access")] {
+            let body = serde_json::json!({
+                "event_type": et,
+                "outcome": outcome,
+                "resource_type": "agent"
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/audit/events")
+                        .header("Authorization", "Bearer test-token")
+                        .header("Content-Type", "application/json")
+                        .body(Body::from(serde_json::to_string(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/events?outcome=failure")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["outcome"].as_str().unwrap(), "failure");
+        assert_eq!(arr[0]["event_type"].as_str().unwrap(), "auth_failure");
     }
 
     #[tokio::test]
