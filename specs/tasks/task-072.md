@@ -2,7 +2,7 @@
 title: "LSP Call Graph — Core Pipeline + Go Extractor Integration"
 spec_ref: "lsp-call-graph.md §1–6, §10 Phase 1, §11"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-072.md
 coverage_sections:
   - "lsp-call-graph.md §1 Problem"
@@ -13,7 +13,11 @@ coverage_sections:
   - "lsp-call-graph.md §6 Extraction Pipeline"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 1)"
   - "lsp-call-graph.md §11 Prerequisites"
-commits: []
+commits:
+  - a8d036f4
+  - ac3a99bf
+  - 2b34ae1f
+  - 144aa70c
 ---
 
 ## Spec Excerpt
@@ -49,15 +53,15 @@ The current extractors emit `Contains`, `Implements`, and basic `Calls` edges vi
 
 ## Acceptance Criteria
 
-- [ ] `CallGraphExtractor` port trait exists in `gyre-ports`
-- [ ] Go adapter shells out to `go-callgraph` binary and parses JSON output
-- [ ] Pipeline runs Pass 2 after Pass 1 on push/sync for Go repos
-- [ ] `Calls` edges from Pass 2 are stored in graph via `GraphPort`
-- [ ] Edges are deduplicated (no duplicates from Pass 1 + Pass 2)
-- [ ] Pass 2 is non-blocking — graph is usable after Pass 1, becomes complete after Pass 2
-- [ ] Unit tests for JSON parsing and edge deduplication
-- [ ] Integration test: sync a Go repo → verify `Calls` edges appear in graph
-- [ ] `cargo test --all` passes, `cargo fmt --all` clean
+- [x] `CallGraphExtractor` port trait exists in `gyre-ports` — `crates/gyre-ports/src/call_graph.rs:26-33`
+- [x] Go adapter shells out to `go-callgraph` binary and parses JSON output — `crates/gyre-adapters/src/call_graph.rs` (`SubprocessCallGraphExtractor`, binary verified on Go fixture)
+- [x] Pipeline runs Pass 2 after Pass 1 on push/sync for Go repos — `crates/gyre-server/src/graph_extraction.rs` `do_extract()` step 7
+- [x] `Calls` edges from Pass 2 are stored in graph via `GraphPort` — `extract_and_persist_call_graph()` → `graph_store.create_edge`
+- [x] Edges are deduplicated (no duplicates from Pass 1 + Pass 2) — `crates/gyre-domain/src/call_graph_resolve.rs` `resolve_call_edges`
+- [x] Pass 2 is non-blocking — graph is usable after Pass 1, becomes complete after Pass 2 — `tokio::spawn` fire-and-forget in `do_extract()` step 7, after steps 3–6 persist Pass 1
+- [x] Unit tests for JSON parsing and edge deduplication — `crates/gyre-domain/src/call_graph_resolve.rs` tests; `crates/gyre-adapters/src/call_graph.rs` tests
+- [x] Integration test: sync a Go repo → verify `Calls` edges appear in graph — `sync_go_repo_persists_calls_edges_in_graph_store` in `crates/gyre-server/src/graph_extraction.rs`
+- [x] `cargo test --all` passes, `cargo fmt --all` clean — 21/21 suites ok; `cargo fmt --all --check` clean
 
 ## Agent Instructions
 

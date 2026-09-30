@@ -786,7 +786,6 @@ pub async fn extract_and_persist_call_graph(
     extractor: &dyn gyre_ports::call_graph::CallGraphExtractor,
 ) -> usize {
     use gyre_domain::call_graph_resolve::{detect_all_languages, resolve_call_edges};
-
     let languages = detect_all_languages(repo_root);
     if languages.is_empty() {
         return 0;
