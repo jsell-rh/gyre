@@ -1,0 +1,34 @@
+# Ignored-tool-tests exemptions
+# One `path:line` per line (relative to repo root), `#` starts a comment.
+# These are PRE-EXISTING adapter functions that shell out to external tools
+# where the only same-file test coverage is #[ignore]d.
+#
+# IMPORTANT: every entry below is a real F1/F2-class hazard (external-tool
+# contract pinned only by tests CI never runs), NOT a false positive. They
+# are exempted only so the check runs green on main while their fixes are
+# owned by the tasks below. When you fix one, DELETE its exemption line —
+# do not leave it behind.
+#
+# See: specs/reviews/task-106.md F1, F2 (the findings that created this check)
+#
+# --- task-106 revision round owns these (jj adapter contract) ---
+crates/gyre-adapters/src/jj_ops.rs:47       # jj_init — colocated init refused inside git worktrees (review F2)
+crates/gyre-adapters/src/jj_ops.rs:53       # jj_new — stderr/stdout contract unpinned (review F1 class)
+crates/gyre-adapters/src/jj_ops.rs:74       # jj_describe — ignored-only coverage
+crates/gyre-adapters/src/jj_ops.rs:80       # jj_log — ignored-only coverage
+crates/gyre-adapters/src/jj_ops.rs:116      # jj_squash — ignored-only coverage
+crates/gyre-adapters/src/jj_ops.rs:137      # jj_bookmark_create — ignored-only coverage
+crates/gyre-adapters/src/jj_ops.rs:143      # jj_undo — ignored-only coverage
+#
+# --- unowned; fix opportunistically when touching these files ---
+crates/gyre-adapters/src/compute/container.rs:143   # spawn_process — ignored-only coverage
+crates/gyre-adapters/src/compute/container.rs:212   # kill_process — ignored-only coverage
+crates/gyre-adapters/src/compute/container.rs:230   # is_alive — ignored-only coverage
+crates/gyre-adapters/src/compute/docker.rs:22       # spawn_process — ignored-only coverage
+crates/gyre-adapters/src/compute/docker.rs:56       # kill_process — ignored-only coverage
+crates/gyre-adapters/src/compute/docker.rs:71       # is_alive — ignored-only coverage
+crates/gyre-adapters/src/compute/ssh.rs:70          # open_tunnel — ignored-only coverage
+crates/gyre-adapters/src/compute/ssh.rs:166         # is_alive (Session) — ignored-only coverage
+crates/gyre-adapters/src/compute/ssh.rs:184         # spawn_process — ignored-only coverage
+crates/gyre-adapters/src/compute/ssh.rs:229         # kill_process — ignored-only coverage
+crates/gyre-adapters/src/compute/ssh.rs:249         # is_alive (Tunnel) — ignored-only coverage

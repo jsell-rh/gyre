@@ -61,6 +61,18 @@ bash scripts/check-dead-parameters.sh
 # Byte-slice truncation lint (flags &s[..N] panics on multibyte UTF-8)
 bash scripts/check-byte-slice-truncation.sh
 
+# Warn-continue creation lint (flags warn-and-continue on restriction policy creation)
+bash scripts/check-warn-continue-creation.sh
+
+# Inert enforcement lint (flags evaluate_/enforce_/verify_ calls whose results are discarded)
+bash scripts/check-inert-enforcement.sh
+
+# Ignored tool test lint (flags adapter fns shelling out with only #[ignore]d test coverage)
+bash scripts/check-ignored-tool-tests.sh
+
+# Id-from-sha lint (flags Id::new fed a commit SHA where another entity's id belongs)
+bash scripts/check-id-from-sha.sh
+
 # Auto-format
 cargo fmt --all
 

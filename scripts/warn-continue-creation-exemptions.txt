@@ -1,0 +1,17 @@
+# Warn-continue creation exemptions
+# One `path:line` per line (relative to repo root), `#` starts a comment.
+# These are PRE-EXISTING warn-and-continue sites on restriction-bearing
+# creation (state.policies.create/save).
+#
+# IMPORTANT: every entry below is a real F6-class hazard (fail-open
+# restriction creation), NOT a false positive. They are exempted only so the
+# check runs green on main while their fixes are owned by the tasks below.
+# When you fix one, DELETE its exemption line — do not leave it behind.
+#
+# See: specs/reviews/task-077.md F6 (the finding that created this check)
+#
+# --- task-077 revision round owns these (interrogation restriction policy) ---
+crates/gyre-server/src/api/spawn.rs:219    # match state.policies.create(policy) warn arm — agent spawns unrestricted if Deny creation fails (review F6 exact site)
+#
+# --- unowned; fix opportunistically when touching these files ---
+crates/gyre-server/src/abac_middleware.rs:712  # if let Err = state.policies.create in seed_builtin_policies — idempotent startup seeding, non-fatal by design

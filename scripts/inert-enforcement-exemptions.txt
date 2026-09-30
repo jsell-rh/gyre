@@ -1,0 +1,16 @@
+# Inert-enforcement exemptions
+# One `path:line` per line (relative to repo root), `#` starts a comment.
+# These are PRE-EXISTING statement-position evaluate_/enforce_/verify_ calls
+# whose results are discarded.
+#
+# IMPORTANT: every entry below is a real F5-class hazard (audit-only
+# enforcement whose result gates nothing), NOT a false positive. They are
+# exempted only so the check runs green on main while their fixes are owned
+# by the tasks below. When you fix one, DELETE its exemption line — do not
+# leave it behind.
+#
+# See: specs/reviews/task-077.md F5 (the finding that created this check)
+#
+# --- task-077 revision round owns these (merge-time ABAC audit-only) ---
+crates/gyre-server/src/merge_processor.rs:1331   # evaluate_attestation_abac — result discarded, merge proceeds regardless (review F5 exact site)
+crates/gyre-server/src/merge_processor.rs:1353   # evaluate_attestation_abac — result discarded, merge proceeds regardless (review F5 exact site)

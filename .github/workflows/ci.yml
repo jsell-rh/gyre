@@ -54,6 +54,14 @@ jobs:
         run: bash scripts/check-dead-parameters.sh || true
       - name: Byte-slice truncation lint (advisory)
         run: bash scripts/check-byte-slice-truncation.sh || true
+      - name: Warn-continue creation lint (advisory)
+        run: bash scripts/check-warn-continue-creation.sh || true
+      - name: Inert enforcement lint (advisory)
+        run: bash scripts/check-inert-enforcement.sh || true
+      - name: Ignored tool test lint (advisory)
+        run: bash scripts/check-ignored-tool-tests.sh || true
+      - name: Id-from-sha lint (advisory)
+        run: bash scripts/check-id-from-sha.sh || true
       - name: Em-dash check                                                                                                                     
         run: |                                                                                                                                  
           find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true  

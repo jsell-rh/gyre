@@ -396,6 +396,38 @@ repos:
         language: script
         pass_filenames: false
 
+      - id: warn-continue-creation
+        name: warn-continue creation lint
+        description: Detect warn-and-continue on restriction-bearing policy creation that leaves actors unrestricted
+        entry: scripts/check-warn-continue-creation.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: inert-enforcement
+        name: inert enforcement lint
+        description: Detect evaluate_/enforce_/verify_ calls whose results are discarded and gate nothing
+        entry: scripts/check-inert-enforcement.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: ignored-tool-tests
+        name: ignored tool test lint
+        description: Detect adapter fns shelling out to external tools whose only same-file test coverage is ignored
+        entry: scripts/check-ignored-tool-tests.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: id-from-sha
+        name: id-from-sha lint
+        description: Detect Id::new constructions fed a commit SHA where another entity's id belongs
+        entry: scripts/check-id-from-sha.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
