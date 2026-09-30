@@ -919,9 +919,16 @@ async fn run_command_in_dir(
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let combined = format!("{stdout}{stderr}");
-            // Truncate to 4 KiB.
+            // Truncate to 4 KiB, on a UTF-8 char boundary (external process
+            // output may be multibyte — a fixed byte index would panic).
             let truncated = if combined.len() > 4096 {
-                format!("{}...(truncated)", &combined[..4096])
+                let end = combined
+                    .char_indices()
+                    .take_while(|(i, _)| *i <= 4096)
+                    .map(|(i, _)| i)
+                    .last()
+                    .unwrap_or(0);
+                format!("{}...(truncated)", &combined[..end])
             } else {
                 combined
             };

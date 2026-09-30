@@ -173,12 +173,27 @@ Hooks run automatically on `git commit`. To run manually:
 pre-commit run --all-files
 ```
 
-Hook summary:
-- `cargo-fmt`: formatting check
-- `cargo-clippy`: lint with denied warnings
+Hook summary (see `.pre-commit-config.yaml` for the full list; ~60 local hooks):
+- `cargo-fmt` / `cargo-clippy`: formatting and lint with denied warnings
 - `arch-lint`: hexagonal boundary enforcement
+- `abac-route-registry`: every registered `/api/v1/` route must have an ABAC `RouteResourceMapping` entry (`abac_middleware.rs`) — unregistered routes get NO policy evaluation
+- `migration-versions`: fails on duplicate Diesel migration versions (one silently never runs)
+- `byte-slice-truncation`: fails on `&s[..N]` string slices that panic on non-char-boundary UTF-8
+- `dead-message-kinds`: fails on `MessageKind` variants with no emitter (dead spec delivery link)
 - `no-em-dash`: rejects Unicode em-dashes in source
 - `conventional-commits`: commit message format (commit-msg stage)
+
+Several hooks have exemption files (`scripts/<check>-exemptions.txt`) seeded with pre-existing violations. Exemption lists are legacy debt: they should shrink, never grow.
+
+### Adding a database migration
+
+Diesel derives a migration's version from the directory name prefix (before the first `_`, dashes removed). Duplicate versions silently drop the second migration — its tables never get created on fresh databases. Always take the NEXT unused 6-digit sequence number:
+
+```bash
+ls crates/gyre-adapters/migrations/ | sort | tail -3
+```
+
+`scripts/check-migration-versions.sh` (pre-commit + CI) and the guard test `no_duplicate_migration_version_prefixes` both fail on duplicates.
 
 ---
 

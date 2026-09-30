@@ -1,0 +1,65 @@
+# ABAC route registry exemptions
+# One route path per line. These routes predate check-abac-route-registry.sh
+# and are NOT yet in the ABAC ResourceResolver (abac_middleware.rs). They are
+# therefore running with NO policy evaluation — an authorization gap, not an
+# approved state. This list should SHRINK as routes are added to the
+# resolver. NEVER add new routes here: new endpoints must ship with a
+# RouteResourceMapping (or RouteResourceMapping::exempt) entry.
+#
+# The five task-095 recovery routes (F2) are deliberately NOT here — they are
+# the finding that motivated this check and are registered in the resolver
+# by the task-095 revision.
+
+/api/v1/admin/llm/config
+/api/v1/admin/llm/config/:function
+/api/v1/admin/llm/prompts
+/api/v1/admin/llm/prompts/:function
+/api/v1/agents/:id/fail
+/api/v1/agents/:id/stop
+/api/v1/agents/:id/usage
+/api/v1/auth/key-binding
+/api/v1/auth/key-binding/:id
+/api/v1/auth/key-bindings
+/api/v1/compute-targets
+/api/v1/compute-targets/:id
+/api/v1/constraints/dry-run
+/api/v1/constraints/strategy
+/api/v1/constraints/validate
+/api/v1/dependencies/breaking
+/api/v1/dependencies/breaking/:id/acknowledge
+/api/v1/dependencies/stale
+/api/v1/meta-specs-registry
+/api/v1/meta-specs-registry/:id
+/api/v1/meta-specs-registry/:id/versions
+/api/v1/meta-specs-registry/:id/versions/:version
+/api/v1/patrol/spec-links
+/api/v1/repos/:id/archive
+/api/v1/repos/:id/attestations/:commit_sha/bundle
+/api/v1/repos/:id/attestations/:commit_sha/chain
+/api/v1/repos/:id/attestations/:commit_sha/verification
+/api/v1/repos/:id/orchestrator/spawn
+/api/v1/repos/:id/spec-assertions/check
+/api/v1/repos/:id/unarchive
+/api/v1/repos/:id/views
+/api/v1/repos/:id/views/:view_id
+/api/v1/specs/:path/dependencies
+/api/v1/specs/:path/dependents
+/api/v1/specs/:path/reject
+/api/v1/specs/conflicts
+/api/v1/specs/stale-links
+/api/v1/tenants/:id/trust-anchors
+/api/v1/tenants/:id/trust-anchors/:aid
+/api/v1/users/me/judgments
+/api/v1/users/me/notification-preferences
+/api/v1/users/me/notifications/count
+/api/v1/users/me/tokens
+/api/v1/users/me/tokens/:id
+/api/v1/workspaces/:id/dependency-graph
+/api/v1/workspaces/:id/dependency-policy
+/api/v1/workspaces/:id/llm/config
+/api/v1/workspaces/:id/llm/config/:function
+/api/v1/workspaces/:id/llm/prompts
+/api/v1/workspaces/:id/llm/prompts/:function
+/api/v1/workspaces/:id/meta-specs/preview
+/api/v1/workspaces/:id/meta-specs/preview/:preview_id
+/api/v1/workspaces/:id/orchestrator/spawn

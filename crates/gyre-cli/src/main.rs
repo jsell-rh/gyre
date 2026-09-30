@@ -1314,7 +1314,7 @@ async fn main() -> Result<()> {
                             // dependency_edge_id: internal reference, not user-facing
                             // acknowledged / acknowledged_by / acknowledged_at: always false/None for unacknowledged list
                             let sha = bc["commit_sha"].as_str().unwrap_or("");
-                            let short_sha = if sha.len() > 10 { &sha[..10] } else { sha };
+                            let short_sha: String = sha.chars().take(10).collect();
                             let detected = bc["detected_at"].as_u64().unwrap_or(0);
                             let desc = bc["description"].as_str().unwrap_or("");
                             println!(

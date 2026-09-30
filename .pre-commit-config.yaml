@@ -64,6 +64,37 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: abac-route-registry
+        name: ABAC route registry lint
+        description: Fail if a registered /api/v1/ route has no ABAC ResourceResolver entry
+        entry: scripts/check-abac-route-registry.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: migration-versions
+        name: migration version uniqueness lint
+        description: Fail on duplicate Diesel migration versions (one silently never runs)
+        entry: scripts/check-migration-versions.sh
+        language: script
+        pass_filenames: false
+
+      - id: byte-slice-truncation
+        name: fixed byte-index string slice lint
+        description: Detect &s[..N] truncation that panics on non-char-boundary UTF-8
+        entry: scripts/check-byte-slice-truncation.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: dead-message-kinds
+        name: dead MessageKind lint
+        description: Fail if a MessageKind variant is never emitted (dead spec delivery link)
+        entry: scripts/check-dead-message-kinds.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: path-scope-binding
         name: path scope binding
         description: Verify API handlers bind Path tenant_id/workspace_id to auth context

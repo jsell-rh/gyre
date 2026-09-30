@@ -104,6 +104,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/commits", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/diff", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/mirror/sync", "repo", Some("write")),
+                RouteResourceMapping::api("/api/v1/repos/:id/status", "repo", None),
+                RouteResourceMapping::api("/api/v1/repos/:id/queue/pause", "repo", Some("write")),
+                RouteResourceMapping::api("/api/v1/repos/:id/queue/resume", "repo", Some("write")),
+                RouteResourceMapping::api("/api/v1/repos/:id/revert/:mr_id", "repo", Some("write")),
+                RouteResourceMapping::api("/api/v1/repos/:id/post-merge-gates", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/provenance", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/aibom", "repo", None),
                 RouteResourceMapping::api(
@@ -457,6 +462,8 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/policies/effective", "policy", None),
                 RouteResourceMapping::api("/api/v1/policies/:id", "policy", None),
                 // ── Users / Profile ────────────────────────────────────────
+                // POST /users (create) is admin-only, enforced in-handler.
+                RouteResourceMapping::api("/api/v1/users", "user", None),
                 RouteResourceMapping::api("/api/v1/users/me", "user", None),
                 RouteResourceMapping::api("/api/v1/users/me/agents", "agent", None),
                 RouteResourceMapping::api("/api/v1/users/me/tasks", "task", None),
@@ -774,7 +781,9 @@ pub async fn abac_middleware(
         .unwrap_or_else(|| req.uri().path().to_string());
 
     // Resolve the route mapping. Routes not in the registry fall through
-    // (check-api-auth.sh catches missing entries at CI time).
+    // (scripts/check-abac-route-registry.sh fails the build if a registered
+    // /api/v1/ route has no entry here — keep it that way; an unregistered
+    // route means NO policy evaluation).
     let (resource_type, action_override, exempt) =
         match RESOURCE_RESOLVER.get().and_then(|r| r.resolve(&pattern)) {
             Some(m) => (m.resource_type, m.action_override, m.exempt),

@@ -52,8 +52,14 @@ jobs:
         run: GYRE_CHECK_HIERARCHY=1 bash scripts/check-hierarchy.sh
       - name: Dead parameter lint (advisory)
         run: bash scripts/check-dead-parameters.sh || true
-      - name: Byte-slice truncation lint (advisory)
-        run: bash scripts/check-byte-slice-truncation.sh || true
+      - name: ABAC route registry lint
+        run: bash scripts/check-abac-route-registry.sh
+      - name: Migration version uniqueness lint
+        run: bash scripts/check-migration-versions.sh
+      - name: Byte-slice truncation lint
+        run: bash scripts/check-byte-slice-truncation.sh
+      - name: Dead MessageKind lint
+        run: bash scripts/check-dead-message-kinds.sh
       - name: Em-dash check                                                                                                                     
         run: |                                                                                                                                  
           find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true  

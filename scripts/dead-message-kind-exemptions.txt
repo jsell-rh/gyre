@@ -1,0 +1,22 @@
+# Dead MessageKind exemptions
+# One variant name per line (optional trailing # justification). These
+# variants currently have NO emitter anywhere in the codebase — they are
+# dead spec links (the corresponding spec notifications cannot be
+# delivered). The list should SHRINK as emitters are added. NEVER add new
+# variants: a new MessageKind must ship with its emit_event call site.
+#
+# Seeded at process-revision time (task-095 F3) from a full-repo scan.
+
+# task-095 F3: spec platform-model §6 step 6 requires the author agent to
+# receive RevertNotification via MCP — needs an emit_event emitter in the
+# post-merge recovery path (handle_post_merge_failure).
+MrReverted
+
+# Spec'd (agent-runtime.md budget warnings; platform-model hot-file
+# warnings; message-bus QueueUpdated) but never emitted — pre-existing
+# gaps, tracked here so the check is green for NEW kinds.
+QueueUpdated
+HotFilesChanged
+BudgetWarning
+BudgetExhausted
+AgentError

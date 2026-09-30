@@ -14,15 +14,17 @@
 # index — literals or ALL_CAPS consts):
 #   &expr[..N]   &expr[N..]   &expr[N..M]   expr.truncate(N)   &expr[N]
 #
-# Slices with a leading `..` AND trailing bound only when the expression is
-# runtime-derived (we cannot prove constness of the string, so we assume
-# runtime — the exemption path is explicit).
-#
 # NOT flagged: slices of byte arrays/Vec<u8> (&v[..N] on non-UTF-8 is fine),
 # u8 slices (`.as_bytes()[..N]` — slicing bytes never hits a char boundary),
 # char_indices/chars()-based truncation, floor_char_boundary.
 #
-# Exempt a line with: `// slice:ok — <reason>`
+# Sites already known-unsafe are listed in
+# scripts/byte-slice-truncation-exemptions.txt — that list should SHRINK as
+# sites are fixed; NEVER add new sites — new code must truncate on a char
+# boundary (char_indices, chars().take(N)). An entry may alternatively be
+# suppressed inline with `// slice:ok — <reason>`.
+#
+# Run by pre-commit and CI.
 #
 # Usage: bash scripts/check-byte-slice-truncation.sh [paths...]  (default crates/)
 
