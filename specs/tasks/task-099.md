@@ -9,9 +9,7 @@ coverage_sections:
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits:
-  - "feat(server): POST /api/v1/users admin user creation with API key issuance"
-  - "feat(cli): gyre bootstrap command (tenant, workspace, repo, personas, gates, orchestrator)"
+commits: ["d235de22"]
 ---
 
 ## Spec Excerpt
