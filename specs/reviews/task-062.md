@@ -171,3 +171,42 @@ stale three-edge references remain anywhere in Rust. Re-ran
   pre-existing failures outside this task's scope.
 
 Setting `progress: needs-revision` (F3 open).
+
+## Round 7
+
+[-] [process-revision-complete] **F3 resolved.** Frontend test-reachability
+semantics extracted into `web/src/lib/test-reachability.js` and aligned with
+spec §3 (commit `cbcbd6ab`, "refactor(web): extract test-reachability to module,
+align frontend with spec §3"):
+
+- `TEST_REACHABILITY_EDGES = new Set(['calls'])` with a doc comment citing
+  §3 "via Calls" and explaining the exclusion of Implements/RoutesTo/Contains —
+  now genuinely matching the backend constant
+  (`view_query_resolver.rs:400`, `&[EdgeType::Calls]`).
+- `ExplorerCanvas.svelte` no longer contains `FRONTEND_TEST_EDGES` or the local
+  three-edge `TEST_REACHABILITY_EDGES` (grep: zero hits). It imports
+  `buildAdjacency`, `computeTestReachable`, `computeTestUnreachable`,
+  `computeTestFragilityCounts`, `computeTestGaps` from the shared module
+  (imports at lines 11–17, adjacency at 1622, delegates at 1701–1707/1815,
+  `test_gaps` scope at 1969–1973). ~100 lines of inline three-edge traversal
+  removed.
+- Pinning tests exercise the real production code path:
+  `web/src/__tests__/test-reachability.test.js` (7 tests) imports the module
+  consumed by ExplorerCanvas and mirrors the Rust pinning test — Implements-only
+  and RoutesTo-only nodes are NOT test-reachable, appear in `computeTestGaps`,
+  and accrue zero fragility; Calls chains (incl. transitive) are reachable;
+  fragility counts distinct tests once each. All 7 pass
+  (`npx vitest run src/__tests__/test-reachability.test.js`).
+
+Cross-surface parity verified: `scripts/check-cross-surface-parity.sh` passes;
+all JS hygiene checks pass (`check-mirrored-logic-tests-js.sh`,
+`check-tautological-assertions-js.sh`, `check-phantom-test-apis-js.sh`, etc.).
+`cargo test -p gyre-domain --lib view_query_resolver`: 116 passed, 0 failed.
+Full `cd web && npm test`: 1492 passed, 17 failed — the same 17 pre-existing
+failures documented in Round 6 (`ExplorerCanvas-performance` flake,
+`ExplorerViewAskViewSpec`, `FlowRenderer`, `MoldableViewNodeTypeFilter`), all
+in files untouched by task-062 commits. Remaining `routes_to` references in
+ExplorerCanvas.svelte (lines 4297/4322) are blast-radius/focus-scope view
+queries, unrelated to test reachability.
+
+Setting `progress: ready-for-review` (no open findings).
