@@ -68,6 +68,10 @@ jobs:
         run: bash scripts/check-scope-literal-defaults.sh || true
       - name: Unwritten adapter store-field lint (advisory)
         run: bash scripts/check-unwritten-store-fields.sh || true
+      - name: In-memory state store lint (advisory)
+        run: bash scripts/check-in-memory-state-stores.sh || true
+      - name: Unbounded external http lint (advisory)
+        run: bash scripts/check-unbounded-external-http.sh || true
       - name: ABAC route registry lint
         run: bash scripts/check-abac-route-registry.sh
       - name: Migration version uniqueness lint

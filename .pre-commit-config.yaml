@@ -553,6 +553,22 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: in-memory-state-stores
+        name: in-memory state store lint
+        description: Detect Arc<Mutex<HashMap/Vec>> store type aliases in non-test server code lacking port/adapter backing
+        entry: scripts/check-in-memory-state-stores.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: unbounded-external-http
+        name: unbounded external http lint
+        description: Detect reqwest::Client::new() in non-test Rust lacking a .timeout build or tokio::time::timeout wrapper
+        entry: scripts/check-unbounded-external-http.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

@@ -1,0 +1,9 @@
+# Legacy unbounded reqwest clients (task-107 F10 baseline; frozen at 6).
+# Fix by building with .timeout(...) or wrapping awaits in
+# tokio::time::timeout; never add entries.
+crates/gyre-server/src/lib.rs:858
+crates/gyre-adapters/src/llm/rig_vertexai.rs:103
+crates/gyre-adapters/src/llm/rig_vertexai.rs:613
+crates/gyre-adapters/src/llm/rig_vertexai.rs:692
+crates/gyre-adapters/src/llm/rig_vertexai.rs:761
+crates/gyre-adapters/src/llm/rig_vertexai.rs:836
