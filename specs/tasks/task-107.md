@@ -2,10 +2,10 @@
 title: "Integrate Sigstore/Fulcio for keyless commit signing"
 spec_ref: "identity-security.md §Layer 3: Sigstore/Fulcio"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "identity-security.md §Layer 3: Sigstore/Fulcio"
-commits: []
+commits: ["59a5e3ba", "41dbe88e"]
 ---
 
 ## Spec Excerpt
@@ -54,13 +54,13 @@ Current state: `commit_signatures.rs` uses local Ed25519 signing. The mode can b
 
 ## Acceptance Criteria
 
-- [ ] Fulcio certificate issuance using agent OIDC JWT
-- [ ] Commits signed with Fulcio-issued certificate
-- [ ] Signatures recorded in Rekor transparency log
-- [ ] Verification endpoint checks certificate chain and Rekor entry
-- [ ] Configurable via GYRE_SIGNING_MODE, GYRE_FULCIO_URL, GYRE_REKOR_URL
-- [ ] Graceful fallback to local signing when Fulcio unreachable
-- [ ] `cargo test --all` passes
+- [x] Fulcio certificate issuance using agent OIDC JWT
+- [x] Commits signed with Fulcio-issued certificate
+- [x] Signatures recorded in Rekor transparency log
+- [x] Verification endpoint checks certificate chain and Rekor entry
+- [x] Configurable via GYRE_SIGNING_MODE, GYRE_FULCIO_URL, GYRE_REKOR_URL
+- [x] Graceful fallback to local signing when Fulcio unreachable
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 
