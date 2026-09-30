@@ -15,7 +15,7 @@ coverage_sections:
   - "lsp-call-graph.md §11 Prerequisites"
 commits:
   - a8d036f4
-  - 0123dd0f
+  - afacf980
 ---
 
 ## Spec Excerpt
