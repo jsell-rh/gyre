@@ -62,6 +62,10 @@ jobs:
         run: bash scripts/check-ignored-tool-tests.sh || true
       - name: Id-from-sha lint (advisory)
         run: bash scripts/check-id-from-sha.sh || true
+      - name: ABAC-exempt handler authorization lint (advisory)
+        run: bash scripts/check-abac-exempt-handlers.sh || true
+      - name: Unwritten adapter store-field lint (advisory)
+        run: bash scripts/check-unwritten-store-fields.sh || true
       - name: Em-dash check                                                                                                                     
         run: |                                                                                                                                  
           find crates -name '*.rs' -o -name '*.toml' | xargs bash scripts/check-no-em-dash.sh || true  

@@ -73,6 +73,15 @@ bash scripts/check-ignored-tool-tests.sh
 # Id-from-sha lint (flags Id::new fed a commit SHA where another entity's id belongs)
 bash scripts/check-id-from-sha.sh
 
+# ABAC-exempt handler authorization lint (flags exempt-route handlers with no
+# per-handler authorization decision, deferred enforcement, or unbacked
+# mitigation claims)
+bash scripts/check-abac-exempt-handlers.sh
+
+# Unwritten adapter store-field lint (flags in-memory adapter collection
+# fields read by getters but never populated by the store/save path)
+bash scripts/check-unwritten-store-fields.sh
+
 # Auto-format
 cargo fmt --all
 

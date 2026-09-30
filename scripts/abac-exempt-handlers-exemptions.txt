@@ -1,0 +1,18 @@
+# ABAC-exempt handler authorization exemptions
+# One `path:line` per line (relative to repo root), `#` starts a comment.
+# These are handlers on ABAC-exempt routes that currently fail
+# check-abac-exempt-handlers.sh (no per-handler authorization decision,
+# deferred enforcement in the doc comment, or an unbacked mitigation
+# claim).
+#
+# IMPORTANT: every entry below is a real F1b/F1c-class hazard (an
+# ABAC-exempt route reachable by any authenticated agent without a
+# per-handler authorization decision), NOT a false positive. They are
+# exempted only so the check runs green on main while their fixes are
+# owned by the tasks below. When you fix one, DELETE its exemption
+# line — do not leave it behind.
+#
+# See: specs/reviews/task-087.md F1b/F1c (the finding that created this check)
+#
+# --- task-087 revision round owns these (span payload endpoint) ---
+crates/gyre-server/src/api/traces.rs:150   # get_span_payload: span → gate_run → MR → workspace resolution deferred to a follow-up; "tenant-scoped so cross-tenant access returns None naturally" claim unbacked (shared AppState repo is not tenant-scoped). Fix: resolve the span's MR and check workspace/tenant, return Forbidden on mismatch.

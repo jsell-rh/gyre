@@ -941,6 +941,19 @@ Before marking a task `ready-for-review`, verify:
     - **Assert the fields, not the existence.** For generator functions, enumerate the output's fields from the spec and assert each one's value (or spec-band membership). `result.is_some()` is an existence check, not a field assertion. Priority bands, effect values, action lists, and condition shapes are the exact fields downstream enforcement consumes — they are the assertion targets.
     - **Grep the variant into the test suite.** For each spec-defined variant string, grep the test files. Zero hits means no test constructs it; a variant only settable via handler code has an untestable-by-accident gap.
 
+149. **REST-surface literal signature — no invented required parameters:** A REST route's query/path/body parameters are its spec signature. If the spec route is `GET /api/v1/trace-spans/:span_id/payload` (two segments, no query), the handler MUST NOT add a required query parameter (e.g. `gate_run_id`) that the spec does not define. Adding a required parameter the spec omits breaks every spec-conforming client with a 400 before any handler logic runs. Flaw observed: task-087 F1a — the payload endpoint required `gate_run_id` though the spec route (HSI §3a) and `docs/api-reference.md` document no such parameter; the parameter belonged inside the storage key, not the route.
+    - **Verify the literal signature.** Diff the handler's parameter structs against the spec's route definition AND the row in `docs/api-reference.md`. Any required parameter not in both is an invention; remove it or amend the spec deliberately (with a spec-change note), never silently.
+    - **Storage keys are not route parameters.** If two identifiers are needed to locate a row (span_id unique only within a trace), the composite key belongs in the port method and the storage layer, or the route shape changes in the spec first.
+
+150. **ABAC-exempt routes MUST implement per-handler authorization in the handler body:** Exempting a route from middleware ABAC is a promise that the handler itself enforces the check. The handler MUST load the referenced entity, resolve it to its workspace/tenant scope, compare against the caller's identity, and return Forbidden/NotFound on mismatch — the pattern in `dismiss_notification` (api/users.rs): load entity, compare `tenant_id`, return `ApiError::Forbidden`. Flaw observed: task-087 F1b — the span payload endpoint's only "authorization" was an `_auth: AuthenticatedAgent` extractor binding that was never consulted; any authenticated agent in any workspace could read any span's full payloads.
+    - **An underscore-bound auth parameter is the flaw signature.** `_auth: AuthenticatedAgent` on an ABAC-exempt route means the identity is extracted and then ignored — grep for it. Either the handler branches on the identity, or the exemption is unauthorized access.
+    - **Doc comments do not defer specced enforcement.** A comment saying authorization is "deferred to a follow-up" on a route whose spec mandates per-handler auth is a finding, not a mitigation plan. Enforcement ships in the revision, or the route does not ship.
+    - **Mitigation claims must be verifiable by grep.** A comment claiming "the storage layer is tenant-scoped so cross-tenant access returns None naturally" must be backed by actual tenant-scoping calls (`with_tenant`, tenant-filtered lookups) in the handler or repository path it names. Prose is not enforcement. Flaw observed: task-087 F1c — the claimed tenant-scoping did not exist anywhere in the server (zero `with_tenant()` calls).
+
+151. **Adapter parity — every port method needs a same-adapter round-trip test, fields read by getters must be populated by mutators, and wire values must match the spec's JSON examples exactly:** When a port trait has multiple adapters (mem + SQLite), each adapter's implementation of each port method needs a round-trip test against THAT adapter (store through the mem adapter, get through the mem adapter), not only through the sibling. Flaw observed: task-087 F2 — `MemTraceRepository.payloads` was read by `get_span_payload` but `store()` never inserted into it (the SQLite adapter populated its payload blob correctly); in-memory mode 404ed every payload request, and no mem round-trip test existed to catch it.
+    - **Write-shape coverage per field.** For every collection field an adapter declares, its store/save path must populate it. A field only ever read (Default-derived empty) is a silent no-op — the compiler and read-side tests against the sibling adapter cannot catch it. Run `bash scripts/check-unwritten-store-fields.sh`.
+    - **Wire-value casing is contract.** For every enum serialized into a spec-documented API response, the serialized string must match the spec's JSON example VALUES exactly, including case: `"Server"` in the spec means `as_str()` returns `"Server"`, not `"server"`. Diff the serialization against the spec's example JSON, not just the field names. Flaw observed: task-087 F3 — `SpanKind::as_str`/`SpanStatus::as_str` lowercase (`"server"`, `"ok"`) while the spec examples (HSI §3a) show `"Server"`, `"Ok"`.
+
 ## Workflow
 
 1. Read the relevant system specs. These are your source of truth and overarching vision.
@@ -1040,6 +1053,8 @@ scripts/check-warn-continue-creation.sh
 scripts/check-inert-enforcement.sh
 scripts/check-ignored-tool-tests.sh
 scripts/check-id-from-sha.sh
+scripts/check-abac-exempt-handlers.sh
+scripts/check-unwritten-store-fields.sh
 ```
 If any script reports violations, fix them before proceeding. **Do not commit with check script violations.** These scripts exist because prior review rounds found flaws that the checklist alone did not prevent — they are the mechanical backstop.
 

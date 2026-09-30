@@ -428,6 +428,22 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: abac-exempt-handlers
+        name: ABAC-exempt handler authorization lint
+        description: Detect handlers on ABAC-exempt routes that perform no per-handler authorization or claim unverified mitigations
+        entry: scripts/check-abac-exempt-handlers.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: unwritten-store-fields
+        name: unwritten adapter store-field lint
+        description: Detect in-memory adapter collection fields that are read but never populated
+        entry: scripts/check-unwritten-store-fields.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
