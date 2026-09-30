@@ -75,8 +75,28 @@ wt_guard_stash() {
 }
 wt_guard_restore() {
   if [ "${WT_GUARDED:-0}" -eq 1 ]; then
-    git stash pop >/dev/null 2>&1 || \
-      log "!!! WARNING: failed to restore stashed WIP (loop-wt-guard) — check git stash list"
+    if git stash pop >/dev/null 2>&1; then
+      return 0
+    fi
+    # Failed pop is never data loss: the stash commits hold the full WIP.
+    # Two failure modes, both observed in the wild:
+    #  1. mid-pop merge conflict (unmerged files, stash kept)
+    #  2. untracked collision: the agent (e.g. auditor cargo-building web/dist,
+    #     or committing a file the WIP also added) recreates a path in the
+    #     stash's untracked arm — "already exists, no checkout", stash kept,
+    #     tracked part partially applied.
+    # Recovery: abort any in-progress merge, restore every path the stash
+    # recorded (tracked arm, then untracked arm), unstage, drop the stash.
+    # Stash content wins over agent leftovers — the stashed WIP predates the
+    # agent run we are recovering from.
+    git merge --abort >/dev/null 2>&1
+    git checkout "stash@{0}" -- . >/dev/null 2>&1
+    if git rev-parse -q --verify "stash@{0}^3" >/dev/null 2>&1; then
+      git checkout "stash@{0}^3" -- . >/dev/null 2>&1
+    fi
+    git reset -q
+    git stash drop >/dev/null 2>&1
+    log "WIP restore failed mid-pop (loop-wt-guard); recovered stash content by checkout"
   fi
 }
 
