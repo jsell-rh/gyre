@@ -9,7 +9,7 @@ coverage_sections:
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits: ["d235de22"]
+commits: ["825edc85", "997480d1"]
 ---
 
 ## Spec Excerpt
