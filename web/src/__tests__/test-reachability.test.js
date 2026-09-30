@@ -127,3 +127,57 @@ describe('test-reachability (view-query-grammar.md §3: via Calls)', () => {
     expect(fragility2.get('n1')).toBe(1);
   });
 });
+
+describe('test-reachability depth caps (mirrors view_query_resolver.rs)', () => {
+  // Chain of `hops` Calls edges from a test node: t1 -> c1 -> ... -> cHOPS.
+  // cHOPS is the terminal node, `hops` Calls edges away from t1.
+  function callsChain(hops) {
+    const nodes = [{ id: 't1', node_type: 'function', name: 'test_fn', test_node: true }];
+    const edges = [];
+    let prev = 't1';
+    for (let i = 1; i <= hops; i++) {
+      const id = `c${i}`;
+      nodes.push({ id, node_type: 'function', name: `chain_${i}`, test_node: false });
+      edges.push({ id: `x${i}`, source_id: prev, target_id: id, edge_type: 'calls' });
+      prev = id;
+    }
+    return { nodes, edges };
+  }
+
+  it('test fragility caps traversal at 20 hops, matching backend bfs_traverse depth cap', () => {
+    // Node 21 hops out: beyond the backend's fragility depth cap
+    // (compute_all_test_fragility → bfs_traverse(..., 20, ...)), so the
+    // frontend must also report zero fragility — same reference, same
+    // result on both surfaces.
+    const { nodes, edges } = callsChain(21);
+    const fragility = computeTestFragilityCounts(nodes, buildAdjacency(edges));
+    expect(fragility.get('c20')).toBe(1);
+    expect(fragility.get('c21') ?? 0).toBe(0);
+
+    // Node 20 hops out: exactly at the cap, still counted.
+    const fragility20 = computeTestFragilityCounts(nodes.slice(0, 21), buildAdjacency(edges.slice(0, 20)));
+    expect(fragility20.get('c20')).toBe(1);
+
+    // Raising the cap recovers the deep node.
+    const deep = computeTestFragilityCounts(nodes, buildAdjacency(edges), 21);
+    expect(deep.get('c21')).toBe(1);
+  });
+
+  it('test reachability caps traversal at 100 hops, matching backend compute_test_reachable', () => {
+    // Node 101 hops out is beyond the backend's reachability depth cap
+    // (compute_test_reachable: "if depth > 100 { continue; }"), so the
+    // frontend must also classify it unreachable.
+    const { nodes, edges } = callsChain(101);
+    const reachable = computeTestReachable(nodes, buildAdjacency(edges));
+    expect(reachable.has('c100')).toBe(true);
+    expect(reachable.has('c101')).toBe(false);
+
+    // Therefore it is a coverage gap, matching the backend test_gaps scope.
+    const gaps = computeTestGaps(nodes, buildAdjacency(edges));
+    expect(gaps.has('c101')).toBe(true);
+
+    // Raising the cap recovers the deep node.
+    const deep = computeTestReachable(nodes, buildAdjacency(edges), 101);
+    expect(deep.has('c101')).toBe(true);
+  });
+});
