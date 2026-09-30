@@ -735,15 +735,27 @@ async fn run_trace_capture_gate(
         "trace_capture gate: starting OTLP gRPC receiver"
     );
 
-    // Look up commit SHA from MR (best effort).
-    let commit_sha = state
-        .merge_requests
-        .find_by_id(mr_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|mr| mr.source_branch)
-        .unwrap_or_else(|| "unknown".to_string());
+    // Look up the MR's source branch head commit SHA (best effort).
+    // Spec §3a: GateTrace is linked to MR and commit SHA — resolve the branch
+    // head via git, falling back to "unknown" when the repo/branch is missing.
+    let commit_sha = resolve_source_commit_sha(state, mr_id).await;
+
+    // Template `{{repo_name}}` in the gate's env map (HSI §3a) — e.g.
+    // `OTEL_SERVICE_NAME: "{{repo_name}}"` becomes the repository name.
+    let repo_name = match state.merge_requests.find_by_id(mr_id).await {
+        Ok(Some(mr)) => state
+            .repos
+            .find_by_id(&mr.repository_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|repo| repo.name)
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    for value in config.env.values_mut() {
+        *value = value.replace("{{repo_name}}", &repo_name);
+    }
 
     // Run the OTLP receiver + test command.
     let capture_result = crate::otlp_receiver::run_trace_capture(
@@ -804,6 +816,29 @@ async fn revoke_gate_token(state: &Arc<AppState>, gate_agent_id: &str) {
         .kv_store
         .kv_remove("agent_tokens", gate_agent_id)
         .await;
+}
+
+/// Resolve the MR's source-branch head commit SHA for GateTrace linkage
+/// (HSI §3a). MR → repository → `git rev-parse refs/heads/<branch>`; falls
+/// back to "unknown" when the MR, repo, or branch cannot be resolved.
+async fn resolve_source_commit_sha(state: &Arc<AppState>, mr_id: &Id) -> String {
+    let mr = state.merge_requests.find_by_id(mr_id).await.ok().flatten();
+    let Some(mr) = mr else {
+        return "unknown".to_string();
+    };
+    let repo = state
+        .repos
+        .find_by_id(&mr.repository_id)
+        .await
+        .ok()
+        .flatten();
+    let Some(repo) = repo else {
+        return "unknown".to_string();
+    };
+    let refname = format!("refs/heads/{}", mr.source_branch);
+    crate::git_refs::resolve_ref(&repo.path, &refname)
+        .await
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 async fn run_command(cmd: &str) -> (GateStatus, String) {
@@ -1304,6 +1339,181 @@ mod tests {
         assert!(
             stored.is_none(),
             "no trace should be stored when OTLP is disabled"
+        );
+    }
+
+    /// HSI §3a: the stored GateTrace must be linked to the MR's source-branch
+    /// head commit SHA. Real temp git repo; branch head resolved via
+    /// `git rev-parse refs/heads/<source_branch>`.
+    #[tokio::test]
+    async fn trace_capture_gate_stores_source_branch_commit_sha() {
+        let state = test_state();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+
+        for args in [
+            vec!["init", &path],
+            vec!["-C", &path, "config", "user.email", "t@t.com"],
+            vec!["-C", &path, "config", "user.name", "T"],
+        ] {
+            std::process::Command::new("git")
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        std::fs::write(dir.path().join("f.txt"), "x").unwrap();
+        for args in [
+            vec!["-C", &path, "add", "."],
+            vec!["-C", &path, "commit", "-m", "c1"],
+        ] {
+            std::process::Command::new("git")
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        // Create the source branch and advance it beyond main.
+        std::process::Command::new("git")
+            .args(["-C", &path, "checkout", "-b", "feat/x"])
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join("g.txt"), "y").unwrap();
+        for args in [
+            vec!["-C", &path, "add", "."],
+            vec!["-C", &path, "commit", "-m", "c2"],
+        ] {
+            std::process::Command::new("git")
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        let expected_sha = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["-C", &path, "rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+
+        let repo = gyre_domain::Repository::new(
+            Id::new("repo-sha-test"),
+            Id::new("default"),
+            "sha-test-repo",
+            path,
+            now_secs(),
+        );
+        state.repos.create(&repo).await.unwrap();
+        let mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-sha-test"),
+            repo.id,
+            "feat",
+            "feat/x",
+            "main",
+            now_secs(),
+        );
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let gate = make_gate(
+            GateType::TraceCapture,
+            Some(r#"{"test_command": "true", "otlp_port": 0}"#.to_string()),
+        );
+        let mr_id = Id::new("mr-sha-test");
+        let result_id = Id::new(Uuid::new_v4().to_string());
+        let (status, output) = run_trace_capture_gate(&state, &gate, &mr_id, &result_id).await;
+        assert_eq!(status, GateStatus::Passed, "output: {output}");
+
+        let trace = state
+            .traces
+            .get_by_mr(&mr_id)
+            .await
+            .unwrap()
+            .expect("trace stored");
+        assert_eq!(
+            trace.commit_sha, expected_sha,
+            "trace must link the source-branch head SHA, not 'unknown'"
+        );
+        assert_eq!(trace.commit_sha.len(), 40, "40-char hex SHA");
+    }
+
+    /// Without a repo/branch to resolve, commit_sha falls back to "unknown"
+    /// (observational gate still passes).
+    #[tokio::test]
+    async fn trace_capture_gate_commit_sha_falls_back_to_unknown() {
+        let state = test_state();
+        let gate = make_gate(
+            GateType::TraceCapture,
+            Some(r#"{"test_command": "true", "otlp_port": 0}"#.to_string()),
+        );
+        let mr_id = make_mr_id(); // no MR stored
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        let (status, output) = run_trace_capture_gate(&state, &gate, &mr_id, &result_id).await;
+        assert_eq!(status, GateStatus::Passed, "output: {output}");
+
+        let trace = state
+            .traces
+            .get_by_mr(&mr_id)
+            .await
+            .unwrap()
+            .expect("trace stored");
+        assert_eq!(trace.commit_sha, "unknown");
+    }
+
+    /// HSI §3a: `{{repo_name}}` in the gate config's env values is templated
+    /// to the MR's repository name before the test command runs. Observable
+    /// via a script file that dumps the env value.
+    #[tokio::test]
+    async fn trace_capture_gate_templates_repo_name_in_env() {
+        let state = test_state();
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("svc.txt");
+        let script_path = dir.path().join("dump.sh");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$OTEL_SERVICE_NAME\" > {}\n",
+                out_path.display()
+            ),
+        )
+        .unwrap();
+
+        let repo = gyre_domain::Repository::new(
+            Id::new("repo-tpl-test"),
+            Id::new("default"),
+            "payments-api",
+            dir.path().join("repo.git").display().to_string(),
+            now_secs(),
+        );
+        state.repos.create(&repo).await.unwrap();
+        let mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-tpl-test"),
+            repo.id,
+            "feat",
+            "feat/y",
+            "main",
+            now_secs(),
+        );
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let gate = make_gate(
+            GateType::TraceCapture,
+            Some(format!(
+                r#"{{"test_command": "sh {}", "otlp_port": 0, "env": {{"OTEL_SERVICE_NAME": "{{{{repo_name}}}}"}}}}"#,
+                script_path.display()
+            )),
+        );
+        let mr_id = Id::new("mr-tpl-test");
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        let (status, output) = run_trace_capture_gate(&state, &gate, &mr_id, &result_id).await;
+        assert_eq!(status, GateStatus::Passed, "output: {output}");
+
+        let observed = std::fs::read_to_string(&out_path)
+            .expect("test command should have written the templated env value");
+        assert_eq!(
+            observed, "payments-api",
+            "{{repo_name}} must be templated to the repository name"
         );
     }
 }

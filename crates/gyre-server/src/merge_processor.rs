@@ -565,6 +565,10 @@ async fn merge_atomic_group(
                     warn!("could not transition MR to Merged: {e}");
                 }
                 let _ = state.merge_requests.update(&updated_mr).await;
+                // HSI §3a: promote the MR's gate trace to attestation on merge.
+                if let Err(e) = state.traces.promote_to_attestation(&updated_mr.id).await {
+                    warn!(mr_id = %updated_mr.id, error = %e, "failed to promote gate trace to attestation");
+                }
 
                 state
                     .merge_queue
@@ -1325,6 +1329,11 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 warn!("could not transition MR to Merged: {e}");
             }
             let _ = state.merge_requests.update(&updated_mr).await;
+            // HSI §3a: promote the MR's gate trace to attestation on merge
+            // (permanent — survives per-MR cleanup for provenance).
+            if let Err(e) = state.traces.promote_to_attestation(&updated_mr.id).await {
+                warn!(mr_id = %updated_mr.id, error = %e, "failed to promote gate trace to attestation");
+            }
 
             state
                 .merge_queue
@@ -4142,6 +4151,61 @@ mod tests {
             .try_recv()
             .expect("AtomicGroupFailed event should be emitted");
         assert_eq!(msg.kind, gyre_common::MessageKind::AtomicGroupFailed);
+    }
+
+    /// HSI §3a trace lifecycle: when the merge processor merges an MR, the
+    /// stored gate trace is promoted to attestation — observable because a
+    /// subsequent `delete_by_mr` no longer removes it (permanent).
+    #[tokio::test]
+    async fn merging_mr_promotes_gate_trace_to_attestation() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "promote-repo", "ws-1").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-promote"),
+            repo.id.clone(),
+            "MR promote",
+            "feat/promote",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.status = gyre_domain::MrStatus::Approved;
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-promote", 50, 1000).await;
+
+        // Pre-store a gate trace for the MR (as a TraceCapture gate would).
+        let trace = gyre_common::GateTrace {
+            id: Id::new("trace-promote"),
+            mr_id: mr.id.clone(),
+            gate_run_id: Id::new("gr-promote"),
+            commit_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            spans: vec![],
+            captured_at: 1000,
+        };
+        state.traces.store(&trace).await.unwrap();
+        assert!(state.traces.get_by_mr(&mr.id).await.unwrap().is_some());
+
+        // Run a merge-processor cycle: no gates → MR merges.
+        // event-emission:ok — this test verifies trace promotion, not events.
+        // notification-coverage:ok — MR has no author agents, so no user is
+        // notifiable; this test verifies trace promotion, not notifications.
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, gyre_domain::MrStatus::Merged);
+
+        // Promotion observable: delete_by_mr is now a no-op (permanent trace).
+        state.traces.delete_by_mr(&mr.id).await.unwrap();
+        assert!(
+            state.traces.get_by_mr(&mr.id).await.unwrap().is_some(),
+            "merged MR's trace must survive delete_by_mr (promoted to attestation)"
+        );
     }
 
     // --- TASK-061: Integration tests for evaluate_attestation_abac ---

@@ -47,12 +47,15 @@ pub struct TraceCaptureConfig {
     /// Maximum spans per trace (prevents unbounded storage from fuzz tests).
     #[serde(default = "default_max_spans")]
     pub max_spans: usize,
-    /// Whether to capture external dependency spans (requires real network
-    /// access in the app-under-test). Informational — the receiver ingests
-    /// whatever spans it is sent; the app-under-test decides whether to mock
-    /// external deps. Surfaced to the test process via `GYRE_CAPTURE_EXTERNAL`.
     #[serde(default)]
     pub capture_external: bool,
+    /// Extra env vars injected into the test command (OTel or otherwise).
+    /// Values support `{{repo_name}}` templating, resolved by the gate
+    /// executor before the capture starts. Merged over the receiver's
+    /// built-in OTel defaults, so an explicit user value (e.g. a custom
+    /// `OTEL_SERVICE_NAME`) wins.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 /// Default gRPC OTLP port (per OTLP spec).
@@ -73,6 +76,7 @@ impl Default for TraceCaptureConfig {
             test_command: default_test_command(),
             max_spans: default_max_spans(),
             capture_external: false,
+            env: HashMap::new(),
         }
     }
 }
@@ -283,8 +287,8 @@ pub async fn run_trace_capture(
     let command_output = if parts.is_empty() {
         Err(anyhow::anyhow!("empty test_command"))
     } else {
-        tokio::process::Command::new(parts[0])
-            .args(&parts[1..])
+        let mut cmd = tokio::process::Command::new(parts[0]);
+        cmd.args(&parts[1..])
             .env("OTEL_EXPORTER_OTLP_ENDPOINT", &otlp_endpoint)
             .env("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
             .env("OTEL_SERVICE_NAME", "gyre-gate-test")
@@ -296,10 +300,12 @@ pub async fn run_trace_capture(
                 } else {
                     "false"
                 },
-            )
-            .output()
-            .await
-            .context("run test_command")
+            );
+        // User-supplied env (gate config `env` map) wins over the defaults
+        // above — an explicit OTEL_SERVICE_NAME or endpoint override takes
+        // precedence (HSI §3a gate config).
+        cmd.envs(&config.env);
+        cmd.output().await.context("run test_command")
     };
 
     // Stop the OTLP receiver.
@@ -752,5 +758,85 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.grpc_port, 4317);
         assert_eq!(cfg.max_spans_per_trace, 10_000);
+    }
+    /// HSI §3a acceptance: the spec's literal gate-config YAML block must be
+    /// parseable into `TraceCaptureConfig` (camelCase gate fields, snake_case
+    /// config fields, env map with `{{repo_name}}` templating left raw here —
+    /// the gate executor resolves it).
+    #[test]
+    fn trace_capture_config_parses_spec_yaml_block() {
+        let yaml = r#"
+otlp_port: 4317
+test_command: "cargo test --features integration"
+max_spans: 10000
+capture_external: false
+env:
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4317"
+  OTEL_SERVICE_NAME: "{{repo_name}}"
+"#;
+        let cfg: TraceCaptureConfig = serde_yaml::from_str(yaml).expect("parse spec YAML block");
+        assert_eq!(cfg.otlp_port, Some(4317));
+        assert_eq!(cfg.test_command, "cargo test --features integration");
+        assert_eq!(cfg.max_spans, 10_000);
+        assert!(!cfg.capture_external);
+        assert_eq!(
+            cfg.env.get("OTEL_SERVICE_NAME").map(String::as_str),
+            Some("{{repo_name}}")
+        );
+        assert_eq!(
+            cfg.env
+                .get("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .map(String::as_str),
+            Some("http://localhost:4317")
+        );
+    }
+
+    /// Defaults: no `env` key in config means an empty map (serde default).
+    #[test]
+    fn trace_capture_config_env_defaults_empty() {
+        let cfg: TraceCaptureConfig =
+            serde_yaml::from_str("test_command: true").expect("parse minimal config");
+        assert!(cfg.env.is_empty());
+    }
+
+    /// HSI §3a: the test command must receive env vars from the gate's `env`
+    /// map, overriding the built-in OTel defaults. Observable via a command
+    /// that writes `$OTEL_SERVICE_NAME` to a temp file.
+    #[tokio::test]
+    async fn run_trace_capture_injects_env_map_into_test_command() {
+        // test_command is exec'd without a shell (split on whitespace), so
+        // use a script file to observe the child process env.
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("service_name.txt");
+        let script_path = dir.path().join("dump_env.sh");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$OTEL_SERVICE_NAME\" > {}\n",
+                out_path.display()
+            ),
+        )
+        .unwrap();
+
+        let mut env = HashMap::new();
+        env.insert("OTEL_SERVICE_NAME".to_string(), "my-repo-tests".to_string());
+        let config = TraceCaptureConfig {
+            test_command: format!("sh {}", script_path.display()),
+            env,
+            otlp_port: Some(0),
+            ..Default::default()
+        };
+
+        let trace = run_trace_capture(config, 0, Id::new("mr-1"), Id::new("gr-1"), "sha".into())
+            .await
+            .expect("capture should succeed");
+        assert!(trace.spans.is_empty());
+
+        let observed =
+            std::fs::read_to_string(&out_path).expect("test command should have written env value");
+        assert_eq!(
+            observed, "my-repo-tests",
+            "user env must override the default OTEL_SERVICE_NAME"
+        );
     }
 }

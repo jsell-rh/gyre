@@ -885,6 +885,14 @@ pub async fn reject_spec(
             mr.status = gyre_domain::MrStatus::Closed;
             mr.updated_at = now;
             let _ = state.merge_requests.update(&mr).await;
+            // HSI §3a: delete the gate trace on close-without-merge.
+            if let Err(e) = state.traces.delete_by_mr(&mr.id).await {
+                tracing::warn!(
+                    "failed to delete gate trace for MR {} on spec-reject close: {}",
+                    mr.id,
+                    e
+                );
+            }
         }
     }
 

@@ -3274,6 +3274,9 @@ fn test_state_inner(
 pub struct MemTraceRepository {
     store: Arc<Mutex<HashMap<String, gyre_common::GateTrace>>>,
     payloads: Arc<Mutex<HashMap<(String, String), gyre_ports::trace::SpanPayload>>>,
+    /// MR IDs whose traces were promoted to attestation — mirrors the SQLite
+    /// adapter's `permanent=1` flag: promoted traces survive `delete_by_mr`.
+    permanent: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 #[async_trait]
@@ -3281,6 +3284,8 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
     async fn store(&self, trace: &gyre_common::GateTrace) -> Result<()> {
         let mut guard = self.store.lock().await;
         // Replace any existing trace for same MR (capped at most recent).
+        // A fresh capture is non-permanent (SQLite inserts permanent=0).
+        self.permanent.lock().await.remove(trace.mr_id.as_str());
         guard.retain(|_, v| v.mr_id != trace.mr_id);
         guard.insert(trace.mr_id.as_str().to_string(), trace.clone());
         Ok(())
@@ -3303,11 +3308,19 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
         }))
     }
 
-    async fn promote_to_attestation(&self, _mr_id: &Id) -> Result<()> {
-        Ok(()) // no-op for in-memory (no eviction logic needed in tests)
+    async fn promote_to_attestation(&self, mr_id: &Id) -> Result<()> {
+        self.permanent
+            .lock()
+            .await
+            .insert(mr_id.as_str().to_string());
+        Ok(())
     }
 
     async fn delete_by_mr(&self, mr_id: &Id) -> Result<()> {
+        // Promoted traces are permanent (SQLite: `permanent=1` rows survive).
+        if self.permanent.lock().await.contains(mr_id.as_str()) {
+            return Ok(());
+        }
         self.store.lock().await.remove(mr_id.as_str());
         Ok(())
     }
