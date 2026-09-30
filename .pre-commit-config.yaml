@@ -483,6 +483,21 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: fail-open-ref-resolution
+        name: fail-open ref-resolution lint
+        description: Detect resolve_ref() results defaulted with .unwrap_or_default()/.unwrap_or("")
+        entry: scripts/check-fail-open-ref-resolution.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
+      - id: task-commit-attribution
+        name: task commit-attribution lint
+        description: Detect task-labeled product-surface commits missing from their task's commits frontmatter
+        entry: scripts/check-task-commit-attribution.sh
+        language: script
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format

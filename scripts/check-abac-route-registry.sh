@@ -29,6 +29,7 @@
 # count must never rise; it must shrink as routes are moved into the
 # resolver (delete the entry when you register a route).
 FROZEN_EXEMPTION_COUNT=53
+FROZEN_DUPLICATE_COUNT=22
 
 #
 # Run by pre-commit and CI.
@@ -62,6 +63,27 @@ grep -o '"/api/v1/[^"]*"' "$API_MOD" | tr -d '"' | sort -u > /tmp/.abac-router-p
 # vec (includes exempt entries — an exempt mapping still resolves, so it
 # covers the route).
 grep -o '"/api/v1/[^"]*"' "$ABAC" | tr -d '"' | sort -u > /tmp/.abac-resolver-paths.$$
+
+# Duplicate-resolver detection (task-095 R3-F4 cosmetic sub-finding): the
+# five recovery routes are registered twice in the resolver — the first
+# match wins in `resolve()`, so every later duplicate entry is dead code,
+# including its resource mapping (the duplicate post-merge-gates entry
+# maps to "gate" but the first-match entry maps it differently). 22 paths
+# are currently duplicated; frozen so the count must shrink as duplicates
+# are removed, never grow.
+grep -o '"/api/v1/[^"]*"' "$ABAC" | tr -d '"' | sort | uniq -d > /tmp/.abac-dup-paths.$$
+DUPLICATE_COUNT=$(wc -l < /tmp/.abac-dup-paths.$$)
+if [ "$DUPLICATE_COUNT" -gt "$FROZEN_DUPLICATE_COUNT" ]; then
+    echo "FAIL: $DUPLICATE_COUNT duplicate path entries in the ABAC resolver (baseline: $FROZEN_DUPLICATE_COUNT)."
+    echo ""
+    echo "ResourceResolver::resolve() is first-match, so every duplicate entry"
+    echo "after the first is dead — its resource mapping silently never runs"
+    echo "(task-095 R3-F4: the duplicate post-merge-gates mapping to \"gate\""
+    echo "is shadowed by the earlier entry). Remove the duplicate entries;"
+    echo "if you removed all duplicates of a path, the count shrinks — lower"
+    echo "FROZEN_DUPLICATE_COUNT to match; never raise it."
+    FAIL=1
+fi
 
 # Exemptions: one route path per line, # comments allowed.
 if [ -f "$EXEMPTIONS_FILE" ]; then

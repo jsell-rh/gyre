@@ -82,6 +82,16 @@ bash scripts/check-abac-exempt-handlers.sh
 # fields read by getters but never populated by the store/save path)
 bash scripts/check-unwritten-store-fields.sh
 
+# Fail-open ref-resolution lint (flags resolve_ref() results defaulted with
+# .unwrap_or_default()/.unwrap_or("") — a None there means the ref does not
+# resolve; health signals must fail closed)
+bash scripts/check-fail-open-ref-resolution.sh
+
+# Task commit-attribution lint (flags task-labeled product-surface commits
+# missing from their task's commits: frontmatter — they are invisible to
+# review scoping; needs full git history)
+bash scripts/check-task-commit-attribution.sh
+
 # Auto-format
 cargo fmt --all
 
@@ -197,9 +207,11 @@ pre-commit run --all-files
 Hook summary (see `.pre-commit-config.yaml` for the full list; ~60 local hooks):
 - `cargo-fmt` / `cargo-clippy`: formatting and lint with denied warnings
 - `arch-lint`: hexagonal boundary enforcement
-- `abac-route-registry`: every registered `/api/v1/` route must have an ABAC `RouteResourceMapping` entry (`abac_middleware.rs`) — unregistered routes get NO policy evaluation
+- `abac-route-registry`: every registered `/api/v1/` route must have an ABAC `RouteResourceMapping` entry (`abac_middleware.rs`) — unregistered routes get NO policy evaluation; also fails on growth in duplicate resolver entries (first-match makes later entries dead code)
 - `migration-versions`: fails on duplicate Diesel migration versions (one silently never runs)
 - `byte-slice-truncation`: fails on `&s[..N]` string slices that panic on non-char-boundary UTF-8
+- `fail-open-ref-resolution`: fails on `resolve_ref(...)` results defaulted with `.unwrap_or_default()`/`.unwrap_or("")` — health/safety signals must fail closed
+- `task-commit-attribution`: fails on task-labeled product-surface commits missing from their task's `commits:` frontmatter (invisible to review scoping)
 - `dead-message-kinds`: fails on `MessageKind` variants with no emitter (dead spec delivery link)
 - `no-em-dash`: rejects Unicode em-dashes in source
 - `conventional-commits`: commit message format (commit-msg stage)
