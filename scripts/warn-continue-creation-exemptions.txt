@@ -14,4 +14,4 @@
 crates/gyre-server/src/api/spawn.rs:219    # match state.policies.create(policy) warn arm — agent spawns unrestricted if Deny creation fails (review F6 exact site)
 #
 # --- unowned; fix opportunistically when touching these files ---
-crates/gyre-server/src/abac_middleware.rs:712  # if let Err = state.policies.create in seed_builtin_policies — idempotent startup seeding, non-fatal by design
+crates/gyre-server/src/abac_middleware.rs:728  # if let Err = state.policies.create in seed_builtin_policies — idempotent startup seeding, non-fatal by design
