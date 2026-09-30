@@ -314,6 +314,7 @@ merge_worker() {
   git branch -d "$branch" 2>/dev/null
   unset "ACTIVE_WORKERS[$task_name]"
   log "    Cleaned up worktree for $task_name"
+
   return 0
 }
 
@@ -374,6 +375,12 @@ for f in "$REPO_ROOT"/specs/tasks/task-*.md; do
     log "<<< Pre-flight process revision done"
   fi
 done
+
+# Pre-flight verdicts and process revisions commit directly to main —
+# publish them so remote is not stale while workers churn.
+git push origin main >/dev/null 2>&1 \
+  && log "Pre-flight: pushed main to origin" \
+  || log "Pre-flight: push to origin failed (will retry)"
 
 
 ITERATION=0
@@ -442,14 +449,19 @@ while true; do
     done
   fi
 
-  # 5. Status report
+  # 5. Publish: one push per cycle covers auditor/PM/merge/pre-flight commits
+  git push origin main >/dev/null 2>&1 \
+    && log "Cycle: pushed main to origin" \
+    || log "Cycle: push to origin failed (will retry next cycle)"
+
+  # 6. Status report
   active=${#ACTIVE_WORKERS[@]}
   log "    Active workers: $active"
   for task_name in "${!ACTIVE_WORKERS[@]}"; do
     log "      - $task_name"
   done
 
-  # 6. Check convergence
+  # 7. Check convergence
   if [ "$active" -eq 0 ]; then
     remaining=$(find_eligible_tasks | wc -l)
     if [ "$remaining" -eq 0 ]; then
