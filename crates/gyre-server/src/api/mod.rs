@@ -38,6 +38,7 @@ pub mod personas;
 pub mod policies;
 pub mod provenance;
 pub mod push_gates;
+pub mod recovery;
 pub mod release;
 pub mod repos;
 pub mod saved_views;
@@ -160,6 +161,18 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/push-gates",
             get(push_gates::get_push_gates).put(push_gates::set_push_gates),
+        )
+        // Post-merge recovery protocol (platform-model.md §6)
+        .route("/api/v1/repos/:id/status", get(recovery::repo_status))
+        .route("/api/v1/repos/:id/queue/pause", put(recovery::pause_queue))
+        .route(
+            "/api/v1/repos/:id/queue/resume",
+            put(recovery::resume_queue),
+        )
+        .route("/api/v1/repos/:id/revert/:mr_id", post(recovery::revert_mr))
+        .route(
+            "/api/v1/repos/:id/post-merge-gates",
+            get(recovery::get_post_merge_gates).put(recovery::set_post_merge_gates),
         )
         // Stack attestation policy (M14.2)
         .route(

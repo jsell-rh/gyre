@@ -180,3 +180,56 @@ pub async fn notify_mr_merged(
     )
     .await;
 }
+
+/// Notify the MR author's spawning user that their merged MR was reverted by
+/// the post-merge recovery protocol (platform-model.md §6).
+pub async fn notify_mr_reverted(
+    state: &AppState,
+    author_agent_id: &Id,
+    workspace_id: &Id,
+    mr_id: &str,
+    reason: &str,
+) {
+    let spawned_by = state
+        .agents
+        .find_by_id(author_agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|a| a.spawned_by);
+
+    let user_id = if let Some(sb) = &spawned_by {
+        Id::new(sb.clone())
+    } else {
+        return; // No human to notify
+    };
+
+    let mr_label = state
+        .merge_requests
+        .find_by_id(&Id::new(mr_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|mr| format!("'{}'", mr.title))
+        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+
+    let body_json = serde_json::json!({
+        "mr_id": mr_id,
+        "agent_id": author_agent_id.as_str(),
+        "reason": reason,
+    })
+    .to_string();
+
+    notify_rich(
+        state,
+        workspace_id.clone(),
+        user_id,
+        NotificationType::MrReverted,
+        format!("MR {mr_label} was reverted: {reason}"),
+        "default",
+        Some(body_json),
+        Some(mr_id.to_string()),
+        None,
+    )
+    .await;
+}

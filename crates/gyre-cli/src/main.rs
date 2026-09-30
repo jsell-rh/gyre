@@ -181,6 +181,11 @@ enum Commands {
         #[command(subcommand)]
         command: DepsCommands,
     },
+    /// Repository operations (status, revert, merge queue control)
+    Repo {
+        #[command(subcommand)]
+        command: RepoCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -208,6 +213,72 @@ enum ReleaseCommands {
         /// Output changelog markdown to stdout instead of summary
         #[arg(long)]
         markdown: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RepoCommands {
+    /// Show repo status: main health (green/broken) and merge queue state
+    Status {
+        /// Repository ID
+        #[arg(long)]
+        repo_id: String,
+        /// Gyre server base URL
+        #[arg(long, default_value = "http://localhost:3000")]
+        server: String,
+        /// Auth token
+        #[arg(long, default_value = DEFAULT_TOKEN)]
+        token: String,
+    },
+    /// Manually revert a merged MR
+    Revert {
+        /// Merge request ID
+        mr_id: String,
+        /// Repository ID
+        #[arg(long)]
+        repo_id: String,
+        /// Gyre server base URL
+        #[arg(long, default_value = "http://localhost:3000")]
+        server: String,
+        /// Auth token
+        #[arg(long, default_value = DEFAULT_TOKEN)]
+        token: String,
+    },
+    /// Merge queue control (pause/resume)
+    Queue {
+        #[command(subcommand)]
+        command: QueueCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum QueueCommands {
+    /// Manually pause the merge queue
+    Pause {
+        /// Repository ID
+        #[arg(long)]
+        repo_id: String,
+        /// Reason for the pause
+        #[arg(long)]
+        reason: Option<String>,
+        /// Gyre server base URL
+        #[arg(long, default_value = "http://localhost:3000")]
+        server: String,
+        /// Auth token
+        #[arg(long, default_value = DEFAULT_TOKEN)]
+        token: String,
+    },
+    /// Manually resume the merge queue
+    Resume {
+        /// Repository ID
+        #[arg(long)]
+        repo_id: String,
+        /// Gyre server base URL
+        #[arg(long, default_value = "http://localhost:3000")]
+        server: String,
+        /// Auth token
+        #[arg(long, default_value = DEFAULT_TOKEN)]
+        token: String,
     },
 }
 
@@ -1333,6 +1404,81 @@ async fn main() -> Result<()> {
                 _ => println!("No divergence alerts."),
             }
         }
+
+        Commands::Repo { command } => match command {
+            RepoCommands::Status {
+                repo_id,
+                server,
+                token,
+            } => {
+                let api = client::GyreClient::new(server, token);
+                let status = api.repo_status(&repo_id).await?;
+
+                let paused = status["queue_paused"].as_bool().unwrap_or(false);
+                let main_green = status["main_green"].as_bool();
+                let gates = status["post_merge_gates"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+
+                println!("Repo {repo_id}");
+                println!();
+                match main_green {
+                    Some(true) => println!("Main: green"),
+                    Some(false) => println!("Main: broken (post-merge validation failing)"),
+                    None => println!("Main: unknown (no post-merge gates configured)"),
+                }
+                if paused {
+                    let reason = status["pause_reason"].as_str().unwrap_or("unknown");
+                    println!("Merge queue: paused ({reason})");
+                } else {
+                    println!("Merge queue: running");
+                }
+                if gates.is_empty() {
+                    println!("Post-merge gates: none configured");
+                } else {
+                    println!("Post-merge gates:");
+                    for g in &gates {
+                        let name = g["name"].as_str().unwrap_or("?");
+                        let cmd = g["command"].as_str().unwrap_or("?");
+                        let required = g["required"].as_bool().unwrap_or(true);
+                        println!("  {name}: {cmd} (required: {required})");
+                    }
+                }
+            }
+            RepoCommands::Revert {
+                mr_id,
+                repo_id,
+                server,
+                token,
+            } => {
+                let api = client::GyreClient::new(server, token);
+                let result = api.revert_mr(&repo_id, &mr_id).await?;
+                let sha = result["revert_commit_sha"].as_str().unwrap_or("?");
+                println!("Reverted MR {mr_id} (revert commit: {sha})");
+            }
+            RepoCommands::Queue { command } => match command {
+                QueueCommands::Pause {
+                    repo_id,
+                    reason,
+                    server,
+                    token,
+                } => {
+                    let api = client::GyreClient::new(server, token);
+                    api.pause_queue(&repo_id, reason.as_deref()).await?;
+                    println!("Merge queue for repo {repo_id} paused.");
+                }
+                QueueCommands::Resume {
+                    repo_id,
+                    server,
+                    token,
+                } => {
+                    let api = client::GyreClient::new(server, token);
+                    api.resume_queue(&repo_id).await?;
+                    println!("Merge queue for repo {repo_id} resumed.");
+                }
+            },
+        },
     }
 
     Ok(())
