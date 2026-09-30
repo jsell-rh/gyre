@@ -80,6 +80,7 @@ When spawning an agent into a container compute target, the server pre-mints the
 | `GYRE_TASK_ID` | Task UUID | Assigned task reference |
 | `GYRE_REPO_ID` | Repository UUID | Repo being worked on |
 | `GYRE_AGENT_COMMAND` | _(optional)_ | Command for the entrypoint to exec after setup (e.g. a CI script) |
+| `GYRE_CRED_{NAME}` | _(per secret)_ | Resolved secrets from the secrets repository (Platform Model §7): tenant/workspace/repo/task scoped, nearest scope wins on name collision, expired secrets excluded. Held in memory by the `cred-proxy` sidecar and scrubbed before the agent process starts -- raw values never appear in the agent process env |
 | `GYRE_CRED_PROXY` | `http://127.0.0.1:8765` | Address of the `cred-proxy` sidecar (M27); injected so entrypoint and agent-runner can reference the proxy address |
 | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:8765` | Routes Anthropic SDK calls through cred-proxy; raw API key never exposed to agent process (M27) |
 | `ANTHROPIC_API_KEY` | `proxy-managed` | Placeholder so Anthropic SDK initialises; cred-proxy injects the real `x-api-key` header per request (M27) |
@@ -93,7 +94,7 @@ Build and register:
 docker build -t gyre-agent:latest docker/gyre-agent/
 
 # M25 zero-config: start server with API key -- gyre-agent-default is auto-registered
-GYRE_AGENT_CREDENTIALS=ANTHROPIC_API_KEY=sk-ant-xxx cargo run -p gyre-server
+GYRE_SECRET_ENCRYPTION_KEY=<64-hex-chars> cargo run -p gyre-server  # secrets encrypted at rest
 
 # Or manually create a container compute target (Admin -> Compute -> Add) with type=container
 # Agent containers need bridge networking to reach server:

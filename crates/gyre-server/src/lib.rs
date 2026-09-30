@@ -392,6 +392,10 @@ pub struct AppState {
     pub user_notification_prefs: Arc<dyn gyre_ports::UserNotificationPreferenceRepository>,
     /// Per-user API tokens (HSI §12). Hashed at rest; plaintext never stored.
     pub user_tokens: Arc<dyn gyre_ports::UserTokenRepository>,
+    /// Secret repository (platform-model.md §7): scoped credential storage,
+    /// encrypted at rest in the adapter. Agent spawn resolves secrets through
+    /// this and injects them as GYRE_CRED_* env vars for the cred-proxy sidecar.
+    pub secrets: Arc<dyn gyre_ports::SecretRepository>,
     /// Aggregated judgment ledger for user activity history (HSI §12).
     pub judgment_ledger: Arc<dyn gyre_ports::JudgmentLedgerRepository>,
     /// WebSocket ticket store: short-lived, single-use tokens for WS auth.
@@ -1051,6 +1055,10 @@ pub fn build_state(
         user_tokens: store!(
             dyn gyre_ports::UserTokenRepository,
             mem::MemUserTokenRepository::default()
+        ),
+        secrets: store!(
+            dyn gyre_ports::SecretRepository,
+            mem::MemSecretRepository::default()
         ),
         judgment_ledger: store!(
             dyn gyre_ports::JudgmentLedgerRepository,

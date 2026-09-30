@@ -721,6 +721,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     trust_anchors,
     key_bindings,
     chain_attestations,
+    secrets,
 );
 
 diesel::table! {
@@ -949,5 +950,22 @@ diesel::table! {
         created_at -> BigInt,
         tenant_id -> Text,
         commit_sha -> Text,
+    }
+}
+
+diesel::table! {
+    secrets (id) {
+        id -> Text,
+        name -> Text,
+        scope -> Text,
+        scope_id -> Text,
+        secret_type -> Text,
+        encrypted_value -> Binary,
+        nonce -> Binary,
+        created_by -> Text,
+        created_at -> BigInt,
+        expires_at -> Nullable<BigInt>,
+        last_rotated_at -> Nullable<BigInt>,
+        tenant_id -> Text,
     }
 }

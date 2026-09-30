@@ -633,24 +633,40 @@ pub(crate) async fn spawn_agent_core(
         container_env.insert("GYRE_TASK_ID".to_string(), req.task_id.clone());
         container_env.insert("GYRE_REPO_ID".to_string(), req.repo_id.clone());
 
-        // M27: Inject operator-configured credentials via GYRE_CRED_* prefix.
-        // The cred-proxy sidecar reads GYRE_CRED_* vars, stores in memory, and scrubs
-        // them before the agent process starts — raw values are never in the agent env.
-        // Format: KEY1=VALUE1,KEY2=VALUE2 (values may contain '=' — split on first '=' only).
-        if let Ok(creds) = std::env::var("GYRE_AGENT_CREDENTIALS") {
-            for pair in creds.split(',') {
-                let pair = pair.trim();
-                if let Some((k, v)) = pair.split_once('=') {
-                    if !k.is_empty() {
-                        container_env.insert(format!("GYRE_CRED_{k}"), v.to_string());
-                    }
+        // Platform Model §7 Secrets Delivery: resolve scoped secrets from the
+        // repository (tenant → workspace → repo → task, nearest scope wins)
+        // and inject as GYRE_CRED_* env vars. The cred-proxy sidecar reads
+        // GYRE_CRED_* vars, stores in memory, and scrubs them before the agent
+        // process starts — raw values are never in the agent env.
+        // Failure is logged and skipped: a missing/undecryptable secret must
+        // not block spawning the agent itself.
+        let tenant_id = workspace
+            .as_ref()
+            .map(|ws| ws.tenant_id.to_string())
+            .unwrap_or_else(|| "default".to_string());
+        match state
+            .secrets
+            .resolve_for_agent(
+                &tenant_id,
+                &repo.workspace_id.to_string(),
+                &req.repo_id,
+                Some(&req.task_id),
+            )
+            .await
+        {
+            Ok(resolved) => {
+                for (name, value) in resolved {
+                    container_env.insert(
+                        format!("GYRE_CRED_{name}"),
+                        String::from_utf8_lossy(&value).into_owned(),
+                    );
                 }
             }
-        }
-        // GCP service account JSON (may contain commas — injected via a dedicated var).
-        if let Ok(sa_json) = std::env::var("GYRE_AGENT_GCP_SA_JSON") {
-            if !sa_json.is_empty() {
-                container_env.insert("GYRE_CRED_GCP_SA_JSON".to_string(), sa_json);
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
+                );
             }
         }
 
@@ -667,7 +683,7 @@ pub(crate) async fn spawn_agent_core(
         container_env.insert("ANTHROPIC_API_KEY".to_string(), "proxy-managed".to_string());
 
         // Vertex AI: forward non-secret Vertex config env vars to the container.
-        // Secrets (GCP SA JSON) are handled by GYRE_CRED_GCP_SA_JSON above.
+        // Secrets (e.g. GCP SA JSON) are delivered via the secrets repository above.
         // CLAUDE_CODE_USE_VERTEX enables Vertex mode in the Claude Agent SDK.
         for var_name in [
             "CLAUDE_CODE_USE_VERTEX",
@@ -846,8 +862,7 @@ pub(crate) async fn spawn_agent_core(
                             agent_id = %agent.id,
                             "container spawn failed (best-effort): {e}. \
                             If the image is missing, build it first: \
-                            `docker build -t gyre-agent:latest docker/gyre-agent/`. \
-                            Then restart the server with GYRE_AGENT_CREDENTIALS set."
+                            `docker build -t gyre-agent:latest docker/gyre-agent/`."
                         );
                     }
                 }
