@@ -475,6 +475,19 @@ async fn merge_atomic_group(
         }
     };
 
+    // Post-merge recovery (TASK-095): if the queue is paused for this repo
+    // (a previous merge failed post-merge validation and main is red), do
+    // not merge. Group entries are still Queued — leave them for retry once
+    // the queue resumes.
+    if merge_queue_paused(state, &repo.id).await {
+        info!(
+            group = %group_name,
+            repo_id = %repo.id,
+            "merge queue paused for repo, leaving atomic group queued"
+        );
+        return Ok(());
+    }
+
     // Record the target branch HEAD before starting, for rollback.
     let target_branch = &first_mr.target_branch;
     let pre_group_sha =
@@ -490,6 +503,10 @@ async fn merge_atomic_group(
 
     // Track successfully merged entries for potential rollback.
     let mut merged_entries: Vec<(MergeQueueEntry, MergeRequest)> = Vec::new();
+    // Merge commits produced in this group run, for post-merge validation
+    // (TASK-095). Preserves member order; used to identify which member's
+    // merge failed the post-merge gate.
+    let mut group_merge_shas: Vec<String> = Vec::new();
 
     // Sequentially merge each member in dependency order.
     for ge in &group_entries {
@@ -576,6 +593,8 @@ async fn merge_atomic_group(
                     .await?;
 
                 merged_entries.push((ge.clone(), updated_mr));
+                // Track the merge commit for post-merge validation (TASK-095).
+                group_merge_shas.push(merge_commit_sha.clone());
             }
             Ok(MergeResult::Conflict { message }) => {
                 warn!(
@@ -658,6 +677,27 @@ async fn merge_atomic_group(
         merged_count = merged_entries.len(),
         "atomic group merged successfully"
     );
+
+    // TASK-095: post-merge validation for the atomic group. The post-merge
+    // gate runs against the new HEAD of the default branch after the group
+    // landed — same rule as single-entry merges. On failure, run the
+    // recovery protocol for the group: pause queue, revert the group's
+    // merges, mark members Reverted, notify, remediation tasks, invalidate
+    // gate results. See platform-model.md §6.
+    if let Some(last_sha) = group_merge_shas.last() {
+        if let Err(failure_reason) =
+            crate::gate_executor::run_post_merge_gates(state, &repo, last_sha).await
+        {
+            recover_atomic_group_from_post_merge_failure(
+                state,
+                &repo,
+                &merged_entries,
+                &group_merge_shas,
+                &failure_reason,
+            )
+            .await;
+        }
+    }
 
     Ok(())
 }
@@ -1704,10 +1744,6 @@ async fn recover_from_post_merge_failure(
     merge_commit_sha: &str,
     failure_reason: &str,
 ) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
 
     // Step 1: pause the merge queue.
     pause_merge_queue(state, repo, failure_reason).await;
@@ -1757,10 +1793,36 @@ async fn recover_from_post_merge_failure(
         .await;
     }
 
+    // Steps 4–7: per-MR side effects (mark Reverted, notify, remediation
+    // task, invalidate gate results).
+    apply_revert_side_effects(state, repo, mr, merge_commit_sha, &revert_sha, failure_reason)
+        .await;
+}
+
+/// Per-MR recovery side effects (platform-model.md §6 steps 4–7): mark the
+/// MR `Reverted`, send the author agent a RevertNotification (event +
+/// persisted notification), create a remediation task describing the
+/// failure, and invalidate the MR's gate results so they must re-run.
+///
+/// `revert_sha` is the revert commit that undid the MR's merge (for atomic
+/// groups, the final revert commit of the group run).
+async fn apply_revert_side_effects(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    mr: &MergeRequest,
+    merge_commit_sha: &str,
+    revert_sha: &str,
+    failure_reason: &str,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
     // Step 4: mark the MR Reverted. The revert_mr_id references the revert
     // commit that undid this MR (a full revert MR object is not created —
     // the forge pushed the revert directly to the default branch).
-    let revert_mr_id = Id::new(revert_sha.clone());
+    let revert_mr_id = Id::new(revert_sha.to_string());
     let mut updated = mr.clone();
     if let Err(e) = updated.revert(revert_mr_id.clone(), now) {
         warn!(mr_id = %mr.id, error = %e, "MR could not transition to Reverted (already reverted?)");
@@ -1854,6 +1916,89 @@ async fn recover_from_post_merge_failure(
                 )
                 .await;
         }
+    }
+}
+
+/// Atomic-group post-merge failure recovery (platform-model.md §6): the
+/// group merged as one unit, so it reverts as one unit.
+///
+/// 1. Pause the merge queue for this repo.
+/// 2. Revert every merge commit of the group run in reverse order — each
+///    revert restores the branch tree one merge back, so the final revert
+///    commit leaves the tree at its pre-group state (history is preserved,
+///    unlike `rollback_atomic_group`'s branch reset).
+/// 3. Re-run post-merge gates on the reverted HEAD; resume on pass,
+///    escalate (stay paused) on failure.
+/// 4. Steps 4–7 of the protocol for every merged member: mark `Reverted`,
+///    RevertNotification, remediation task, gate-result invalidation.
+async fn recover_atomic_group_from_post_merge_failure(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    merged_entries: &[(MergeQueueEntry, MergeRequest)],
+    group_merge_shas: &[String],
+    failure_reason: &str,
+) {
+    // Step 1: pause the merge queue.
+    pause_merge_queue(state, repo, failure_reason).await;
+
+    // Step 2: revert every group merge commit, newest first.
+    let mut final_revert_sha: Option<String> = None;
+    for sha in group_merge_shas.iter().rev() {
+        match state.git_ops.revert_commit(&repo.path, &repo.default_branch, sha).await {
+            Ok(revert_sha) => final_revert_sha = Some(revert_sha),
+            Err(e) => {
+                error!(
+                    repo_id = %repo.id,
+                    merge_sha = %sha,
+                    error = %e,
+                    "group revert commit creation failed — queue stays paused, escalating"
+                );
+                if let Some((_, mr)) = merged_entries.first() {
+                    notify_escalation(
+                        state,
+                        repo,
+                        mr,
+                        &format!("revert of atomic-group merge commit {sha} failed: {e}"),
+                    )
+                    .await;
+                }
+                return;
+            }
+        }
+    }
+    let Some(revert_sha) = final_revert_sha else {
+        return; // empty group — nothing merged, nothing to recover
+    };
+
+    // Step 3: re-run post-merge gates on the reverted HEAD.
+    let revert_green = crate::gate_executor::run_post_merge_gates(state, repo, &revert_sha)
+        .await
+        .is_ok();
+
+    if revert_green {
+        resume_merge_queue(state, repo).await;
+    } else {
+        if let Some((_, mr)) = merged_entries.last() {
+            notify_escalation(
+                state,
+                repo,
+                mr,
+                &format!(
+                    "post-merge gates still failing on reverted HEAD {revert_sha} after \
+                     reverting atomic group ({} members): {failure_reason}",
+                    merged_entries.len(),
+                ),
+            )
+            .await;
+        }
+    }
+
+    // Steps 4–7 for every merged member. Each member is attributed the
+    // merge commit that landed it (matched by position in the group run)
+    // and the final revert commit that undid the group.
+    for (i, (_, mr)) in merged_entries.iter().enumerate() {
+        let merge_sha = group_merge_shas.get(i).map(String::as_str).unwrap_or("");
+        apply_revert_side_effects(state, repo, mr, merge_sha, &revert_sha, failure_reason).await;
     }
 }
 
@@ -5371,5 +5516,201 @@ mod tests {
                 || n.notification_type == NotificationType::MergeQueueEscalation),
             "advisory failure must not produce recovery notifications"
         );
+    }
+
+    /// Test: a paused merge queue also blocks atomic-group merges — the
+    /// spec's "no more merges until main is green" applies to every merge
+    /// path. Entries stay Queued and members stay Open.
+    #[tokio::test]
+    async fn paused_queue_skips_atomic_group() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "recovery-repo", "ws-1").await;
+
+        let mut agent = gyre_domain::Agent::new(Id::new("agent-grp"), "agent-grp", 1000);
+        agent.spawned_by = Some("user-grp".to_string());
+        agent.workspace_id = Id::new("ws-1");
+        state.agents.create(&agent).await.unwrap();
+
+        create_mr_in_group(
+            &state,
+            "mr-grp-a",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/grp-a",
+            Some("agent-grp"),
+        )
+        .await;
+        create_mr_in_group(
+            &state,
+            "mr-grp-b",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/grp-b",
+            Some("agent-grp"),
+        )
+        .await;
+        enqueue_mr(&state, "mr-grp-a", 100, 1000).await;
+        enqueue_mr(&state, "mr-grp-b", 100, 1001).await;
+
+        // Pause the queue for this repo.
+        state
+            .kv_store
+            .kv_set(
+                "merge_queue_pause",
+                repo.id.as_str(),
+                serde_json::json!({"paused": true, "reason": "manual test pause"}).to_string(),
+            )
+            .await
+            .unwrap();
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        process_next(&state).await.unwrap();
+
+        // Entries stay Queued and MRs stay Open — no group merge while paused.
+        for (entry_id, mr_id) in [("entry-mr-grp-a", "mr-grp-a"), ("entry-mr-grp-b", "mr-grp-b")] {
+            let entry = state
+                .merge_queue
+                .find_by_id(&Id::new(entry_id))
+                .await
+                .unwrap()
+                .expect("entry should exist");
+            assert_eq!(
+                entry.status,
+                MergeQueueEntryStatus::Queued,
+                "{entry_id} should stay queued while paused"
+            );
+            let updated = state
+                .merge_requests
+                .find_by_id(&Id::new(mr_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(updated.status, MrStatus::Open, "{mr_id} should stay open while paused");
+        }
+        assert!(rx.try_recv().is_err(), "no events expected while paused");
+        // Paused queue must not notify anyone either — merge didn't happen.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-grp"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs.is_empty(),
+            "no notifications expected while paused, got {:?}",
+            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+        );
+    }
+
+    /// Test: post-merge gate failure on an atomic-group merge runs the full
+    /// recovery protocol for every member: queue paused, all members marked
+    /// Reverted, each author's spawner notified, remediation task per
+    /// member, gate results invalidated.
+    #[tokio::test]
+    async fn atomic_group_post_merge_fail_reverts_all_members() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "recovery-repo", "ws-1").await;
+
+        let mut agent_a = gyre_domain::Agent::new(Id::new("agent-grpa"), "agent-grpa", 1000);
+        agent_a.spawned_by = Some("user-grpa".to_string());
+        agent_a.workspace_id = Id::new("ws-1");
+        state.agents.create(&agent_a).await.unwrap();
+
+        let mut agent_b = gyre_domain::Agent::new(Id::new("agent-grpb"), "agent-grpb", 1000);
+        agent_b.spawned_by = Some("user-grpb".to_string());
+        agent_b.workspace_id = Id::new("ws-1");
+        state.agents.create(&agent_b).await.unwrap();
+
+        create_mr_in_group(
+            &state,
+            "mr-grpm-a",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/grpm-a",
+            Some("agent-grpa"),
+        )
+        .await;
+        create_mr_in_group(
+            &state,
+            "mr-grpm-b",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/grpm-b",
+            Some("agent-grpb"),
+        )
+        .await;
+        enqueue_mr(&state, "mr-grpm-a", 100, 1000).await;
+        enqueue_mr(&state, "mr-grpm-b", 100, 1001).await;
+
+        // Required post-merge gate that always fails.
+        create_post_merge_gate(&state, &repo.id, "false", true).await;
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        process_next(&state).await.unwrap();
+
+        // 1. Queue is paused.
+        assert!(merge_queue_paused(&state, &repo.id).await);
+
+        // 2. Every member marked Reverted with reverted_at set.
+        for mr_id in ["mr-grpm-a", "mr-grpm-b"] {
+            let updated = state
+                .merge_requests
+                .find_by_id(&Id::new(mr_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(updated.status, MrStatus::Reverted, "{mr_id} should be Reverted");
+            assert!(updated.reverted_at.is_some());
+            assert!(updated.revert_mr_id.is_some());
+        }
+
+        // 3. Events: MergeQueuePaused (workspace) + MrReverted per member.
+        let mut saw_paused = false;
+        let mut reverted_events = 0;
+        while let Ok(msg) = rx.try_recv() {
+            match msg.kind {
+                MessageKind::MergeQueuePaused => saw_paused = true,
+                MessageKind::MrReverted => reverted_events += 1,
+                _ => {}
+            }
+        }
+        assert!(saw_paused, "MergeQueuePaused event should be emitted");
+        assert_eq!(
+            reverted_events, 2,
+            "each group member should emit a MrReverted event"
+        );
+
+        // 4. Both authors' spawners got a MrReverted notification.
+        for user in ["user-grpa", "user-grpb"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+                .await
+                .unwrap();
+            assert!(
+                notifs.iter().any(|n| n.notification_type == NotificationType::MrReverted),
+                "{user} should receive a MrReverted notification, got {:?}",
+                notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            );
+        }
+
+        // 5. One remediation task per member, each naming the failure reason.
+        let tasks = state.tasks.list_by_repo(&repo.id).await.unwrap();
+        let reverted_tasks: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.labels.contains(&"reverted-mr".to_string()))
+            .collect();
+        assert_eq!(reverted_tasks.len(), 2, "one remediation task per member");
+        for t in &reverted_tasks {
+            assert_eq!(t.priority, TaskPriority::High);
+            assert!(t.title.contains("post-merge-tests"), "task title: {}", t.title);
+        }
+
+        // 6. Escalation branch: the noop adapter's revert SHA fails the
+        // re-run, so the queue stays paused (escalated to a human).
+        assert!(merge_queue_paused(&state, &repo.id).await);
     }
 }
