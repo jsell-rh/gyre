@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{GateResult, GateStatus, GateType, QualityGate, SpecApproval};
+use gyre_domain::{GatePhase, GateResult, GateStatus, GateType, QualityGate, SpecApproval};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
@@ -32,6 +32,12 @@ pub struct CreateGateRequest {
     pub persona: Option<String>,
     /// When false, gate is advisory only — failures do not block merging. Defaults to true.
     pub required: Option<bool>,
+    /// When this gate runs: "pre_merge" (blocking, before merge) or
+    /// "post_merge" (validation against the new default-branch HEAD after
+    /// merge). Defaults to "pre_merge".
+    pub gate_phase: Option<GatePhase>,
+    /// Command timeout in seconds. Defaults to the system default (300s).
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -45,6 +51,10 @@ pub struct GateResponse {
     pub persona: Option<String>,
     /// Whether this gate is blocking (true) or advisory-only (false).
     pub required: bool,
+    /// "pre_merge" or "post_merge".
+    pub gate_phase: String,
+    /// Command timeout in seconds (None = system default).
+    pub timeout_secs: Option<u64>,
     pub created_at: u64,
 }
 
@@ -59,6 +69,8 @@ impl From<QualityGate> for GateResponse {
             required_approvals: g.required_approvals,
             persona: g.persona,
             required: g.required,
+            gate_phase: g.gate_phase.as_str().to_string(),
+            timeout_secs: g.timeout_secs,
             created_at: g.created_at,
         }
     }
@@ -210,6 +222,8 @@ pub async fn create_gate(
         required_approvals: req.required_approvals,
         persona: req.persona,
         required: req.required.unwrap_or(true),
+        gate_phase: req.gate_phase.unwrap_or_default(),
+        timeout_secs: req.timeout_secs,
         created_at: now_secs(),
     };
 

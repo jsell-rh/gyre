@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{GateResult, GateStatus, GateType, QualityGate};
+use gyre_domain::{GatePhase, GateResult, GateStatus, GateType, QualityGate};
 use gyre_ports::{GateResultRepository, QualityGateRepository};
 use std::sync::Arc;
 
@@ -23,6 +23,8 @@ struct QualityGateRow {
     required_approvals: Option<i32>,
     persona: Option<String>,
     required: i32,
+    gate_phase: String,
+    timeout_secs: Option<i64>,
     created_at: i64,
 }
 
@@ -46,6 +48,8 @@ impl QualityGateRow {
             required_approvals: self.required_approvals.map(|v| v as u32),
             persona: self.persona,
             required: self.required != 0,
+            gate_phase: GatePhase::parse(&self.gate_phase).unwrap_or_default(),
+            timeout_secs: self.timeout_secs.map(|v| v as u64),
             created_at: self.created_at as u64,
         }
     }
@@ -62,6 +66,8 @@ struct NewQualityGateRow<'a> {
     required_approvals: Option<i32>,
     persona: Option<&'a str>,
     required: i32,
+    gate_phase: &'a str,
+    timeout_secs: Option<i64>,
     created_at: i64,
 }
 
@@ -92,6 +98,8 @@ impl QualityGateRepository for SqliteStorage {
                 required_approvals: g.required_approvals.map(|v| v as i32),
                 persona: g.persona.as_deref(),
                 required: if g.required { 1 } else { 0 },
+                gate_phase: g.gate_phase.as_str(),
+                timeout_secs: g.timeout_secs.map(|v| v as i64),
                 created_at: g.created_at as i64,
             };
             diesel::insert_into(quality_gates::table)
@@ -105,6 +113,8 @@ impl QualityGateRepository for SqliteStorage {
                     quality_gates::required_approvals.eq(row.required_approvals),
                     quality_gates::persona.eq(row.persona),
                     quality_gates::required.eq(row.required),
+                    quality_gates::gate_phase.eq(row.gate_phase),
+                    quality_gates::timeout_secs.eq(row.timeout_secs),
                 ))
                 .execute(&mut *conn)
                 .context("upsert quality gate")?;

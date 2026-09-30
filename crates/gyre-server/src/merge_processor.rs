@@ -954,6 +954,24 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     };
 
+    // Post-merge recovery: if the queue is paused for this repo (a previous
+    // merge failed post-merge validation and main is red), do not merge.
+    // Leave the entry queued so it is retried once the queue resumes.
+    if merge_queue_paused(state, &repo.id).await {
+        info!(
+            entry_id = %entry.id,
+            repo_id = %repo.id,
+            "merge queue paused for repo, leaving entry queued"
+        );
+        // The entry was claimed as Processing above; put it back so it is
+        // retried once the queue resumes.
+        state
+            .merge_queue
+            .update_status(&entry.id, MergeQueueEntryStatus::Queued, None)
+            .await?;
+        return Ok(());
+    }
+
     // Note: Atomic group readiness (step 4c) is already verified in the
     // selection loop above — no need to re-check here.
 
@@ -1561,6 +1579,23 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 &updated_mr.workspace_id,
             )
             .await;
+
+            // TASK-095: Post-merge validation — run post_merge-phase gates
+            // against the new HEAD of the default branch. On failure, run
+            // the recovery protocol (pause queue, revert, notify, task,
+            // invalidate gates). See platform-model.md §6.
+            if let Err(failure_reason) =
+                crate::gate_executor::run_post_merge_gates(state, &repo, &merge_commit_sha).await
+            {
+                recover_from_post_merge_failure(
+                    state,
+                    &repo,
+                    &updated_mr,
+                    &merge_commit_sha,
+                    &failure_reason,
+                )
+                .await;
+            }
         }
         Ok(MergeResult::Conflict { message }) => {
             warn!(entry_id = %entry.id, reason = %message, "merge conflict");
@@ -1587,6 +1622,282 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// KV namespace for merge queue pause state. Key = repo id, value = JSON
+/// `{"paused": bool, "reason": string}`.
+const MERGE_QUEUE_PAUSE_NS: &str = "merge_queue_pause";
+
+/// Is the merge queue paused for this repo?
+async fn merge_queue_paused(state: &AppState, repo_id: &Id) -> bool {
+    match state.kv_store.kv_get(MERGE_QUEUE_PAUSE_NS, repo_id.as_str()).await {
+        Ok(Some(v)) => serde_json::from_str::<serde_json::Value>(&v)
+            .ok()
+            .and_then(|j| j.get("paused").and_then(|p| p.as_bool()))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Pause the merge queue for this repo (no more merges until main is green).
+/// Persists the pause state and emits a `MergeQueuePaused` event so the
+/// Workspace Orchestrator can reprioritize work (platform-model.md §6).
+async fn pause_merge_queue(state: &AppState, repo: &gyre_domain::Repository, reason: &str) {
+    let payload = serde_json::json!({ "paused": true, "reason": reason }).to_string();
+    if let Err(e) = state
+        .kv_store
+        .kv_set(MERGE_QUEUE_PAUSE_NS, repo.id.as_str(), payload)
+        .await
+    {
+        error!(repo_id = %repo.id, error = %e, "failed to persist merge queue pause");
+    }
+    state
+        .emit_event(
+            Some(repo.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(repo.workspace_id.clone()),
+            gyre_common::message::MessageKind::MergeQueuePaused,
+            Some(serde_json::json!({
+                "repo_id": repo.id.to_string(),
+                "reason": reason,
+            })),
+        )
+        .await;
+}
+
+/// Resume the merge queue for this repo: clear the pause state and emit
+/// `MergeQueueResumed` so watchers know main is green again.
+async fn resume_merge_queue(state: &AppState, repo: &gyre_domain::Repository) {
+    if let Err(e) = state
+        .kv_store
+        .kv_remove(MERGE_QUEUE_PAUSE_NS, repo.id.as_str())
+        .await
+    {
+        warn!(repo_id = %repo.id, error = %e, "failed to clear merge queue pause");
+    }
+    state
+        .emit_event(
+            Some(repo.workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(repo.workspace_id.clone()),
+            gyre_common::message::MessageKind::MergeQueueResumed,
+            Some(serde_json::json!({
+                "repo_id": repo.id.to_string(),
+            })),
+        )
+        .await;
+}
+
+/// Post-merge validation failure recovery (platform-model.md §6):
+///
+/// 1. Pause the merge queue for this repo.
+/// 2. Create a revert commit undoing the merge and push it to the default branch.
+/// 3. Re-run post-merge gates on the reverted HEAD.
+///    - PASS: resume the queue (main is green again).
+///    - FAIL: escalate to a human via a MergeQueueEscalation notification; stay paused.
+/// 4. Mark the MR `Reverted` (both branches — the merge is already undone).
+/// 5. Send the author agent a RevertNotification (event + persisted notification).
+/// 6. Create a remediation task describing the failure.
+/// 7. Invalidate the MR's gate results (they must re-run).
+async fn recover_from_post_merge_failure(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    mr: &MergeRequest,
+    merge_commit_sha: &str,
+    failure_reason: &str,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Step 1: pause the merge queue.
+    pause_merge_queue(state, repo, failure_reason).await;
+
+    // Step 2: forge the revert commit on the default branch.
+    let revert_sha = match state
+        .git_ops
+        .revert_commit(&repo.path, &repo.default_branch, merge_commit_sha)
+        .await
+    {
+        Ok(sha) => sha,
+        Err(e) => {
+            error!(
+                mr_id = %mr.id,
+                merge_sha = %merge_commit_sha,
+                error = %e,
+                "revert commit creation failed — queue stays paused, escalating"
+            );
+            // Cannot revert: escalate immediately, stay paused.
+            notify_escalation(state, repo, mr, &format!(
+                "revert of merge commit {merge_commit_sha} failed: {e}"
+            ))
+            .await;
+            return;
+        }
+    };
+
+    // Step 3: re-run post-merge gates on the reverted HEAD.
+    let revert_green = crate::gate_executor::run_post_merge_gates(state, repo, &revert_sha)
+        .await
+        .is_ok();
+
+    if revert_green {
+        // Main is green again — resume the queue.
+        resume_merge_queue(state, repo).await;
+    } else {
+        // Something else is wrong — escalate to a human, stay paused.
+        notify_escalation(
+            state,
+            repo,
+            mr,
+            &format!(
+                "post-merge gates still failing on reverted HEAD {revert_sha} after reverting MR {} (merge commit {merge_commit_sha}): {failure_reason}",
+                mr.id
+            ),
+        )
+        .await;
+    }
+
+    // Step 4: mark the MR Reverted. The revert_mr_id references the revert
+    // commit that undid this MR (a full revert MR object is not created —
+    // the forge pushed the revert directly to the default branch).
+    let revert_mr_id = Id::new(revert_sha.clone());
+    let mut updated = mr.clone();
+    if let Err(e) = updated.revert(revert_mr_id.clone(), now) {
+        warn!(mr_id = %mr.id, error = %e, "MR could not transition to Reverted (already reverted?)");
+    } else {
+        if let Err(e) = state.merge_requests.update(&updated).await {
+            error!(mr_id = %mr.id, error = %e, "failed to persist Reverted MR status");
+        }
+    }
+
+    // Step 5: RevertNotification to the author agent via event + notification.
+    if let Some(author_agent_id) = &updated.author_agent_id {
+        let payload = serde_json::json!({
+            "mr_id": updated.id.to_string(),
+            "repo_id": repo.id.to_string(),
+            "merge_commit_sha": merge_commit_sha,
+            "revert_commit_sha": revert_sha,
+            "reason": failure_reason,
+        });
+        state
+            .emit_event(
+                Some(updated.workspace_id.clone()),
+                gyre_common::message::Destination::Agent(author_agent_id.clone()),
+                gyre_common::message::MessageKind::MrReverted,
+                Some(payload.clone()),
+            )
+            .await;
+
+        // Persisted notification for the spawning user (falls back to the
+        // agent id itself when no spawning user exists).
+        let spawned_by = state
+            .agents
+            .find_by_id(author_agent_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|a| a.spawned_by);
+        let user_id = match &spawned_by {
+            Some(sb) => Id::new(sb.clone()),
+            None => author_agent_id.clone(),
+        };
+        crate::notifications::notify_rich(
+            state,
+            updated.workspace_id.clone(),
+            user_id,
+            gyre_common::NotificationType::MrReverted,
+            format!("MR '{}' reverted on {}: post-merge validation failed", updated.title, repo.name),
+            "default",
+            Some(payload.to_string()),
+            Some(updated.id.to_string()),
+            Some(repo.id.to_string()),
+        )
+        .await;
+    }
+
+    // Step 6: remediation task.
+    let task_id = Id::new(Uuid::new_v4().to_string());
+    let mut task = gyre_domain::Task::new(
+        task_id,
+        format!("MR {} reverted: {}", updated.id, failure_reason),
+        now,
+    );
+    task.priority = TaskPriority::High;
+    task.labels = vec!["reverted-mr".to_string(), "auto-created".to_string()];
+    task.workspace_id = updated.workspace_id.clone();
+    task.repo_id = updated.repository_id.clone();
+    task.description = Some(format!(
+        "MR '{}' ({}) was merged to {} but failed post-merge validation: {}. \
+         The merge was reverted via commit {}. Re-do the work on a fresh branch \
+         and re-open a merge request.",
+        updated.title,
+        updated.id,
+        repo.default_branch,
+        failure_reason,
+        revert_sha,
+    ));
+    if let Err(e) = state.tasks.create(&task).await {
+        error!(task_id = %task.id, error = %e, "failed to persist remediation task");
+    }
+
+    // Step 7: invalidate the MR's gate results — they must re-run.
+    if let Ok(results) = state.gate_results.list_by_mr_id(updated.id.as_str()).await {
+        for r in results {
+            let _ = state
+                .gate_results
+                .update_status(
+                    r.id.as_str(),
+                    GateStatus::Pending,
+                    None,
+                    None,
+                    Some("invalidated: MR reverted, must re-run".to_string()),
+                )
+                .await;
+        }
+    }
+}
+
+/// Escalate a merge-queue problem to a human: a priority-1
+/// MergeQueueEscalation notification to the MR author's spawning user.
+async fn notify_escalation(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    mr: &MergeRequest,
+    message: &str,
+) {
+    let user_id = match &mr.author_agent_id {
+        Some(author_id) => {
+            let spawned_by = state
+                .agents
+                .find_by_id(author_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|a| a.spawned_by);
+            match &spawned_by {
+                Some(sb) => Id::new(sb.clone()),
+                None => author_id.clone(),
+            }
+        }
+        None => mr.workspace_id.clone(),
+    };
+    crate::notifications::notify_rich(
+        state,
+        mr.workspace_id.clone(),
+        user_id,
+        gyre_common::NotificationType::MergeQueueEscalation,
+        format!("Merge queue escalation on {}", repo.name),
+        "default",
+        Some(serde_json::json!({
+            "repo_id": repo.id.to_string(),
+            "mr_id": mr.id.to_string(),
+            "message": message,
+        })
+        .to_string()),
+        Some(mr.id.to_string()),
+        Some(repo.id.to_string()),
+    )
+    .await;
 }
 
 /// Trigger cascade tests for all repos that depend on the merged repo.
@@ -3161,15 +3472,17 @@ mod tests {
 
         // Create a required quality gate.
         let gate = QualityGate {
-            id: Id::new("gate-1"),
-            repo_id: repo.id.clone(),
-            name: "unit-tests".to_string(),
-            gate_type: GateType::TestCommand,
-            command: Some("cargo test".to_string()),
-            required_approvals: None,
-            persona: None,
-            required: true,
-            created_at: 1000,
+          id: Id::new("gate-1"),
+          repo_id: repo.id.clone(),
+          name: "unit-tests".to_string(),
+          gate_type: GateType::TestCommand,
+          command: Some("cargo test".to_string()),
+          required_approvals: None,
+          persona: None,
+          required: true,
+          gate_phase: Default::default(),
+          timeout_secs: None,
+          created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -3283,15 +3596,17 @@ mod tests {
 
         // Create a required gate and a failed result for mr-a.
         let gate = QualityGate {
-            id: Id::new("gate-1"),
-            repo_id: repo.id.clone(),
-            name: "unit-tests".to_string(),
-            gate_type: GateType::TestCommand,
-            command: Some("cargo test".to_string()),
-            required_approvals: None,
-            persona: None,
-            required: true,
-            created_at: 1000,
+          id: Id::new("gate-1"),
+          repo_id: repo.id.clone(),
+          name: "unit-tests".to_string(),
+          gate_type: GateType::TestCommand,
+          command: Some("cargo test".to_string()),
+          required_approvals: None,
+          persona: None,
+          required: true,
+          gate_phase: Default::default(),
+          timeout_secs: None,
+          created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -3395,15 +3710,17 @@ mod tests {
         // This makes atomic_group_ready("bundle", "mr-a") return Ok(false)
         // because group member mr-c has a pending required gate.
         let gate = QualityGate {
-            id: Id::new("gate-1"),
-            repo_id: repo.id.clone(),
-            name: "unit-tests".to_string(),
-            gate_type: GateType::TestCommand,
-            command: Some("cargo test".to_string()),
-            required_approvals: None,
-            persona: None,
-            required: true,
-            created_at: 1000,
+          id: Id::new("gate-1"),
+          repo_id: repo.id.clone(),
+          name: "unit-tests".to_string(),
+          gate_type: GateType::TestCommand,
+          command: Some("cargo test".to_string()),
+          required_approvals: None,
+          persona: None,
+          required: true,
+          gate_phase: Default::default(),
+          timeout_secs: None,
+          created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -4752,5 +5069,307 @@ mod tests {
             assert_eq!(result.effect, PolicyEffect::Allow);
             assert_eq!(result.matched_policy, Some("allow-tenant".to_string()),);
         }
+    }
+
+    // ── TASK-095: post-merge validation + recovery protocol ─────────────
+
+    use gyre_domain::{GatePhase, MrStatus};
+    use gyre_common::message::MessageKind;
+    use gyre_common::NotificationType;
+
+    /// Create a post-merge TestCommand gate for a repo.
+    async fn create_post_merge_gate(
+        state: &AppState,
+        repo_id: &Id,
+        command: &str,
+        required: bool,
+    ) {
+        let gate = gyre_domain::QualityGate {
+            id: Id::new("gate-pm-1"),
+            repo_id: repo_id.clone(),
+            name: "post-merge-tests".to_string(),
+            gate_type: gyre_domain::GateType::TestCommand,
+            command: Some(command.to_string()),
+            required_approvals: None,
+            persona: None,
+            required,
+            gate_phase: GatePhase::PostMerge,
+            timeout_secs: Some(30),
+            created_at: 1000,
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+    }
+
+    /// Shared setup for recovery tests: repo, author agent (spawned by a
+    /// human), MR, queue entry, and a passing pre-merge gate result so the
+    /// MR is mergeable.
+    async fn setup_recovery_mr(state: &AppState) -> (Repository, gyre_domain::MergeRequest) {
+        let repo = create_repo_in_workspace(state, "recovery-repo", "ws-1").await;
+
+        let mut agent = gyre_domain::Agent::new(Id::new("agent-recov"), "agent-recov", 1000);
+        agent.spawned_by = Some("user-recov".to_string());
+        agent.workspace_id = Id::new("ws-1");
+        state.agents.create(&agent).await.unwrap();
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-recov"),
+            repo.id.clone(),
+            "MR recovery test",
+            "feat/recov",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.author_agent_id = Some(Id::new("agent-recov"));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        enqueue_mr(state, "mr-recov", 100, 1000).await;
+
+        (repo, mr)
+    }
+
+    #[tokio::test]
+    async fn post_merge_pass_does_not_pause_queue() {
+        let state = test_state();
+        let (repo, mr) = setup_recovery_mr(&state).await;
+
+        // `true` always exits 0 → post-merge validation passes.
+        create_post_merge_gate(&state, &repo.id, "true", true).await;
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        process_next(&state).await.unwrap();
+
+        // MR merged, no pause recorded, no MergeQueuePaused event.
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MrStatus::Merged);
+        assert!(!merge_queue_paused(&state, &repo.id).await);
+        assert!(rx.try_recv().is_err(), "no events expected on pass");
+
+        // Merge-success notification was delivered to the author's spawner.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs.iter().any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+            "author spawner should receive the merge notification, got {:?}",
+            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn post_merge_fail_runs_full_recovery_protocol() {
+        let state = test_state();
+        let (repo, mr) = setup_recovery_mr(&state).await;
+
+        // `false` always exits non-zero → required post-merge gate fails,
+        // and re-running on the reverted HEAD fails again → escalation path.
+        create_post_merge_gate(&state, &repo.id, "false", true).await;
+
+        // Pre-existing gate result to verify invalidation.
+        let gr = gyre_domain::GateResult {
+            id: Id::new("gr-recov"),
+            gate_id: Id::new("gate-pm-1"),
+            mr_id: mr.id.clone(),
+            status: GateStatus::Passed,
+            output: None,
+            started_at: None,
+            finished_at: None,
+        };
+        state.gate_results.save(&gr).await.unwrap();
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        process_next(&state).await.unwrap();
+
+        // 1. Queue is paused with the failure reason.
+        let paused = merge_queue_paused(&state, &repo.id).await;
+        assert!(paused, "merge queue should be paused after post-merge failure");
+        let raw = state
+            .kv_store
+            .kv_get("merge_queue_pause", repo.id.as_str())
+            .await
+            .unwrap()
+            .expect("pause state should be persisted");
+        let pause_json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(pause_json["paused"], true);
+        assert!(
+            pause_json["reason"].as_str().unwrap().contains("post-merge-tests"),
+            "pause reason should name the failed gate: {}",
+            pause_json["reason"]
+        );
+
+        // 2. Events: MergeQueuePaused (workspace) and MrReverted (author agent).
+        let mut saw_paused = false;
+        let mut saw_reverted = false;
+        while let Ok(msg) = rx.try_recv() {
+            match msg.kind {
+                MessageKind::MergeQueuePaused => {
+                    saw_paused = true;
+                    assert_eq!(msg.payload.as_ref().unwrap()["repo_id"], repo.id.as_str());
+                }
+                MessageKind::MrReverted => {
+                    saw_reverted = true;
+                    assert_eq!(msg.payload.as_ref().unwrap()["mr_id"], mr.id.as_str());
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_paused, "MergeQueuePaused event should be emitted");
+        assert!(saw_reverted, "MrReverted event should be emitted");
+
+        // 3. MR marked Reverted with reverted_at set.
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MrStatus::Reverted);
+        assert!(updated.reverted_at.is_some());
+        assert!(updated.revert_mr_id.is_some());
+
+        // 4. Author's spawner got a MrReverted notification and (re-run
+        //    failed on the noop revert SHA) a MergeQueueEscalation.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        let types: Vec<&NotificationType> = notifs.iter().map(|n| &n.notification_type).collect();
+        assert!(
+            types.contains(&&NotificationType::MrReverted),
+            "author spawner should receive MrReverted notification, got {types:?}"
+        );
+        assert!(
+            types.contains(&&NotificationType::MergeQueueEscalation),
+            "re-run failure should escalate to human, got {types:?}"
+        );
+
+        // 5. Remediation task created with the failure reason.
+        let tasks = state.tasks.list_by_repo(&repo.id).await.unwrap();
+        let reverted_task = tasks
+            .iter()
+            .find(|t| t.labels.contains(&"reverted-mr".to_string()))
+            .expect("remediation task should exist");
+        assert!(reverted_task.title.contains(mr.id.as_str()));
+        assert!(reverted_task.title.contains("post-merge-tests"));
+        assert_eq!(reverted_task.priority, TaskPriority::High);
+        assert_eq!(reverted_task.workspace_id.as_str(), "ws-1");
+
+        // 6. Gate results invalidated → back to Pending.
+        let results = state.gate_results.list_by_mr_id(mr.id.as_str()).await.unwrap();
+        assert!(
+            results.iter().all(|r| r.status == GateStatus::Pending),
+            "gate results should be invalidated to Pending"
+        );
+
+        // 7. Escalation branch: queue stays paused (re-run failed on noop adapter).
+        assert!(merge_queue_paused(&state, &repo.id).await);
+    }
+
+    #[tokio::test]
+    async fn paused_queue_skips_entries_and_resume_processes_next() {
+        let state = test_state();
+        let (repo, mr) = setup_recovery_mr(&state).await;
+
+        // Pause the queue manually with a reason.
+        state
+            .kv_store
+            .kv_set(
+                "merge_queue_pause",
+                repo.id.as_str(),
+                serde_json::json!({"paused": true, "reason": "manual test pause"}).to_string(),
+            )
+            .await
+            .unwrap();
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        process_next(&state).await.unwrap();
+
+        // Entry stays Queued and the MR stays Open — no merge while paused.
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-recov"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Queued);
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MrStatus::Open);
+        assert!(rx.try_recv().is_err(), "no events expected while paused");
+
+        // Resume → next cycle merges the MR (NoopGitOps succeeds).
+        resume_merge_queue(&state, &repo).await;
+        process_next(&state).await.unwrap();
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MrStatus::Merged, "resumed queue should merge the entry");
+        assert!(!merge_queue_paused(&state, &repo.id).await);
+
+        // Merge-success notification delivered after resume.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs.iter().any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+            "author spawner should receive the merge notification, got {:?}",
+            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn advisory_post_merge_gate_failure_does_not_pause() {
+        let state = test_state();
+        let (repo, mr) = setup_recovery_mr(&state).await;
+
+        // Non-required gate fails → advisory only, no pause.
+        create_post_merge_gate(&state, &repo.id, "false", false).await;
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MrStatus::Merged);
+        assert!(!merge_queue_paused(&state, &repo.id).await, "advisory failure must not pause");
+        assert!(rx.try_recv().is_err(), "no recovery events for advisory failure");
+
+        // Merge succeeded → merge notification, but no recovery notifications.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs.iter().any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+            "author spawner should receive the merge notification, got {:?}",
+            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+        );
+        assert!(
+            !notifs.iter().any(|n| n.notification_type == NotificationType::MrReverted
+                || n.notification_type == NotificationType::MergeQueueEscalation),
+            "advisory failure must not produce recovery notifications"
+        );
     }
 }

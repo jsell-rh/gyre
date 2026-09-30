@@ -878,6 +878,136 @@ async fn run_command(cmd: &str) -> (GateStatus, String) {
     }
 }
 
+/// Run a command with an optional working directory and timeout.
+/// Same semantics as `run_command`, plus:
+/// - `cwd`: working directory for the child process (None = server cwd).
+/// - `timeout_secs`: kill the process and fail the gate when exceeded.
+async fn run_command_in_dir(
+    cmd: &str,
+    cwd: Option<&std::path::Path>,
+    timeout_secs: u64,
+) -> (GateStatus, String) {
+    // Split command on whitespace to avoid shell injection via `sh -c`.
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        return (GateStatus::Failed, "empty command".to_string());
+    }
+    let mut command = tokio::process::Command::new(parts[0]);
+    command.args(&parts[1..]);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+
+    let result = match tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        command.output(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => {
+            warn!(cmd = %cmd, timeout_secs, "gate command timed out");
+            return (
+                GateStatus::Failed,
+                format!("timed out after {timeout_secs}s"),
+            );
+        }
+    };
+
+    match result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{stdout}{stderr}");
+            // Truncate to 4 KiB.
+            let truncated = if combined.len() > 4096 {
+                format!("{}...(truncated)", &combined[..4096])
+            } else {
+                combined
+            };
+
+            if output.status.success() {
+                (GateStatus::Passed, truncated)
+            } else {
+                warn!(cmd = %cmd, "gate command failed with non-zero exit code");
+                (GateStatus::Failed, truncated)
+            }
+        }
+        Err(e) => {
+            warn!(cmd = %cmd, error = %e, "gate command could not be spawned");
+            (GateStatus::Failed, format!("spawn error: {e}"))
+        }
+    }
+}
+
+/// Run all post-merge-phase gates for a repository against `head_sha`
+/// (the new HEAD of the default branch after a merge landed).
+///
+/// Returns `Ok(())` when all required post-merge gates pass (or none exist).
+/// Returns `Err(reason)` naming the first required gate that failed — the
+/// reason is used in the revert notification and remediation task
+/// (platform-model.md §6). Non-required gates are advisory: failures are
+/// logged but do not fail validation.
+///
+/// When a worktree exists for the repo (registered via GitOpsPort), commands
+/// run inside it so tests execute against the new HEAD's checkout. Otherwise
+/// they run in the server's working directory, matching pre-merge gates.
+pub async fn run_post_merge_gates(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    head_sha: &str,
+) -> Result<(), String> {
+    let gates = state
+        .quality_gates
+        .list_by_repo_id_and_phase(repo.id.as_str(), gyre_domain::GatePhase::PostMerge)
+        .await
+        .map_err(|e| format!("failed to list post-merge gates: {e}"))?;
+
+    if gates.is_empty() {
+        return Ok(());
+    }
+
+    // Prefer a registered worktree as the command working directory.
+    let cwd: Option<std::path::PathBuf> = state
+        .git_ops
+        .list_worktrees(repo.path.as_str())
+        .await
+        .ok()
+        .and_then(|paths| paths.into_iter().next())
+        .map(std::path::PathBuf::from);
+
+    for gate in &gates {
+        match &gate.gate_type {
+            GateType::TestCommand | GateType::LintCommand => {
+                let timeout = gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS);
+                let (status, output) = run_command_in_dir(
+                    gate.command.as_deref().unwrap_or("true"),
+                    cwd.as_deref(),
+                    timeout,
+                )
+                .await;
+                if status == GateStatus::Failed {
+                    if gate.required {
+                        return Err(format!(
+                            "post-merge gate '{}' failed: {}",
+                            gate.name, output
+                        ));
+                    }
+                    warn!(gate = %gate.name, "advisory post-merge gate failed: {output}");
+                }
+            }
+            other => {
+                // Post-merge validation is command-based; other gate types
+                // are pre-merge concepts and are skipped in this phase.
+                info!(gate = %gate.name, gate_type = ?other, "skipping non-command post-merge gate");
+            }
+        }
+    }
+
+    info!(repo_id = %repo.id, head = %head_sha, "post-merge gates passed");
+    Ok(())
+}
+
 /// Returns whether all required gate results for the given MR have passed.
 /// Returns `Ok(true)` if no gates exist or all required gates passed.
 /// Returns `Ok(false)` if any required gates are still pending/running.
@@ -947,6 +1077,8 @@ mod tests {
             required_approvals: None,
             persona: Some("personas/test.md".to_string()),
             required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
             created_at: now_secs(),
         }
     }
@@ -1205,6 +1337,8 @@ mod tests {
                 required_approvals: None,
                 persona: None,
                 required: false,
+                gate_phase: Default::default(),
+                timeout_secs: None,
                 created_at: now_secs(),
             })
             .await

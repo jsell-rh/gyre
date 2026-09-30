@@ -100,4 +100,17 @@ pub trait GitOpsPort: Send + Sync {
         branch: &str,
         file_path: &str,
     ) -> Result<Option<Vec<u8>>>;
+
+    /// Create a revert commit on `branch` that undoes `sha_to_revert`.
+    ///
+    /// The revert commit's tree is the first parent's tree of `sha_to_revert`,
+    /// and its parent is the current tip of `branch`. Returns the revert
+    /// commit's SHA. Used by the post-merge recovery protocol
+    /// (platform-model.md §6).
+    async fn revert_commit(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        sha_to_revert: &str,
+    ) -> Result<String>;
 }

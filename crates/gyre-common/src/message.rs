@@ -124,6 +124,18 @@ pub enum MessageKind {
     /// server_only = true. Tier: Event (signed, TTL).
     /// Broadcast to workspace — all group members rolled back and requeued.
     AtomicGroupFailed,
+    /// Emitted when a merged MR is reverted by the post-merge recovery protocol
+    /// (platform-model.md §6 Rollback & Recovery). server_only = true.
+    /// Tier: Event (signed, TTL). Directed to the author agent.
+    MrReverted,
+    /// Emitted when a repository's merge queue is paused by the recovery protocol.
+    /// server_only = true. Tier: Event (signed, TTL).
+    /// Broadcast to workspace — agents keep working, merges hold.
+    MergeQueuePaused,
+    /// Emitted when a repository's merge queue resumes after a successful recovery.
+    /// server_only = true. Tier: Event (signed, TTL).
+    /// Broadcast to workspace.
+    MergeQueueResumed,
 
     // ── Tier 3: Telemetry (unsigned + in-memory only) ──────────────────
     ToolCallStart,
@@ -159,7 +171,10 @@ impl MessageKind {
             MessageKind::QueueUpdated => "queue_updated",
             MessageKind::PushRejected => "push_rejected",
             MessageKind::PushAccepted => "push_accepted",
-            MessageKind::SpecChanged => "spec_changed",
+            MessageKind::AtomicGroupFailed => "atomic_group_failed",
+            MessageKind::MrReverted => "mr_reverted",
+            MessageKind::MergeQueuePaused => "merge_queue_paused",
+            MessageKind::MergeQueueResumed => "merge_queue_resumed",
             MessageKind::SpecApproved => "spec_approved",
             MessageKind::GateFailure => "gate_failure",
             MessageKind::StaleSpecWarning => "stale_spec_warning",
@@ -171,7 +186,7 @@ impl MessageKind {
             MessageKind::BudgetExhausted => "budget_exhausted",
             MessageKind::AgentError => "agent_error",
             MessageKind::ConstraintViolation => "constraint_violation",
-            MessageKind::AtomicGroupFailed => "atomic_group_failed",
+            MessageKind::SpecChanged => "spec_changed",
             MessageKind::ToolCallStart => "tool_call_start",
             MessageKind::ToolCallEnd => "tool_call_end",
             MessageKind::TextMessageContent => "text_message_content",
@@ -213,6 +228,9 @@ impl MessageKind {
                 | MessageKind::AgentError
                 | MessageKind::ConstraintViolation
                 | MessageKind::AtomicGroupFailed
+                | MessageKind::MrReverted
+                | MessageKind::MergeQueuePaused
+                | MessageKind::MergeQueueResumed
         )
     }
 
@@ -251,6 +269,9 @@ impl MessageKind {
             | MessageKind::AgentError
             | MessageKind::ConstraintViolation
             | MessageKind::AtomicGroupFailed
+            | MessageKind::MrReverted
+            | MessageKind::MergeQueuePaused
+            | MessageKind::MergeQueueResumed
             | MessageKind::Custom(_) => MessageTier::Event,
 
             MessageKind::ToolCallStart
@@ -295,6 +316,9 @@ impl MessageKind {
             "agent_error" => MessageKind::AgentError,
             "constraint_violation" => MessageKind::ConstraintViolation,
             "atomic_group_failed" => MessageKind::AtomicGroupFailed,
+            "mr_reverted" => MessageKind::MrReverted,
+            "merge_queue_paused" => MessageKind::MergeQueuePaused,
+            "merge_queue_resumed" => MessageKind::MergeQueueResumed,
             "tool_call_start" => MessageKind::ToolCallStart,
             "tool_call_end" => MessageKind::ToolCallEnd,
             "text_message_content" => MessageKind::TextMessageContent,
@@ -547,7 +571,10 @@ mod tests {
             MessageKind::AgentCompleted,
             MessageKind::ReconciliationCompleted,
             MessageKind::TaskCreated,
-            MessageKind::TaskTransitioned,
+            MessageKind::AtomicGroupFailed,
+            MessageKind::MrReverted,
+            MessageKind::MergeQueuePaused,
+            MessageKind::MergeQueueResumed,
             MessageKind::MrCreated,
             MessageKind::MrStatusChanged,
             MessageKind::MrMerged,

@@ -609,6 +609,58 @@ impl GitOpsPort for Git2OpsAdapter {
         })
         .await?
     }
+
+    async fn revert_commit(
+        &self,
+        repo_path: &str,
+        branch: &str,
+        sha_to_revert: &str,
+    ) -> Result<String> {
+        let repo_path = repo_path.to_string();
+        let branch = branch.to_string();
+        let sha_to_revert = sha_to_revert.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+
+            let revert_oid =
+                git2::Oid::from_str(&sha_to_revert).context("invalid revert SHA")?;
+            let revert_commit = repo
+                .find_commit(revert_oid)
+                .context("revert SHA is not a valid commit")?;
+            if revert_commit.parent_count() == 0 {
+                anyhow::bail!("cannot revert a root commit: {sha_to_revert}");
+            }
+            // The revert restores the first parent's tree.
+            let parent_commit = revert_commit.parent(0)?;
+            let tree = parent_commit.tree()?;
+
+            // The new commit's parent is the current branch tip.
+            let branch_ref = repo
+                .find_branch(&branch, BranchType::Local)
+                .with_context(|| format!("branch '{branch}' not found"))?;
+            let tip_commit = branch_ref.get().peel_to_commit()?;
+
+            // Message mirrors `git revert`'s default.
+            let subject = revert_commit
+                .summary()
+                .unwrap_or("commit")
+                .to_string();
+            let message = format!(
+                "Revert \"{subject}\"\n\nThis reverts commit {sha_to_revert}."
+            );
+            let sig = git2::Signature::now("Gyre", "gyre@local")?;
+            let commit_id = repo.commit(
+                Some(&format!("refs/heads/{branch}")),
+                &sig,
+                &sig,
+                &message,
+                &tree,
+                &[&tip_commit],
+            )?;
+            Ok(commit_id.to_string())
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -699,6 +751,63 @@ mod tests {
         assert_eq!(branches[0].name, "main");
         assert!(branches[0].is_default);
         assert!(!branches[0].head_sha.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_revert_commit_restores_parent_tree() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let adapter = Git2OpsAdapter::new();
+        let workdir = repo.workdir().unwrap().to_str().unwrap().to_string();
+
+        // Point HEAD at main (unborn), then commit base.
+        repo.set_head("refs/heads/main").unwrap();
+        std::fs::write(dir.path().join("file.txt"), "base").unwrap();
+        let base = make_commit(&repo, "base");
+
+        // Merge commit: change the file via write_file (merges into main tip).
+        let merge_sha = adapter
+            .write_file(&workdir, "main", "file.txt", b"changed", "change file")
+            .await
+            .unwrap();
+
+        // Revert the merge commit.
+        let revert_sha = adapter
+            .revert_commit(&workdir, "main", &merge_sha)
+            .await
+            .unwrap();
+
+        // Revert commit is the new main tip.
+        let repo = Repository::open(&workdir).unwrap();
+        let branch = repo.find_branch("main", git2::BranchType::Local).unwrap();
+        let tip = branch.get().peel_to_commit().unwrap();
+        assert_eq!(tip.id().to_string(), revert_sha);
+
+        // Its tree equals the base commit's tree (the change is undone).
+        assert_eq!(tip.tree_id(), repo.find_commit(base).unwrap().tree_id());
+
+        // Its parent is the reverted merge commit.
+        assert_eq!(tip.parent(0).unwrap().id().to_string(), merge_sha);
+
+        // The message mirrors `git revert`.
+        assert!(tip.message().unwrap().starts_with("Revert \"change file\""));
+        assert!(tip.message().unwrap().contains(&merge_sha));
+    }
+
+    #[tokio::test]
+    async fn test_revert_commit_rejects_root_commit() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let adapter = Git2OpsAdapter::new();
+        let workdir = repo.workdir().unwrap().to_str().unwrap().to_string();
+
+        // Point HEAD at main (unborn), then commit root.
+        repo.set_head("refs/heads/main").unwrap();
+        std::fs::write(dir.path().join("file.txt"), "base").unwrap();
+        let root = make_commit(&repo, "root");
+
+        let result = adapter.revert_commit(&workdir, "main", &root.to_string()).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

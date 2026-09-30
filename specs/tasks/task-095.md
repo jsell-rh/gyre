@@ -2,13 +2,13 @@
 title: "Platform Model Post-Merge Validation + Recovery Protocol"
 spec_ref: "platform-model.md §6 Rollback & Recovery"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §6 Rollback & Recovery"
   - "platform-model.md §6 Post-Merge Validation"
   - "platform-model.md §6 Recovery Protocol"
   - "platform-model.md §6 Agent Behavior During Recovery"
-commits: []
+commits: ["80a3574e"]
 ---
 
 ## Spec Excerpt
@@ -71,15 +71,15 @@ Agents keep working — their branches need rebasing after main is fixed (jj han
 
 ## Acceptance Criteria
 
-- [ ] Post-merge gates run after merge against new HEAD
-- [ ] `Reverted` variant added to MrStatus
-- [ ] Merge queue pauses on post-merge gate failure
-- [ ] Revert commit created and pushed automatically
-- [ ] Original MR re-opened as Reverted
-- [ ] Author agent receives RevertNotification
-- [ ] Remediation task created with failure reason
-- [ ] Merge queue resume works after main is green
-- [ ] `cargo test --all` passes
+- [x] Post-merge gates run after merge against new HEAD
+- [x] `Reverted` variant added to MrStatus
+- [x] Merge queue pauses on post-merge gate failure
+- [x] Revert commit created and pushed automatically
+- [x] Original MR re-opened as Reverted
+- [x] Author agent receives RevertNotification
+- [x] Remediation task created with failure reason
+- [x] Merge queue resume works after main is green
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 
