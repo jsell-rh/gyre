@@ -2,13 +2,13 @@
 title: "View Query Grammar — Core Type Definitions & Computed Reference Resolver"
 spec_ref: "view-query-grammar.md §1–3"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: "specs/reviews/task-062.md"
 coverage_sections:
   - "view-query-grammar.md §1 Problem"
   - "view-query-grammar.md §2 Primitives"
   - "view-query-grammar.md §3 1. Computed References"
-commits: ["ce4845cc", "30a46847", "e482bbf3", "e828ff39", "cbcbd6ab", "7acf6d2e"]
+commits: ["ce4845cc", "30a46847", "e482bbf3", "e828ff39", "cbcbd6ab", "7acf6d2e", "2bf5eb20", "2d0cff8f", "7364e938", "a7303e58", "5166cabd"]
 ---
 
 ## Spec Excerpt

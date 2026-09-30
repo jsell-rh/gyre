@@ -14,6 +14,15 @@
 // node, and Contains would make every sibling in a tested module "covered".
 export const TEST_REACHABILITY_EDGES = new Set(['calls']);
 
+// BFS depth caps — mirror the backend resolver so a reference resolves
+// identically on both surfaces (§3 "All computations are deterministic"):
+//   compute_test_reachable caps at depth 100
+//     (crates/gyre-domain/src/view_query_resolver.rs:421)
+//   compute_all_test_fragility traverses via bfs_traverse(..., 20, ...)
+//     (crates/gyre-domain/src/view_query_resolver.rs:457)
+export const REACHABLE_MAX_DEPTH = 100;
+export const FRAGILITY_MAX_DEPTH = 20;
+
 // Node types that count as testable for coverage-gap analysis.
 const TESTABLE_TYPES = new Set(['function', 'method', 'endpoint', 'type', 'trait', 'class']);
 
@@ -38,17 +47,21 @@ export function buildAdjacency(edges) {
 }
 
 // $test_reachable — every node id reachable from any test function via
-// Calls (outgoing only). Includes the test nodes themselves.
-export function computeTestReachable(nodes, adjacency) {
+// Calls (outgoing only). Includes the test nodes themselves. BFS is capped
+// at maxDepth hops, mirroring the backend `compute_test_reachable` depth
+// cap (view_query_resolver.rs — "if depth > 100 { continue; }").
+export function computeTestReachable(nodes, adjacency, maxDepth = REACHABLE_MAX_DEPTH) {
   const testN = nodes.filter(n => n.test_node);
-  const reachable = new Set(testN.map(n => n.id));
-  const q = [...reachable];
+  const reachable = new Set();
+  const q = testN.map(n => [n.id, 0]);
   while (q.length > 0) {
-    const id = q.shift();
+    const [id, depth] = q.shift();
+    if (depth > maxDepth || reachable.has(id)) continue;
+    reachable.add(id);
     for (const nb of (adjacency.get(id) ?? [])) {
-      if (reachable.has(nb.targetId) || !TEST_REACHABILITY_EDGES.has(nb.edgeType) || nb.reverse) continue;
-      reachable.add(nb.targetId);
-      q.push(nb.targetId);
+      if (TEST_REACHABILITY_EDGES.has(nb.edgeType) && !nb.reverse && !reachable.has(nb.targetId)) {
+        q.push([nb.targetId, depth + 1]);
+      }
     }
   }
   return reachable;
@@ -56,8 +69,8 @@ export function computeTestReachable(nodes, adjacency) {
 
 // $test_unreachable — testable, non-test nodes NOT reachable from any test
 // function via Calls.
-export function computeTestUnreachable(nodes, adjacency) {
-  const reachable = computeTestReachable(nodes, adjacency);
+export function computeTestUnreachable(nodes, adjacency, maxDepth = REACHABLE_MAX_DEPTH) {
+  const reachable = computeTestReachable(nodes, adjacency, maxDepth);
   const result = new Set();
   for (const n of nodes) {
     if (!n.test_node && TESTABLE_TYPES.has(n.node_type) && !reachable.has(n.id)) result.add(n.id);
@@ -67,8 +80,8 @@ export function computeTestUnreachable(nodes, adjacency) {
 
 // §2 test_gaps scope — Map of gap node id -> 0 (matched depth), or null when
 // the graph has no coverage gaps. Matches the queryMatchedWithDepth contract.
-export function computeTestGaps(nodes, adjacency) {
-  const gaps = computeTestUnreachable(nodes, adjacency);
+export function computeTestGaps(nodes, adjacency, maxDepth = REACHABLE_MAX_DEPTH) {
+  const gaps = computeTestUnreachable(nodes, adjacency, maxDepth);
   if (gaps.size === 0) return null;
   const matched = new Map();
   for (const id of gaps) matched.set(id, 0);
@@ -76,19 +89,23 @@ export function computeTestGaps(nodes, adjacency) {
 }
 
 // $test_fragility — for each node, the count of distinct test functions whose
-// Calls-only traversal reaches it. O(T*(N+M)); callers cache the result.
-export function computeTestFragilityCounts(nodes, adjacency) {
+// Calls-only traversal reaches it. O(T*(N+M)); callers cache the result. BFS
+// from each test is capped at maxDepth hops, mirroring the backend
+// `compute_all_test_fragility`, which passes depth 20 to bfs_traverse
+// (view_query_resolver.rs).
+export function computeTestFragilityCounts(nodes, adjacency, maxDepth = FRAGILITY_MAX_DEPTH) {
   const fragility = new Map(); // node_id -> count of distinct tests reaching it
   const testNodes = nodes.filter(n => n.test_node);
   for (const tn of testNodes) {
     const reached = new Set([tn.id]);
-    const q = [tn.id];
+    const q = [[tn.id, 0]];
     while (q.length > 0) {
-      const id = q.shift();
+      const [id, depth] = q.shift();
+      if (depth >= maxDepth) continue;
       for (const nb of (adjacency.get(id) ?? [])) {
         if (TEST_REACHABILITY_EDGES.has(nb.edgeType) && !nb.reverse && !reached.has(nb.targetId)) {
           reached.add(nb.targetId);
-          q.push(nb.targetId);
+          q.push([nb.targetId, depth + 1]);
         }
       }
     }

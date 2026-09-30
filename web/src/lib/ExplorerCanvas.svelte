@@ -15,6 +15,7 @@
     computeTestReachable as computeTestReachableSet,
     computeTestUnreachable as computeTestUnreachableSet,
   } from './test-reachability.js';
+  import { edgePassesFilter } from './canvas-filters.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null }} */
   let {
@@ -1608,15 +1609,10 @@
     }
   }
 
+  // Edge rendering per active filter — mapping lives in canvas-filters.js
+  // (unit-testable; must stay in agreement with filterOpacity above).
   function filterEdge(edge) {
-    if (filter === 'all') return true;
-    const et = (edge.edge_type ?? edge.type ?? '').toLowerCase();
-    switch (filter) {
-      case 'endpoints': return et === 'calls' || et === 'routes_to';
-      case 'types': return et === 'field_of' || et === 'depends_on';
-      case 'calls': return et === 'calls';
-      default: return true;
-    }
+    return edgePassesFilter(filter, edge.edge_type ?? edge.type ?? '');
   }
 
   let adjacency = $derived.by(() => buildAdjacency(edges));
