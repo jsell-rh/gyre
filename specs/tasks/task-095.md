@@ -2,14 +2,14 @@
 title: "Platform Model Post-Merge Validation + Recovery Protocol"
 spec_ref: "platform-model.md §6 Rollback & Recovery"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-095.md
 coverage_sections:
   - "platform-model.md §6 Rollback & Recovery"
   - "platform-model.md §6 Post-Merge Validation"
   - "platform-model.md §6 Recovery Protocol"
   - "platform-model.md §6 Agent Behavior During Recovery"
-commits: ["03dc80a7", "287c5a08"]
+commits: ["7c723298", "86c7d382", "3a9b11f6"]
 ---
 
 ## Spec Excerpt

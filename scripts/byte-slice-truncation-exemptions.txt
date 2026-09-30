@@ -11,13 +11,8 @@
 #
 # See: specs/reviews/task-095.md F4 (the finding that created this check)
 #
-# --- task-095 revision round owns these (gate output truncation) ---
-crates/gyre-server/src/gate_executor.rs:251   # &output[..GATE_ATTESTATION_OUTPUT_LIMIT]
-crates/gyre-server/src/gate_executor.rs:430   # &process_output[..4096]
-crates/gyre-server/src/gate_executor.rs:661   # &process_output[..4096]
-crates/gyre-server/src/gate_executor.rs:862   # &combined[..4096] — run_command (review F4 exact site)
-crates/gyre-server/src/gate_executor.rs:924   # &combined[..4096] — run_command_in_dir (review F4 exact site)
-#
+# --- task-095 sites fixed in revision round (3a9b11f6): gate_executor.rs
+# truncation now routes through truncate_bytes() — lines deleted per policy ---
 # --- unowned; fix opportunistically when touching these files ---
 crates/gyre-server/src/api/specs.rs:282       # &e.current_sha[..8] — hex sha
 crates/gyre-server/src/explorer_ws.rs:2882    # &raw_preview[..500] — JSON preview
