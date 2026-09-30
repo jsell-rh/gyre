@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-09-29
+**Last updated:** 2026-09-30
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
