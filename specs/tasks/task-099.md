@@ -2,7 +2,8 @@
 title: "Platform Model Bootstrap Command"
 spec_ref: "platform-model.md §8 Bootstrap & First-Run"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
+review: specs/reviews/task-099.md
 coverage_sections:
   - "platform-model.md §8 Bootstrap & First-Run"
   - "platform-model.md §8 gyre bootstrap CLI Command"
