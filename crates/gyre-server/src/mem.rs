@@ -1524,6 +1524,9 @@ impl MemWorkspaceRepository {
     }
 
     /// Test hook: cause subsequent `apply_trust_transition` calls to fail.
+    /// Only used by `#[cfg(test)]` wiring (`shared_workspace_policy_pair`),
+    /// so gated to test builds to avoid dead-code warnings in the lib.
+    #[cfg(test)]
     pub fn fail_trust_transitions(&self) {
         self.fail_trust_transition
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1695,11 +1698,6 @@ impl MemPolicyRepository {
             policies,
             decisions: Arc::new(Mutex::new(Vec::new())),
         }
-    }
-
-    /// Clone the shared policy-store handle (for wiring a paired workspace repo).
-    pub fn store(&self) -> Arc<Mutex<HashMap<String, gyre_domain::Policy>>> {
-        Arc::clone(&self.policies)
     }
 }
 
