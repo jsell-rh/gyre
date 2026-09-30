@@ -109,30 +109,38 @@ fn decrypt_value(key: &LessSafeKey, ciphertext: &[u8], nonce: &[u8]) -> Result<V
     Ok(in_out)
 }
 
+/// Derive the 32-byte AES key from the `GYRE_SECRET_ENCRYPTION_KEY` value.
+///
+/// Accepts a 64-char hex string (32 bytes) or any other string, which is
+/// hashed with SHA-256 to derive 32 key bytes. Returns `None` when the env
+/// var is unset. Pure: no process state mutated, so it is unit-testable.
+fn key_bytes_from_env_value(env_key: &str) -> Result<[u8; 32]> {
+    use ring::digest::{digest, SHA256};
+    if env_key.trim().len() == 64 {
+        // Hex-encoded 32-byte key.
+        let bytes = hex::decode(env_key.trim())
+            .map_err(|e| anyhow::anyhow!("GYRE_SECRET_ENCRYPTION_KEY is not valid hex: {e}"))?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    } else {
+        // Arbitrary passphrase: derive 32 bytes via SHA-256.
+        let d = digest(&SHA256, env_key.as_bytes());
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(d.as_ref());
+        Ok(arr)
+    }
+}
+
 /// Load the AES-256-GCM key.
 ///
 /// Priority:
-/// 1. `GYRE_SECRET_ENCRYPTION_KEY` env var: hex string (64 hex chars) or any
-///    other string, which is hashed with SHA-256 to derive 32 key bytes.
+/// 1. `GYRE_SECRET_ENCRYPTION_KEY` env var (see [`key_bytes_from_env_value`]).
 /// 2. Auto-generated random key, persisted in the kv_store table so it is
 ///    stable across server restarts.
 fn load_encryption_key(conn: &mut SqliteConnection) -> Result<LessSafeKey> {
-    use ring::digest::{digest, SHA256};
     let key_bytes: [u8; 32] = if let Ok(env_key) = std::env::var("GYRE_SECRET_ENCRYPTION_KEY") {
-        if env_key.trim().len() == 64 {
-            // Hex-encoded 32-byte key.
-            let bytes = hex::decode(env_key.trim())
-                .map_err(|e| anyhow::anyhow!("GYRE_SECRET_ENCRYPTION_KEY is not valid hex: {e}"))?;
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            arr
-        } else {
-            // Arbitrary passphrase: derive 32 bytes via SHA-256.
-            let d = digest(&SHA256, env_key.as_bytes());
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(d.as_ref());
-            arr
-        }
+        key_bytes_from_env_value(&env_key)?
     } else {
         // Auto-generate and persist so restarts can still decrypt stored secrets.
         let existing = kv_get(conn, KEY_NAMESPACE, KEY_KV_KEY)?;
@@ -639,19 +647,43 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_key_fails_decryption() {
-        let (tmp, storage) = tmp_storage();
+        // Encrypt with the storage's key, then decrypt with a different key
+        // constructed directly — no process-env mutation (tests run in
+        // parallel and share the environment).
+        let (_tmp, storage) = tmp_storage();
         let secret = sample_secret("A", SecretScope::Repo, "repo-1", "t1");
         storage.create(&secret, b"some-secret-value").await.unwrap();
-        // Reopen with a different explicit key.
-        drop(storage);
-        std::env::set_var(
-            "GYRE_SECRET_ENCRYPTION_KEY",
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        let (ciphertext, nonce) = decrypt_row(&storage, secret.id.as_str());
+        let other_bytes = [7u8; 32];
+        let other_key = LessSafeKey::new(
+            UnboundKey::new(&AES_256_GCM, &other_bytes).expect("valid key length"),
         );
-        let storage2 = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
-        let err = storage2.get_value(&secret.id, "t1").await.unwrap_err();
-        std::env::remove_var("GYRE_SECRET_ENCRYPTION_KEY");
+        let err = decrypt_value(&other_key, &ciphertext, &nonce).unwrap_err();
         assert!(err.to_string().contains("decryption failed"));
+    }
+
+    #[test]
+    fn env_key_derivation_hex_and_passphrase() {
+        // 64-hex-char value decodes to the raw 32 bytes.
+        let hex_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            key_bytes_from_env_value(hex_key).unwrap(),
+            [
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+                0x89, 0xab, 0xcd, 0xef
+            ]
+        );
+        // Non-hex value is hashed with SHA-256.
+        let d = ring::digest::digest(&ring::digest::SHA256, b"passphrase");
+        let mut expected = [0u8; 32];
+        expected.copy_from_slice(d.as_ref());
+        assert_eq!(key_bytes_from_env_value("passphrase").unwrap(), expected);
+        // Whitespace around a hex value is trimmed before decoding.
+        assert_eq!(
+            key_bytes_from_env_value(&format!("  {hex_key}  ")).unwrap(),
+            key_bytes_from_env_value(hex_key).unwrap()
+        );
     }
 
     #[tokio::test]
