@@ -8,7 +8,7 @@ coverage_sections:
   - "view-query-grammar.md §1 Problem"
   - "view-query-grammar.md §2 Primitives"
   - "view-query-grammar.md §3 1. Computed References"
-commits: ["ce4845cc", "30a46847", "e482bbf3", "e828ff39", "cbcbd6ab", "7acf6d2e", "decb0353", "afac7264"]
+commits: ["ce4845cc", "30a46847", "e482bbf3", "e828ff39", "cbcbd6ab", "7acf6d2e", "4a16b621", "23a59fa1", "14e153ab", "77389ee6"]
 ---
 
 ## Spec Excerpt
