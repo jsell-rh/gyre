@@ -1,18 +1,18 @@
 # Coverage: Explorer Canvas
 
 **Spec:** [`system/explorer-canvas.md`](../../system/explorer-canvas.md)
-**Last audited:** 2026-04-13
+**Last audited:** 2026-09-30 (full re-audit — 7 task-assigned rows untouched per rules (task-065/066/067/081 all progress: not-started), notes refreshed with fresh code evidence; 3 n/a rows spot-checked correct. No status changes. Material finding for PM: substantial untasked substrate now exists in ExplorerCanvas.svelte (5969 lines) — lens toggle incl. grayed-out Observable, evaluative overlay w/ particles + playback, drill-down + breadcrumb, trace-from-here, edge click detail — substantially overlapping task-065/066/067 scope; PM should verify coverage_sections of those tasks against current code before spawning, and note MoldableView (split Graph/Flow tabs) is now test-only — the live surface is ExplorerView/RepoMode Architecture tab.)
 **Coverage:** 0/10
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|
-| 1 | Problem | 2 | task-assigned | task-065 | |
-| 2 | Design | 2 | task-assigned | task-065 | |
-| 3 | One Canvas, Three Lenses | 3 | task-assigned | task-065 | |
-| 4 | Lens Definitions | 3 | task-assigned | task-066 | |
-| 5 | Progressive Drill-Down | 3 | task-assigned | task-067 | |
-| 6 | Causal Flow Trace (Structural Lens Feature) | 3 | task-assigned | task-081 | Depends on task-072 (LSP call graph) |
-| 7 | Data Requirements Summary | 3 | n/a | - | Reference table — no implementable requirement |
-| 8 | Component Architecture | 3 | task-assigned | task-065 | |
-| 9 | Implementation Phases | 3 | n/a | - | Phased rollout tracking — no implementable requirement |
-| 10 | Relationship to Other Specs | 2 | n/a | - | Cross-reference section |
+| 1 | Problem | 2 | task-assigned | task-065 | Substrate note (2026-09-30): spec's premise (split Graph + Flow tabs in MoldableView) is partially moot — MoldableView is test-only (zero imports outside web/src/__tests__), the live surface is ExplorerView (RepoMode Architecture tab) rendering ExplorerCanvas with the lens toggle. |
+| 2 | Design | 2 | task-assigned | task-065 | Substrate note (2026-09-30): single interactive canvas exists — ExplorerCanvas.svelte (5969 ln, lens default 'structural' :27) renders topology + evaluative overlay in one surface (toolbar lens-group :5008-5012). FlowRenderer/FlowCanvas still exist but only on the test-only MoldableView path. |
+| 3 | One Canvas, Three Lenses | 3 | task-assigned | task-065 | Substrate note (2026-09-30): lens toggle with all three lenses in toolbar (ExplorerCanvas.svelte:5008-5012) — Structural/Evaluative active buttons (aria-pressed) + Observable disabled w/ "coming soon" + ObservableBanner notice (:5439-5443), matching spec incl. the grayed-out Observable requirement. Lens wired through ExplorerView (:1322,1559). task-065 not-started. |
+| 4 | Lens Definitions | 3 | task-assigned | task-066 | Substrate note (2026-09-30): Evaluative lens substantially real in ExplorerCanvas: particles on edges from real trace data (:2351,3815), node heat/error glow (:3197), edge thickness by call frequency (:3491), playback controls w/ scrubber + speed clamped 0.25x-5.0x (:760,845), particle/node click detail (selectedEdgeDetail :216-217,4144). Data-source endpoints exist: GET /merge-requests/:id/trace + /trace-spans/:span_id/payload (api/mod.rs:326-333), strengthened by task-087 (998a3518, 2026-09-30). Structural lens real: GovernedBy spec-coverage coloring (:103-152), complexity/churn node sizing (:1390), context menu (:4260). task-066 not-started. |
+| 5 | Progressive Drill-Down | 3 | task-assigned | task-067 | Substrate note (2026-09-30): drillInto(node) (:4187) on dblclick (:5070) + keyboard (:4236,4381,4545), Breadcrumb component rendered (:5433) with canvasState.breadcrumb persistence for deep-link URL hash (:221-231), drill fade transition (drillFadeAlpha :237). Contains-edge children drill present. task-067 not-started. |
+| 6 | Causal Flow Trace (Structural Lens Feature) | 3 | task-assigned | task-081 | Depends on task-072 (LSP call graph) — task-072 now ready-for-review: extract_and_persist_call_graph (graph_extraction.rs:780) Pass 2 emits real Calls edges via LSP type checkers w/ duplicate-skip, test asserting the edge lands in the graph store (:1290-1303). "Trace from here" context-menu action exists in ExplorerCanvas (:4290,5227) w/ numbered path badges (:2598,4099-4102). task-081 itself not-started. |
+| 7 | Data Requirements Summary | 3 | n/a | - | Reference table — no implementable requirement. Spot-checked 2026-09-30: rows re-checked against code — structural topology/Calls edges/trace endpoints/Contains/GovernedBy all exist as documented. |
+| 8 | Component Architecture | 3 | task-assigned | task-065 | Substrate note (2026-09-30): spec's component tree (LensToggle/ExplorerCanvas/EvaluativeOverlay/NodeBadge/Breadcrumb under MoldableView) is inverted in reality — the tree exists but hangs off ExplorerView, not MoldableView (test-only). EvaluativeOverlay component renders conditionally when lens=evaluative (ExplorerCanvas.svelte:5014+). |
+| 9 | Implementation Phases | 3 | n/a | - | Phased rollout tracking — no implementable requirement. Spot-checked 2026-09-30: phases tracked as task-065/066/067/081 rows; n/a correct. |
+| 10 | Relationship to Other Specs | 2 | n/a | - | Cross-reference section — no implementable requirement. |
