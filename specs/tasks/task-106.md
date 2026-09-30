@@ -6,7 +6,7 @@ progress: needs-revision
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["534add4e"]
+commits: ["534add4e", "c1c6dd9e"]
 ---
 
 ## Spec Excerpt
@@ -48,13 +48,23 @@ Current state: The speculative merge system (`speculative_merge.rs`) detects con
 
 ## Acceptance Criteria
 
-- [ ] `jj_rebase` function added to jj_ops adapter
-- [ ] After MR merge, in-flight agents on same target branch are automatically rebased
-- [ ] Conflicts from rebase are surfaced as state (not errors)
-- [ ] Agents notified via WebSocket of baseline movement
-- [ ] Rebase skipped for dead/completed agents
-- [ ] Rebase operations logged
-- [ ] `cargo test --all` passes
+- [x] `jj_rebase` function added to jj_ops adapter
+- [x] After MR merge, in-flight agents on same target branch are automatically rebased
+- [x] Conflicts from rebase are surfaced as state (not errors)
+- [x] Agents notified via WebSocket of baseline movement
+- [x] Rebase skipped for dead/completed agents
+- [x] Rebase operations logged
+- [x] `cargo test --all` passes
+
+## Spec-vs-Plan Divergence (review F5)
+
+The plan said `jj rebase -r <revision> -d <destination>`; the spec (§4) says
+the agent's "in-progress work" — the whole stack — moves onto the new base.
+`-r @` would rebase only the working-copy commit and abandon its descendants
+onto the old parent; the adapter therefore runs `jj rebase -b @ -d <dest>`,
+which rebases the branch containing `@` (the entire in-flight stack).
+Verified empirically against jj 0.39.0 (see
+`jj_rebase_clean_after_target_moves` in `crates/gyre-adapters/src/jj_ops.rs`).
 
 ## Agent Instructions
 
