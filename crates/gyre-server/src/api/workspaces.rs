@@ -820,7 +820,6 @@ mod tests {
     /// then a PUT that changes the trust level must return 409.
     #[tokio::test]
     async fn update_workspace_trust_transition_failure_returns_409() {
-        use gyre_ports::WorkspaceRepository;
         let state = crate::mem::test_state_failing_trust();
         // Seed a Guided workspace directly. Trust level is pinned explicitly:
         // the entity default is Supervised (HSI §2) and the test needs a
@@ -834,7 +833,7 @@ mod tests {
         );
         ws.trust_level = gyre_domain::TrustLevel::Guided;
         state.workspaces.create(&ws).await.unwrap();
-        let app = crate::api::api_router().with_state(state);
+        let app = crate::api::api_router().with_state(state.clone());
 
         // Changing Guided -> Supervised triggers a trust transition, which the
         // failing repo rejects; the handler must surface a 409 Conflict.
@@ -852,6 +851,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Rollback: the failed transition must leave the workspace unchanged
+        // (still Guided) and must not have partially applied trust policies.
+        let ws_after = state
+            .workspaces
+            .find_by_id(&gyre_common::Id::new("ws-fail-1"))
+            .await
+            .unwrap()
+            .expect("workspace still exists after failed transition");
+        assert_eq!(ws_after.trust_level, gyre_domain::TrustLevel::Guided);
+
+        let policies_after = state.policies.list().await.unwrap();
+        assert!(
+            !policies_after
+                .iter()
+                .any(|p| p.name.starts_with("trust:") && p.scope_id.as_deref() == Some("ws-fail-1")),
+            "failed transition must not partially apply trust: policies"
+        );
     }
 
     /// New workspaces default to Supervised trust (HSI §2) and are seeded
