@@ -1,4 +1,4 @@
-// @generated — hand-written for M15.1 (diesel print-schema equivalent)
+// @generated - hand-written for M15.1 (diesel print-schema equivalent)
 // Matches migrations/2024-01-01-000001_initial_schema/up.sql
 
 diesel::table! {
@@ -239,11 +239,18 @@ diesel::table! {
 diesel::table! {
     audit_events (id) {
         id -> Text,
-        agent_id -> Text,
         event_type -> Text,
-        path -> Nullable<Text>,
-        details -> Text,
-        pid -> Nullable<Integer>,
+        agent_id -> Nullable<Text>,
+        user_id -> Nullable<Text>,
+        session_id -> Nullable<Text>,
+        workspace_id -> Nullable<Text>,
+        repo_id -> Nullable<Text>,
+        resource_type -> Text,
+        resource_id -> Nullable<Text>,
+        outcome -> Text,
+        detail -> Text,
+        source_ip -> Nullable<Text>,
+        user_agent -> Nullable<Text>,
         timestamp -> BigInt,
     }
 }

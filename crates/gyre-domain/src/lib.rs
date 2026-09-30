@@ -65,7 +65,7 @@ pub use analytics::{AnalyticsEvent, CostEntry};
 pub use attestation::{
     constraint_count, root_signer, AttestationBundle, AttestationGateResult, MergeAttestation,
 };
-pub use audit::{AuditEvent, AuditEventType};
+pub use audit::{AuditEvent, AuditEventType, AuditOutcome};
 pub use budget::{BudgetCallRecord, BudgetConfig, BudgetUsage};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};
 pub use compute_target::{ComputeTargetEntity, ComputeTargetType};

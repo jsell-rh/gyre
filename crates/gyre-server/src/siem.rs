@@ -132,11 +132,15 @@ pub fn format_syslog(event: &AuditEvent) -> String {
     let ts = chrono_like_iso8601(event.timestamp);
     let msg = serde_json::json!({
         "id": event.id.as_str(),
-        "agent_id": event.agent_id.as_str(),
         "event_type": event.event_type.as_str(),
-        "path": event.path,
-        "pid": event.pid,
-        "details": event.details,
+        "agent_id": event.agent_id.as_ref().map(|id| id.as_str()),
+        "user_id": event.user_id.as_ref().map(|id| id.as_str()),
+        "workspace_id": event.workspace_id.as_ref().map(|id| id.as_str()),
+        "resource_type": event.resource_type,
+        "resource_id": event.resource_id,
+        "outcome": event.outcome.as_str(),
+        "detail": event.detail,
+        "source_ip": event.source_ip,
     });
     format!(
         "<134>1 {} gyre - - - {} {}\n",
@@ -163,11 +167,31 @@ pub fn format_cef(event: &AuditEvent) -> String {
         gyre_domain::AuditEventType::Custom(_) => 3,
     };
     let event_type = event.event_type.as_str();
-    let mut extensions = format!("agentId={} ts={}", event.agent_id.as_str(), event.timestamp);
-    if let Some(ref path) = event.path {
+    let mut extensions = format!(
+        "ts={} resourceType={} outcome={}",
+        event.timestamp,
+        cef_escape(&event.resource_type),
+        event.outcome.as_str()
+    );
+    if let Some(agent_id) = &event.agent_id {
+        extensions.push_str(&format!(" agentId={}", agent_id.as_str()));
+    }
+    if let Some(user_id) = &event.user_id {
+        extensions.push_str(&format!(" userId={}", user_id.as_str()));
+    }
+    if let Some(workspace_id) = &event.workspace_id {
+        extensions.push_str(&format!(" workspaceId={}", workspace_id.as_str()));
+    }
+    if let Some(resource_id) = &event.resource_id {
+        extensions.push_str(&format!(" resourceId={}", cef_escape(resource_id)));
+    }
+    if let Some(source_ip) = &event.source_ip {
+        extensions.push_str(&format!(" src={}", cef_escape(source_ip)));
+    }
+    if let Some(path) = event.detail.get("path").and_then(|v| v.as_str()) {
         extensions.push_str(&format!(" filePath={}", cef_escape(path)));
     }
-    if let Some(pid) = event.pid {
+    if let Some(pid) = event.detail.get("pid").and_then(|v| v.as_u64()) {
         extensions.push_str(&format!(" pid={}", pid));
     }
     format!(
@@ -340,11 +364,18 @@ mod tests {
     fn make_event(id: &str, et: AuditEventType) -> AuditEvent {
         AuditEvent::new(
             Id::new(id),
-            Id::new("agent-1"),
             et,
-            Some("/tmp/test".to_string()),
-            serde_json::json!({ "mode": "read" }),
-            Some(4321),
+            Some(Id::new("agent-1")),
+            None,
+            None,
+            Some(Id::new("ws-1")),
+            None,
+            "container".to_string(),
+            Some("abc123".to_string()),
+            gyre_domain::AuditOutcome::Success,
+            serde_json::json!({ "mode": "read", "path": "/tmp/test", "pid": 4321 }),
+            Some("10.0.0.1".to_string()),
+            None,
             1704067200,
         )
     }
@@ -356,6 +387,9 @@ mod tests {
         assert!(msg.starts_with("<134>1 "));
         assert!(msg.contains("file_access"));
         assert!(msg.contains("agent-1"));
+        assert!(msg.contains("\"outcome\":\"success\""));
+        assert!(msg.contains("\"resource_type\":\"container\""));
+        assert!(msg.contains("\"workspace_id\":\"ws-1\""));
     }
 
     #[test]
@@ -365,8 +399,12 @@ mod tests {
         assert!(msg.starts_with("CEF:0|Gyre|gyre-server|"));
         assert!(msg.contains("network_connect"));
         assert!(msg.contains("agentId=agent-1"));
+        assert!(msg.contains("resourceType=container"));
+        assert!(msg.contains("outcome=success"));
+        assert!(msg.contains("workspaceId=ws-1"));
         assert!(msg.contains("filePath="));
         assert!(msg.contains("pid=4321"));
+        assert!(msg.contains("src=10.0.0.1"));
     }
 
     #[test]

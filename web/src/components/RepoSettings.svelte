@@ -457,7 +457,7 @@
   /** Extract clickable entity references from audit event */
   function auditEntityRefs(evt) {
     const refs = [];
-    const d = evt.details ?? {};
+    const d = evt.detail ?? evt.details ?? {};
     if (typeof d === 'object') {
       if (d.agent_id) refs.push({ type: 'agent', id: d.agent_id });
       if (d.mr_id) refs.push({ type: 'mr', id: d.mr_id });
@@ -1117,7 +1117,7 @@
                 <span class="audit-type">{evt.event_type ?? evt.type ?? '—'}</span>
                 <span class="audit-actor">{evt.actor ?? evt.user_id ?? '—'}</span>
                 <span class="audit-detail">
-                  {fmtAuditDetail(evt.details ?? evt.message)}
+                  {fmtAuditDetail(evt.detail ?? evt.details ?? evt.message)}
                   {#if refs.length > 0}
                     <span class="audit-refs">
                       {#each refs as ref}

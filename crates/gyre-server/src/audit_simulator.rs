@@ -17,7 +17,7 @@ pub fn spawn_audit_simulator(state: Arc<AppState>) {
     if std::env::var("GYRE_AUDIT_SIMULATE").as_deref() != Ok("true") {
         return;
     }
-    info!("Audit simulator enabled — generating synthetic audit events");
+    info!("Audit simulator enabled - generating synthetic audit events");
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
@@ -60,25 +60,29 @@ async fn run_simulation_tick(state: &AppState) -> anyhow::Result<()> {
 
         let event = AuditEvent::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
-            agent.id.clone(),
             event_type.clone(),
-            path.map(|p| p.to_string()),
-            serde_json::json!({ "simulated": true }),
-            Some(1000 + rel_pid),
+            Some(agent.id.clone()),
+            None,
+            None,
+            None,
+            None,
+            "agent".to_string(),
+            Some(agent.id.to_string()),
+            gyre_domain::AuditOutcome::Success,
+            serde_json::json!({
+                "simulated": true,
+                "path": path,
+                "pid": 1000 + rel_pid,
+            }),
+            None,
+            None,
             now,
         );
 
         state.audit.record(&event).await?;
+        // Broadcast the full envelope - SSE consumers get every field.
         let _ = state.audit_broadcast_tx.send(
-            serde_json::to_string(&serde_json::json!({
-                "id": event.id.as_str(),
-                "agent_id": event.agent_id.as_str(),
-                "event_type": event.event_type.as_str(),
-                "path": event.path,
-                "timestamp": event.timestamp,
-                "simulated": true,
-            }))
-            .unwrap_or_default(),
+            serde_json::to_string(&event).unwrap_or_default(),
         );
     }
 
@@ -97,7 +101,7 @@ mod tests {
     #[tokio::test]
     async fn simulator_tick_no_agents_is_ok() {
         let state = test_state();
-        // No active agents — should succeed with no events
+        // No active agents - should succeed with no events
         run_simulation_tick(&state).await.unwrap();
         let count = state.audit.count().await.unwrap();
         assert_eq!(count, 0);

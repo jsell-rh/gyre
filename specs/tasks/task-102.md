@@ -2,10 +2,10 @@
 title: "Expand AuditEvent schema to spec-compliant envelope"
 spec_ref: "observability.md §Audit Event Schema"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Schema"
-commits: []
+commits: ["717100687da89331bcb89cbf115b883049066be4"]
 ---
 
 ## Spec Excerpt

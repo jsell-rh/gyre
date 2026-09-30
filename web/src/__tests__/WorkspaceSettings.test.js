@@ -425,7 +425,7 @@ describe('WorkspaceSettings', () => {
 
     it('shows audit rows when events exist', async () => {
       api.auditEvents.mockResolvedValue([
-        { id: 'e1', event_type: 'spec_approved', actor: 'user@example.com', details: 'auth.md', timestamp: 1700000000 },
+        { id: 'e1', event_type: 'spec_approved', user_id: 'user@example.com', detail: { spec_path: 'auth.md' }, timestamp: 1700000000 },
       ]);
       const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
       await openAuditTab(container);
