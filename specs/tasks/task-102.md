@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Schema"
-commits: ["717100687da89331bcb89cbf115b883049066be4"]
+commits: ["ee99c7444fe21e8a39ae2279d9a55de97d7636dd"]
 ---
 
 ## Spec Excerpt
@@ -78,14 +78,14 @@ The current implementation (`gyre-domain/src/audit.rs`) has a simpler struct: `i
 
 ## Acceptance Criteria
 
-- [ ] `AuditEvent` struct matches spec envelope (all 14 fields)
-- [ ] `AuditOutcome` enum with Success/Failure/Blocked variants
-- [ ] `agent_id` is `Option<Id>` (null for server-initiated events)
-- [ ] Database migration adds new columns, removes path/pid
-- [ ] Query API supports filtering by workspace_id, user_id, resource_type, outcome
-- [ ] SIEM formatters include new fields
-- [ ] All existing audit tests updated and passing
-- [ ] `cargo test --all` passes
+- [x] `AuditEvent` struct matches spec envelope (all 14 fields)
+- [x] `AuditOutcome` enum with Success/Failure/Blocked variants
+- [x] `agent_id` is `Option<Id>` (null for server-initiated events)
+- [x] Database migration adds new columns, removes path/pid
+- [x] Query API supports filtering by workspace_id, user_id, resource_type, outcome
+- [x] SIEM formatters include new fields
+- [x] All existing audit tests updated and passing
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 
