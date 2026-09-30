@@ -1,8 +1,8 @@
 # Coverage: The Ralph Loop
 
 **Spec:** [`system/ralph-loop.md`](../../system/ralph-loop.md)
-**Last audited:** 2026-04-13
-**Coverage:** 0/27 (27 n/a)
+**Last audited:** 2026-09-30 (full spot-check of all 27 `n/a` rows. Supersession verified genuine: spec header declares Superseded by agent-runtime.md §1/§5; agent-runtime.md:486 confirms replacement. Requirement mapping confirmed: inbox→message-bus.md (10 verified rows), lifecycle/spawn/orchestrator/concurrency/reviewer/error-recovery→agent-runtime §1 Phases 4-8 (coverage rows 7-11, task-118, audited 2026-09-30), max_iterations→agent-runtime:140, prompt freezing→§5 (task-116), provenance→authorization-provenance.md (100%). Row 22 RalphStep removal verified DONE in code: enum absent from gyre-domain; only historical migration (sqlite/migrations.rs:240) and an AIBOM removal-note comment (aibom.rs:83) remain — the spec's required end state. No status changes.)
+**Coverage:** 0/27 (27 n/a — superseded)
 
 > **Entire spec superseded by [`agent-runtime.md`](../../system/agent-runtime.md) §1 (Agent Lifecycle) and §5 (Agent Prompt Structure).** All sections marked n/a — requirements are tracked via the agent-runtime coverage matrix.
 
