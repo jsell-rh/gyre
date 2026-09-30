@@ -461,6 +461,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repo_orchestrator_response_has_no_duplicate_repo_id() {
+        // Regression: orchestrator_response flattened AgentResponse.repo_id
+        // alongside the outer repo_id, emitting the JSON key twice — strict
+        // deserializers (serde default) reject duplicate fields, so the CLI
+        // could not parse the spawn response at all.
+        let state = test_state();
+        seed(&state).await;
+        let (agent, _token) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("dup-check")), "user-1")
+                .await
+                .unwrap();
+        let json = serde_json::to_value(orchestrator_response(agent)).unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(
+            obj.get("repo_id"),
+            Some(&serde_json::json!("r-1")),
+            "outer repo_id must carry the orchestrator's repo binding"
+        );
+        let count = obj.keys().filter(|k| *k == "repo_id").count();
+        assert_eq!(count, 1, "repo_id must appear exactly once: {obj:?}");
+        assert_eq!(obj["orchestrator_type"], "repo_orchestrator");
+        assert_eq!(obj["restart_on_failure"], true);
+    }
+
+    #[tokio::test]
     async fn stale_detector_restarts_dead_orchestrator() {
         let state = test_state();
         seed(&state).await;

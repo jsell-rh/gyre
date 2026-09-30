@@ -79,10 +79,15 @@ pub struct OrchestratorAgentResponse {
 }
 
 /// Build the orchestrator response view of a domain agent (task-093).
+///
+/// The flattened `AgentResponse.repo_id` is left `None`: this struct already
+/// serializes `repo_id` at the outer level, and emitting the key twice makes
+/// the wire JSON unparseable for strict duplicate-field deserializers
+/// (serde default, and every generated client).
 pub(crate) fn orchestrator_response(a: Agent) -> OrchestratorAgentResponse {
     OrchestratorAgentResponse {
         agent: AgentResponse {
-            repo_id: a.repo_id.as_ref().map(|id| id.to_string()),
+            repo_id: None,
             ..AgentResponse::from(a.clone())
         },
         orchestrator_type: a.orchestrator_type.to_string(),
