@@ -84,6 +84,8 @@ wt_guard_restore() {
     if git stash pop >/dev/null 2>&1; then
       return 0
     fi
+
+
     # Failed pop is never data loss: the stash commits hold the full WIP.
     # Two failure modes, both observed in the wild:
     #  1. mid-pop merge conflict (unmerged files, stash kept)
@@ -196,6 +198,10 @@ spawn_worker() {
   local task_file="$1"
   local task_name
   task_name=$(basename "$task_file" .md)
+  if [ "${DISK_GUARD_SOFT:-0}" -eq 1 ]; then
+    log "    Disk guard: deferring spawn of $task_name (low disk)"
+    return 1
+  fi
   local worktree="$WORKTREE_BASE/$task_name"
   # Orphan adoption: a worker from a previous loop instance may still be
   # running in this worktree (loop restarts don't kill workers, and the
@@ -324,6 +330,64 @@ merge_worker() {
   return 0
 }
 
+# --- Disk guard ---
+# The 2026-09-30 crash: six worker cargo target/ dirs (88G) + caches filled
+# the root fs to 100%; the auditor omp died on SIGBUS (mmap write, ENOSPC),
+# taking the loop shell with it. Prevent recurrence:
+#   - DISK_SOFT_FREE_PCT (default 5 = 95% used): stop spawning new
+#     workers; sweep target dirs of NON-running workers (rm -rf is safe:
+#     cargo rebuilds them).
+#   - DISK_HARD_FREE_PCT (default 3 = 97% used): sleep the loop (no agents
+#     at all) until space recovers — agents on a full disk die mid-write.
+# Both are advisory gates ahead of ENOSPC, checked every cycle.
+DISK_SOFT_FREE_PCT=${GYRE_DISK_SOFT_FREE_PCT:-5}
+DISK_HARD_FREE_PCT=${GYRE_DISK_HARD_FREE_PCT:-3}
+disk_avail_pct() {
+  # Print free-space percentage of the filesystem holding the repo (integer).
+  df -P "$REPO_ROOT" | awk 'NR==2 { gsub("%","",$5); print 100-$5 }'
+}
+sweep_dead_target_dirs() {
+  # rm -rf cargo target dirs of workers with no live process in their
+  # worktree. NEVER touch a dir belonging to a running worker — rm -rf on
+  # a live agent's build dir kills its cargo mid-write.
+  local wt pct_used avail_after
+  for wt in "$WORKTREE_BASE"/task-*/; do
+    [ -d "$wt/target" ] || continue
+    if pgrep -f "$wt" >/dev/null 2>&1; then
+      log "    Disk sweep: skipping ${wt}target (worker live)"
+      continue
+    fi
+    rm -rf "$wt/target" 2>/dev/null \
+      && log "    Disk sweep: removed ${wt}target"
+  done
+  # Stray /target-* dirs at repo root (orphaned CARGO_TARGET_DIR from dead
+  # workers; /target-*/ is gitignored).
+  for wt in "$REPO_ROOT"/target-*/; do
+    [ -d "$wt" ] || continue
+    rm -rf "$wt" 2>/dev/null \
+      && log "    Disk sweep: removed stray $wt"
+  done
+}
+disk_guard() {
+  local avail
+  avail=$(disk_avail_pct)
+  if [ "$avail" -lt "$DISK_HARD_FREE_PCT" ]; then
+    log "!!! Disk guard: only ${avail}% free (< $DISK_HARD_FREE_PCT%) — pausing loop until space recovers"
+    sweep_dead_target_dirs
+    while [ "$(disk_avail_pct)" -lt "$DISK_HARD_FREE_PCT" ]; do
+      sleep 60
+    done
+    log "    Disk guard: recovered, resuming"
+    return 0
+  fi
+  if [ "$avail" -lt "$DISK_SOFT_FREE_PCT" ]; then
+    log "!!! Disk guard: only ${avail}% free (< $DISK_SOFT_FREE_PCT%) — sweeping dead target dirs, no new spawns this cycle"
+    sweep_dead_target_dirs
+    return 1
+  fi
+  return 0
+}
+
 cleanup_all() {
   log "Loop exiting — detaching worktrees (branches preserved for recovery)"
   local task_name worktree live
@@ -393,6 +457,12 @@ ITERATION=0
 while true; do
   ITERATION=$((ITERATION + 1))
   log "--- Orchestrator cycle $ITERATION (${#ACTIVE_WORKERS[@]} active workers) ---"
+
+  # Disk guard: hard pause when nearly full; soft gate stops new spawns.
+  # Live workers continue their rounds either way (their commits are on
+  # branches; only NEW agents are gated).
+  DISK_GUARD_SOFT=0
+  disk_guard || DISK_GUARD_SOFT=1
 
   # Self-heal the lock PID: agents occasionally truncate /tmp/gyre-loop.lock
   # (or /tmp cleanups wipe it). Rewrite our PID each cycle so the dashboard's
