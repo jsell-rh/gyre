@@ -106,6 +106,20 @@ let lastSnapshot = { workers: [], log: "", error: null, when: 0 };
 // /tmp/gyre-loop.lock (flock) and writes its PID into it. Liveness is
 // kill(pid,0) AND a cmdline check — a recycled PID running something else
 // must not read as "alive".
+import { execFileSync } from "node:child_process";
+// Disk free % for the filesystem holding the repo (same check the loop's
+// disk guard uses). Null when df is unavailable — UI hides the gauge then.
+function diskFreePct() {
+  try {
+    const out = execFileSync("df", ["-P", process.cwd()], { encoding: "utf8" });
+    const line = out.split("\n")[1] || "";
+    const pctUsed = Number(line.trim().split(/\s+/)[4].replace("%", ""));
+    return Number.isFinite(pctUsed) ? 100 - pctUsed : null;
+  } catch {
+    return null;
+  }
+}
+
 async function loopAlive() {
   const lockPath = process.env.GYRE_LOOP_LOCK || "/tmp/gyre-loop.lock";
   let pid;
@@ -324,6 +338,7 @@ async function refreshSnapshot() {
     lastSnapshot = {
       workers, log, logAgeMs: await ageMs(LOG_PATH, now),
       loopAlive: await loopAlive(),
+      diskFree: diskFreePct(),
       alerts: Array.from(alerts.values()),
       events: extractEvents(logText),
       coverage: await coverageStats(), coverageHistory: await coverageHistory(),
@@ -333,7 +348,7 @@ async function refreshSnapshot() {
   } catch (e) {
     lastSnapshot = {
       workers: prevWorkers, log: lastSnapshot.log, logAgeMs: null,
-      loopAlive: await loopAlive(), alerts: lastSnapshot.alerts || [],
+      loopAlive: await loopAlive(), diskFree: diskFreePct(), alerts: lastSnapshot.alerts || [],
       events: lastSnapshot.events || [], coverage: lastSnapshot.coverage || null,
       wipGuarded: lastSnapshot.wipGuarded || false,
       error: String(e.message || e), when: Date.now(),
@@ -709,6 +724,7 @@ const HTML = `<!doctype html>
   <span class="status" id="status" role="status">Connecting…</span>
   <span class="chip info" id="wip-chip" hidden></span>
   <span class="chip" id="loop-chip" hidden></span>
+  <span class="chip" id="disk-chip" hidden></span>
   <button class="mute-btn" id="mute" title="Toggle alert sound">Muted</button>
 </header>
 <div class="subhead" id="subhead">
@@ -738,6 +754,7 @@ const HTML = `<!doctype html>
 var statusEl = document.getElementById("status");
 var conn = document.getElementById("conn");
 var loopChip = document.getElementById("loop-chip");
+  var diskChip = document.getElementById("disk-chip");
 var wipChip = document.getElementById("wip-chip");
 var errBox = document.getElementById("err");
 var errText = document.getElementById("err-msg");
@@ -1211,6 +1228,22 @@ function render(data) {
     " \\u00b7 " + receiving + " receiving \\u00b7 updated " +
     (data.when ? new Date(data.when).toLocaleTimeString() : "\\u2014");
   conn.classList.toggle("down", hasErr);
+
+  // Disk chip: amber below 10% free, red below the loop's 5% soft gate.
+  if (typeof data.diskFree === "number") {
+    diskChip.hidden = false;
+    if (data.diskFree < 5) {
+      diskChip.className = "chip danger";
+      diskChip.textContent = "disk " + data.diskFree + "% free";
+    } else if (data.diskFree < 10) {
+      diskChip.className = "chip warn";
+      diskChip.textContent = "disk " + data.diskFree + "% free";
+    } else {
+      diskChip.hidden = true;
+    }
+  } else {
+    diskChip.hidden = true;
+  }
 
   // Loop chip: dead = red; alive-but-quiet = neutral, informational.
   if (loopStopped) {
