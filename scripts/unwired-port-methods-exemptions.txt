@@ -1,0 +1,23 @@
+# unwired-port-methods-exemptions.txt — frozen legacy debt for
+# scripts/check-unwired-port-methods.sh. One trait name per line, with a
+# reason and an owner. Never add entries; fix by wiring the trait into
+# production (store! pattern in build_state) or removing it.
+
+# task-207 F1: ActivityRepository is implemented in all three adapters
+# (delete_older_than) but not wired into AppState — the activity_events
+# retention arm is hollow. Product fix owned by task-207's revision
+# round; remove this entry when the wiring lands.
+ActivityRepository
+
+# Pre-existing (predates this check): LlmPort is consumed only through
+# LlmPortFactory::for_model() -> Arc<dyn LlmPort> (state.llm in lib.rs);
+# callers use the returned object without naming the trait, so the
+# name-reference scan cannot see the consumption. Not a wiring gap.
+LlmPort
+
+# Pre-existing (predates this check): StoragePort::health_check is
+# implemented for SqliteStorage/PgStorage but no production surface
+# calls it (admin_health reports entity counts, not DB liveness). Dead
+# capability; adopt it in a health endpoint or drop the trait when
+# touched. Not owned by any open task.
+StoragePort

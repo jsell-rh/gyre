@@ -72,6 +72,8 @@ jobs:
         run: bash scripts/check-in-memory-state-stores.sh || true
       - name: Unbounded external http lint (advisory)
         run: bash scripts/check-unbounded-external-http.sh || true
+      - name: Unwired port-method lint (advisory)
+        run: bash scripts/check-unwired-port-methods.sh || true
       - name: ABAC route registry lint
         run: bash scripts/check-abac-route-registry.sh
       - name: Migration version uniqueness lint

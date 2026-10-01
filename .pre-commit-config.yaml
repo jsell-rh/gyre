@@ -569,6 +569,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: unwired-port-methods
+        name: unwired port-method lint
+        description: Detect adapter-implemented port traits with zero production wiring or callers
+        entry: scripts/check-unwired-port-methods.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: conventional-commits
         name: conventional commits
         description: Enforce conventional commit message format
