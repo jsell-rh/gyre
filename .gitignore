@@ -8,6 +8,10 @@ worktrees/
 .agent.jsonl
 .worker.log
 .spawn.log
+# Stray agent cargo target dirs (CARGO_TARGET_DIR set to <dir>/target-<name>
+# by workers). Never tracked; ignoring keeps wt_guard from stashing 11k
+# build-artifact files (~500 MB) around every on-main agent run.
+/target-*/
 .ralph-loop-status.md
 
 # Nix build outputs

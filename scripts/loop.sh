@@ -70,9 +70,15 @@ wt_guard_stash() {
   if ! git diff --quiet --ignore-submodules -- || \
      ! git diff --cached --quiet --ignore-submodules -- || \
      [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    # --include-untracked (without --all) respects .gitignore, so ignored
+    # build dirs (target-task095/ et al. via /target-*/ in .gitignore) stay
+    # on disk instead of being swept into the stash — observed orphaning
+    # ~500 MB / 11k artifact files twice when the loop died mid-run. Do NOT
+    # add a pathspec here: pathspec-mode stash includes ignored files too.
     git stash push --include-untracked --message "loop-wt-guard" >/dev/null 2>&1 && WT_GUARDED=1
   fi
 }
+
 wt_guard_restore() {
   if [ "${WT_GUARDED:-0}" -eq 1 ]; then
     if git stash pop >/dev/null 2>&1; then
