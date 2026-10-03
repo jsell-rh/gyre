@@ -120,8 +120,3 @@ gyre-adapters = { path = "crates/gyre-adapters" }
 lto = true
 codegen-units = 1
 strip = true
-
-[patch.crates-io]
-# TEMPORARY build-environment shim (revert before commit): this machine has no
-# system libpq; bundled_without_openssl builds libpq from pq-src via cc.
-pq-sys = { path = "/tmp/libpq-dl/pq-sys-bundled" }
