@@ -121,18 +121,45 @@ pub async fn create_interrogation_policies(
     state: &AppState,
     agent_id: &str,
 ) -> Result<Vec<String>, anyhow::Error> {
-    let now = now_secs();
+    let created_ids = create_interrogation_policies_in(
+        state.policies.as_ref(),
+        agent_id,
+        now_secs(),
+    )
+    .await?;
+
+    // Store policy IDs in kv_store for cleanup on complete/kill/stale.
+    if let Ok(ids_json) = serde_json::to_string(&created_ids) {
+        let _ = state
+            .kv_store
+            .kv_set("interrogation_policies", agent_id, ids_json)
+            .await;
+    }
+
+    Ok(created_ids)
+}
+
+/// Build the three interrogation policies for an agent (HSI §4):
+/// - `interrogation-restrict-{id}`: Deny write/delete/spawn/approve/merge on
+///   task/mr/repo/agent/spec/persona/worktree (the agent is read-only).
+/// - `interrogation-allow-message-{id}`: Allow write to message resources.
+/// - `interrogation-allow-read-{id}`: Allow read to context resources.
+///
+/// Split from `create_interrogation_policies` so the fail-closed creation
+/// loop can be unit-tested against a duplicate-rejecting store without
+/// constructing a full `AppState`.
+fn interrogation_policies_for(agent_id: &str, now: u64) -> Vec<Policy> {
     let subject_value = format!("agent:{agent_id}");
 
     let restrict_id = format!("interrogation-restrict-{agent_id}");
     let allow_message_id = format!("interrogation-allow-message-{agent_id}");
     let allow_read_id = format!("interrogation-allow-read-{agent_id}");
 
-    let policies: Vec<Policy> = vec![
+    vec![
         // Deny write/delete/spawn/approve/merge on all non-message resources (priority 200).
         Policy {
             id: Id::new(&restrict_id),
-            name: restrict_id.clone(),
+            name: restrict_id,
             description: format!(
                 "Interrogation agent {agent_id} is read-only + message to requesting human"
             ),
@@ -171,7 +198,7 @@ pub async fn create_interrogation_policies(
         // Allow write to message resource (priority 201).
         Policy {
             id: Id::new(&allow_message_id),
-            name: allow_message_id.clone(),
+            name: allow_message_id,
             description: format!("Interrogation agent {agent_id} can send messages"),
             scope: PolicyScope::Tenant,
             scope_id: None,
@@ -194,7 +221,7 @@ pub async fn create_interrogation_policies(
         // Allow read to conversation/explorer_view/spec/mr/repo/task (priority 202).
         Policy {
             id: Id::new(&allow_read_id),
-            name: allow_read_id.clone(),
+            name: allow_read_id,
             description: format!("Interrogation agent {agent_id} can read context resources"),
             scope: PolicyScope::Tenant,
             scope_id: None,
@@ -221,24 +248,23 @@ pub async fn create_interrogation_policies(
             created_at: now,
             updated_at: now,
         },
-    ];
+    ]
+}
 
+/// Create the interrogation policies via the given policy repository, failing
+/// closed on the first creation error (task-077 F6). Returns the created ids.
+async fn create_interrogation_policies_in(
+    policies: &dyn gyre_ports::PolicyRepository,
+    agent_id: &str,
+    now: u64,
+) -> Result<Vec<String>, anyhow::Error> {
     let mut created_ids = Vec::new();
-    for policy in &policies {
-        state.policies.create(policy).await.map_err(|e| {
+    for policy in &interrogation_policies_for(agent_id, now) {
+        policies.create(policy).await.map_err(|e| {
             anyhow::anyhow!("failed to create interrogation policy {}: {e}", policy.id)
         })?;
         created_ids.push(policy.id.to_string());
     }
-
-    // Store policy IDs in kv_store for cleanup on complete/kill/stale.
-    if let Ok(ids_json) = serde_json::to_string(&created_ids) {
-        let _ = state
-            .kv_store
-            .kv_set("interrogation_policies", agent_id, ids_json)
-            .await;
-    }
-
     Ok(created_ids)
 }
 
@@ -2919,6 +2945,101 @@ mod tests {
             resp.status(),
             StatusCode::CREATED,
             "interrogation agents should bypass task_type filtering"
+        );
+    }
+
+    /// TASK-077 (F6): `create_interrogation_policies` must fail closed — if
+    /// a policy cannot be created (e.g. duplicate id), the error propagates
+    /// instead of warn-and-continue, so an interrogation agent can never run
+    /// with only a subset of its restriction policies.
+    #[tokio::test]
+    async fn create_interrogation_policies_fails_closed_on_duplicate() {
+        use std::collections::HashMap;
+        use std::sync::Arc as StdArc;
+        use tokio::sync::Mutex;
+
+        /// Policy repo that rejects creating a duplicate id (like the SQL
+        /// adapters' unique constraints), used to force the failure path.
+        struct DuplicateRejectingPolicyRepo {
+            policies: Mutex<HashMap<String, gyre_domain::Policy>>,
+        }
+
+        #[async_trait::async_trait]
+        impl gyre_ports::PolicyRepository for DuplicateRejectingPolicyRepo {
+            async fn create(&self, policy: &gyre_domain::Policy) -> anyhow::Result<()> {
+                let mut store = self.policies.lock().await;
+                if store.contains_key(&policy.id.to_string()) {
+                    anyhow::bail!(
+                        "policy id already exists: {}",
+                        policy.id.to_string()
+                    );
+                }
+                store.insert(policy.id.to_string(), policy.clone());
+                Ok(())
+            }
+            async fn find_by_id(&self, id: &str) -> anyhow::Result<Option<gyre_domain::Policy>> {
+                Ok(self.policies.lock().await.get(id).cloned())
+            }
+            async fn list(&self) -> anyhow::Result<Vec<gyre_domain::Policy>> {
+                Ok(self.policies.lock().await.values().cloned().collect())
+            }
+            async fn list_by_scope(
+                &self,
+                _scope: &gyre_domain::PolicyScope,
+                _scope_id: Option<&str>,
+            ) -> anyhow::Result<Vec<gyre_domain::Policy>> {
+                Ok(Vec::new())
+            }
+            async fn update(&self, _policy: &gyre_domain::Policy) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn delete(&self, _id: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn delete_by_name_prefix(&self, _prefix: &str) -> anyhow::Result<u64> {
+                Ok(0)
+            }
+            async fn delete_by_name_prefix_and_scope_id(
+                &self,
+                _prefix: &str,
+                _scope_id: &str,
+            ) -> anyhow::Result<u64> {
+                Ok(0)
+            }
+            async fn record_decision(
+                &self,
+                _decision: &gyre_domain::PolicyDecision,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn list_decisions(
+                &self,
+                _subject_id: Option<&str>,
+                _resource_type: Option<&str>,
+                _limit: usize,
+            ) -> anyhow::Result<Vec<gyre_domain::PolicyDecision>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let failing_repo = DuplicateRejectingPolicyRepo {
+            policies: Mutex::new(HashMap::new()),
+        };
+
+        // First creation succeeds and persists the three policies.
+        let ids = create_interrogation_policies_in(&failing_repo, "agent-f6", 1000)
+            .await
+            .expect("first creation should succeed");
+        assert_eq!(ids.len(), 3, "three interrogation policies expected");
+
+        // Second creation for the same agent collides with the existing
+        // policy ids — must return Err, not warn-and-continue.
+        let err = create_interrogation_policies_in(&failing_repo, "agent-f6", 1001)
+            .await
+            .expect_err("duplicate policy creation must fail closed");
+        assert!(
+            err.to_string().contains("interrogation"),
+            "error must name the failed interrogation policy, got: {err}"
         );
     }
 }

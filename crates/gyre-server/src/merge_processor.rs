@@ -1506,9 +1506,10 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     .load_chain(&chain_att.id)
                     .await
                     .unwrap_or_default();
-                let attestation_eval =
-                    evaluate_attestation_abac(state, &chain, &chain_att, &mr, &entry, &repo, "merge")
-                        .await;
+                let attestation_eval = evaluate_attestation_abac(
+                    state, &chain, &chain_att, &mr, &entry, &repo, "merge",
+                )
+                .await;
                 if attestation_eval.effect == gyre_domain::policy::PolicyEffect::Deny {
                     warn!(
                         entry_id = %entry.id,
@@ -1537,11 +1538,10 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                     .load_chain(&leaf.id)
                                     .await
                                     .unwrap_or_default();
-                                let attestation_eval =
-                                    evaluate_attestation_abac(
-                                        state, &chain, leaf, &mr, &entry, &repo, "merge",
-                                    )
-                                    .await;
+                                let attestation_eval = evaluate_attestation_abac(
+                                    state, &chain, leaf, &mr, &entry, &repo, "merge",
+                                )
+                                .await;
                                 if attestation_eval.effect
                                     == gyre_domain::policy::PolicyEffect::Deny
                                 {
