@@ -4253,6 +4253,7 @@ mod secret_contract_tests {
     //! duplicate-rejection contract in code — SQLite enforces it via UNIQUE
     //! constraints, so a mem-only guard is the only thing tests can catch.
     use super::*;
+    use gyre_common::{Secret, SecretScope, SecretType};
     use gyre_ports::SecretRepository as _;
 
     fn sample_secret(id: &str, name: &str, scope: SecretScope, scope_id: &str, tenant: &str) -> Secret {
