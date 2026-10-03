@@ -201,6 +201,31 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
     .await
 }
 
+/// Tenant containment (task-093 F2/F3): the workspace whose orchestrator is
+/// being spawned must belong to the caller's tenant. The ABAC middleware
+/// evaluates policy for the route, but per-handler containment re-checks the
+/// loaded entity's tenant against the authenticated caller's tenant so a
+/// cross-tenant workspace id cannot be reached even with a valid token.
+async fn check_workspace_tenant(
+    state: &AppState,
+    workspace_id: &str,
+    auth: &AuthenticatedAgent,
+) -> Result<(), ApiError> {
+    let ws = state
+        .workspaces
+        .find_by_id(&Id::new(workspace_id.to_string()))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    if ws.tenant_id.to_string() != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "workspace {workspace_id} belongs to tenant {}, not caller tenant {}",
+            ws.tenant_id, auth.tenant_id
+        )));
+    }
+    Ok(())
+}
+
 /// POST /api/v1/workspaces/:id/orchestrator/spawn
 ///
 /// Spawn the single workspace orchestrator for a workspace.
@@ -211,6 +236,9 @@ pub async fn spawn_workspace_orchestrator(
     Path(workspace_id): Path<String>,
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
+    // Tenant containment: the workspace must belong to the caller's tenant.
+    check_workspace_tenant(&state, &workspace_id, &auth).await?;
+
     let (agent, token) =
         spawn_workspace_orchestrator_core(&state, &workspace_id, req, &auth.agent_id).await?;
 
@@ -297,6 +325,51 @@ pub(crate) async fn spawn_repo_orchestrator_core(
     .await
 }
 
+/// Parsed arguments for `cross_repo_task_core` (task-093 F9). Mirrors the
+/// MCP tool schema for `gyre_cross_repo_task`: title required, the rest
+/// optional.
+pub(crate) struct CrossRepoTaskRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub priority: Option<String>,
+    pub labels: Vec<String>,
+}
+
+/// Shared core of the MCP tool `gyre_cross_repo_task` (task-093 F9).
+/// Creates a Coordination task scoped to the caller's workspace, bound to
+/// no repo (cross-repo by definition — the repo_id stays the empty sentinel
+/// and repo binding happens when work is decomposed into per-repo tasks).
+/// Extracted from the MCP handler so the task-construction rules live in
+/// one place next to the other orchestrator cores.
+pub(crate) async fn cross_repo_task_core(
+    state: &AppState,
+    workspace_id: &str,
+    req: CrossRepoTaskRequest,
+) -> Result<gyre_domain::Task, ApiError> {
+    let now = now_secs();
+    let mut task = gyre_domain::Task::new(new_id(), req.title, now);
+    task.description = req.description;
+    if let Some(p) = req.priority {
+        task.priority = parse_priority(&p);
+    }
+    task.labels = req.labels;
+    task.task_type = Some(gyre_domain::TaskType::Coordination);
+    task.workspace_id = Id::new(workspace_id.to_string());
+    state.tasks.create(&task).await?;
+    Ok(task)
+}
+
+/// Parse a task priority string, defaulting to Medium on unknown input.
+/// Same semantics as the MCP-side parser (case-sensitive match).
+pub(crate) fn parse_priority(s: &str) -> gyre_domain::TaskPriority {
+    match s {
+        "low" => gyre_domain::TaskPriority::Low,
+        "high" => gyre_domain::TaskPriority::High,
+        "critical" => gyre_domain::TaskPriority::Critical,
+        _ => gyre_domain::TaskPriority::Medium,
+    }
+}
+
 /// POST /api/v1/repos/:id/orchestrator/spawn
 ///
 /// Spawn the single repo orchestrator for a repo. Returns 409 Conflict when
@@ -307,10 +380,22 @@ pub async fn spawn_repo_orchestrator(
     Path(repo_id): Path<String>,
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
-    // G6: ABAC enforcement - repo access required to spawn its orchestrator.
+    // Two authorization layers (task-093):
+    // 1. Per-repo ABAC policy (check_repo_abac — repo-scoped policy document,
+    //    admin bypass for claim-less callers).
+    // 2. Tenant containment — the repo's workspace must belong to the
+    //    caller's tenant, so a cross-tenant repo id is Forbidden even when
+    //    no repo policy is stored.
     crate::abac::check_repo_abac(&state, &repo_id, &auth)
         .await
         .map_err(ApiError::Forbidden)?;
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(repo_id.clone()))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+    check_workspace_tenant(&state, &repo.workspace_id.to_string(), &auth).await?;
 
     let (agent, token) =
         spawn_repo_orchestrator_core(&state, &repo_id, req, &auth.agent_id).await?;
@@ -574,5 +659,412 @@ mod tests {
                 .any(|m| m.kind == gyre_common::message::MessageKind::Escalation),
             "expected an Escalation message in the workspace orchestrator inbox"
         );
+    }
+
+    /// Build a hand-rolled AuthenticatedAgent for direct wrapper calls
+    /// (task-093 F10): the auth extractor is not in play in unit tests.
+    fn auth_in_tenant(tenant: &str) -> crate::auth::AuthenticatedAgent {
+        crate::auth::AuthenticatedAgent {
+            agent_id: "caller-1".to_string(),
+            user_id: None,
+            roles: vec![gyre_domain::UserRole::Admin],
+            tenant_id: tenant.to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_spawn_wrapper_allows_same_tenant() {
+        let state = test_state();
+        seed(&state).await;
+
+        let (code, body) = spawn_workspace_orchestrator(
+            State(state.clone()),
+            auth_in_tenant("t1"),
+            Path("ws-1".to_string()),
+            Json(req(Some("ws-orch-wrap"))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::CREATED);
+        assert_eq!(
+            body.agent.orchestrator_type,
+            "workspace_orchestrator".to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_spawn_wrapper_forbids_cross_tenant() {
+        let state = test_state();
+        seed(&state).await;
+
+        match spawn_workspace_orchestrator(
+            State(state.clone()),
+            auth_in_tenant("t2"),
+            Path("ws-1".to_string()),
+            Json(req(Some("ws-orch-evil"))),
+        )
+        .await
+        {
+            Err(e @ ApiError::Forbidden(_)) => assert!(e.to_string().contains("tenant")),
+            Err(other) => panic!("expected Forbidden, got: {other}"),
+            Ok(_) => panic!("cross-tenant spawn must be Forbidden"),
+        }
+
+        // Nothing was spawned.
+        let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        assert!(
+            agents
+                .iter()
+                .all(|a| a.orchestrator_type != OrchestratorType::WorkspaceOrchestrator)
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_spawn_wrapper_allows_same_tenant() {
+        let state = test_state();
+        seed(&state).await;
+
+        let (code, body) = spawn_repo_orchestrator(
+            State(state.clone()),
+            auth_in_tenant("t1"),
+            Path("r-1".to_string()),
+            Json(req(Some("repo-orch-wrap"))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::CREATED);
+        assert_eq!(body.agent.orchestrator_type, "repo_orchestrator".to_string());
+    }
+
+    #[tokio::test]
+    async fn repo_spawn_wrapper_forbids_cross_tenant() {
+        let state = test_state();
+        seed(&state).await;
+
+        match spawn_repo_orchestrator(
+            State(state.clone()),
+            auth_in_tenant("t2"),
+            Path("r-1".to_string()),
+            Json(req(Some("repo-orch-evil"))),
+        )
+        .await
+        {
+            Err(e @ ApiError::Forbidden(_)) => assert!(e.to_string().contains("tenant")),
+            Err(other) => panic!("expected Forbidden, got: {other}"),
+            Ok(_) => panic!("cross-tenant spawn must be Forbidden"),
+        }
+        assert!(
+            state
+                .agents
+                .find_by_name("repo-orch-evil")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn escalation_payload_carries_replacement_and_informational_flag() {
+        // F8: when the dead repo orchestrator has a replacement, the
+        // Escalation message must name it and be informational, so the
+        // workspace orchestrator does not treat the repo as unorchestrated.
+        let state = test_state();
+        seed(&state).await;
+
+        let (ws_orch, _t1) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+                .await
+                .unwrap();
+        let (repo_orch, _t2) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch")), "user-1")
+                .await
+                .unwrap();
+
+        // Age the repo orchestrator past the heartbeat timeout and run a cycle.
+        let mut aged = state
+            .agents
+            .find_by_id(&repo_orch.id)
+            .await
+            .unwrap()
+            .unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+
+        crate::stale_agents::run_once(&state).await.unwrap();
+
+        // A replacement exists (restart_on_failure is true for spawned
+        // orchestrators).
+        let replacement = state
+            .agents
+            .find_by_name("repo-orch-restart-1")
+            .await
+            .unwrap()
+            .expect("replacement spawned");
+
+        // The escalation names the replacement and is informational.
+        let inbox = state.messages.list_unacked(&ws_orch.id, 100).await.unwrap();
+        let esc = inbox
+            .iter()
+            .find(|m| m.kind == gyre_common::message::MessageKind::Escalation)
+            .expect("escalation message");
+        let payload = esc
+            .payload
+            .as_ref()
+            .and_then(|p| p.as_object())
+            .expect("payload object");
+        assert_eq!(
+            payload.get("replacement_agent_id").and_then(|v| v.as_str()),
+            Some(replacement.id.to_string().as_str())
+        );
+        assert_eq!(
+            payload.get("informational").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_decrements_budget_and_replacement_reclaims_it() {
+        // F4: an aborted agent releases its budget slot and the replacement
+        // re-claims it — net effect is exactly one live orchestrator counted.
+        let state = test_state();
+        seed(&state).await;
+        let cfg = gyre_domain::BudgetConfig {
+            max_tokens_per_day: None,
+            max_cost_per_day: None,
+            max_concurrent_agents: Some(2),
+            max_agent_lifetime_secs: None,
+        };
+        state
+            .budget_configs
+            .set_config("workspace:ws-1", &cfg)
+            .await
+            .unwrap();
+
+        let (agent, _t) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+                .await
+                .unwrap();
+        let usage = state
+            .budget_usages
+            .get_usage("workspace:ws-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.active_agents, 1);
+
+        let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+        crate::stale_agents::run_once(&state).await.unwrap();
+
+        let replacement = state
+            .agents
+            .find_by_name("ws-orch-restart-1")
+            .await
+            .unwrap()
+            .expect("replacement spawned");
+        assert_eq!(replacement.status, AgentStatus::Active);
+        let after = state
+            .budget_usages
+            .get_usage("workspace:ws-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.active_agents, 1,
+            "abort must decrement and the replacement must re-claim the slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_under_exhausted_budget_leaves_orchestrator_dead() {
+        // F4: when the workspace budget is exhausted, no replacement is
+        // spawned — the orchestrator stays dead instead of spinning.
+        let state = test_state();
+        seed(&state).await;
+        let cfg = gyre_domain::BudgetConfig {
+            max_tokens_per_day: None,
+            max_cost_per_day: None,
+            max_concurrent_agents: Some(1),
+            max_agent_lifetime_secs: None,
+        };
+        state
+            .budget_configs
+            .set_config("workspace:ws-1", &cfg)
+            .await
+            .unwrap();
+
+        let (agent, _t) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+                .await
+                .unwrap();
+
+        // Simulate the workspace being at capacity from other occupants.
+        let mut usage = state
+            .budget_usages
+            .get_usage("workspace:ws-1")
+            .await
+            .unwrap()
+            .unwrap();
+        usage.active_agents = 5;
+        state
+            .budget_usages
+            .set_usage("workspace:ws-1", &usage)
+            .await
+            .unwrap();
+
+        let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+        crate::stale_agents::run_once(&state).await.unwrap();
+
+        let dead = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        assert_eq!(dead.status, AgentStatus::Dead);
+        assert!(
+            state
+                .agents
+                .find_by_name("ws-orch-restart-1")
+                .await
+                .unwrap()
+                .is_none(),
+            "no replacement may be spawned under an exhausted budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_inherits_disconnect_behavior_and_restarts_again() {
+        // F5: the replacement inherits disconnected_behavior from the dead
+        // orchestrator, so a second heartbeat timeout also aborts+restarts
+        // (a Pause default would silently stop the chain at restart-1).
+        let state = test_state();
+        seed(&state).await;
+
+        let (agent, _t) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+                .await
+                .unwrap();
+        let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+        crate::stale_agents::run_once(&state).await.unwrap();
+
+        // Second death: age the replacement past the timeout as well.
+        let mut r1 = state
+            .agents
+            .find_by_name("ws-orch-restart-1")
+            .await
+            .unwrap()
+            .expect("first replacement");
+        assert_eq!(
+            r1.disconnected_behavior,
+            gyre_domain::DisconnectedBehavior::Abort
+        );
+        r1.spawned_at = r1.spawned_at.saturating_sub(10_000);
+        r1.last_heartbeat = None;
+        state.agents.update(&r1).await.unwrap();
+        crate::stale_agents::run_once(&state).await.unwrap();
+
+        let r2 = state
+            .agents
+            .find_by_name("ws-orch-restart-2")
+            .await
+            .unwrap()
+            .expect("second replacement spawned (behavior inherited)");
+        assert_eq!(r2.status, AgentStatus::Active);
+        assert_eq!(
+            state
+                .agents
+                .find_by_name("ws-orch-restart-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentStatus::Dead
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_agent_restarts_and_escalates_repo_orchestrator() {
+        // F6: the fail handler gives an orchestrator the same death handling
+        // as the stale-agent Abort path — replacement + escalation.
+        let state = test_state();
+        seed(&state).await;
+
+        let (ws_orch, _t1) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+                .await
+                .unwrap();
+        let (repo_orch, _t2) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch")), "user-1")
+                .await
+                .unwrap();
+
+        let code = crate::api::spawn::fail_agent(
+            State(state.clone()),
+            Path(repo_orch.id.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::OK);
+
+        let replacement = state
+            .agents
+            .find_by_name("repo-orch-restart-1")
+            .await
+            .unwrap()
+            .expect("replacement spawned via fail path");
+        assert_eq!(replacement.status, AgentStatus::Active);
+
+        let inbox = state.messages.list_unacked(&ws_orch.id, 100).await.unwrap();
+        let esc = inbox
+            .iter()
+            .find(|m| m.kind == gyre_common::message::MessageKind::Escalation)
+            .expect("escalation message");
+        let payload = esc
+            .payload
+            .as_ref()
+            .and_then(|p| p.as_object())
+            .expect("payload object");
+        assert_eq!(
+            payload.get("replacement_agent_id").and_then(|v| v.as_str()),
+            Some(replacement.id.to_string().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_agent_restarts_orchestrator_with_restart_on_failure() {
+        // F6: the stop handler also runs the shared death handling —
+        // restart_on_failure is the owner's exactly-one-live directive.
+        let state = test_state();
+        seed(&state).await;
+
+        let (agent, _t) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+                .await
+                .unwrap();
+
+        let code = crate::api::spawn::stop_agent(
+            State(state.clone()),
+            Path(agent.id.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::OK);
+
+        let stopped = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        assert_eq!(stopped.status, AgentStatus::Stopped);
+        let replacement = state
+            .agents
+            .find_by_name("ws-orch-restart-1")
+            .await
+            .unwrap()
+            .expect("replacement spawned via stop path");
+        assert_eq!(replacement.status, AgentStatus::Active);
     }
 }

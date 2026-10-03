@@ -9,4 +9,4 @@
 # See: specs/reviews/task-093.md F7 (the finding that created this check)
 #
 # --- task-093 revision round owns this ---
-gyre_message_send   # writes via state.messages.store in handle_message_send; gate lists gyre_message_ack but not send. Fix: add "gyre_message_send" to the needs_write match.
+# (empty — gyre_message_send was added to the needs_write gate)
