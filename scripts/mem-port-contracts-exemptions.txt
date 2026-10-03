@@ -1,4 +1,4 @@
-# mem-port-contracts-exemptions.txt — legacy debt, frozen at 1 entry.
+# mem-port-contracts-exemptions.txt — legacy debt, frozen at 0 entries.
 # Fix a flagged mem create by adding the duplicate guard the port doc
 # states; never add entries. If you fix a site, delete its line and
 # lower FROZEN_EXEMPTION_COUNT in check-mem-port-contracts.sh.
