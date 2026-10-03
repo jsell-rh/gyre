@@ -82,7 +82,7 @@ describe('Workspace sidebar section navigation (F6/R9 — HSI §1.3 workspace-sc
     api.version.mockResolvedValue({ version: '0.1.0' });
   });
 
-  async function renderApp(containerGetter) {
+  async function renderApp() {
     const { container } = render(App);
     // Wait until the workspace home has rendered (workspace auto-selected).
     await waitFor(() => {

@@ -63,7 +63,7 @@
       "specs": "Specs",
       "agent_rules": "Agent Rules"
     },
-    "decisions_empty": "No pending decisions. At Supervised trust, decisions appear when agents need guidance, specs need approval, or gates fail.",
+    "decisions_empty": "No decisions needed — system is running autonomously.",
     "repos_empty": "No repositories yet.",
     "specs_empty": "No specs yet.",
     "view_all": "View all",
