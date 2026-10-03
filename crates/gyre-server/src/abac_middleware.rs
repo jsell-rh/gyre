@@ -149,7 +149,16 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/squash", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/undo", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/bookmark", "repo", Some("write")),
-                RouteResourceMapping::api("/api/v1/repos/:id/commits/:sha/signature", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/commits/:sha/signature",
+                    "repo",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/orchestrator/spawn",
+                    "repo",
+                    Some("write"),
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/dependencies", "dependency", None),
                 RouteResourceMapping::api(
                     "/api/v1/repos/:id/dependencies/:dependency_id",
@@ -381,6 +390,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/workspaces", "workspace", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id", "workspace", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/repos", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/orchestrator/spawn",
+                    "workspace",
+                    Some("write"),
+                ),
                 // Workspace-scoped entity lists (M34 Slice 6 — primary access patterns)
                 RouteResourceMapping::api("/api/v1/workspaces/:workspace_id/tasks", "task", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:workspace_id/agents", "agent", None),

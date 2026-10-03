@@ -37,7 +37,6 @@
 /api/v1/repos/:id/attestations/:commit_sha/bundle
 /api/v1/repos/:id/attestations/:commit_sha/chain
 /api/v1/repos/:id/attestations/:commit_sha/verification
-/api/v1/repos/:id/orchestrator/spawn
 /api/v1/repos/:id/spec-assertions/check
 /api/v1/repos/:id/unarchive
 /api/v1/repos/:id/views
@@ -62,4 +61,3 @@
 /api/v1/workspaces/:id/llm/prompts/:function
 /api/v1/workspaces/:id/meta-specs/preview
 /api/v1/workspaces/:id/meta-specs/preview/:preview_id
-/api/v1/workspaces/:id/orchestrator/spawn
