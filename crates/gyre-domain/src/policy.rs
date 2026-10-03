@@ -359,3 +359,84 @@ pub fn trust_policies_for_level(
         crate::TrustLevel::Custom => vec![],
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests (TASK-077 F8: field-level assertions on generated trust policies)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TrustLevel;
+
+    /// Supervised generates exactly one policy — the merge-hold Deny whose
+    /// fields merge-time enforcement (HSI §2) consumes. Every field is
+    /// asserted: a typo in any of them would break the F5 gate while passing
+    /// existence-only checks.
+    #[test]
+    fn trust_policies_for_level_supervised_generates_merge_hold_deny() {
+        let policies = trust_policies_for_level(&TrustLevel::Supervised, "ws-1", "creator-1");
+
+        assert_eq!(policies.len(), 1, "Supervised must generate exactly one policy");
+        let p = &policies[0];
+
+        assert_eq!(p.name, "trust:require-human-mr-review");
+        assert_eq!(p.effect, PolicyEffect::Deny, "trust policy must Deny");
+        assert_eq!(p.priority, 150);
+        assert!(
+            (100..=199).contains(&p.priority),
+            "trust band is 100-199 so user policies (200-299) can override"
+        );
+        assert_eq!(p.actions, vec!["merge".to_string()]);
+        assert_eq!(p.resource_types, vec!["mr".to_string()]);
+
+        // The Deny must match the merge processor's service identity
+        // (subject.type "system") — the exact condition F5 evaluates with.
+        assert_eq!(p.conditions.len(), 1);
+        let c = &p.conditions[0];
+        assert_eq!(
+            c.attribute, "subject.type",
+            "condition must target the merge processor's subject.type"
+        );
+        assert_eq!(c.operator, ConditionOp::Equals);
+        assert_eq!(
+            c.value,
+            ConditionValue::String("system".to_string()),
+            "condition value must match the merge processor's subject.type"
+        );
+
+        assert_eq!(p.scope, PolicyScope::Workspace);
+        assert_eq!(p.scope_id.as_deref(), Some("ws-1"));
+        assert!(p.enabled, "trust policy must be enabled");
+        assert!(!p.immutable, "trust policies are overridable by user Allows");
+        assert!(!p.built_in);
+        assert_eq!(p.created_by, "creator-1");
+    }
+
+    #[test]
+    fn trust_policies_for_level_guided_is_empty() {
+        let policies = trust_policies_for_level(&TrustLevel::Guided, "ws-1", "creator-1");
+        assert!(
+            policies.is_empty(),
+            "Guided relies on built-in policies only — no trust: policies"
+        );
+    }
+
+    #[test]
+    fn trust_policies_for_level_autonomous_is_empty() {
+        let policies = trust_policies_for_level(&TrustLevel::Autonomous, "ws-1", "creator-1");
+        assert!(
+            policies.is_empty(),
+            "Autonomous has no trust: policies — spec approval handled by built-in immutable policy"
+        );
+    }
+
+    #[test]
+    fn trust_policies_for_level_custom_is_empty() {
+        let policies = trust_policies_for_level(&TrustLevel::Custom, "ws-1", "creator-1");
+        assert!(
+            policies.is_empty(),
+            "Custom creates no trust: policies — the user manages ABAC directly"
+        );
+    }
+}
