@@ -1476,6 +1476,18 @@ pub async fn fail_agent(
         }
     }
 
+    // TASK-093 (F6): orchestrator death handling on the fail path — same
+    // treatment as the stale-agent Abort path: restart a replacement when
+    // restart_on_failure is set (subject to the spawn budget) and escalate
+    // repo-tier deaths to the live workspace orchestrator.
+    if agent.is_orchestrator() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        crate::stale_agents::handle_orchestrator_death(&state, &agent, now, "fail").await;
+    }
+
     Ok(StatusCode::OK)
 }
 
@@ -1501,6 +1513,7 @@ pub async fn stop_agent(
         return Ok(StatusCode::OK);
     }
 
+
     agent
         .transition_status(AgentStatus::Stopped)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
@@ -1512,6 +1525,19 @@ pub async fn stop_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+
+    // TASK-093 (F6): orchestrator death handling on the stop path. Stop is
+    // operator-initiated, but `restart_on_failure` is the owner's explicit
+    // exactly-one-live directive for the orchestrator, so the same shared
+    // death handling runs here (restart gated by spawn budget, repo-tier
+    // escalation names the replacement when one was spawned).
+    if agent.is_orchestrator() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        crate::stale_agents::handle_orchestrator_death(&state, &agent, now, "stop").await;
+    }
 
     Ok(StatusCode::OK)
 }
