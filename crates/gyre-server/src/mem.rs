@@ -3190,7 +3190,7 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
 }
 
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
@@ -3200,7 +3200,18 @@ pub fn test_state_with_storage(
     storage: Arc<dyn gyre_ports::storage::StoragePort>,
 ) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, Some(storage))
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, Some(storage), None)
+}
+
+/// Build a test AppState with a custom `SecretRepository` — used to exercise
+/// the spawn path's resolve-failure branch (task-097 F2) with a port that
+/// always errors, everything else in-memory and real.
+#[cfg(test)]
+pub fn test_state_with_secrets(
+    secrets: Arc<dyn gyre_ports::SecretRepository>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, Some(secrets))
 }
 
 /// Build a test AppState whose workspace repo fails every `apply_trust_transition`,
@@ -3208,7 +3219,7 @@ pub fn test_state_with_storage(
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
 }
 
 /// Construct a paired workspace + policy repo that share a single in-memory
@@ -3236,17 +3247,19 @@ fn shared_workspace_policy_pair(
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, None)
+    test_state_inner(git_ops, workspaces, policies, None, None)
 }
 
 /// Shared builder for all in-memory test states. Callers supply the git ops
-/// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`).
+/// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`);
+/// `secrets` overrides the default in-memory SecretRepository when given.
+
 #[cfg(test)]
 fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
-    storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
+    secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
@@ -3366,7 +3379,7 @@ fn test_state_inner(
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
-        secrets: Arc::new(MemSecretRepository::default()),
+        secrets: secrets.unwrap_or_else(|| Arc::new(MemSecretRepository::default())),
         ws_tickets: crate::auth::WsTicketStore::new(),
     })
 }
@@ -3392,14 +3405,21 @@ fn mem_now_secs() -> u64 {
 impl gyre_ports::SecretRepository for MemSecretRepository {
     async fn create(&self, secret: &gyre_common::Secret, value: &[u8]) -> Result<()> {
         let mut store = self.store.lock().await;
-        if store.iter().any(|(tenant_id, existing, _)| {
-            tenant_id == &secret.tenant_id
-                && (existing.id == secret.id
-                    || (existing.scope == secret.scope
-                        && existing.scope_id == secret.scope_id
-                        && existing.name == secret.name))
+        // Mirror the SQLite UNIQUE(id) + UNIQUE(tenant, scope, scope_id, name)
+        // failure mode: reject duplicates instead of silently shadowing them
+        // (get_value/rotate only ever find the first entry).
+        if store.iter().any(|(tid, s, _)| {
+            tid == &secret.tenant_id
+                && (s.id == secret.id
+                    || (s.scope == secret.scope
+                        && s.scope_id == secret.scope_id
+                        && s.name == secret.name))
         }) {
-            anyhow::bail!("secret id or scope/name already exists in tenant");
+            anyhow::bail!(
+                "secret {} already exists in tenant {} (duplicate id or scope/name)",
+                secret.id,
+                secret.tenant_id
+            );
         }
         store.push((secret.tenant_id.clone(), secret.clone(), value.to_vec()));
         Ok(())
@@ -4272,5 +4292,77 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
             .await
             .retain(|(tid, a)| !(tid == tenant_id && a.id == anchor_id));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod secret_contract_tests {
+    //! F1 (task-097): the mem adapter must enforce the SecretRepository port's
+    //! duplicate-rejection contract in code — SQLite enforces it via UNIQUE
+    //! constraints, so a mem-only guard is the only thing tests can catch.
+    use super::*;
+    use gyre_ports::SecretRepository as _;
+
+    fn sample_secret(id: &str, name: &str, scope: SecretScope, scope_id: &str, tenant: &str) -> Secret {
+        Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Static,
+            created_by: "test".to_string(),
+            created_at: mem_now_secs(),
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: tenant.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_duplicate_id_same_tenant() {
+        let repo = MemSecretRepository::default();
+        let s = sample_secret("sec-1", "ALPHA", SecretScope::Tenant, "tenant-a", "tenant-a");
+        repo.create(&s, b"v1").await.unwrap();
+
+        // Same id, different name/scope — still a duplicate (SQLite PK).
+        let dup = sample_secret("sec-1", "BETA", SecretScope::Repo, "repo-9", "tenant-a");
+        let err = repo.create(&dup, b"v2").await;
+        assert!(err.is_err(), "duplicate id in same tenant must be rejected");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_duplicate_scope_and_name_same_tenant() {
+        let repo = MemSecretRepository::default();
+        let s = sample_secret("sec-1", "ALPHA", SecretScope::Repo, "repo-1", "tenant-a");
+        repo.create(&s, b"v1").await.unwrap();
+
+        // Same (scope, scope_id, name) via a fresh id — the UNIQUE the port doc names.
+        let dup = sample_secret("sec-2", "ALPHA", SecretScope::Repo, "repo-1", "tenant-a");
+        let err = repo.create(&dup, b"v2").await;
+        assert!(err.is_err(), "duplicate (scope, scope_id, name) in same tenant must be rejected");
+    }
+
+    #[tokio::test]
+    async fn create_allows_same_name_different_tenant() {
+        let repo = MemSecretRepository::default();
+        let a = sample_secret("sec-1", "ALPHA", SecretScope::Tenant, "tenant-a", "tenant-a");
+        let b = sample_secret("sec-2", "ALPHA", SecretScope::Tenant, "tenant-b", "tenant-b");
+        repo.create(&a, b"v1").await.unwrap();
+        repo.create(&b, b"v2").await.unwrap();
+
+        // Both tenants must independently resolve their own value.
+        let va = repo.get_value(&a.id, "tenant-a").await.unwrap();
+        let vb = repo.get_value(&b.id, "tenant-b").await.unwrap();
+        assert_eq!(va.as_deref(), Some(b"v1".as_slice()));
+        assert_eq!(vb.as_deref(), Some(b"v2".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn create_allows_different_name_same_scope() {
+        let repo = MemSecretRepository::default();
+        let a = sample_secret("sec-1", "ALPHA", SecretScope::Workspace, "ws-1", "tenant-a");
+        let b = sample_secret("sec-2", "BETA", SecretScope::Workspace, "ws-1", "tenant-a");
+        repo.create(&a, b"v1").await.unwrap();
+        repo.create(&b, b"v2").await.unwrap();
     }
 }
