@@ -55,7 +55,7 @@ inject_task_prompt() {
   printf 'Read this file first. Do not scan other task files to find work.\n'
 }
 
-MAX_ROUNDS=6
+MAX_ROUNDS=${MAX_ROUNDS:-6}
 ROUND=0
 
 while [ $ROUND -lt $MAX_ROUNDS ]; do
