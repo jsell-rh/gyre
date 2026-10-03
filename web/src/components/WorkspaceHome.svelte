@@ -24,6 +24,8 @@
   import Modal from '../lib/Modal.svelte';
   import Icon from '../lib/Icon.svelte';
   import CopyableId from '../lib/CopyableId.svelte';
+  import Briefing from './Briefing.svelte';
+  import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
   import { toastSuccess, toastError } from '../lib/toast.svelte.js';
 
@@ -46,10 +48,10 @@
     onSelectRepo = undefined,
     onWorkspaceCreated = undefined,
     decisionsCount = 0,
+    archExpandSignal = 0,
   } = $props();
 
   // ── Workspace overview tab state ────────────────────────────────────────
-  // Pipeline stages navigate directly to the single repo's tab when there's only one repo.
   // When multiple repos exist, clicking a stage expands a minimal summary below the bar.
   let wsTab = $state(null); // 'specs' | 'tasks' | 'mrs' | 'agents' | 'budget' | null
 
@@ -144,8 +146,34 @@
   let specsLoading = $state(true);
   let specsError = $state(null);
   let specs = $state([]);
+  let specsStatusFilter = $state('');
 
-  // ── Budget/Cost state ───────────────────────────────────────────────────
+  // ── Architecture state (ui-navigation.md §2 — collapsed by default) ────
+  let archExpanded = $state(false);
+  let archLoading = $state(false);
+  let archError = $state(null);
+  let archGraph = $state(null); // { nodes: [], edges: [] }
+
+  async function loadArchGraph() {
+    if (!workspace?.id) return;
+    archLoading = true;
+    archError = null;
+    try {
+      archGraph = await api.workspaceGraph(workspace.id);
+    } catch (e) {
+      archError = e.message || 'Failed to load workspace graph';
+      archGraph = { nodes: [], edges: [] };
+    } finally {
+      archLoading = false;
+    }
+  }
+
+  function toggleArch() {
+    archExpanded = !archExpanded;
+    if (archExpanded && !archGraph && !archLoading) {
+      loadArchGraph();
+    }
+  }
   let budgetLoading = $state(true);
   let budgetData = $state(null); // { config, usage }
   let costData = $state(null);   // cost summary
@@ -278,6 +306,22 @@
       specsLoading = false;
     }
   }
+
+  // ── Spec navigation ────────────────────────────────────────────────────
+  function navigateToSpec(spec) {
+    const repo = repoMap[spec.repo_id];
+    if (repo && onSelectRepo) {
+      onSelectRepo(repo, 'specs', spec.path);
+    }
+  }
+
+  // ── Derived: filtered specs ────────────────────────────────────────────
+  let filteredSpecs = $derived(
+    specs.filter(s => {
+      if (specsStatusFilter && (s.approval_status ?? s.status) !== specsStatusFilter) return false;
+      return true;
+    })
+  );
 
   // ── Tasks: load ────────────────────────────────────────────────────────
   async function loadTasks() {
@@ -1073,6 +1117,17 @@
     loadBudget();
     loadMergeQueue();
     loadDepHealth();
+    loadArchGraph();
+  });
+
+  // ── Explorer sidebar click → expand Architecture (HSI §1.3) ───────────
+  // App increments archExpandSignal when the user clicks Explorer at
+  // workspace scope; the section expands so the scroll target has content.
+  $effect(() => {
+    if (archExpandSignal > 0) {
+      archExpanded = true;
+      if (!archGraph && !archLoading) loadArchGraph();
+    }
   });
 </script>
 
@@ -1326,8 +1381,18 @@
                   {/each}
                 </div>
               </section>
+            {:else}
+              <section class="ws-decisions-section" data-testid="section-decisions">
+                <div class="decisions-header">
+                  <h2 class="decisions-title">{$t('workspace_home.sections.decisions')}</h2>
+                </div>
+                <div class="decisions-list">
+                  <p class="empty-text" data-testid="decisions-empty">{$t('workspace_home.decisions_empty')}</p>
+                </div>
+              </section>
             {/if}
           {/if}
+
 
           <!-- Dependency Graph (TASK-046) — toggleable via health card -->
           {#if depGraphOpen}
@@ -1354,6 +1419,126 @@
               </div>
             </section>
           {/if}
+
+          <!-- ── Briefing (HSI §1.3 — narrative for this workspace) ─────── -->
+          <section class="home-section home-section-briefing" aria-labelledby="section-briefing" data-testid="section-briefing">
+            <div class="section-header">
+              <h2 class="section-title" id="section-briefing">{$t('workspace_home.sections.briefing')}</h2>
+            </div>
+            <div class="section-body section-body-briefing">
+              <Briefing workspaceId={workspace.id} scope="workspace" workspaceName={workspace.name} />
+            </div>
+          </section>
+
+          <!-- ── Specs (HSI §1.3 — specs across repos in workspace) ─────── -->
+          <section class="home-section" aria-labelledby="section-specs" data-testid="section-specs">
+            <div class="section-header">
+              <h2 class="section-title" id="section-specs">{$t('workspace_home.sections.specs')}</h2>
+              <div class="header-controls">
+                <select
+                  class="filter-select"
+                  value={specsStatusFilter}
+                  onchange={(e) => { specsStatusFilter = e.target.value; }}
+                  aria-label="Filter specs by status"
+                  data-testid="specs-status-filter"
+                >
+                  <option value="">All statuses</option>
+                  <option value="draft">Draft</option>
+                  <option value="pending">Pending</option>
+                  <option value="approved">Approved</option>
+                  <option value="implemented">Implemented</option>
+                </select>
+              </div>
+            </div>
+            <div class="section-body">
+              {#if specsLoading}
+                <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
+              {:else if specsError}
+                <p class="error-text" role="alert">{specsError}</p>
+              {:else if filteredSpecs.length === 0}
+                <p class="empty-text" data-testid="specs-empty">
+                  {specsStatusFilter ? 'No specs with that status.' : 'No specs yet.'}
+                </p>
+              {:else}
+                <table class="specs-table" data-testid="specs-table">
+                  <thead>
+                    <tr>
+                      <th>Repo</th>
+                      <th>Path</th>
+                      <th>Status</th>
+                      <th>Progress</th>
+                      <th>Last activity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each filteredSpecs as spec (spec.id ?? spec.path)}
+                      <tr
+                        class="spec-row"
+                        onclick={() => navigateToSpec(spec)}
+                        role="button"
+                        tabindex="0"
+                        onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigateToSpec(spec); }}
+                        data-testid="spec-row"
+                        aria-label="Open spec {spec.path}"
+                      >
+                        <td class="spec-repo">{repoMap[spec.repo_id]?.name ?? spec.repo_id ?? '—'}</td>
+                        <td class="spec-path">{spec.path}</td>
+                        <td class="spec-status">
+                          <span class="status-icon" aria-hidden="true">{SPEC_STATUS_ICONS[spec.status] ?? '•'}</span>
+                          {(spec.approval_status ?? spec.status) ?? '—'}
+                        </td>
+                        <td class="spec-progress">
+                          {#if spec.tasks_total != null}
+                            {spec.tasks_done ?? 0}/{spec.tasks_total}
+                          {:else}
+                            —
+                          {/if}
+                        </td>
+                        <td class="spec-activity">{relTime(spec.updated_at)}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              {/if}
+            </div>
+          </section>
+
+          <!-- ── Architecture (HSI §1.3 — realized architecture, collapsed by default per ui-navigation.md §2) ── -->
+          <section class="home-section" aria-labelledby="section-architecture" data-testid="section-architecture">
+            <button
+              class="arch-toggle-header"
+              onclick={toggleArch}
+              aria-expanded={archExpanded}
+              aria-controls="arch-body"
+              data-testid="arch-toggle"
+            >
+              <h2 class="section-title" id="section-architecture">{$t('workspace_home.sections.architecture')}</h2>
+              <span class="arch-toggle-label" aria-hidden="true">
+                {archExpanded ? `▾ ${$t('workspace_home.hide_workspace_graph')}` : `▸ ${$t('workspace_home.show_workspace_graph')}`}
+              </span>
+            </button>
+            {#if archExpanded}
+              <div class="section-body arch-body" id="arch-body" data-testid="arch-body">
+                {#if archLoading}
+                  <div class="skeleton-row"></div>
+                  <div class="skeleton-row"></div>
+                {:else if archError}
+                  <div class="error-row" role="alert">
+                    <p class="error-text">{archError}</p>
+                    <button class="retry-btn" onclick={loadArchGraph} aria-label="Retry loading workspace graph">Retry</button>
+                  </div>
+                {:else if archGraph}
+                  <div class="arch-canvas-wrap" data-testid="arch-canvas">
+                    <ExplorerCanvas
+                      nodes={archGraph.nodes ?? []}
+                      edges={archGraph.edges ?? []}
+                    />
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </section>
 
           <!-- Repos (primary content — the main thing users interact with) -->
           <section class="repos-section" data-testid="section-repos">
@@ -5214,7 +5399,7 @@
     gap: var(--space-2);
   }
 
-  /* Briefing section (unused — section removed) */
+  /* Briefing body hosts Briefing.svelte, which carries its own padding */
   .section-body-briefing {
     padding: 0;
   }
@@ -5223,6 +5408,140 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+
+  /* ── Specs table ────────────────────────────────────────────────────── */
+  .specs-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+  }
+
+  .specs-table th {
+    text-align: left;
+    padding: var(--space-2) var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--color-border);
+    white-space: nowrap;
+  }
+
+  .spec-row {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+  }
+
+  .spec-row:hover {
+    background: var(--color-surface-elevated);
+  }
+
+  .spec-row:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  .spec-row td {
+    padding: var(--space-2) var(--space-2);
+    border-bottom: 1px solid var(--color-border);
+    vertical-align: middle;
+  }
+
+  .spec-row:last-child td {
+    border-bottom: none;
+  }
+
+  .spec-repo {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .spec-path {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text);
+    max-width: 200px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .spec-status {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    white-space: nowrap;
+    color: var(--color-text-secondary);
+    text-transform: capitalize;
+  }
+
+  .status-icon {
+    font-size: var(--text-xs);
+  }
+
+  .spec-progress {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .spec-activity {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  /* ── Architecture (collapsed by default per ui-navigation.md §2) ────── */
+  .arch-toggle-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: var(--space-3) var(--space-4);
+    background: var(--color-surface-elevated);
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    font-family: var(--font-body);
+    text-align: left;
+    gap: var(--space-2);
+    transition: background var(--transition-fast);
+  }
+
+  .arch-toggle-header:hover {
+    background: color-mix(in srgb, var(--color-surface-elevated) 80%, var(--color-border));
+  }
+
+  .arch-toggle-header:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: -2px;
+  }
+
+  /* When not expanded, remove bottom border (section has no body) */
+  .arch-toggle-header[aria-expanded="false"] {
+    border-bottom: none;
+  }
+
+  .arch-toggle-label {
+    font-size: var(--text-xs);
+    color: var(--color-primary);
+    flex-shrink: 0;
+    font-family: var(--font-body);
+  }
+
+  .arch-body {
+    padding: 0;
+  }
+
+  .arch-canvas-wrap {
+    height: 320px;
+    position: relative;
+    overflow: hidden;
   }
 
   /* ── Decisions / Action Needed section ────────────────────────────── */

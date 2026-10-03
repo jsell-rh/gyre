@@ -36,6 +36,9 @@
   // active sidebar indicator is tracked here rather than derived from `mode` alone
   // (HSI §1.3 — "Active sidebar item is visually highlighted").
   let workspaceActiveSection = $state('inbox');
+  // Incremented when Explorer is clicked at workspace scope so WorkspaceHome
+  // expands its (collapsed-by-default) Architecture section before scrolling.
+  let archExpandSignal = $state(0);
   // Same tracking for the cross-workspace dashboard (/all): Inbox/Briefing/Specs
   // are scroll sections of the cross-workspace page, and the workspace cards
   // grid is Explorer (HSI §1.3 tenant-scope row, ui-navigation.md §10).
@@ -883,6 +886,9 @@
           if (!currentWorkspace) { goToCrossWorkspace(); return; }
           goToWorkspaceHome(currentWorkspace);
           workspaceActiveSection = 'explorer';
+          // Signal WorkspaceHome to expand its Architecture section so the
+          // scroll target has visible content (HSI §1.3 Explorer target).
+          archExpandSignal += 1;
           tick().then(() => document.querySelector('[data-testid="section-architecture"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
           return;
         case 'specs':
@@ -1625,6 +1631,7 @@
           <WorkspaceHome
             workspace={currentWorkspace}
             {decisionsCount}
+            {archExpandSignal}
             onSelectRepo={(repo, tab, specPath) => {
               goToRepo(repo, tab);
               if (specPath) {
