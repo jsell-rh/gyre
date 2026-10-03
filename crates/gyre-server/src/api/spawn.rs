@@ -111,7 +111,16 @@ pub struct CompleteAgentRequest {
 
 /// Create the three ABAC policies required for an interrogation agent (HSI §4).
 /// Returns the list of created policy IDs (stored in kv_store for cleanup).
-pub async fn create_interrogation_policies(state: &AppState, agent_id: &str) -> Vec<String> {
+///
+/// Fail closed (task-077 F6): if any restriction/allow policy cannot be
+/// created, the error propagates and the caller aborts the spawn — an
+/// interrogation agent must never run with only a subset of its restriction
+/// policies (the R1 F1 flaw class: a failed `interrogation-restrict-*` Deny
+/// left the agent unrestricted with only a log line).
+pub async fn create_interrogation_policies(
+    state: &AppState,
+    agent_id: &str,
+) -> Result<Vec<String>, anyhow::Error> {
     let now = now_secs();
     let subject_value = format!("agent:{agent_id}");
 
@@ -216,14 +225,10 @@ pub async fn create_interrogation_policies(state: &AppState, agent_id: &str) -> 
 
     let mut created_ids = Vec::new();
     for policy in &policies {
-        match state.policies.create(policy).await {
-            Ok(()) => created_ids.push(policy.id.to_string()),
-            Err(e) => tracing::warn!(
-                agent_id = %agent_id,
-                policy_id = %policy.id,
-                "failed to create interrogation policy: {e}"
-            ),
-        }
+        state.policies.create(policy).await.map_err(|e| {
+            anyhow::anyhow!("failed to create interrogation policy {}: {e}", policy.id)
+        })?;
+        created_ids.push(policy.id.to_string());
     }
 
     // Store policy IDs in kv_store for cleanup on complete/kill/stale.
@@ -234,7 +239,7 @@ pub async fn create_interrogation_policies(state: &AppState, agent_id: &str) -> 
             .await;
     }
 
-    created_ids
+    Ok(created_ids)
 }
 
 /// Delete all ABAC policies created for an interrogation agent.
@@ -451,8 +456,25 @@ pub(crate) async fn spawn_agent_core(
 
     // HSI §4: For interrogation agents — create scoped ABAC policies and store
     // the conversation context for the conversation://context MCP resource.
+    // Fail closed (task-077 F6): if the restriction policies cannot be created,
+    // abort the spawn — never leave an interrogation agent running unrestricted.
     if is_interrogation {
-        create_interrogation_policies(&state, &agent.id.to_string()).await;
+        if let Err(e) = create_interrogation_policies(&state, &agent.id.to_string()).await {
+            // Roll back the already-created agent record and token so the
+            // aborted spawn leaves no orphaned entities behind.
+            if let Err(del_err) = state.agents.delete(&agent.id).await {
+                tracing::error!(
+                    agent_id = %agent.id,
+                    error = %del_err,
+                    "failed to delete agent record after interrogation policy creation failure"
+                );
+            }
+            let _ = state
+                .kv_store
+                .kv_remove("agent_tokens", &agent.id.to_string())
+                .await;
+            return Err(ApiError::Internal(e));
+        }
 
         // Retrieve conversation from kv_store (written by S2.1 ConversationRepository).
         // Best-effort: if not found, the MCP resource will return an empty context.
