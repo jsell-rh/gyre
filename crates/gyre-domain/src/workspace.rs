@@ -221,4 +221,24 @@ mod tests {
         assert!(b.max_tokens_per_day.is_none());
         assert!(b.max_cost_per_day.is_none());
     }
+
+    // ── TASK-077 (F8): TrustLevel::from_db_str round-trips and fallback ──
+
+    #[test]
+    fn from_db_str_parses_all_four_levels() {
+        assert_eq!(TrustLevel::from_db_str("Supervised"), TrustLevel::Supervised);
+        assert_eq!(TrustLevel::from_db_str("Guided"), TrustLevel::Guided);
+        assert_eq!(TrustLevel::from_db_str("Autonomous"), TrustLevel::Autonomous);
+        assert_eq!(TrustLevel::from_db_str("Custom"), TrustLevel::Custom);
+    }
+
+    #[test]
+    fn from_db_str_unknown_falls_back_to_supervised() {
+        // Unknown/legacy values must fall back to Supervised (HSI §2 —
+        // safest level on ambiguity).
+        assert_eq!(TrustLevel::from_db_str("bogus"), TrustLevel::Supervised);
+        assert_eq!(TrustLevel::from_db_str(""), TrustLevel::Supervised);
+        // Case-sensitive: "supervised" is not a stored value.
+        assert_eq!(TrustLevel::from_db_str("supervised"), TrustLevel::Supervised);
+    }
 }
