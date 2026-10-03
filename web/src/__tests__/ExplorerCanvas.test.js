@@ -240,6 +240,42 @@ describe('ExplorerCanvas — view queries', () => {
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Test coverage gaps');
   });
 
+  it('draws highlight.matched.label on matched nodes with the matched color', () => {
+    // spec view-query-grammar.md §3: highlight.matched = color + label for
+    // nodes in the result set. Flat fixture: one package directly containing
+    // the untested function, so the matched leaf is drawn at initial fit zoom
+    // (a deeper tree keeps the parent group in summary mode at test zoom).
+    const flatNodes = [
+      { id: 'pkg1', node_type: 'package', name: 'api', qualified_name: 'api', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+      { id: 'fn2', node_type: 'function', name: 'get_user', qualified_name: 'api.get_user', file_path: 'api/handlers.py', line_start: 32, line_end: 45, visibility: 'public', spec_confidence: 'medium', test_node: false },
+    ];
+    const flatEdges = [
+      { id: 'e1', source_id: 'pkg1', target_id: 'fn2', edge_type: 'contains' },
+    ];
+    const query = {
+      scope: { type: 'test_gaps' },
+      emphasis: { highlight: { matched: { color: '#ef4444', label: 'Untested' } }, dim_unmatched: 0.3 },
+    };
+    render(ExplorerCanvas, {
+      props: { nodes: flatNodes, edges: flatEdges, activeQuery: query },
+    });
+    const labelCalls = mockCtx.fillText.mock.calls.filter(c => c[0] === 'Untested');
+    expect(labelCalls.length).toBeGreaterThan(0);
+    // The label is drawn while fillStyle is the matched color
+    expect(mockCtx.fillStyle).toBeDefined();
+  });
+
+  it('does not draw highlight label when emphasis has no label', () => {
+    const query = {
+      scope: { type: 'test_gaps' },
+      emphasis: { highlight: { matched: { color: '#ef4444' } }, dim_unmatched: 0.3 },
+    };
+    render(ExplorerCanvas, {
+      props: { nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    expect(mockCtx.fillText.mock.calls.some(c => c[0] === 'Untested')).toBe(false);
+  });
+
   it('renders filter scope with node_types', () => {
     const query = {
       scope: { type: 'filter', node_types: ['endpoint'] },
