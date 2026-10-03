@@ -36,9 +36,9 @@
 // Then open http://127.0.0.1:7690
 
 import { createServer } from "node:http";
-import { readFile, readdir, stat, open } from "node:fs/promises";
+import { readFile, readdir, stat, open, writeFile } from "node:fs/promises";
 import { join, normalize, resolve, sep } from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
@@ -46,6 +46,11 @@ const execFileP = promisify(execFile);
 const PORT = Number(process.env.GYRE_DASHBOARD_PORT || 7690);
 const LOG_PATH = process.env.GYRE_LOOP_LOG || "/tmp/gyre-loop.log";
 const WORKER_DIR = process.env.GYRE_WORKER_DIR || "worktrees/workers";
+// Sandbox fleet (scripts/fleet-sandbox.sh): per-task status dirs written by
+// the local driver processes + the parallelism lever file.
+const SBX_STATUS_DIR = process.env.GYRE_SBX_STATUS_DIR || "/tmp/gyre-sandbox/status";
+const SBX_PARALLELISM_FILE = process.env.GYRE_SBX_PARALLELISM || "/tmp/gyre-sandbox/parallelism";
+const SBX_FLEET_JSON = process.env.GYRE_SBX_FLEET_JSON || "/tmp/gyre-sandbox/fleet.json";
 const TAIL_LINES = Number(process.env.GYRE_DASH_TAIL || 120);
 const REFRESH_MS = Number(process.env.GYRE_DASH_REFRESH_MS || 2000);
 const ROOT = process.cwd();
@@ -59,6 +64,8 @@ function taskMeta(frontmatter) {
   if (ref) out.specRef = ref[1];
   const prog = frontmatter.match(/^progress:\s*"?(.*?)"?\s*$/m);
   if (prog) out.progress = prog[1];
+  const depMatch = frontmatter.match(/^depends_on:\s*\n((?:\s*-\s*.+\n?)+)/m);
+  if (depMatch) out.deps = depMatch[1].split("\n").map((l) => l.replace(/^\s*-\s*/, "").trim()).filter(Boolean);
   return out;
 }
 
@@ -88,6 +95,79 @@ async function tailFile(path, lines) {
   const text = await tailBytes(path, 128 * 1024);
   if (text == null) return null;
   return text.split("\n").slice(-lines).join("\n").trimEnd();
+}
+
+// Decode a sandbox agent event stream (omp .agent.jsonl mirror or the
+// tail -F relay stream) into a readable transcript. Raw JSONL deltas are
+// unreadable in a card body; this folds them into:
+//   [think] ...   — folded thinking text (dimmed client-side via marker)
+//   agent prose    — text_delta accumulation
+//   $ cmd          — tool calls (bash etc.)
+//   -> result tail — tool execution results
+// Also passes through plain non-JSON lines (worker loop logs etc.).
+function decodeAgentEvents(text) {
+  let out = "";
+  let thinkBuf = "", textBuf = "", toolBuf = "", toolName = "";
+  const flushThink = () => {
+    if (thinkBuf) {
+      // fold whitespace, cap: thinking is context, not content
+      out += "[think] " + thinkBuf.replace(/\s+/g, " ").slice(-2000) + "\n";
+      thinkBuf = "";
+    }
+  };
+  const flushText = () => { if (textBuf) { out += textBuf + "\n"; textBuf = ""; } };
+  const flushTool = () => {
+    if (toolBuf) {
+      let cmd = toolBuf;
+      try { cmd = JSON.parse(toolBuf).command || toolName + " " + toolBuf; } catch {}
+      out += "$ " + String(cmd).slice(0, 500) + "\n";
+      toolBuf = "";
+    }
+  };
+  for (const line of text.split("\n")) {
+    if (line === "===STREAM-OPEN===" || line === "===NEXT-FILE===" || line === "===WORKER-LOG===") {
+      flushThink(); flushText(); flushTool();
+      if (line !== "===WORKER-LOG===") continue;
+      out += "--- worker log ---\n";
+      continue;
+    }
+    if (!line.startsWith("{")) { flushThink(); flushText(); flushTool(); out += line + "\n"; continue; }
+    let d; try { d = JSON.parse(line); } catch { out += line + "\n"; continue; }
+    const ev = d.assistantMessageEvent || d;
+    switch (ev.type || d.type) {
+      case "thinking_delta": thinkBuf += ev.delta || ""; break;
+      case "thinking_start": case "text_start": case "toolcall_start": break;
+      case "text_delta": flushThink(); textBuf += ev.delta || ""; break;
+      case "text_end": flushThink(); if (ev.content) textBuf += ev.content; break;
+      case "toolcall_delta": flushThink(); flushText(); toolBuf += ev.delta || ""; break;
+      case "toolcall_end":
+        flushThink(); flushText();
+        if (ev.toolCall && ev.toolCall.name) {
+          toolName = ev.toolCall.name;
+          const a = ev.toolCall.arguments || {};
+          out += "$ " + (a.command || a.path || JSON.stringify(a)).toString().slice(0, 500) + "\n";
+          toolBuf = "";
+        }
+        break;
+      case "tool_execution_start":
+        flushThink(); flushText(); flushTool();
+        if (ev.args && ev.toolName) {
+          out += "$ " + (ev.args.command || ev.args.path || JSON.stringify(ev.args)).toString().slice(0, 500) + "\n";
+        }
+        break;
+      case "tool_execution_end":
+        flushThink(); flushText(); flushTool();
+        if (ev.result && ev.result.content) {
+          const txt = ev.result.content.map((c) => c.text || "").join("").trim();
+          if (txt) out += "-> " + txt.split("\n").slice(0, 6).join("\n   ").slice(0, 1500) + "\n";
+        }
+        break;
+      case "message_end": case "turn_end": case "message_start": case "turn_start":
+      case "tool_execution_update": default: break;
+    }
+  }
+  flushThink(); flushText(); flushTool();
+  return out.trimEnd();
 }
 
 // Age of a file's last write (ms before `now`), or null if unreadable.
@@ -309,6 +389,19 @@ async function readFrontmatter(path) {
   }
 }
 
+// Fleet status: reads the parallelism lever + fleet heartbeat. Returns
+// null when no fleet is running (standalone worker-sandbox.sh runs still
+// show their cards via sbxWorkers).
+async function sbxFleetStatus() {
+  const out = { parallelism: null, active: null, updated: null, leverPath: SBX_PARALLELISM_FILE };
+  try { out.parallelism = Number((await readFile(SBX_PARALLELISM_FILE, "utf8")).trim()) || null; } catch {}
+  try {
+    const f = JSON.parse(await readFile(SBX_FLEET_JSON, "utf8"));
+    out.active = f.active; out.updated = f.updated;
+  } catch {}
+  return out;
+}
+
 let refreshing = false;
 async function refreshSnapshot() {
   if (refreshing) return; // never overlap refreshes
@@ -328,17 +421,72 @@ async function refreshSnapshot() {
         return { name, title, specRef, progress, done, agentLog, workerLog, agentAgeMs: await ageMs(join(dir, ".agent.log"), now) };
       })
     );
+    // --- Sandbox fleet workers (driver-mirrored status dirs) ---
+    const sbxWorkers = [];
+    // One pgrep for all driver liveness checks (was: one spawn per worker).
+    const runningDrivers = await new Promise((res) => {
+      const out = [];
+      const p = spawn("pgrep", ["-af", "worker-sandbox.sh .*specs/tasks/task-"]);
+      p.stdout.on("data", (d) => out.push(d.toString()));
+      p.on("close", () => {
+        const set = new Set();
+        for (const line of out.join("").split("\n")) {
+          const m = line.match(/specs\/tasks\/(task-[a-z0-9-]+)\.md/);
+          if (m) set.add(m[1]);
+        }
+        res(set);
+      });
+      p.on("error", () => res(new Set()));
+    });
+    try {
+      const sbxNames = (await readdir(SBX_STATUS_DIR)).filter((n) => /^task-/.test(n)).sort();
+      for (const name of sbxNames) {
+        const dir = join(SBX_STATUS_DIR, name);
+        const st = await readFile(join(dir, "status.json"), "utf8").then(JSON.parse).catch(() => null);
+        const mirror = decodeAgentEvents(await tailFile(join(dir, "agent-mirror.txt"), TAIL_LINES) || "");
+        const driverLog = await tailFile(join(dir, "driver.log"), 60);
+        const fm = await readFrontmatter(`specs/tasks/${name}.md`);
+        const meta = taskMeta(fm);
+        // Driver liveness: a live driver updates status.json / driver.log.
+        const age = await ageMs(join(dir, "driver.log"), now);
+        // True liveness = a worker-sandbox.sh driver process exists for this
+        // task (state dirs persist after exit; file age alone can't tell
+        // "running round" from "dead driver"). One pgrep for ALL tasks —
+        // spawning one per worker hammered the box at 12 workers.
+        const driverAlive = runningDrivers.has(name);
+        sbxWorkers.push({
+          name, title: meta.title, specRef: meta.specRef,
+          progress: meta.progress,
+          sbx: true, sbxState: st ? st.state : "unknown",
+          round: st ? st.round : null, roundsTotal: st ? st.total_rounds : null,
+          sandbox: st ? st.sandbox : null, extra: st ? st.extra : "",
+          agentLog: mirror, workerLog: driverLog,
+          agentAgeMs: age, driverAlive,
+        });
+      }
+    } catch { /* no sandbox fleet running */ }
     const logText = await tailBytes(LOG_PATH, 256 * 1024);
-    const log = logText == null ? "" : logText.split("\n").slice(-TAIL_LINES).join("\n").trimEnd();
+    // Alerts from orchestrator + worker logs (worker markers carry task
+    // names), rebuilt fresh each refresh so recovered failures clear.
+    var log = logText == null ? "" : logText.split("\n").slice(-TAIL_LINES).join("\n").trimEnd();
+    const tasks = [];
+    try {
+      const files = await readdir(join(ROOT, "specs/tasks"));
+      for (const f of files.filter((n) => /^task-/.test(n) && n.endsWith(".md"))) {
+        const name = f.replace(/\.md$/, "");
+        const meta = taskMeta(await readFrontmatter(join(ROOT, "specs/tasks", f)));
+        tasks.push({ name, title: meta.title || "", deps: meta.deps || [], progress: meta.progress || "unknown" });
+      }
+    } catch { /* no tasks dir */ }
     // Alerts from orchestrator + worker logs (worker markers carry task
     // names), rebuilt fresh each refresh so recovered failures clear.
     const alerts = new Map();
     scanAlerts(null, (logText || "").split("\n"), alerts);
     for (const w of workers) scanAlerts(w.name, (w.workerLog || "").split("\n"), alerts);
     lastSnapshot = {
-      workers, log, logAgeMs: await ageMs(LOG_PATH, now),
-      loopAlive: await loopAlive(),
-      diskFree: diskFreePct(),
+      sbxWorkers,
+      fleet: await sbxFleetStatus(),
+      workers, log, logAgeMs: await ageMs(LOG_PATH, now), tasks,
       alerts: Array.from(alerts.values()),
       events: extractEvents(logText),
       coverage: await coverageStats(), coverageHistory: await coverageHistory(),
@@ -347,7 +495,9 @@ async function refreshSnapshot() {
     };
   } catch (e) {
     lastSnapshot = {
-      workers: prevWorkers, log: lastSnapshot.log, logAgeMs: null,
+      workers: prevWorkers, sbxWorkers: lastSnapshot.sbxWorkers || [],
+      fleet: lastSnapshot.fleet || null,
+      log: lastSnapshot.log, logAgeMs: null,
       loopAlive: await loopAlive(), diskFree: diskFreePct(), alerts: lastSnapshot.alerts || [],
       events: lastSnapshot.events || [], coverage: lastSnapshot.coverage || null,
       wipGuarded: lastSnapshot.wipGuarded || false,
@@ -453,19 +603,22 @@ const HTML = `<!doctype html>
   #filedlg .covchart-sub {
     font: 12px var(--pf-font-mono); color: var(--pf-text-muted);
     padding: 0 var(--sp-4) var(--sp-2);
+    display: flex; align-items: center; gap: var(--sp-2);
+    padding: 2px var(--sp-3);
+    background: var(--pf-surface-2);
+    border: 1px solid var(--pf-border);
+    border-radius: var(--pf-radius-pill);
+    font-size: 12px; color: var(--pf-text-muted);
   }
-  #filedlg .covchart-wrap { padding: 0 var(--sp-4) var(--sp-4); }
-  #filedlg .covchart-wrap svg { width: 100%; height: auto; display: block; }
-  #filedlg .covchart-wrap text { font: 10px var(--pf-font-mono); fill: var(--pf-text-muted); }
-  .chip.warn {
-    color: var(--pf-warning); border-color: color-mix(in srgb, var(--pf-warning) 40%, var(--pf-border));
+  .par-lever input[type="range"] {
+    width: 110px; accent-color: var(--pf-brand); cursor: pointer;
   }
-  .chip.danger {
-    color: var(--pf-danger); border-color: color-mix(in srgb, var(--pf-danger) 40%, var(--pf-border));
+  .par-lever .par-value {
+    min-width: 2ch; text-align: center;
+    font-family: var(--pf-font-mono); color: var(--pf-text);
+    font-weight: 600;
   }
-  .chip.info {
-    color: var(--pf-info); border-color: color-mix(in srgb, var(--pf-info) 40%, var(--pf-border));
-  }
+  .par-lever.pending { opacity: 0.6; }
   .mute-btn {
     flex: none; padding: 2px var(--sp-3); border-radius: var(--pf-radius-pill);
     background: var(--pf-surface-2); border: 1px solid var(--pf-border);
@@ -604,6 +757,15 @@ const HTML = `<!doctype html>
     background: color-mix(in srgb, var(--pf-success) 15%, var(--pf-surface-2));
     border-color: color-mix(in srgb, var(--pf-success) 35%, var(--pf-border));
   }
+  /* Live-driver pill: unmistakable "a sandbox agent is on this NOW" signal.
+     Green, filled, pulsing — visually distinct from every state badge. */
+  .badge.p-live {
+    color: #fff;
+    background: var(--pf-success);
+    border-color: var(--pf-success);
+    font-weight: 700;
+    animation: pulse 2s infinite;
+  }
 
   .card-body {
     flex: 1; margin: 0; padding: var(--sp-3) var(--sp-4);
@@ -680,7 +842,6 @@ const HTML = `<!doctype html>
   .md p  { margin: var(--sp-2) 0; }
   .md ul, .md ol { margin: var(--sp-2) 0; padding-left: var(--sp-5); }
   .md li { margin: var(--sp-1) 0; }
-  }
   .md pre {
     margin: var(--sp-2) 0; padding: var(--sp-3); overflow-x: auto;
     background: var(--pf-surface-2); border: 1px solid var(--pf-border);
@@ -710,6 +871,29 @@ const HTML = `<!doctype html>
     padding: 2px var(--sp-3); cursor: pointer; font-size: 12px;
   }
 
+  /* --- DAG view --- */
+  #dag-wrap { display: flex; gap: var(--sp-3); padding: 0 var(--sp-4) var(--sp-6); min-height: 60vh; }
+  #dag-wrap[hidden] { display: none; }
+  #dag { flex: 1; overflow: auto; border: 1px solid var(--pf-border); border-radius: 8px; background: var(--pf-bg); }
+  #dag svg { display: block; }
+  .dag-node { cursor: pointer; }
+  .dag-node rect { fill: var(--pf-bg); stroke-width: 1.5; }
+  .dag-node.n-complete rect { stroke: var(--pf-border); }
+  .dag-node.n-complete text { fill: var(--pf-text-muted); }
+  .dag-node.n-not-started rect { stroke: var(--pf-border); stroke-dasharray: 3 3; }
+  .dag-node.n-ready rect { stroke: var(--pf-accent); }
+  .dag-node.n-needs-revision rect { stroke: var(--pf-warn, #ec7311); }
+  .dag-node.n-ready-for-review rect { stroke: var(--pf-info, #2b9af3); }
+  .dag-node.n-live rect { stroke: var(--pf-success, #3da539); stroke-width: 2.5; }
+  .dag-node.n-live rect { filter: drop-shadow(0 0 6px rgba(61,165,57,.7)); }
+  .dag-node text { font: 11px var(--pf-font-mono); fill: var(--pf-text); }
+  .dag-node .dag-sub { font-size: 9px; fill: var(--pf-text-muted); }
+  .dag-edge { stroke: var(--pf-border); fill: none; stroke-width: 1.2; }
+  .dag-edge.e-done { stroke: var(--pf-success, #3da539); }
+  #dag-side { width: 40%; min-width: 320px; display: flex; flex-direction: column; border: 1px solid var(--pf-border); border-radius: 8px; background: var(--pf-bg); }
+  #dag-side[hidden] { display: none; }
+  .dag-side-head { display: flex; justify-content: space-between; align-items: center; padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--pf-border); font: 12px var(--pf-font-mono); }
+  #dag-side-log { flex: 1; margin: 0; padding: var(--sp-3); overflow: auto; font: 11px var(--pf-font-mono); white-space: pre-wrap; max-height: 65vh; }
   @media (prefers-reduced-motion: reduce) {
     .card.receiving .dot { animation: none; }
     .card { transition: none; }
@@ -725,6 +909,13 @@ const HTML = `<!doctype html>
   <span class="chip info" id="wip-chip" hidden></span>
   <span class="chip" id="loop-chip" hidden></span>
   <span class="chip" id="disk-chip" hidden></span>
+  <span class="chip info" id="fleet-chip" hidden></span>
+  <span class="par-lever" id="par-lever" hidden title="Live lever: concurrent sandbox workers. The fleet re-reads this every cycle — raise to add workers, lower to drain.">
+    <span class="par-label">agents</span>
+    <input type="range" id="par-slider" min="1" max="100" step="1" value="2">
+    <span class="par-value" id="par-value">2</span>
+  </span>
+  <button class="mute-btn" id="dag-btn" title="Toggle task DAG view">DAG</button>
   <button class="mute-btn" id="mute" title="Toggle alert sound">Muted</button>
 </header>
 <div class="subhead" id="subhead">
@@ -738,6 +929,16 @@ const HTML = `<!doctype html>
   <h2>No workers detected</h2>
   <p>Start the loop, then reload this page:</p>
   <p><code>bash scripts/loop.sh</code></p>
+</div>
+<div id="dag-wrap" hidden>
+  <div id="dag-side" hidden>
+    <div class="dag-side-head">
+      <span id="dag-side-title">task</span>
+      <button id="dag-side-close">Close</button>
+    </div>
+    <pre id="dag-side-log"></pre>
+  </div>
+  <div id="dag"></div>
 </div>
 <div id="grid"></div>
 <dialog id="filedlg">
@@ -763,12 +964,19 @@ var alertsBox = document.getElementById("alerts");
 var covFill = document.getElementById("cov-fill");
 var covSpark = document.getElementById("cov-spark");
 var covText = document.getElementById("cov-text");
+var fleetChip = document.getElementById("fleet-chip");
+var parLever = document.getElementById("par-lever");
+var parSlider = document.getElementById("par-slider");
+var parValue = document.getElementById("par-value");
 var muteBtn = document.getElementById("mute");
 var favicon = document.getElementById("favicon");
 var dlg = document.getElementById("filedlg");
 var dlgTitle = document.getElementById("dlg-title");
 var dlgBody = document.getElementById("dlg-body");
 var sticks = new Map(); // card key -> following (stick to bottom)
+var muxEs = null;            // single multiplexed EventSource (/api/streams)
+var muxBodies = {};          // task name -> card body element
+var muxBufs = {};            // task name -> text buffer
 
 var ACTIVE_MS = 15000;        // agent output fresher than this = receiving
 var LOOP_QUIET_MS = 120000;   // orchestrator log older than this = quiet
@@ -1168,8 +1376,6 @@ function loadFile(path) {
     .then(function (r) { return r.json(); })
     .then(function (d) {
       renderFileModal(path, d.error ? null : d.content);
-      dlgSrcBtn.textContent = "Source";
-      if (!dlg.open) dlg.showModal();
     })
     .catch(function () {
       renderFileModal(path, null);
@@ -1185,8 +1391,10 @@ function render(data) {
   errBox.classList.toggle("show", hasErr);
   if (hasErr) errText.textContent = data.error;
 
+  if (dagShown) renderDag(data.tasks, data.sbxWorkers);
+  else if (data.tasks) renderDag.lastTasks = data.tasks; // keep for later toggle
+  if (data.tasks) renderDag.lastSbx = data.sbxWorkers || [];
   var loopStopped = data.loopAlive === false;
-
   var items = data.workers.map(function (w) {
     var stalled = !loopStopped && w.agentAgeMs != null && w.agentAgeMs >= WORKER_STALL_MS;
     var wedged = (data.alerts || []).some(function (a) { return a.sev === "danger" && a.text.indexOf(w.name) !== -1 && /Max rounds|wedged/.test(a.text); }) || /Max rounds/.test(w.workerLog || "");
@@ -1201,6 +1409,32 @@ function render(data) {
       receiving: w.agentAgeMs != null && w.agentAgeMs < ACTIVE_MS,
       progress: w.progress, round: roundOf(w), stalled: stalled, wedged: wedged,
     };
+  });
+  // Sandbox fleet workers: cards mirroring the local ones, with
+  // round/sandbox info in the phase line and driver-log tail as foot.
+  (data.sbxWorkers || []).forEach(function (w) {
+    // A live sandbox worker outranks a stale local worktree card with the
+    // same task name (old loop leftovers): drop the local one.
+    var staleIdx = -1;
+    items.forEach(function (i, ix) { if (i.key === w.name && !i.sandbox) staleIdx = ix; });
+    if (staleIdx !== -1) items.splice(staleIdx, 1);
+    var sbxLive = w.agentAgeMs != null && w.agentAgeMs < ACTIVE_MS * 3;
+    var driverAlive = !!w.driverAlive;
+    var phase = w.sbxState || "unknown";
+    if (w.round != null) phase += " r" + w.round + "/" + (w.roundsTotal || "?");
+    if (!driverAlive) phase += " \u00b7 driver exited";
+    var links = [];
+    if (w.progress === "needs-revision") links.push({ label: "review", path: "specs/reviews/" + w.name + ".md" });
+    if (w.specRef) links.push({ label: "spec", path: "specs/system/" + w.specRef.split(" ")[0] });
+    items.push({
+      key: "sbx-" + w.name, name: w.name + " \u00b7 sandbox", title: w.title, specRef: w.specRef,
+      taskPath: "specs/tasks/" + w.name + ".md", links: links,
+      content: w.agentLog || "(no mirrored agent output yet)",
+      phase: phase, foot: (w.workerLog || "").split("\\n").filter(Boolean).pop() || "",
+      receiving: driverAlive || sbxLive, sandbox: true, progress: w.progress, round: w.round,
+      live: true, liveTask: w.name, // SSE subscription, not snapshot polling
+      driverAlive: driverAlive, // true = a sandbox agent is on this task right now
+    });
   });
   var logLive = data.logAgeMs != null && data.logAgeMs < LOOP_QUIET_MS;
   if (data.log || data.logAgeMs != null) {
@@ -1256,6 +1490,25 @@ function render(data) {
     loopChip.textContent = "quiet " + fmtDuration(data.logAgeMs) + " \\u00b7 agent mid-run";
   } else {
     loopChip.hidden = true;
+  }
+
+  // Fleet chip + live parallelism lever.
+  var fleet = data.fleet;
+  if (fleet && (fleet.active != null || fleet.parallelism != null)) {
+    fleetChip.hidden = false;
+    fleetChip.className = "chip info";
+    fleetChip.textContent = "fleet " + (fleet.active != null ? fleet.active : "?") +
+      " active / " + (fleet.parallelism != null ? fleet.parallelism : "?") + " lever";
+    parLever.hidden = false;
+    if (fleet.parallelism != null && !parSlider.matches(":active")) {
+      parSlider.value = fleet.parallelism;
+      parValue.textContent = fleet.parallelism;
+    }
+  } else if ((data.sbxWorkers || []).length) {
+    // Standalone sandbox worker(s) without a fleet — show workers, no lever.
+    fleetChip.hidden = true; parLever.hidden = true;
+  } else {
+    fleetChip.hidden = true; parLever.hidden = true;
   }
 
   // WIP-guard chip: is the operator's uncommitted work stashed right now?
@@ -1332,6 +1585,50 @@ function render(data) {
     grid.insertBefore(el, cursor);
     // cursor unchanged: el now occupies its slot
   }
+  // --- ONE multiplexed SSE feed for all sandbox worker cards ---------------
+  // Browsers allow only ~6 HTTP/1.1 connections per host; one EventSource
+  // per card exhausted the pool and stalled the snapshot poll. Instead a
+  // single /api/streams connection carries every task's tail; render()
+  // just registers which card elements belong to which task.
+  var wantedLive = {};
+  items.forEach(function (i) { if (i.live && i.liveTask) wantedLive[i.key] = i.liveTask; });
+  if (Object.keys(wantedLive).length && !muxEs) {
+    muxEs = new EventSource("/api/streams");
+    muxEs.onmessage = function (e) {
+      var m;
+      try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (!m || !m.t || typeof m.d !== "string") return;
+      var body = muxBodies[m.t];
+      if (!body) return;
+      var b = muxBufs[m.t] || "";
+      b += m.d;
+      if (b.length > 65536) b = b.slice(-65536);
+      muxBufs[m.t] = b;
+      body.textContent = b;
+      var key = body.closest(".card").dataset.key;
+      if (sticks.get(key) !== false) body.scrollTop = body.scrollHeight;
+    };
+    // drop buffers for tasks whose cards are gone
+    var seen = {};
+    items.forEach(function (i) { if (i.liveTask) seen[i.liveTask] = 1; });
+    Object.keys(muxBufs).forEach(function (t) { if (!seen[t]) delete muxBufs[t]; });
+  } else if (!Object.keys(wantedLive).length && muxEs) {
+    muxEs.close(); muxEs = null; muxBufs = {};
+  }
+  // (re)bind card bodies for the current live set
+  Object.keys(wantedLive).forEach(function (k) {
+    var el = haveMap[k] || grid.querySelector('[data-key="' + k + '"]');
+    if (!el) return;
+    var task = wantedLive[k];
+    var body = el.querySelector(".card-body");
+    if (!muxBodies[task] || muxBodies[task] !== body) {
+      muxBodies[task] = body;
+      if (muxBufs[task]) body.textContent = muxBufs[task];
+    }
+  });
+  Object.keys(muxBodies).forEach(function (t) {
+    if (!Object.values(wantedLive).includes(t)) delete muxBodies[t];
+  });
   Array.prototype.forEach.call(grid.children, function (el) {
     var i = items.find(function (x) { return x.key === el.dataset.key; });
     if (!i) return;
@@ -1347,13 +1644,19 @@ function render(data) {
     var badge = el.querySelector(".badge");
     var badgeText = i.progress || i.phase || "";
     var badgeClass = "badge" + (i.progress ? " p-" + i.progress : "");
+    if (i.driverAlive) { badgeText = "\u25cf LIVE \u00b7 " + badgeText; badgeClass = "badge p-live"; }
     if (badge.textContent !== badgeText) badge.textContent = badgeText;
     if (badge.className !== badgeClass) badge.className = badgeClass;
     var roundEl = el.querySelector(".roundchip");
     var roundText = i.round ? "r" + i.round + "/6" : "";
     if (roundEl.textContent !== roundText) roundEl.textContent = roundText;
     var body = el.querySelector(".card-body");
-    if (body.textContent !== i.content) body.textContent = i.content;
+    if (i.live && muxBodies[i.liveTask]) {
+      if (body.textContent === "(no mirrored agent output yet)") body.textContent = "";
+      if (muxBufs[i.liveTask] && body.textContent !== muxBufs[i.liveTask]) body.textContent = muxBufs[i.liveTask];
+    } else if (body.textContent !== i.content) {
+      body.textContent = i.content;
+    }
     var foot = el.querySelector(".card-foot");
     if (foot.textContent !== i.foot) foot.textContent = i.foot;
     if (i.noFollow) {
@@ -1361,8 +1664,7 @@ function render(data) {
       return;
     }
     var follow = sticks.get(el.dataset.key) !== false;
-    el.classList.toggle("unfollowed", !follow);
-    if (follow) body.scrollTop = body.scrollHeight;
+    if (follow && !(i.live && muxBodies[i.liveTask])) body.scrollTop = body.scrollHeight;
   });
 }
 
@@ -1377,6 +1679,126 @@ grid.addEventListener("scroll", function (e) {
   body.closest(".card").classList.toggle("unfollowed", !atBottom);
 }, true);
 
+// --- Task DAG view --------------------------------------------------------
+// Layered left-to-right layout: depth = longest dependency chain. Nodes
+// colored by progress; a live sandbox worker glows green with its sandbox
+// name + round. Click a node -> live log side panel (SSE stream).
+var dagEl = document.getElementById("dag");
+var dagSide = document.getElementById("dag-side");
+var dagSideTitle = document.getElementById("dag-side-title");
+var dagSideLog = document.getElementById("dag-side-log");
+var dagShown = false;
+var dagSelTask = null;
+var dagEs = null;
+
+document.getElementById("dag-btn").addEventListener("click", function () {
+  dagShown = !dagShown;
+  document.getElementById("dag-wrap").hidden = !dagShown;
+  grid.hidden = dagShown;
+  if (dagShown && renderDag.lastTasks) renderDag(renderDag.lastTasks, renderDag.lastSbx || []);
+  if (!dagShown && dagEs) { dagEs.close(); dagEs = null; dagSide.hidden = true; }
+});
+document.getElementById("dag-side-close").addEventListener("click", function () {
+  dagSide.hidden = true; dagSelTask = null;
+  if (dagEs) { dagEs.close(); dagEs = null; }
+});
+
+function dagSelect(task) {
+  dagSelTask = task;
+  dagSide.hidden = false;
+  dagSideTitle.textContent = task.name + " \u00b7 " + (task.sandbox || task.progress);
+  dagSideLog.textContent = "streaming\u2026";
+  if (dagEs) dagEs.close();
+  dagEs = new EventSource("/api/stream?task=" + encodeURIComponent(task.name));
+  var buf = "";
+  var lastNotice = "";
+  dagEs.onmessage = function (e) {
+    try { var d = JSON.parse(e.data).d; } catch (err) { return; }
+    // Server repeats a "no stream" notice each heartbeat; show it once.
+    if (d.indexOf("(driver running but streams no log") !== -1 || d.indexOf("(no live stream") !== -1) {
+      if (d === lastNotice) return;
+      lastNotice = d;
+    } else lastNotice = "";
+    buf += d;
+    dagSideLog.textContent = buf;
+    dagSideLog.scrollTop = dagSideLog.scrollHeight;
+  };
+  dagEs.onerror = function () { if (!buf) dagSideLog.textContent = "(no live stream for this task \u2014 worker not running)"; };
+}
+
+function renderDag(tasks, sbxWorkers) {
+  if (!tasks || !tasks.length) return;
+  var byName = {};
+  tasks.forEach(function (t) { byName[t.name] = t; });
+  // sandbox worker by task name (live agents)
+  var liveBy = {};
+  (sbxWorkers || []).forEach(function (w) { liveBy[w.name] = w; });
+  // depth: longest chain of deps
+  var depth = {};
+  function d(t) {
+    if (depth[t.name] != null) return depth[t.name];
+    depth[t.name] = 0; // cycle guard
+    var m = 0;
+    (t.deps || []).forEach(function (dn) { if (byName[dn]) m = Math.max(m, d(byName[dn]) + 1); });
+    depth[t.name] = m;
+    return m;
+  }
+  tasks.forEach(d);
+  // columns by depth, rows within column
+  var cols = [];
+  tasks.forEach(function (t) {
+    var c = depth[t.name];
+    if (!cols[c]) cols[c] = [];
+    cols[c].push(t);
+  });
+  var NW = 150, NH = 34, GX = 60, GY = 14, PAD = 20;
+  var maxRows = Math.max.apply(null, cols.map(function (c) { return c.length; }));
+  var W = PAD * 2 + cols.length * (NW + GX) - GX;
+  var H = PAD * 2 + maxRows * (NH + GY) - GY;
+  var pos = {};
+  cols.forEach(function (c, ci) {
+    c.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+    c.forEach(function (t, ri) {
+      pos[t.name] = { x: PAD + ci * (NW + GX), y: PAD + ri * (NH + GY) };
+    });
+  });
+  var svg = '<svg width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  // edges first (under nodes)
+  tasks.forEach(function (t) {
+    (t.deps || []).forEach(function (dn) {
+      if (!pos[dn] || !pos[t.name]) return;
+      var a = pos[dn], b = pos[t.name];
+      var x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2;
+      var mx = (x1 + x2) / 2;
+      var done = byName[dn] && byName[dn].progress === "complete";
+      svg += '<path class="dag-edge' + (done ? " e-done" : "") + '" d="M' + x1 + " " + y1 + " C" + mx + " " + y1 + " " + mx + " " + y2 + " " + x2 + " " + y2 + '"/>';
+    });
+  });
+  // nodes
+  tasks.forEach(function (t) {
+    var p = pos[t.name];
+    var live = liveBy[t.name];
+    var liveNow = live && live.driverAlive;
+    var cls = "dag-node n-" + (t.progress || "unknown") + (liveNow ? " n-live" : "");
+    var sub = liveNow
+      ? "\u25cf agent: " + (live.sandbox || "?") + " \u00b7 r" + (live.round || "?") + "/" + (live.roundsTotal || "?")
+      : (t.progress || "no state");
+    svg += '<g class="' + cls + '" data-task="' + t.name + '" transform="translate(' + p.x + "," + p.y + ')">' +
+      "<rect width=" + NW + " height=" + NH + " rx=6></rect>" +
+      '<text x="8" y="14">' + t.name + "</text>" +
+      '<text class="dag-sub" x="8" y="26">' + String(sub).slice(0, 32) + "</text></g>";
+  });
+  svg += "</svg>";
+  dagEl.innerHTML = svg;
+  Array.prototype.forEach.call(dagEl.querySelectorAll(".dag-node"), function (n) {
+    n.addEventListener("click", function () {
+      var name = n.dataset.task;
+      var t = byName[name];
+      dagSelect({ name: name, sandbox: liveBy[name] ? liveBy[name].sandbox : null, progress: t.progress });
+    });
+  });
+}
+
 function poll() {
   fetch("/api/snapshot").then(function (r) { return r.json(); }).then(render)
     .catch(function () {
@@ -1384,6 +1806,24 @@ function poll() {
       statusEl.textContent = "server unreachable";
     });
 }
+// Live lever: debounce, POST, reflect server ack (or revert + flash).
+var parTimer = null;
+parSlider.addEventListener("input", function () {
+  parValue.textContent = parSlider.value;
+  parLever.classList.add("pending");
+  if (parTimer) clearTimeout(parTimer);
+  parTimer = setTimeout(function () {
+    fetch("/api/parallelism", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: Number(parSlider.value) }),
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      parLever.classList.remove("pending");
+      if (!j.ok) { parValue.textContent = "err"; }
+    }).catch(function () { parLever.classList.remove("pending"); });
+  }, 400);
+});
+
 poll();
 setInterval(poll, 2000);
 </script>
@@ -1397,6 +1837,131 @@ const server = createServer((req, res) => {
   } else if (req.url === "/") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(HTML);
+  } else if (req.url === "/api/parallelism" && req.method === "POST") {
+    // Live lever: write the parallelism file the fleet re-reads each cycle.
+    let body = "";
+    req.on("data", (c) => { body += c; if (body.length > 1024) req.destroy(); });
+    req.on("end", () => {
+      try {
+        const n = Number(JSON.parse(body).value);
+        if (!Number.isInteger(n) || n < 1 || n > 100) throw new Error("out of range");
+        writeFile(SBX_PARALLELISM_FILE, String(n) + "\n").then(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true, value: n }));
+        });
+      } catch (e) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: String(e.message || e) }));
+      }
+    });
+  } else if (req.url.split("?")[0] === "/api/streams") {
+    // MULTIPLEXED server-sent events: ONE connection streams every sandbox
+    // worker's stream.log. Browsers cap HTTP/1.1 at 6 connections per host —
+    // a card-per-EventSource design exhausted the pool and stalled the
+    // snapshot poll. Message shape: data: {"t": "<task>", "d": "<text>"}.
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    // Per-task tail state, rebuilt when the set of tasks changes.
+    let tails = new Map(); // task -> { offset, carry }
+    let closed = false;
+    const listTasks = async () => {
+      try {
+        const names = (await readdir(SBX_STATUS_DIR)).filter((n) => /^task-/.test(n)).sort();
+        const next = new Set(names);
+        for (const n of names) if (!tails.has(n)) tails.set(n, { offset: 0, carry: "" });
+        for (const n of [...tails.keys()]) if (!next.has(n)) tails.delete(n);
+      } catch { /* status dir gone */ }
+    };
+    const pumpTask = async (task) => {
+      const file = join(SBX_STATUS_DIR, task, "stream.log");
+      const t = tails.get(task);
+      if (!t) return;
+      try {
+        const st = await stat(file);
+        if (st.size > t.offset) {
+          const fh = await open(file, "r");
+          try {
+            const len = Math.min(st.size - t.offset, 256 * 1024);
+            const buf = Buffer.alloc(len);
+            await fh.read(buf, 0, len, t.offset);
+            t.carry += buf.toString("utf8");
+            const lastNl = t.carry.lastIndexOf("\n");
+            if (lastNl === -1) return;
+            const chunk = t.carry.slice(0, lastNl + 1);
+            t.carry = t.carry.slice(lastNl + 1);
+            t.offset += Buffer.byteLength(chunk);
+            res.write(`data: ${JSON.stringify({ t: task, d: decodeAgentEvents(chunk) })}\n\n`);
+          } finally { await fh.close(); }
+        } else if (st.size < t.offset) {
+          t.offset = 0; t.carry = ""; // rotated/truncated
+        }
+      } catch { /* stream.log gone: driver between rounds */ }
+    };
+    const pump = async () => {
+      if (closed) return;
+      await listTasks();
+      await Promise.all([...tails.keys()].map((t) => pumpTask(t)));
+    };
+    const iv = setInterval(() => { pump().catch(() => {}); res.write(": hb\n\n"); }, 1000);
+    req.on("close", () => { closed = true; clearInterval(iv); });
+  } else if (req.url.startsWith("/api/stream")) {
+    // Single-task SSE (DAG side panel — at most one connection at a time).
+    const rel = new URL(req.url, "http://localhost").searchParams.get("task") || "";
+    if (!/^task-[a-z0-9-]+$/.test(rel)) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "bad task" }));
+      return;
+    }
+    const file = join(SBX_STATUS_DIR, rel, "stream.log");
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    let offset = 0;
+    let carry = ""; // partial line split across pump reads
+    let closed = false;
+    const pump = async () => {
+      if (closed) return;
+      try {
+        const st = await stat(file);
+        if (st.size > offset) {
+          const fh = await open(file, "r");
+          try {
+            const len = Math.min(st.size - offset, 256 * 1024);
+            const buf = Buffer.alloc(len);
+            await fh.read(buf, 0, len, offset);
+            carry += buf.toString("utf8");
+            const lastNl = carry.lastIndexOf("\n");
+            if (lastNl === -1) return; // wait for a full line
+            const chunk = carry.slice(0, lastNl + 1);
+            carry = carry.slice(lastNl + 1);
+            res.write(`data: ${JSON.stringify({ d: decodeAgentEvents(chunk) })}\n\n`);
+          } finally { await fh.close(); }
+        } else if (st.size < offset) {
+          offset = 0; // rotated/truncated
+        }
+      } catch { /* file gone: driver between rounds */ }
+    };
+    // Tell the browser when there is nothing to stream: silence looks like
+    // a hang. Uses the snapshot's shared driver set — no per-task pgrep.
+    let notified = false;
+    const notifyState = async () => {
+      try { await stat(file); notified = false; } catch {
+        const alive = (lastSnapshot.sbxWorkers || []).some((w) => w.name === rel && w.driverAlive);
+        const msg = alive
+          ? "(driver running but streams no log \u2014 old code; will stream after respawn)"
+          : "(no live stream for this task \u2014 no worker is running it)";
+        if (!notified) { res.write(`data: ${JSON.stringify({ d: msg })}\n\n`); notified = true; }
+      }
+    };
+    const iv = setInterval(() => { pump().catch(() => {}); notifyState().catch(() => {}); res.write(": hb\n\n"); }, 1000);
+    req.on("close", () => { closed = true; clearInterval(iv); });
   } else if (req.url.startsWith("/api/file")) {
     // Read-only file access, sandboxed to specs/ (normalized, no traversal).
     const rel = new URL(req.url, "http://localhost").searchParams.get("path") || "";
