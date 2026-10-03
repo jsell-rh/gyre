@@ -3232,6 +3232,21 @@
         ctx.font = `400 ${typeSize}px system-ui`;
         ctx.fillText(n?.node_type ?? '', s.x, s.y + fontSize * 0.7 + 2);
       }
+
+      // View query highlight label (spec: emphasis.highlight.matched.label —
+      // text label for nodes in the result set, colored with the matched color)
+      const hlLabel = activeQuery?.emphasis?.highlight?.matched?.label;
+      if (hlLabel && n?.id && queryMatchedIds?.has(n.id) && sw > 30 && sh > 14 && cam.zoom >= 0.5) {
+        const hlColor = activeQuery.emphasis.highlight.matched.color ?? '#fbbf24';
+        const hlSize = Math.max(7, Math.min(10, sw * 0.08));
+        ctx.save();
+        ctx.fillStyle = hlColor;
+        ctx.font = `600 ${hlSize}px system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(hlLabel, s.x, s.y + sh / 2 + 3);
+        ctx.restore();
+      }
     }
 
     // Badge rendering (from view query emphasis.badges or evaluative metrics)
