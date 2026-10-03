@@ -652,6 +652,40 @@ async fn merge_atomic_group(
             return Ok(());
         }
 
+        // TASK-077 / HSI §2 (F5): merge-time ABAC gate for the merge
+        // processor's internal service identity — same gate as the
+        // single-entry path; without it the atomic group path would be a
+        // Supervised bypass. Human-approval escape: an MR already Approved
+        // (by a human, via the status endpoint) proceeds.
+        if mr.status != MrStatus::Approved {
+            let result = evaluate_merge_abac(state, &mr, &repo).await;
+            if result.effect == gyre_domain::policy::PolicyEffect::Deny {
+                warn!(
+                    group = %group_name,
+                    mr_id = %mr.id,
+                    workspace_id = %mr.workspace_id,
+                    matched_policy = ?result.matched_policy,
+                    "supervised trust: holding atomic group for human MR approval"
+                );
+                rollback_atomic_group(
+                    state,
+                    group_name,
+                    &repo,
+                    target_branch,
+                    pre_group_sha.as_deref(),
+                    &merged_entries,
+                    &group_entries,
+                    &format!(
+                        "supervised trust: human MR approval required for MR {}",
+                        mr.id
+                    ),
+                    &mr.id,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+
         // Attempt the merge for this member.
         let result = state
             .git_ops
@@ -1421,6 +1455,39 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
+    // TASK-077 / HSI §2 (F5): merge-time ABAC enforcement for the merge
+    // processor's internal service identity. In a Supervised workspace the
+    // `trust:require-human-mr-review` Deny matches (subject.type "system",
+    // subject.id "merge-processor") and the merge is HELD — not failed —
+    // until a human approves the MR via the status endpoint. The processor's
+    // own Open → Approved transition happens only after this gate, so it
+    // cannot self-satisfy the escape.
+    if mr.status != MrStatus::Approved {
+        let result = evaluate_merge_abac(state, &mr, &repo).await;
+        if result.effect == gyre_domain::policy::PolicyEffect::Deny {
+            warn!(
+                entry_id = %entry.id,
+                mr_id = %mr.id,
+                workspace_id = %mr.workspace_id,
+                matched_policy = ?result.matched_policy,
+                "supervised trust: holding merge for human MR approval"
+            );
+            // Requeue (not Failed): Failed is terminal and would permanently
+            // block the human-approval path. Queued entries are retried on the
+            // next cycle; once a human sets the MR to Approved, the gate
+            // passes and the merge proceeds.
+            state
+                .merge_queue
+                .update_status(
+                    &entry.id,
+                    MergeQueueEntryStatus::Queued,
+                    Some("supervised trust: human MR approval required".to_string()),
+                )
+                .await?;
+            return Ok(());
+        }
+    }
+
     // TASK-061 (§7.2): Populate attestation chain ABAC subject attributes
     // and evaluate policies with action=merge, resource_type=attestation.
     // Audit-only — logged but not enforced (merge proceeds regardless).
@@ -1429,27 +1496,36 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         let mut chain_found = false;
 
         // Try by source branch head commit first.
-        if let Some(ref source_sha) =
+        if let Some(source_sha) =
             crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.source_branch))
                 .await
         {
-            if let Ok(Some(chain_att)) = state.chain_attestations.find_by_commit(source_sha).await {
+            if let Ok(Some(chain_att)) = state.chain_attestations.find_by_commit(&source_sha).await {
                 let chain = state
                     .chain_attestations
                     .load_chain(&chain_att.id)
                     .await
                     .unwrap_or_default();
-                evaluate_attestation_abac(state, &chain, &chain_att, &mr, &entry, &repo, "merge")
-                    .await;
+                let attestation_eval =
+                    evaluate_attestation_abac(state, &chain, &chain_att, &mr, &entry, &repo, "merge")
+                        .await;
+                if attestation_eval.effect == gyre_domain::policy::PolicyEffect::Deny {
+                    warn!(
+                        entry_id = %entry.id,
+                        mr_id = %mr.id,
+                        matched_policy = ?attestation_eval.matched_policy,
+                        "attestation ABAC denied merge (audit-only, enforcement-mode:ok per authorization-provenance coverage row 35)"
+                    );
+                }
                 chain_found = true;
             }
         }
 
         // Fallback: look up via agent's current task.
         if !chain_found {
-            if let Some(ref author_id) = mr.author_agent_id {
+            if let Some(author_id) = &mr.author_agent_id {
                 if let Ok(Some(agent)) = state.agents.find_by_id(author_id).await {
-                    if let Some(ref task_id) = agent.current_task_id {
+                    if let Some(task_id) = &agent.current_task_id {
                         if let Ok(atts) = state
                             .chain_attestations
                             .find_by_task(task_id.as_str())
@@ -1461,10 +1537,21 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                     .load_chain(&leaf.id)
                                     .await
                                     .unwrap_or_default();
-                                evaluate_attestation_abac(
-                                    state, &chain, leaf, &mr, &entry, &repo, "merge",
-                                )
-                                .await;
+                                let attestation_eval =
+                                    evaluate_attestation_abac(
+                                        state, &chain, leaf, &mr, &entry, &repo, "merge",
+                                    )
+                                    .await;
+                                if attestation_eval.effect
+                                    == gyre_domain::policy::PolicyEffect::Deny
+                                {
+                                    warn!(
+                                        entry_id = %entry.id,
+                                        mr_id = %mr.id,
+                                        matched_policy = ?attestation_eval.matched_policy,
+                                        "attestation ABAC denied merge (audit-only, enforcement-mode:ok per authorization-provenance coverage row 35)"
+                                    );
+                                }
                             }
                         }
                     }
@@ -2471,6 +2558,52 @@ pub(crate) async fn report_cascade_test_result(
             "cascade test failed, follow-up task created"
         );
     }
+}
+
+/// TASK-077 / HSI §2 (F5): Evaluate merge-time ABAC for the merge processor's
+/// internal service identity.
+///
+/// The merge processor does NOT use the global `GYRE_AUTH_TOKEN` — ABAC bypass
+/// is checked by identity (`subject.id == "gyre-system-token"`), and the
+/// processor's subject id is "merge-processor", so it IS subject to the
+/// Supervised trust policy (`trust:require-human-mr-review`, a Deny on
+/// `subject.type == "system"` for merge/mr). On Deny the merge is held until a
+/// human approves the MR (see the callers — the human-approval escape is
+/// `mr.status == MrStatus::Approved`, set by a human via the MR status
+/// endpoint, never by the processor before the gate).
+///
+/// Workspace-scoped policies from OTHER workspaces are filtered out: the
+/// engine's `evaluate` does not check scope_id, and one workspace's trust Deny
+/// must not hold another workspace's merges.
+async fn evaluate_merge_abac(
+    state: &AppState,
+    mr: &MergeRequest,
+    repo: &gyre_domain::Repository,
+) -> crate::policy_engine::EvalResult {
+    // Resolve tenant_id from repo → workspace (same pattern as
+    // evaluate_attestation_abac; subject.tenant_id is required context parity).
+    let tenant_id = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(ws) => ws.map(|w| w.tenant_id.to_string()),
+        Err(_) => None,
+    };
+
+    let mut ctx = crate::policy_engine::AttributeContext::default();
+    ctx.set("subject.type", "system");
+    ctx.set("subject.id", "merge-processor");
+    if let Some(tid) = &tenant_id {
+        ctx.set("subject.tenant_id", tid);
+    }
+    ctx.set("resource.type", "mr");
+    ctx.set("resource.repo_id", repo.id.as_str());
+    ctx.set("resource.workspace_id", mr.workspace_id.as_str());
+
+    let policies = state.policies.list().await.unwrap_or_default();
+    let policies: Vec<_> = policies
+        .into_iter()
+        .filter(|p| p.scope != gyre_domain::policy::PolicyScope::Workspace
+            || p.scope_id.as_deref() == Some(mr.workspace_id.as_str()))
+        .collect();
+    crate::policy_engine::evaluate(policies, &ctx, "merge", "mr")
 }
 
 /// TASK-061 (§7.2): Evaluate ABAC policies with attestation chain subject attributes.
@@ -5988,5 +6121,244 @@ mod tests {
             vec![repo_path.to_str().unwrap().to_string()],
             "gate worktree should be removed"
         );
+    }
+
+    // ── TASK-077 / HSI §2 (F5): merge-time ABAC enforcement tests ─────────
+    //
+    // The merge processor evaluates ABAC with its internal service identity
+    // (subject.type "system", subject.id "merge-processor"). In a Supervised
+    // workspace the `trust:require-human-mr-review` Deny matches and the
+    // merge is held (requeued with a reason, NOT failed) until a human
+    // approves the MR via the status endpoint.
+
+    /// Seed a workspace with the trust policies for the given level.
+    async fn seed_workspace_with_trust(
+        state: &AppState,
+        ws_id: &str,
+        name: &str,
+        level: gyre_domain::TrustLevel,
+    ) {
+        let ws = gyre_domain::Workspace::new(
+            Id::new(ws_id),
+            Id::new("tenant-1"),
+            name,
+            name.to_lowercase(),
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        for p in gyre_domain::trust_policies_for_level(&level, ws_id, "test") {
+            state.policies.create(&p).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn supervised_workspace_open_mr_merge_is_held_and_requeued() {
+        let state = test_state();
+
+        seed_workspace_with_trust(&state, "ws-sup", "Supervised WS", gyre_domain::TrustLevel::Supervised).await;
+        let repo = create_repo_in_workspace(&state, "sup-repo", "ws-sup").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-sup"),
+            repo.id.clone(),
+            "MR in supervised workspace",
+            "feat/sup",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-sup");
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-sup", 50, 1000).await;
+
+        // Run a merge-processor cycle.
+        process_next(&state).await.unwrap();
+
+        // The MR must NOT have been merged.
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-sup"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Open,
+            "supervised trust Deny must hold the merge — MR stays Open"
+        );
+
+        // The queue entry must be requeued (not failed, not merged) with a
+        // reason naming the supervised trust hold.
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-sup"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Queued,
+            "held entry must be requeued so the human-approval path stays live"
+        );
+        let reason = entry
+            .error
+            .as_deref()
+            .unwrap_or_else(|| panic!("requeued entry must carry a hold reason"));
+        assert!(
+            reason.contains("supervised trust"),
+            "hold reason must name supervised trust, got: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_workspace_approved_mr_merges() {
+        let state = test_state();
+
+        seed_workspace_with_trust(&state, "ws-sup2", "Supervised WS 2", gyre_domain::TrustLevel::Supervised).await;
+        let repo = create_repo_in_workspace(&state, "sup-repo-2", "ws-sup2").await;
+
+        // A human has approved the MR via the status endpoint
+        // (Open → Approved is the only path that sets Approved before merge).
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-sup-approved"),
+            repo.id.clone(),
+            "Approved MR in supervised workspace",
+            "feat/sup-approved",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-sup2");
+        mr.transition_status(MrStatus::Approved).unwrap();
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-sup-approved", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-sup-approved"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "human-approved MR must merge in a Supervised workspace"
+        );
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-sup-approved"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Merged,
+            "approved MR's queue entry must be Merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn guided_workspace_open_mr_merges() {
+        let state = test_state();
+
+        // Guided seeds no trust Deny policies — the merge processor's
+        // system identity must pass the ABAC gate.
+        seed_workspace_with_trust(&state, "ws-guided", "Guided WS", gyre_domain::TrustLevel::Guided).await;
+        let repo = create_repo_in_workspace(&state, "guided-repo", "ws-guided").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-guided"),
+            repo.id.clone(),
+            "MR in guided workspace",
+            "feat/guided",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-guided");
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-guided", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-guided"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "Guided workspace (no trust Deny) must not hold the merge"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_trust_denies_atomic_group_member_rolls_back_group() {
+        let state = test_state();
+
+        seed_workspace_with_trust(&state, "ws-sup3", "Supervised WS 3", gyre_domain::TrustLevel::Supervised).await;
+        let repo = create_repo_in_workspace(&state, "sup-repo-3", "ws-sup3").await;
+
+        create_mr_in_group(
+            &state,
+            "mr-group-a",
+            &repo.id,
+            "ws-sup3",
+            "bundle-sup",
+            "feat/group-a",
+            Some("agent-1"),
+        )
+        .await;
+        create_mr_in_group(
+            &state,
+            "mr-group-b",
+            &repo.id,
+            "ws-sup3",
+            "bundle-sup",
+            "feat/group-b",
+            Some("agent-1"),
+        )
+        .await;
+
+        enqueue_mr(&state, "mr-group-a", 50, 1000).await;
+        enqueue_mr(&state, "mr-group-b", 50, 1001).await;
+
+        process_next(&state).await.unwrap();
+
+        // No member may merge: the group is held and rolled back to Queued.
+        for mr_id in ["mr-group-a", "mr-group-b"] {
+            let updated = state
+                .merge_requests
+                .find_by_id(&Id::new(mr_id))
+                .await
+                .unwrap()
+                .expect("mr should exist");
+            assert_eq!(
+                updated.status, MrStatus::Open,
+                "atomic group member {mr_id} must stay Open under supervised trust"
+            );
+
+            let entry = state
+                .merge_queue
+                .find_by_id(&Id::new(format!("entry-{mr_id}")))
+                .await
+                .unwrap()
+                .expect("entry should exist");
+            assert_eq!(
+                entry.status,
+                MergeQueueEntryStatus::Queued,
+                "atomic group member {mr_id} must be requeued after rollback"
+            );
+            let reason = entry
+                .error
+                .as_deref()
+                .unwrap_or_else(|| panic!("requeued entry {mr_id} must carry a rollback reason"));
+            assert!(
+                reason.contains("supervised trust"),
+                "rollback reason must name supervised trust, got: {reason}"
+            );
+        }
     }
 }
