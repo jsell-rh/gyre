@@ -1975,19 +1975,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "pq-src"
-version = "0.3.0"
-dependencies = [
- "cc",
- "openssl-sys",
-]
-
-[[package]]
 name = "pq-sys"
 version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "574ddd6a267294433f140b02a726b0640c43cf7c6f717084684aaa3b285aba61"
 dependencies = [
  "libc",
- "pq-src",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
