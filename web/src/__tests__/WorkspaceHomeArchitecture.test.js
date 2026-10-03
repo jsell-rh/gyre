@@ -40,9 +40,16 @@ vi.mock('../lib/api.js', () => ({
     agent: vi.fn().mockResolvedValue({ name: 'test-agent' }),
     task: vi.fn().mockResolvedValue({ title: 'test-task' }),
     mergeRequest: vi.fn().mockResolvedValue({ title: 'test-mr' }),
-    activity: vi.fn().mockResolvedValue([]),
     mergeQueue: vi.fn().mockResolvedValue([]),
     mergeQueueGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    workspaceDependencyGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    staleDependencies: vi.fn().mockResolvedValue([]),
+    breakingChanges: vi.fn().mockResolvedValue([]),
+    sendAgentMessage: vi.fn().mockResolvedValue({}),
+    createWorkspace: vi.fn().mockResolvedValue({ id: 'ws-new', name: 'New WS', slug: 'new-ws' }),
+    repoBlastRadius: vi.fn().mockResolvedValue({ direct: [], transitive: [], total: 0 }),
+    repoDependents: vi.fn().mockResolvedValue([]),
+    workspaceDependencyPolicy: vi.fn().mockResolvedValue(null),
   },
 }));
 
@@ -56,6 +63,10 @@ import WorkspaceHome from '../components/WorkspaceHome.svelte';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
+vi.mock('../lib/ExplorerCanvas.svelte', () => ({
+  default: function ExplorerCanvasStub() {},
+}));
+
 const WORKSPACE = { id: 'ws-1', name: 'Payments', slug: 'payments', trust_level: 'Guided' };
 
 const GRAPH = {
@@ -68,10 +79,7 @@ const GRAPH = {
   ],
 };
 
-// ── Tests ──────────────────────────────────────────────────────────────────────
-
-// TODO: Architecture section moved to repo mode — update tests for new layout
-describe.skip('WorkspaceHome — Architecture section (old layout)', () => {
+describe('WorkspaceHome — Architecture section (ui-navigation.md §2, HSI §1.3)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.workspaceGraph.mockResolvedValue(GRAPH);
@@ -82,18 +90,25 @@ describe.skip('WorkspaceHome — Architecture section (old layout)', () => {
     expect(container.querySelector('[data-testid="section-architecture"]')).toBeTruthy();
   });
 
-  it('is expanded by default', async () => {
+  it('is collapsed by default (ui-navigation.md §2 — architecture collapsed unless expanded)', async () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     const toggle = container.querySelector('[data-testid="arch-toggle"]');
     expect(toggle).toBeTruthy();
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(container.querySelector('[data-testid="arch-body"]')).toBeNull();
+  });
+
+  it('shows "Show workspace graph" label when collapsed (default)', async () => {
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => {
-      expect(container.querySelector('[data-testid="arch-body"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="arch-toggle"]').textContent).toContain('Show workspace graph');
     });
   });
 
-  it('shows "Hide workspace graph" label when expanded (default)', async () => {
+  it('shows "Hide workspace graph" label when expanded', async () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    const toggle = container.querySelector('[data-testid="arch-toggle"]');
+    await fireEvent.click(toggle);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="arch-toggle"]').textContent).toContain('Hide workspace graph');
     });
@@ -106,35 +121,36 @@ describe.skip('WorkspaceHome — Architecture section (old layout)', () => {
     });
   });
 
-  it('collapses when toggle is clicked', async () => {
+  it('expands when toggle is clicked from collapsed', async () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     const toggle = container.querySelector('[data-testid="arch-toggle"]');
-    await waitFor(() => expect(container.querySelector('[data-testid="arch-body"]')).toBeTruthy());
     await fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    await waitFor(() => expect(container.querySelector('[data-testid="arch-body"]')).toBeTruthy());
+  });
+
+  it('re-collapses when toggle is clicked a second time', async () => {
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    const toggle = container.querySelector('[data-testid="arch-toggle"]');
+    await fireEvent.click(toggle); // expand
+    await waitFor(() => expect(container.querySelector('[data-testid="arch-body"]')).toBeTruthy());
+    await fireEvent.click(toggle); // collapse
     expect(container.querySelector('[data-testid="arch-body"]')).toBeNull();
   });
 
-  it('shows "Show workspace graph" label when collapsed', async () => {
+  it('re-expands when toggle is clicked a third time', async () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     const toggle = container.querySelector('[data-testid="arch-toggle"]');
-    await waitFor(() => expect(container.querySelector('[data-testid="arch-body"]')).toBeTruthy());
-    await fireEvent.click(toggle);
-    expect(toggle.textContent).toContain('Show workspace graph');
-  });
-
-  it('re-expands when toggle is clicked a second time', async () => {
-    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    const toggle = container.querySelector('[data-testid="arch-toggle"]');
-    await waitFor(() => expect(container.querySelector('[data-testid="arch-body"]')).toBeTruthy());
+    await fireEvent.click(toggle); // expand
     await fireEvent.click(toggle); // collapse
     expect(container.querySelector('[data-testid="arch-body"]')).toBeNull();
     await fireEvent.click(toggle); // expand again
     await waitFor(() => expect(container.querySelector('[data-testid="arch-body"]')).toBeTruthy());
   });
 
-  it('renders the canvas after graph loads', async () => {
+  it('renders the canvas after graph loads and section is expanded', async () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await fireEvent.click(container.querySelector('[data-testid="arch-toggle"]'));
     await waitFor(() => {
       expect(container.querySelector('[data-testid="arch-canvas"]')).toBeTruthy();
     });
@@ -151,21 +167,21 @@ describe.skip('WorkspaceHome — Architecture section (old layout)', () => {
 
     expect(api.workspaceGraph).toHaveBeenCalledTimes(1);
   });
-
-  it('shows error row and retry button on API failure', async () => {
+  it('shows error row and retry button on API failure (when expanded)', async () => {
     api.workspaceGraph.mockRejectedValue(new Error('network error'));
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await fireEvent.click(container.querySelector('[data-testid="arch-toggle"]'));
     await waitFor(() => {
       expect(container.querySelector('[role="alert"]')).toBeTruthy();
       expect(container.querySelector('[aria-label="Retry loading workspace graph"]')).toBeTruthy();
     });
   });
-
   it('retry button calls workspaceGraph again', async () => {
     api.workspaceGraph.mockRejectedValueOnce(new Error('fail'));
     api.workspaceGraph.mockResolvedValue(GRAPH);
 
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await fireEvent.click(container.querySelector('[data-testid="arch-toggle"]'));
 
     await waitFor(() => {
       expect(container.querySelector('[aria-label="Retry loading workspace graph"]')).toBeTruthy();
@@ -198,24 +214,23 @@ describe.skip('WorkspaceHome — Architecture section (old layout)', () => {
     expect(container.querySelector('[data-testid="section-architecture"]')).toBeNull();
   });
 
-  it('shows six sections total when workspace is provided', () => {
+  it('shows the workspace home sections when workspace is provided', async () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
-    expect(container.querySelector('[data-testid="section-decisions"]')).toBeTruthy();
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="section-decisions"]')).toBeTruthy();
+    });
     expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="section-architecture"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="section-briefing"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="section-specs"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="section-agent-rules"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="section-architecture"]')).toBeTruthy();
   });
 
-  it('Architecture section appears between Specs and Agent Rules (per ui-navigation.md §2)', () => {
+  it('Architecture section appears after Specs (per ui-navigation.md §2 section order)', () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     const sections = [...container.querySelectorAll('[data-testid^="section-"]')];
     const ids = sections.map(s => s.getAttribute('data-testid'));
     const specsIdx = ids.indexOf('section-specs');
     const archIdx = ids.indexOf('section-architecture');
-    const rulesIdx = ids.indexOf('section-agent-rules');
     expect(archIdx).toBeGreaterThan(specsIdx);
-    expect(archIdx).toBeLessThan(rulesIdx);
   });
 });

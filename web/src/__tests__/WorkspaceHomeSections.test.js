@@ -702,7 +702,7 @@ describe.skip('Repos section (old layout — needs update)', () => {
 
 // ── Briefing section ──────────────────────────────────────────────────────────
 
-describe.skip('Briefing section (old layout — needs update)', () => {
+describe('Briefing section (HSI §1.3 — workspace-scope scroll target)', () => {
   it('renders the briefing section container', () => {
     const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     expect(container.querySelector('[data-testid="section-briefing"]')).toBeTruthy();
@@ -726,7 +726,7 @@ describe.skip('Briefing section (old layout — needs update)', () => {
 
 // ── Specs section ─────────────────────────────────────────────────────────────
 
-describe.skip('Specs section (old layout — needs update)', () => {
+describe('Specs section (HSI §1.3 — workspace-scope scroll target)', () => {
   it('calls api.specsForWorkspace on mount', async () => {
     render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => expect(api.specsForWorkspace).toHaveBeenCalledWith('ws-1'));
