@@ -640,32 +640,57 @@ pub(crate) async fn spawn_agent_core(
         // process starts — raw values are never in the agent env.
         // Failure is logged and skipped: a missing/undecryptable secret must
         // not block spawning the agent itself.
-        let tenant_id = workspace
-            .as_ref()
-            .map(|ws| ws.tenant_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
-        match state
-            .secrets
-            .resolve_for_agent(
-                &tenant_id,
-                &repo.workspace_id.to_string(),
-                &req.repo_id,
-                Some(&req.task_id),
-            )
-            .await
-        {
-            Ok(resolved) => {
-                for (name, value) in resolved {
-                    container_env.insert(
-                        format!("GYRE_CRED_{name}"),
-                        String::from_utf8_lossy(&value).into_owned(),
-                    );
+        // Resolve the tenant from the workspace record; never fabricate a
+        // "default" tenant. On an unresolvable workspace, skip tenant-scoped
+        // (and thus all) secret resolution and warn — the spawn itself must
+        // continue without GYRE_CRED_* env vars.
+        match workspace.as_ref() {
+            Some(ws) => {
+                let tenant_id = ws.tenant_id.to_string();
+                match state
+                    .secrets
+                    .resolve_for_agent(
+                        &tenant_id,
+                        &repo.workspace_id.to_string(),
+                        &req.repo_id,
+                        Some(&req.task_id),
+                    )
+                    .await
+                {
+                    Ok(resolved) => {
+                        for (name, value) in resolved {
+                            // Env vars must be UTF-8. Skip (and name, never
+                            // log) non-UTF-8 values rather than corrupting
+                            // them with replacement chars — same availability
+                            // posture as the resolve-failure branch.
+                            match String::from_utf8(value) {
+                                Ok(s) => {
+                                    container_env.insert(format!("GYRE_CRED_{name}"), s);
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        agent_id = %agent.id,
+                                        secret_name = %name,
+                                        "skipping non-UTF-8 secret; GYRE_CRED_* env vars require UTF-8 values"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %agent.id,
+                            "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
+                        );
+                    }
                 }
             }
-            Err(e) => {
+            None => {
                 tracing::warn!(
                     agent_id = %agent.id,
-                    "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
+                    workspace_id = %repo.workspace_id,
+                    repo_id = %req.repo_id,
+                    "workspace unresolvable; skipping scoped secret resolution (no GYRE_CRED_* env vars)"
                 );
             }
         }
@@ -1817,7 +1842,7 @@ async fn create_derived_input_for_agent(
 
 #[cfg(test)]
 mod tests {
-    use crate::mem::test_state;
+    use crate::mem::{test_state, test_state_with_secrets};
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -2898,5 +2923,398 @@ mod tests {
             StatusCode::CREATED,
             "interrogation agents should bypass task_type filtering"
         );
+    }
+
+    // ── Platform Model §7: scoped secrets delivery (task-097 F2) ──────────────
+    //
+    // These tests exercise the real spawn path end-to-end: secrets are seeded
+    // into the AppState's SecretRepository (the mem adapter), an agent is
+    // spawned via POST /api/v1/agents/spawn, and the resulting child-process
+    // environment is observed. Observability trick: the compute target is a
+    // Kubernetes-typed target whose config.command points at a test-written
+    // shell script — dispatch falls through to the local LocalTarget (no
+    // docker/kube dependency), the config command wins over GYRE_AGENT_COMMAND,
+    // and the script dumps its environment to a tempfile we read back.
+    // Spawn failure is best-effort (201 regardless), so the assertions are on
+    // the dump file, not just the HTTP status.
+
+    use crate::AppState;
+    use gyre_common::{Secret, SecretScope, SecretType};
+    use std::sync::Arc;
+
+    fn test_secret(
+        name: &str,
+        scope: SecretScope,
+        scope_id: &str,
+        tenant_id: &str,
+    ) -> Secret {
+        let id = uuid::Uuid::new_v4().to_string();
+        Secret {
+            id: gyre_common::Id::new(&id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Static,
+            created_by: "test".to_string(),
+            created_at: 0,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: tenant_id.to_string(),
+        }
+    }
+
+    async fn seed_secret(
+        state: &Arc<AppState>,
+        name: &str,
+        scope: SecretScope,
+        scope_id: &str,
+        tenant_id: &str,
+        value: &[u8],
+    ) {
+        let secret = test_secret(name, scope, scope_id, tenant_id);
+        state
+            .secrets
+            .create(&secret, value)
+            .await
+            .expect("seeding secret into mem repository must succeed");
+    }
+
+    /// Create a Kubernetes-typed compute target whose config.command is a
+    /// test-written script dumping all GYRE_CRED_* env vars to `dump_path`.
+    /// Kubernetes-typed targets fall through the container/ssh dispatch arms
+    /// to LocalTarget, so the script runs as a plain local process — real
+    /// env delivery, no docker dependency, no process-env mutation.
+    async fn create_env_dump_compute_target(
+        app: Router,
+        name: &str,
+        dump_path: &str,
+    ) -> (Router, String) {
+        let script_path = format!("{dump_path}.sh");
+        let script = format!(
+            "#!/bin/sh\nenv | grep '^GYRE_CRED_' | sort > {dump_path}\nexit 0\n"
+        );
+        std::fs::write(&script_path, script).expect("writing env-dump script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod env-dump script");
+        }
+        let body = serde_json::json!({
+            "name": name,
+            "target_type": "Kubernetes",
+            "config": {"command": script_path},
+            "is_default": false,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "env-dump compute target create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// LocalTarget spawns with `current_dir(work_dir)`, so the worktree path
+    /// must exist on disk — NoopGitOps's create_worktree is a no-op.
+    fn create_worktree_dir(state: &Arc<AppState>, workspace_id: &str, repo: &str, branch: &str) {
+        let worktree_path = format!(
+            "{}/{}/{}.git/worktrees/{}",
+            state.repos_root,
+            workspace_id,
+            repo,
+            branch.replace('/', "-")
+        );
+        std::fs::create_dir_all(&worktree_path).expect("creating worktree dir");
+    }
+
+    /// Wait (bounded) for the env-dump script to write its output file.
+    async fn wait_for_dump(dump_path: &str) -> Option<String> {
+        for _ in 0..100 {
+            if let Ok(content) = std::fs::read_to_string(dump_path) {
+                return Some(content);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn spawn_delivers_scoped_secrets_across_all_scopes() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
+
+        let (app, ws_id) = create_workspace(app, "secrets-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Secrets delivery task").await;
+        let (app, ct_id) =
+            create_env_dump_compute_target(app, "env-dump-all", &dump_path).await;
+
+        // The test caller is Admin on tenant "default"; the workspace's
+        // tenant derives from the caller, so all scopes live in "default".
+        let tenant = "default";
+        seed_secret(&state, "TENANT_VAR", SecretScope::Tenant, tenant, tenant, b"tenant-value").await;
+        seed_secret(&state, "WORKSPACE_VAR", SecretScope::Workspace, &ws_id, tenant, b"workspace-value").await;
+        seed_secret(&state, "REPO_VAR", SecretScope::Repo, &repo_id, tenant, b"repo-value").await;
+        seed_secret(&state, "TASK_VAR", SecretScope::Task, &task_id, tenant, b"task-value").await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/secrets");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/secrets", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("env-dump script should have written its output");
+        assert!(
+            dump.contains("GYRE_CRED_TENANT_VAR=tenant-value\n"),
+            "tenant-scoped secret must be delivered:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_CRED_WORKSPACE_VAR=workspace-value\n"),
+            "workspace-scoped secret must be delivered:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_CRED_REPO_VAR=repo-value\n"),
+            "repo-scoped secret must be delivered:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_CRED_TASK_VAR=task-value\n"),
+            "task-scoped secret must be delivered:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_secret_delivery_nearest_scope_wins() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
+
+        let (app, ws_id) = create_workspace(app, "secrets-ws-nearest").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Nearest scope task").await;
+        let (app, ct_id) =
+            create_env_dump_compute_target(app, "env-dump-nearest", &dump_path).await;
+
+        let tenant = "default";
+        seed_secret(&state, "SHARED", SecretScope::Tenant, tenant, tenant, b"from-tenant").await;
+        seed_secret(&state, "SHARED", SecretScope::Repo, &repo_id, tenant, b"from-repo").await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/nearest");
+        let (_, json) =
+            do_spawn_with_target(app, &repo_id, &task_id, "feat/nearest", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("env-dump script should have written its output");
+        assert_eq!(
+            dump, "GYRE_CRED_SHARED=from-repo\n",
+            "repo (nearer) scope must win over tenant for the same name"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_unresolvable_workspace_skips_secret_resolution() {
+        // A repo in a nonexistent workspace ("ws-ghost") is accepted by the
+        // create-repo validation (it only rejects `..`/`/`), so the spawn
+        // path sees workspace=None. The F3 fix must skip secret resolution
+        // (warn) rather than fabricate tenant "default" — a tenant-scoped
+        // secret named LEAK in the "default" tenant must NOT leak into the
+        // agent env.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
+
+        let (app, repo_id) = create_repo_in_workspace(app, "ws-ghost").await;
+        let (app, task_id) = create_task(app, "Ghost workspace task").await;
+        let (app, ct_id) =
+            create_env_dump_compute_target(app, "env-dump-ghost", &dump_path).await;
+
+        // The previously-fabricated tenant identity — this is exactly the
+        // secret the old code would have delivered.
+        seed_secret(&state, "LEAK", SecretScope::Tenant, "default", "default", b"leaked").await;
+
+        create_worktree_dir(&state, "ws-ghost", "wt-repo", "feat/ghost");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/ghost", &ct_id).await;
+        assert_eq!(
+            json["agent"]["status"], "active",
+            "unresolvable workspace must not fail the spawn"
+        );
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("env-dump script should have written its output");
+        assert!(
+            !dump.contains("GYRE_CRED_"),
+            "no GYRE_CRED_* may be delivered when the workspace is unresolvable:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_non_utf8_secret_skipped_others_delivered() {
+        // F4: a non-UTF-8 secret value cannot become an env var; it must be
+        // skipped with a warning naming the secret (never the value), while
+        // the remaining secrets are still delivered.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
+
+        let (app, ws_id) = create_workspace(app, "secrets-ws-binary").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Binary secret task").await;
+        let (app, ct_id) =
+            create_env_dump_compute_target(app, "env-dump-binary", &dump_path).await;
+
+        let tenant = "default";
+        seed_secret(&state, "BINARY_SECRET", SecretScope::Tenant, tenant, tenant, b"\xff\xfe\x00binary").await;
+        seed_secret(&state, "TEXT_SECRET", SecretScope::Tenant, tenant, tenant, b"text-value").await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/binary");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/binary", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("env-dump script should have written its output");
+        assert!(
+            dump.contains("GYRE_CRED_TEXT_SECRET=text-value\n"),
+            "UTF-8 secret must still be delivered:\n{dump}"
+        );
+        assert!(
+            !dump.contains("GYRE_CRED_BINARY_SECRET"),
+            "non-UTF-8 secret must be skipped, not corrupted and delivered:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_secret_resolve_error_does_not_fail_spawn() {
+        // A failing SecretRepository must not block the spawn: the resolution
+        // error is logged and the agent starts without GYRE_CRED_* env vars.
+        // The mem-backed state keeps everything real except the secrets port,
+        // which always errors — the resolve-Err branch of the spawn path.
+        struct FailingSecrets;
+        #[async_trait::async_trait]
+        impl gyre_ports::SecretRepository for FailingSecrets {
+            async fn create(
+                &self,
+                _secret: &gyre_common::Secret,
+                _value: &[u8],
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn get_value(
+                &self,
+                _id: &gyre_common::Id,
+                _tenant_id: &str,
+            ) -> anyhow::Result<Option<Vec<u8>>> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn list_by_scope(
+                &self,
+                _scope: gyre_common::SecretScope,
+                _scope_id: &str,
+                _tenant_id: &str,
+            ) -> anyhow::Result<Vec<gyre_common::Secret>> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn delete(&self, _id: &gyre_common::Id, _tenant_id: &str) -> anyhow::Result<()> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn rotate(
+                &self,
+                _id: &gyre_common::Id,
+                _new_value: &[u8],
+                _tenant_id: &str,
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn resolve_for_agent(
+                &self,
+                _tenant_id: &str,
+                _workspace_id: &str,
+                _repo_id: &str,
+                _task_id: Option<&str>,
+            ) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+                anyhow::bail!("resolve_for_agent failed")
+            }
+        }
+
+        let state = test_state_with_secrets(Arc::new(FailingSecrets));
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
+
+        let (app, ws_id) = create_workspace(app, "secrets-ws-fail").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Failing secrets task").await;
+        let (app, ct_id) =
+            create_env_dump_compute_target(app, "env-dump-fail", &dump_path).await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/failing");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/failing", &ct_id).await;
+        assert_eq!(
+            json["agent"]["status"], "active",
+            "secret resolution failure must not fail the spawn"
+        );
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("env-dump script should have written its output");
+        assert!(
+            !dump.contains("GYRE_CRED_"),
+            "no GYRE_CRED_* may be delivered when resolution fails:\n{dump}"
+        );
+    }
+
+    /// Like `do_spawn`, but with an explicit compute_target_id in the request
+    /// body so the env-dump target drives the local dispatch.
+    async fn do_spawn_with_target(
+        app: Router,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+        compute_target_id: &str,
+    ) -> (Router, serde_json::Value) {
+        let body = serde_json::json!({
+            "name": "worker-1",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+            "compute_target_id": compute_target_id,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        (app, json)
     }
 }
