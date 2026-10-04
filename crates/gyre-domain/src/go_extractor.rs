@@ -7,8 +7,11 @@
 //! - Exported functions (`func FunctionName(...)`)
 //! - Exported methods (`func (r *Receiver) MethodName(...)`)
 //!
-//! **qualified_name scheme:** `<go-module-path>/<package>.TypeName`
-//! Example: module `github.com/org/myapp`, package `api`, type `Server`
+//! **qualified_name scheme:** `<go-module-path>/<directory-path>.TypeName`
+//! (Go's import-path rule: module path joined with the file's directory;
+//! root-level files get the bare module path). The package *clause* can
+//! differ from the directory name, so it is never used in qualified names.
+//! Example: module `github.com/org/myapp`, file `api/server.go`
 //! → `github.com/org/myapp/api.Server`
 
 use crate::extractor::{
@@ -203,11 +206,27 @@ impl GoExtractionContext {
             return Ok(());
         }
 
-        // Build qualified name for package node: <module>/<pkg>
+        // Build qualified name for the package and everything in it:
+        // <module>/<directory-path>. This mirrors Go's import-path rule
+        // (module path + directory path per the language spec) and the
+        // go-callgraph binary, which reports `pkg.Pkg.Path()`. The package
+        // *clause* (pkg_name) may differ from the directory name in real
+        // code, so it must not appear in any qualified name.
         let pkg_qname = if self.module_path.is_empty() {
+            // No go.mod module path — fall back to the package clause.
             pkg_name.clone()
         } else {
-            format!("{}/{}", self.module_path, pkg_name)
+            // Directory part of the repo-relative file path, /-separated.
+            // A root-level file (e.g. main.go) yields the bare module path.
+            let dir = Path::new(&rel_path)
+                .parent()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if dir.is_empty() {
+                self.module_path.clone()
+            } else {
+                format!("{}/{}", self.module_path, dir)
+            }
         };
 
         // Get or create the Package node (shared across files in same package).
