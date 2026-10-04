@@ -1255,6 +1255,47 @@ func (s *Server) stop() {}
     }
 
     #[test]
+    fn qualified_name_uses_import_path_not_package_clause() {
+        // F6 (specs/reviews/task-072.md): node qualified names must follow the
+        // Go import-path rule — module path + directory path — because that is
+        // what `golang.org/x/tools/go/callgraph/cha` (and scripts/go-callgraph)
+        // emits in its raw edges. The package clause may differ from the
+        // directory name; if Pass 1 built qnames from the clause, Pass 2 raw
+        // edges would never match.
+        let src = r#"package httpapi
+
+type Server struct{}
+
+func (s *Server) Handle() error {
+    return nil
+}
+
+func Serve() {}
+"#;
+        let dir = make_repo(GO_MOD, &[("internal/handlers/server.go", src)]);
+        let result = GoExtractor.extract(dir.path(), "abc123");
+
+        let method = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "Handle")
+            .expect("exported method Handle extracted");
+        assert_eq!(
+            method.qualified_name, "github.com/org/myapp/internal/handlers.Server.Handle",
+            "method qname = module + directory + Type.Method (import-path rule), NOT the package clause"
+        );
+        let func = result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == NodeType::Function && n.name == "Serve")
+            .expect("exported function Serve extracted");
+        assert_eq!(
+            func.qualified_name, "github.com/org/myapp/internal/handlers.Serve",
+            "function qname = module + directory (import-path rule), NOT the package clause"
+        );
+    }
+
+    #[test]
     fn contains_edges_link_package_to_types() {
         let src = r#"package api
 
