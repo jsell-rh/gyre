@@ -7,7 +7,7 @@ use gyre_common::{
     Id,
 };
 use gyre_ports::GraphPort;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 /// Thread-safe in-memory store for the knowledge graph.
 #[derive(Default)]
@@ -26,12 +26,12 @@ impl MemGraphStore {
 #[async_trait]
 impl GraphPort for MemGraphStore {
     async fn create_node(&self, node: GraphNode) -> Result<GraphNode> {
-        self.nodes.write().unwrap().push(node.clone());
+        self.nodes.write().push(node.clone());
         Ok(node)
     }
 
     async fn get_node(&self, id: &Id) -> Result<Option<GraphNode>> {
-        let nodes = self.nodes.read().unwrap();
+        let nodes = self.nodes.read();
         Ok(nodes.iter().find(|n| &n.id == id).cloned())
     }
 
@@ -40,7 +40,7 @@ impl GraphPort for MemGraphStore {
         repo_id: &Id,
         node_type: Option<NodeType>,
     ) -> Result<Vec<GraphNode>> {
-        let nodes = self.nodes.read().unwrap();
+        let nodes = self.nodes.read();
         Ok(nodes
             .iter()
             .filter(|n| &n.repo_id == repo_id)
@@ -51,7 +51,15 @@ impl GraphPort for MemGraphStore {
     }
 
     async fn create_edge(&self, edge: GraphEdge) -> Result<GraphEdge> {
-        self.edges.write().unwrap().push(edge.clone());
+        let mut edges = self.edges.write();
+        // Upsert on id, matching the SQLite adapter's ON CONFLICT(`id`)
+        // semantics: re-persisting a content-derived edge id updates the
+        // record in place instead of accumulating duplicates.
+        if let Some(existing) = edges.iter_mut().find(|e| e.id == edge.id) {
+            *existing = edge.clone();
+        } else {
+            edges.push(edge.clone());
+        }
         Ok(edge)
     }
 
@@ -60,7 +68,7 @@ impl GraphPort for MemGraphStore {
         repo_id: &Id,
         edge_type: Option<EdgeType>,
     ) -> Result<Vec<GraphEdge>> {
-        let edges = self.edges.read().unwrap();
+        let edges = self.edges.read();
         Ok(edges
             .iter()
             .filter(|e| &e.repo_id == repo_id)
@@ -75,7 +83,7 @@ impl GraphPort for MemGraphStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes.write();
         if let Some(node) = nodes.iter_mut().find(|n| &n.id == id) {
             node.deleted_at = Some(now);
         }
@@ -87,7 +95,7 @@ impl GraphPort for MemGraphStore {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let mut edges = self.edges.write().unwrap();
+        let mut edges = self.edges.write();
         if let Some(edge) = edges.iter_mut().find(|e| &e.id == id) {
             edge.deleted_at = Some(now);
         }
@@ -95,21 +103,21 @@ impl GraphPort for MemGraphStore {
     }
 
     async fn delete_nodes_by_repo(&self, repo_id: &Id) -> Result<u64> {
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes.write();
         let before = nodes.len();
         nodes.retain(|n| &n.repo_id != repo_id);
         Ok((before - nodes.len()) as u64)
     }
 
     async fn delete_edges_by_repo(&self, repo_id: &Id) -> Result<u64> {
-        let mut edges = self.edges.write().unwrap();
+        let mut edges = self.edges.write();
         let before = edges.len();
         edges.retain(|e| &e.repo_id != repo_id);
         Ok((before - edges.len()) as u64)
     }
 
     async fn record_delta(&self, delta: ArchitecturalDelta) -> Result<ArchitecturalDelta> {
-        self.deltas.write().unwrap().push(delta.clone());
+        self.deltas.write().push(delta.clone());
         Ok(delta)
     }
 
@@ -119,7 +127,7 @@ impl GraphPort for MemGraphStore {
         since: Option<u64>,
         until: Option<u64>,
     ) -> Result<Vec<ArchitecturalDelta>> {
-        let deltas = self.deltas.read().unwrap();
+        let deltas = self.deltas.read();
         Ok(deltas
             .iter()
             .filter(|d| &d.repo_id == repo_id)
@@ -130,7 +138,7 @@ impl GraphPort for MemGraphStore {
     }
 
     async fn get_nodes_by_spec(&self, repo_id: &Id, spec_path: &str) -> Result<Vec<GraphNode>> {
-        let nodes = self.nodes.read().unwrap();
+        let nodes = self.nodes.read();
         Ok(nodes
             .iter()
             .filter(|n| &n.repo_id == repo_id)
@@ -145,7 +153,7 @@ impl GraphPort for MemGraphStore {
         spec_path: &str,
         confidence: SpecConfidence,
     ) -> Result<()> {
-        let mut nodes = self.nodes.write().unwrap();
+        let mut nodes = self.nodes.write();
         if let Some(node) = nodes.iter_mut().find(|n| &n.id == node_id) {
             node.spec_path = Some(spec_path.to_string());
             node.spec_confidence = confidence;
@@ -154,7 +162,7 @@ impl GraphPort for MemGraphStore {
     }
 
     async fn list_edges_for_node(&self, node_id: &Id) -> Result<Vec<GraphEdge>> {
-        let edges = self.edges.read().unwrap();
+        let edges = self.edges.read();
         Ok(edges
             .iter()
             .filter(|e| &e.source_id == node_id || &e.target_id == node_id)
