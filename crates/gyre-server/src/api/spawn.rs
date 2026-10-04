@@ -1865,6 +1865,7 @@ async fn create_derived_input_for_agent(
 
 #[cfg(test)]
 mod tests {
+    use super::create_interrogation_policies_in;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
@@ -2955,7 +2956,6 @@ mod tests {
     #[tokio::test]
     async fn create_interrogation_policies_fails_closed_on_duplicate() {
         use std::collections::HashMap;
-        use std::sync::Arc as StdArc;
         use tokio::sync::Mutex;
 
         /// Policy repo that rejects creating a duplicate id (like the SQL
