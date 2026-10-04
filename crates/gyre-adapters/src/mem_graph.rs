@@ -54,9 +54,15 @@ impl GraphPort for MemGraphStore {
         let mut edges = self.edges.write();
         // Upsert on id, matching the SQLite adapter's ON CONFLICT(`id`)
         // semantics: re-persisting a content-derived edge id updates the
-        // record in place instead of accumulating duplicates.
+        // mutable fields in place (edge_type, metadata, last_seen_at,
+        // deleted_at) while first_seen_at — the identity of when the edge
+        // first appeared — is immutable, exactly as the SQLite adapter
+        // never updates it on conflict.
         if let Some(existing) = edges.iter_mut().find(|e| e.id == edge.id) {
-            *existing = edge.clone();
+            existing.edge_type = edge.edge_type.clone();
+            existing.metadata = edge.metadata.clone();
+            existing.last_seen_at = edge.last_seen_at;
+            existing.deleted_at = edge.deleted_at;
         } else {
             edges.push(edge.clone());
         }
