@@ -291,12 +291,8 @@ async fn do_extract(
             edges_added_count += 1;
         }
     }
-    for (key, edge) in &old_edge_map {
-        if !new_edge_map.contains_key(key) {
-            graph_store.delete_edge(&edge.id).await?;
-            edges_removed_count += 1;
-        }
-    }
+    edges_removed_count +=
+        sweep_stale_edges(&old_edge_map, &new_edge_map, graph_store.as_ref()).await?;
 
     let node_count = final_nodes.len();
     let edge_count = new_edge_map.len();
@@ -623,6 +619,36 @@ fn edge_type_key(et: &EdgeType) -> &'static str {
     }
 }
 
+/// Soft-delete stale Pass 1 edges (step 5 of `do_extract`).
+///
+/// F8 (task-072 R2): `Calls` edges are exempt — they are owned by Pass 2, the
+/// background call-graph pass. Pass 1's syntax-only extractors emit no `Calls`
+/// edges for Go, so an unconditional sweep would soft-delete every Pass 2 edge
+/// on each push and race the still-running Pass 2 writer of the previous push
+/// (the graph would briefly lose all call data). Pass 2 reconciles its own edge
+/// type in [`extract_and_persist_call_graph`]. Tradeoff: stale Pass 1 `Calls`
+/// edges from the Rust/TS syntax extractors stay until Pass 2 for those
+/// languages lands (Phase 1 scope is Go).
+///
+/// Returns the number of edges removed.
+async fn sweep_stale_edges(
+    old_edge_map: &HashMap<(String, String, String), GraphEdge>,
+    new_edge_map: &HashMap<(String, String, String), GraphEdge>,
+    graph_store: &dyn GraphPort,
+) -> anyhow::Result<usize> {
+    let mut removed = 0usize;
+    for (key, edge) in old_edge_map {
+        if !new_edge_map.contains_key(key) {
+            if edge.edge_type == EdgeType::Calls {
+                continue;
+            }
+            graph_store.delete_edge(&edge.id).await?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Compute field-level differences between an old and new version of the same node.
 ///
 /// Compares the mutable fields that extraction can produce — skips ID, repo_id,
@@ -796,6 +822,7 @@ pub async fn extract_and_persist_call_graph(
     let mut known_edges = existing_edges.to_vec();
     let mut persisted = 0usize;
 
+    let mut extraction_ran = false;
     for lang in languages {
         let raw = match extractor.extract_call_edges(repo_root, lang).await {
             Ok(r) => r,
@@ -812,6 +839,10 @@ pub async fn extract_and_persist_call_graph(
         if raw.is_empty() {
             continue;
         }
+        // Non-empty raw output is positive evidence the toolchain ran (the
+        // adapter degrades a missing tool to `Ok(vec![])`, which is
+        // indistinguishable from a genuinely call-free repo).
+        extraction_ran = true;
 
         let edges = resolve_call_edges(lang, &raw, nodes, &known_edges, repo_id);
         for edge in edges {
@@ -824,6 +855,56 @@ pub async fn extract_and_persist_call_graph(
                     tracing::warn!(repo_id = %repo_id, error = %e, "failed to persist Pass 2 edge");
                 }
             }
+        }
+    }
+
+    // Reconcile Pass 2's own edge type (F8, task-072 R2). Because step 5's
+    // stale sweep skips `Calls`, removal of stale call edges is Pass 2's job:
+    // a live Calls edge is soft-deleted when its (source, target) pair is
+    // absent from this run's resolved set (freshly persisted + carried-over
+    // Pass 1 edges), or when the pair is covered but this row's id is not —
+    // a legacy row from before edge ids became content-derived (it would
+    // otherwise duplicate the fresh row forever). Skipped when no language
+    // produced raw output: a missing/failed toolchain degrades to empty
+    // output, and deleting every Calls edge because the tool was unavailable
+    // would wipe the graph's call data.
+    if extraction_ran {
+        let mut resolved: HashMap<(String, String), HashSet<String>> = HashMap::new();
+        for e in known_edges.iter().filter(|e| e.edge_type == EdgeType::Calls) {
+            resolved
+                .entry((e.source_id.as_str().to_string(), e.target_id.as_str().to_string()))
+                .or_default()
+                .insert(e.id.as_str().to_string());
+        }
+        let live_calls = match graph_store.list_edges(repo_id, Some(EdgeType::Calls)).await {
+            Ok(edges) => edges,
+            Err(e) => {
+                tracing::warn!(repo_id = %repo_id, error = %e, "Pass 2 reconcile: list_edges failed");
+                Vec::new()
+            }
+        };
+        let mut reconciled = 0usize;
+        for edge in live_calls {
+            let pair =
+                (edge.source_id.as_str().to_string(), edge.target_id.as_str().to_string());
+            let stale = match resolved.get(&pair) {
+                None => true,
+                Some(ids) => !ids.contains(edge.id.as_str()),
+            };
+            if stale {
+                if let Err(e) = graph_store.delete_edge(&edge.id).await {
+                    tracing::warn!(repo_id = %repo_id, error = %e, "failed to delete stale Calls edge");
+                } else {
+                    reconciled += 1;
+                }
+            }
+        }
+        if reconciled > 0 {
+            tracing::info!(
+                repo_id = %repo_id,
+                edges = reconciled,
+                "Pass 2 call graph reconcile: stale Calls edges soft-deleted"
+            );
         }
     }
 
@@ -1358,5 +1439,297 @@ mod tests {
             calls.is_empty(),
             "no new Calls edge should be persisted for a duplicate"
         );
+    }
+
+    #[tokio::test]
+    async fn pass2_edge_ids_stable_across_runs() {
+        // F8 idempotence: re-running Pass 2 over the same call structure must
+        // reuse the content-derived edge id (upsert in place), not mint a new
+        // UUID — consumers tracking edges by id or first_seen_at would
+        // otherwise see churn on every push.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-go");
+        let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
+        let callee = make_go_fn("example.com/app/svc.DoWork", "svc/work.go", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+
+        let fake = FakeCallGraphExtractor {
+            edges: vec![CallEdge {
+                from: "example.com/app/api.Handler".to_string(),
+                to: "example.com/app/svc.DoWork".to_string(),
+            }],
+        };
+
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
+        let first = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let first = &first[0];
+
+        // Ensure the second run's `now` differs, so a row replacement (rather
+        // than an in-place upsert) would be observable in first_seen_at.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
+        let second = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(second.len(), 1, "second run must not create a duplicate row");
+        assert_eq!(
+            second[0].id, first.id,
+            "edge id must be content-derived and stable across runs"
+        );
+        assert_eq!(
+            second[0].first_seen_at, first.first_seen_at,
+            "first_seen_at must be preserved across runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_preserves_calls_edges_owned_by_pass2() {
+        // F8 mid-flight race: push N+1's Pass 1 stale sweep runs while push
+        // N's Pass 2 writer may still be persisting Calls edges. The sweep
+        // must never touch the Calls type — a delete there races the async
+        // writer and briefly empties the graph's call data.
+        let repo_id = Id::new("repo-race");
+        let store = MemGraphStore::new();
+        let node = make_graph_node("fn-a", "crate::fn_a");
+
+        let calls_edge = GraphEdge {
+            id: Id::new("pass2-edge"),
+            repo_id: repo_id.clone(),
+            source_id: node.id.clone(),
+            target_id: Id::new("fn-b"),
+            edge_type: EdgeType::Calls,
+            metadata: None,
+            first_seen_at: 1,
+            last_seen_at: 1,
+            deleted_at: None,
+        };
+        let contains_edge = GraphEdge {
+            id: Id::new("pass1-contains"),
+            repo_id: repo_id.clone(),
+            source_id: node.id.clone(),
+            target_id: Id::new("mod-x"),
+            edge_type: EdgeType::Contains,
+            metadata: None,
+            first_seen_at: 1,
+            last_seen_at: 1,
+            deleted_at: None,
+        };
+        for e in [&calls_edge, &contains_edge] {
+            store.create_edge(e.clone()).await.unwrap();
+        }
+
+        // Pass 1 of the next push re-emits neither edge (e.g. both endpoints
+        // moved to a file the syntax extractors no longer parse).
+        let old_edge_map: HashMap<(String, String, String), GraphEdge> =
+            [calls_edge.clone(), contains_edge.clone()]
+                .into_iter()
+                .map(|e| {
+                    (
+                        (
+                            e.source_id.as_str().to_string(),
+                            e.target_id.as_str().to_string(),
+                            edge_type_key(&e.edge_type).to_string(),
+                        ),
+                        e,
+                    )
+                })
+                .collect();
+
+        let removed = sweep_stale_edges(&old_edge_map, &HashMap::new(), &store).await.unwrap();
+        assert_eq!(removed, 1, "only the non-Calls stale edge is removed");
+
+        let live = store.list_edges(&repo_id, None).await.unwrap();
+        assert_eq!(live.len(), 1, "the Calls edge must survive the Pass 1 sweep");
+        assert_eq!(live[0].id, Id::new("pass2-edge"));
+        assert!(live[0].deleted_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn pass2_reconciles_stale_calls_edges() {
+        // F8 lifecycle: with the Pass 1 sweep no longer deleting Calls edges,
+        // Pass 2 must reconcile its own type — a call edge that disappears
+        // from the type checker's output is soft-deleted, live ones keep
+        // their identity.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-go");
+        let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
+        let callee = make_go_fn("example.com/app/svc.DoWork", "svc/work.go", &repo_id);
+        let other = make_go_fn("example.com/app/svc.Gone", "svc/gone.go", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone(), other.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+
+        // Run 1: two calls.
+        let fake_two = FakeCallGraphExtractor {
+            edges: vec![
+                CallEdge {
+                    from: "example.com/app/api.Handler".to_string(),
+                    to: "example.com/app/svc.DoWork".to_string(),
+                },
+                CallEdge {
+                    from: "example.com/app/api.Handler".to_string(),
+                    to: "example.com/app/svc.Gone".to_string(),
+                },
+            ],
+        };
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake_two)
+            .await;
+        let after_first = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(after_first.len(), 2);
+
+        // Run 2: the call to svc.Gone no longer exists in the source.
+        let fake_one = FakeCallGraphExtractor {
+            edges: vec![CallEdge {
+                from: "example.com/app/api.Handler".to_string(),
+                to: "example.com/app/svc.DoWork".to_string(),
+            }],
+        };
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake_one)
+            .await;
+
+        let after_second = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(after_second.len(), 1, "stale Calls edge must be reconciled away");
+        assert_eq!(after_second[0].target_id, callee.id);
+        assert_eq!(
+            after_second[0].id, after_first[0].id,
+            "surviving edge keeps its content-derived id"
+        );
+    }
+
+    #[tokio::test]
+    async fn pass2_reconcile_skipped_when_toolchain_unavailable() {
+        // A missing toolchain degrades to Ok(vec![]) — indistinguishable from
+        // a call-free repo. Reconcile must not interpret that as "no calls
+        // exist" and wipe the graph's Calls edges.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-go");
+        let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
+        let callee = make_go_fn("example.com/app/svc.DoWork", "svc/work.go", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+        store
+            .create_edge(GraphEdge {
+                id: Id::new("prior-pass2-edge"),
+                repo_id: repo_id.clone(),
+                source_id: caller.id.clone(),
+                target_id: callee.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 1,
+                last_seen_at: 1,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+
+        let empty = FakeCallGraphExtractor { edges: vec![] };
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &empty).await;
+
+        let calls = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "empty toolchain output must not wipe existing Calls edges"
+        );
+    }
+
+    #[tokio::test]
+    async fn pass2_reconcile_removes_legacy_duplicate_id_rows() {
+        // Rows written before edge ids became content-derived carry random
+        // UUIDs for the same (source, target) pair. Reconcile must collapse
+        // them onto the fresh content-derived row instead of keeping both.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-go");
+        let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
+        let callee = make_go_fn("example.com/app/svc.DoWork", "svc/work.go", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+        // The legacy row: same pair, pre-content-id UUID.
+        store
+            .create_edge(GraphEdge {
+                id: Id::new("legacy-random-uuid"),
+                repo_id: repo_id.clone(),
+                source_id: caller.id.clone(),
+                target_id: callee.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 1,
+                last_seen_at: 1,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+
+        let fake = FakeCallGraphExtractor {
+            edges: vec![CallEdge {
+                from: "example.com/app/api.Handler".to_string(),
+                to: "example.com/app/svc.DoWork".to_string(),
+            }],
+        };
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
+
+        let calls = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1, "legacy duplicate row must be collapsed");
+        assert_ne!(calls[0].id, Id::new("legacy-random-uuid"));
+        assert_eq!(calls[0].source_id, caller.id);
+        assert_eq!(calls[0].target_id, callee.id);
     }
 }

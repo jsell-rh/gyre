@@ -15,7 +15,6 @@ use gyre_common::Id;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 
 // ── Language detection (marker-file reads only, no subprocess) ──────────────
 
@@ -145,7 +144,7 @@ pub fn resolve_call_edges(
             continue;
         }
         new_edges.push(GraphEdge {
-            id: Id::new(Uuid::new_v4().to_string()),
+            id: calls_edge_id(repo_id, &from.id, &to.id),
             repo_id: repo_id.clone(),
             source_id: from.id.clone(),
             target_id: to.id.clone(),
@@ -158,6 +157,42 @@ pub fn resolve_call_edges(
     }
 
     new_edges
+}
+
+/// Deterministic content-derived id for a Pass 2 `Calls` edge.
+///
+/// Rationale (specs/reviews/task-072.md F8): Pass 2 runs as a background
+/// `tokio::spawn` after Pass 1's transaction commits. With random UUIDs, a
+/// re-derived edge gets a NEW id every run, so the upsert never fires and rows
+/// accumulate; worse, Pass 1's soft-delete sweep can land mid-flight and
+/// delete an edge Pass 2 is about to (re-)insert, leaving a torn state. A
+/// content-derived id — SHA-256 over `repo|source|target|calls` — makes
+/// re-derivation upsert in place (the adapters' `create_edge` conflicts on
+/// `id` and preserves `first_seen_at`), and gives Pass 2 ownership of its edge
+/// type so the foreground sweep skips it. Include `repo_id` so the same
+/// (source, target) pair in two repos never collides on the shared TEXT pk.
+fn calls_edge_id(repo_id: &Id, source_id: &Id, target_id: &Id) -> Id {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(repo_id.as_str().as_bytes());
+    hasher.update(b"|");
+    hasher.update(source_id.as_str().as_bytes());
+    hasher.update(b"|");
+    hasher.update(target_id.as_str().as_bytes());
+    hasher.update(b"|calls");
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+    // Shape as 8-4-4-4-12 for consistency with other edge ids. Assembled from
+    // chars (never constant byte-index slicing) — see
+    // scripts/check-byte-slice-truncation.sh.
+    let mut out = String::with_capacity(36);
+    for (i, c) in hex.chars().take(32).enumerate() {
+        if i == 8 || i == 12 || i == 16 || i == 20 {
+            out.push('-');
+        }
+        out.push(c);
+    }
+    Id::new(out)
 }
 
 fn resolve_node<'a>(
@@ -178,13 +213,18 @@ fn resolve_node<'a>(
 /// Resolve a Go qualified name (e.g. `pkg/path.TypeName.MethodName`) to a graph
 /// node.
 ///
-/// Resolution strategy:
+/// One policy, applied to every branch: resolve exactly or refuse.
 /// 1. Exact qualified-name match (most reliable).
 /// 2. For methods (`Receiver.Method`), require the full `Receiver.Method`
 ///    suffix to match — not just the bare method name, which causes false
 ///    positives like `FooService.Handle` matching `BarService.Handle`.
-/// 3. When multiple candidates match, prefer one in the same package directory
-///    inferred from the caller's package path in the qualified name.
+/// 3. When multiple candidates match, disambiguate with the package path
+///    embedded in the raw qualified name (a candidate whose qualified name
+///    starts with that path, or whose file lives under it).
+/// 4. Still ambiguous after the hint → return `None`. Guessing `candidates[0]`
+///    would silently link the caller to the wrong callee: a wrong edge is
+///    worse than a missing one. This holds for methods and plain functions
+///    alike — there is exactly one ambiguity policy in this module.
 pub fn resolve_go_node<'a>(
     qualified: &str,
     by_qname: &HashMap<&str, &'a GraphNode>,
@@ -223,7 +263,7 @@ pub fn resolve_go_node<'a>(
                     return Some(best);
                 }
             }
-            return Some(candidates[0]);
+            return None;
         }
     }
 
@@ -310,8 +350,21 @@ mod tests {
         assert!(detect_all_languages(dir.path()).is_empty());
     }
 
+    /// Build a raw Pass 2 qualified name the way `scripts/go-callgraph`
+    /// (`golang.org/x/tools/go/callgraph/cha`) does: import path
+    /// (module + directory) + `.` + `Type.Method` or `func`.
+    ///
+    /// Written from the rule in specs/system/lsp-call-graph.md §1 — NOT by
+    /// copying Pass 1's node strings. The `*_divergence_*` tests below prove
+    /// this construction is a genuinely separate input: a name built from the
+    /// package clause instead of the directory must NOT resolve.
+    fn callgraph_name(module: &str, dir: &str, item: &str) -> String {
+        format!("{module}/{dir}.{item}")
+    }
+
     #[test]
     fn resolve_go_cross_package_edge() {
+        // Pass 1 nodes: import-path qnames (module + directory).
         let nodes = vec![
             func_node("h", "example.com/x/api.Handler.Handle", "api/handler.go"),
             func_node(
@@ -320,9 +373,10 @@ mod tests {
                 "service/svc.go",
             ),
         ];
+        // Pass 2 raw edges: built by the go-callgraph rule above.
         let raw = vec![CallEdge {
-            from: "example.com/x/api.Handler.Handle".to_string(),
-            to: "example.com/x/service.ProcessRequest".to_string(),
+            from: callgraph_name("example.com/x", "api", "Handler.Handle"),
+            to: callgraph_name("example.com/x", "service", "ProcessRequest"),
         }];
         let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
         assert_eq!(edges.len(), 1);
@@ -332,10 +386,104 @@ mod tests {
     }
 
     #[test]
+    fn resolve_go_import_path_when_package_clause_differs_from_dir() {
+        // Directory `svc1/` whose files declare `package handlers` (legal Go:
+        // clause and directory name may differ). Pass 1 qnames follow the
+        // import path (module + directory); go-callgraph's Pkg.Path() is also
+        // the import path, so the edge resolves.
+        let nodes = vec![
+            func_node("h", "example.com/app/svc1.Handler.Handle", "svc1/handler.go"),
+            func_node(
+                "p",
+                "example.com/app/svc1.Process",
+                "svc1/proc.go",
+            ),
+        ];
+        let raw = vec![CallEdge {
+            from: callgraph_name("example.com/app", "svc1", "Handler.Handle"),
+            to: callgraph_name("example.com/app", "svc1", "Process"),
+        }];
+        let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
+        assert_eq!(edges.len(), 1, "import-path names resolve even when the package clause differs from the directory");
+    }
+
+    #[test]
+    fn resolve_go_divergence_package_clause_name_does_not_resolve() {
+        // Divergence case (checklist #137): two directories both declaring
+        // `package handlers`. A raw name built from the package CLAUSE
+        // (…/handlers.Handler.Handle) is ambiguous between them and its hint
+        // matches neither node — it must be dropped, not guessed. The
+        // import-path names (module + directory) disambiguate cleanly,
+        // proving the two fixtures are built from different rules.
+        let nodes = vec![
+            func_node("h1", "example.com/app/svc1.Handler.Handle", "svc1/handler.go"),
+            func_node("h2", "example.com/app/svc2.Handler.Handle", "svc2/handler.go"),
+        ];
+        let raw = vec![CallEdge {
+            from: callgraph_name("example.com/app", "svc1", "Handler.Handle"),
+            to: "example.com/app/handlers.Handler.Handle".to_string(),
+        }];
+        let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
+        assert!(
+            edges.is_empty(),
+            "a clause-derived name must not resolve to a directory-derived node"
+        );
+
+        let raw_ok = vec![CallEdge {
+            from: callgraph_name("example.com/app", "svc1", "Handler.Handle"),
+            to: callgraph_name("example.com/app", "svc2", "Handler.Handle"),
+        }];
+        let edges = resolve_call_edges(Language::Go, &raw_ok, &nodes, &[], &Id::new("repo1"));
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target_id, Id::new("h2"));
+    }
+    #[test]
+    fn resolve_go_refuses_ambiguous_method_candidates() {
+        // F7 (specs/reviews/task-072.md): two `Handler.Handle` methods in
+        // different packages, and a raw name whose package hint matches
+        // neither. The method branch must refuse — returning candidates[0]
+        // would link the caller to an arbitrary wrong callee.
+        let nodes = vec![
+            func_node("a", "example.com/x/pkgA.Handler.Handle", "pkgA/handler.go"),
+            func_node("b", "example.com/x/pkgB.Handler.Handle", "pkgB/handler.go"),
+            func_node("c", "example.com/x/pkgC.Caller.Run", "pkgC/caller.go"),
+        ];
+        let raw = vec![CallEdge {
+            from: callgraph_name("example.com/x", "pkgC", "Caller.Run"),
+            to: callgraph_name("example.com/x", "unknown", "Handler.Handle"),
+        }];
+        let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
+        assert!(
+            edges.is_empty(),
+            "ambiguous method match with unusable hint must be dropped, not guessed"
+        );
+    }
+
+    #[test]
+    fn resolve_go_disambiguates_method_with_package_hint() {
+        // The hint path still works when the raw name carries the package:
+        // `pkgA.Handler.Handle`'s prefix before the method is
+        // `example.com/x/pkgA.Handler`, which the pkgA node's qualified name
+        // starts with.
+        let nodes = vec![
+            func_node("a", "example.com/x/pkgA.Handler.Handle", "pkgA/handler.go"),
+            func_node("b", "example.com/x/pkgB.Handler.Handle", "pkgB/handler.go"),
+        ];
+        let raw = vec![CallEdge {
+            from: callgraph_name("example.com/x", "pkgA", "Handler.Handle"),
+            to: callgraph_name("example.com/x", "pkgB", "Handler.Handle"),
+        }];
+        let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].source_id, Id::new("a"));
+        assert_eq!(edges[0].target_id, Id::new("b"));
+    }
+
+    #[test]
     fn resolve_dedups_against_existing_calls() {
         let nodes = vec![
-            func_node("a", "pkg.a", "a.go"),
-            func_node("b", "pkg.b", "b.go"),
+            func_node("a", "example.com/x/svc.A", "svc/a.go"),
+            func_node("b", "example.com/x/svc.B", "svc/b.go"),
         ];
         let existing = vec![GraphEdge {
             id: Id::new("e1"),
@@ -349,8 +497,8 @@ mod tests {
             deleted_at: None,
         }];
         let raw = vec![CallEdge {
-            from: "pkg.a".to_string(),
-            to: "pkg.b".to_string(),
+            from: callgraph_name("example.com/x", "svc", "A"),
+            to: callgraph_name("example.com/x", "svc", "B"),
         }];
         let edges = resolve_call_edges(Language::Go, &raw, &nodes, &existing, &Id::new("repo1"));
         assert!(
@@ -362,17 +510,17 @@ mod tests {
     #[test]
     fn resolve_dedups_within_batch() {
         let nodes = vec![
-            func_node("a", "pkg.a", "a.go"),
-            func_node("b", "pkg.b", "b.go"),
+            func_node("a", "example.com/x/svc.A", "svc/a.go"),
+            func_node("b", "example.com/x/svc.B", "svc/b.go"),
         ];
         let raw = vec![
             CallEdge {
-                from: "pkg.a".to_string(),
-                to: "pkg.b".to_string(),
+                from: callgraph_name("example.com/x", "svc", "A"),
+                to: callgraph_name("example.com/x", "svc", "B"),
             },
             CallEdge {
-                from: "pkg.a".to_string(),
-                to: "pkg.b".to_string(),
+                from: callgraph_name("example.com/x", "svc", "A"),
+                to: callgraph_name("example.com/x", "svc", "B"),
             },
         ];
         let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
@@ -381,13 +529,56 @@ mod tests {
 
     #[test]
     fn resolve_skips_unknown_endpoints() {
-        let nodes = vec![func_node("a", "pkg.a", "a.go")];
+        let nodes = vec![func_node("a", "example.com/x/svc.A", "svc/a.go")];
         let raw = vec![CallEdge {
-            from: "pkg.a".to_string(),
-            to: "pkg.unknown".to_string(),
+            from: callgraph_name("example.com/x", "svc", "A"),
+            to: callgraph_name("example.com/x", "svc", "Missing"),
         }];
         let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
         assert!(edges.is_empty(), "edge to an unknown node is dropped");
+    }
+
+    #[test]
+    fn calls_edge_ids_are_content_derived() {
+        // F8 (specs/reviews/task-072.md): re-deriving the same raw edge must
+        // produce the same id so the adapters' create_edge upserts in place
+        // instead of accumulating rows; different endpoints must not collide.
+        let nodes = vec![
+            func_node("a", "example.com/x/svc.A", "svc/a.go"),
+            func_node("b", "example.com/x/svc.B", "svc/b.go"),
+            func_node("c", "example.com/x/svc.C", "svc/c.go"),
+        ];
+        let raw = vec![CallEdge {
+            from: callgraph_name("example.com/x", "svc", "A"),
+            to: callgraph_name("example.com/x", "svc", "B"),
+        }];
+        let first = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
+        let second = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0].id, second[0].id,
+            "same endpoints re-derive the same edge id"
+        );
+
+        let raw_other = vec![CallEdge {
+            from: callgraph_name("example.com/x", "svc", "A"),
+            to: callgraph_name("example.com/x", "svc", "C"),
+        }];
+        let other = resolve_call_edges(Language::Go, &raw_other, &nodes, &[], &Id::new("repo1"));
+        assert_eq!(other.len(), 1);
+        assert_ne!(
+            first[0].id, other[0].id,
+            "different endpoints derive different edge ids"
+        );
+
+        // Repo scoping: the same endpoints in a different repo are a
+        // different edge (sqlite pk is the bare id string).
+        let other_repo =
+            resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo2"));
+        assert_ne!(
+            first[0].id, other_repo[0].id,
+            "same endpoints in another repo derive a different edge id"
+        );
     }
 
     #[test]
