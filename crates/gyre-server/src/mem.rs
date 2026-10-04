@@ -3487,7 +3487,40 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
         // Replace any existing trace for same MR (capped at most recent).
         // A fresh capture is non-permanent (SQLite inserts permanent=0).
         self.permanent.lock().await.remove(trace.mr_id.as_str());
+        // Drop the replaced trace's payload rows too (SQLite deletes them
+        // via the PK replace in the same transaction).
+        let replaced_gate_run_ids: Vec<String> = guard
+            .values()
+            .filter(|v| v.mr_id == trace.mr_id)
+            .map(|v| v.gate_run_id.as_str().to_string())
+            .collect();
         guard.retain(|_, v| v.mr_id != trace.mr_id);
+        {
+            let mut payloads = self.payloads.lock().await;
+            for grid in replaced_gate_run_ids {
+                payloads.retain(|(g, _), _| g != &grid);
+            }
+            // Mirror sqlite/trace.rs build_payload_blob: the payload carries
+            // the RAW (untruncated) summaries, and a side that is absent or
+            // empty decodes back to None. A span with neither side captured
+            // stores no payload row (SQLite blob is None → get returns None).
+            for span in &trace.spans {
+                let input = match &span.input_summary {
+                    Some(s) if !s.is_empty() => Some(s.as_bytes().to_vec()),
+                    _ => None,
+                };
+                let output = match &span.output_summary {
+                    Some(s) if !s.is_empty() => Some(s.as_bytes().to_vec()),
+                    _ => None,
+                };
+                if input.is_none() && output.is_none() {
+                    continue;
+                }
+                payloads.insert(
+                    (trace.gate_run_id.as_str().to_string(), span.span_id.clone()),
+                    gyre_ports::trace::SpanPayload { input, output },
+                );
+            }
         guard.insert(trace.mr_id.as_str().to_string(), trace.clone());
         Ok(())
     }
@@ -3519,10 +3552,18 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
 
     async fn delete_by_mr(&self, mr_id: &Id) -> Result<()> {
         // Promoted traces are permanent (SQLite: `permanent=1` rows survive).
+        let mut store = self.store.lock().await;
         if self.permanent.lock().await.contains(mr_id.as_str()) {
             return Ok(());
         }
-        self.store.lock().await.remove(mr_id.as_str());
+        // Drop the trace's payload rows with it (SQLite: ON DELETE CASCADE).
+        if let Some(trace) = store.remove(mr_id.as_str()) {
+            let gate_run_id = trace.gate_run_id.as_str().to_string();
+            self.payloads
+                .lock()
+                .await
+                .retain(|(g, _), _| g != &gate_run_id);
+        }
         Ok(())
     }
 }
