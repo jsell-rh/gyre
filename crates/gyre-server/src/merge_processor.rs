@@ -6215,7 +6215,7 @@ mod tests {
             "held entry must be requeued so the human-approval path stays live"
         );
         let reason = entry
-            .error
+.error_message
             .as_deref()
             .unwrap_or_else(|| panic!("requeued entry must carry a hold reason"));
         assert!(
@@ -6367,7 +6367,7 @@ mod tests {
                 "atomic group member {mr_id} must be requeued after rollback"
             );
             let reason = entry
-                .error
+                .error_message
                 .as_deref()
                 .unwrap_or_else(|| panic!("requeued entry {mr_id} must carry a rollback reason"));
             assert!(
