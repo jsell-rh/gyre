@@ -26,25 +26,32 @@ pub enum SpanKind {
 }
 
 impl SpanKind {
+    /// Wire/storage representation. PascalCase per the HSI §3a JSON example
+    /// (`"kind": "Server"`); `parse` accepts the legacy lowercase rows too.
     pub fn as_str(&self) -> &'static str {
         match self {
-            SpanKind::Server => "server",
-            SpanKind::Client => "client",
-            SpanKind::Internal => "internal",
-            SpanKind::Database => "database",
-            SpanKind::Producer => "producer",
-            SpanKind::Consumer => "consumer",
+            SpanKind::Server => "Server",
+            SpanKind::Client => "Client",
+            SpanKind::Internal => "Internal",
+            SpanKind::Database => "Database",
+            SpanKind::Producer => "Producer",
+            SpanKind::Consumer => "Consumer",
         }
     }
 
     pub fn parse(s: &str) -> Self {
-        match s {
-            "server" => SpanKind::Server,
-            "client" => SpanKind::Client,
-            "database" => SpanKind::Database,
-            "producer" => SpanKind::Producer,
-            "consumer" => SpanKind::Consumer,
-            _ => SpanKind::Internal,
+        if s.eq_ignore_ascii_case("server") {
+            SpanKind::Server
+        } else if s.eq_ignore_ascii_case("client") {
+            SpanKind::Client
+        } else if s.eq_ignore_ascii_case("database") {
+            SpanKind::Database
+        } else if s.eq_ignore_ascii_case("producer") {
+            SpanKind::Producer
+        } else if s.eq_ignore_ascii_case("consumer") {
+            SpanKind::Consumer
+        } else {
+            SpanKind::Internal
         }
     }
 }
@@ -62,19 +69,23 @@ pub enum SpanStatus {
 }
 
 impl SpanStatus {
+    /// Wire/storage representation. PascalCase per the HSI §3a JSON example
+    /// (`"status": "Ok"`); `parse` accepts the legacy lowercase rows too.
     pub fn as_str(&self) -> &'static str {
         match self {
-            SpanStatus::Ok => "ok",
-            SpanStatus::Error => "error",
-            SpanStatus::Unset => "unset",
+            SpanStatus::Ok => "Ok",
+            SpanStatus::Error => "Error",
+            SpanStatus::Unset => "Unset",
         }
     }
 
     pub fn parse(s: &str) -> Self {
-        match s {
-            "ok" => SpanStatus::Ok,
-            "error" => SpanStatus::Error,
-            _ => SpanStatus::Unset,
+        if s.eq_ignore_ascii_case("ok") {
+            SpanStatus::Ok
+        } else if s.eq_ignore_ascii_case("error") {
+            SpanStatus::Error
+        } else {
+            SpanStatus::Unset
         }
     }
 }
@@ -118,4 +129,62 @@ pub struct GateTrace {
     pub spans: Vec<TraceSpan>,
     /// Epoch seconds.
     pub captured_at: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_kind_as_str_matches_spec_casing() {
+        // HSI §3a JSON example: "kind": "Server".
+        assert_eq!(SpanKind::Server.as_str(), "Server");
+        assert_eq!(SpanKind::Client.as_str(), "Client");
+        assert_eq!(SpanKind::Internal.as_str(), "Internal");
+        assert_eq!(SpanKind::Database.as_str(), "Database");
+        assert_eq!(SpanKind::Producer.as_str(), "Producer");
+        assert_eq!(SpanKind::Consumer.as_str(), "Consumer");
+    }
+
+    #[test]
+    fn span_status_as_str_matches_spec_casing() {
+        // HSI §3a JSON example: "status": "Ok".
+        assert_eq!(SpanStatus::Ok.as_str(), "Ok");
+        assert_eq!(SpanStatus::Error.as_str(), "Error");
+        assert_eq!(SpanStatus::Unset.as_str(), "Unset");
+    }
+
+    #[test]
+    fn span_kind_status_round_trip() {
+        for kind in [
+            SpanKind::Server,
+            SpanKind::Client,
+            SpanKind::Internal,
+            SpanKind::Database,
+            SpanKind::Producer,
+            SpanKind::Consumer,
+        ] {
+            assert_eq!(SpanKind::parse(kind.as_str()), kind);
+        }
+        for status in [SpanStatus::Ok, SpanStatus::Error, SpanStatus::Unset] {
+            assert_eq!(SpanStatus::parse(status.as_str()), status);
+        }
+    }
+
+    #[test]
+    fn span_kind_status_parse_accepts_legacy_lowercase_rows() {
+        // Rows written before the casing fix store lowercase values.
+        assert_eq!(SpanKind::parse("server"), SpanKind::Server);
+        assert_eq!(SpanKind::parse("client"), SpanKind::Client);
+        assert_eq!(SpanKind::parse("internal"), SpanKind::Internal);
+        assert_eq!(SpanKind::parse("database"), SpanKind::Database);
+        assert_eq!(SpanKind::parse("producer"), SpanKind::Producer);
+        assert_eq!(SpanKind::parse("consumer"), SpanKind::Consumer);
+        assert_eq!(SpanStatus::parse("ok"), SpanStatus::Ok);
+        assert_eq!(SpanStatus::parse("error"), SpanStatus::Error);
+        assert_eq!(SpanStatus::parse("unset"), SpanStatus::Unset);
+        // Unknown values keep the historical defaults.
+        assert_eq!(SpanKind::parse("nonsense"), SpanKind::Internal);
+        assert_eq!(SpanStatus::parse("nonsense"), SpanStatus::Unset);
+    }
 }
