@@ -20,7 +20,9 @@ pub trait GraphPort: Send + Sync {
     async fn list_nodes(&self, repo_id: &Id, node_type: Option<NodeType>)
         -> Result<Vec<GraphNode>>;
 
-    /// Persist a new graph edge.
+    /// Persist a graph edge. Upserts on `id`: re-persisting an existing edge
+    /// updates mutable fields (edge_type, metadata, last_seen_at, deleted_at)
+    /// but preserves the immutable `first_seen_at` from the original insert.
     async fn create_edge(&self, edge: GraphEdge) -> Result<GraphEdge>;
 
     /// List edges for a repo, optionally filtered by edge type.
