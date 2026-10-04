@@ -287,21 +287,31 @@ pub async fn cleanup_interrogation_policies(state: &AppState, agent_id: &str) {
         Err(_) => return,
     };
 
+    let mut any_failed = false;
     for id in &ids {
         if let Err(e) = state.policies.delete(id).await {
+            // Fail-visible, fail-retryable (task-077 F6 delete sweep): a
+            // failed delete must NOT discard the kv record of the policy id —
+            // removing it would orphan the policy with no retry path. Keep
+            // the entry so the next cleanup pass (agent.complete, admin kill,
+            // stale detection) retries the delete.
+            any_failed = true;
             tracing::warn!(
                 agent_id = %agent_id,
                 policy_id = %id,
-                "failed to delete interrogation policy: {e}"
+                "failed to delete interrogation policy (will retry on next cleanup): {e}"
             );
         }
     }
 
-    // Remove the kv entry.
-    let _ = state
-        .kv_store
-        .kv_remove("interrogation_policies", agent_id)
-        .await;
+    // Remove the kv entry only once every policy delete succeeded — otherwise
+    // the surviving entry is the retry handle for the orphaned policies.
+    if !any_failed {
+        let _ = state
+            .kv_store
+            .kv_remove("interrogation_policies", agent_id)
+            .await;
+    }
 
     tracing::info!(
         agent_id = %agent_id,
