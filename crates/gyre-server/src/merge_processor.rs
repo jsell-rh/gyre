@@ -33,25 +33,51 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
 const REVERT_COUNTS_NS: &str = "revert_counts";
 
 /// Increment and return the MR's revert count (circuit breaker, §6).
-async fn increment_revert_count(state: &AppState, mr_id: &str) -> anyhow::Result<u64> {
+///
+/// The counter is keyed on the resubmission-stable identity (see
+/// [`revert_breaker_key`], task-095 R3-F2): the remediation flow instructs
+/// the author to re-do the work on a fresh branch and open a NEW merge
+/// request, so a per-MR-id key could never accumulate across the
+/// fix-and-resubmit cycle the protocol itself prescribes.
+pub(crate) async fn increment_revert_count(
+    state: &AppState,
+    mr: &MergeRequest,
+) -> anyhow::Result<u64> {
+    let key = revert_breaker_key(mr);
     let current = state
         .kv_store
-        .kv_get(REVERT_COUNTS_NS, mr_id)
+        .kv_get(REVERT_COUNTS_NS, &key)
         .await?
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
     let next = current + 1;
     state
         .kv_store
-        .kv_set(REVERT_COUNTS_NS, mr_id, next.to_string())
+        .kv_set(REVERT_COUNTS_NS, &key, next.to_string())
         .await?;
     Ok(next)
+}
+
+/// Circuit-breaker counter key for an MR (task-095 R3-F2).
+///
+/// Keyed on `spec_ref` when the MR carries one — a resubmission of the
+/// same spec re-enters with the same `spec_ref`, so "the same MR reverted
+/// 3 times" accumulates across the fresh-branch/fresh-MR resubmission
+/// cycle the remediation task prescribes, and fires on the spec that
+/// keeps failing post-merge validation (spec Circuit Breaker item 3: "the
+/// spec it references may need revisiting"). Falls back to the MR id for
+/// MRs with no spec binding (manual reverts of unbound work).
+pub(crate) fn revert_breaker_key(mr: &MergeRequest) -> String {
+    match mr.spec_ref.as_deref() {
+        Some(spec_ref) => format!("spec:{}", spec_ref),
+        None => format!("mr:{}", mr.id),
+    }
 }
 
 
 /// Circuit breaker tripped: cancel the MR's queue entries permanently and
 /// escalate to a human (platform-model.md §6 Circuit Breaker).
-async fn trip_circuit_breaker(
+pub(crate) async fn trip_circuit_breaker(
     state: &AppState,
     workspace_id: &Id,
     repo_id: &str,
@@ -673,6 +699,8 @@ async fn merge_atomic_group(
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
+                // R3-F1: record the member's own merge commit SHA.
+                updated_mr.merge_commit_sha = Some(merge_commit_sha.clone());
                 updated_mr.updated_at = now;
                 if updated_mr.status == MrStatus::Open {
                     let _ = updated_mr.transition_status(MrStatus::Approved);
@@ -1489,6 +1517,9 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+            // R3-F1: record the MR's own merge commit SHA — the manual
+            // revert endpoint reverts this, never the current branch HEAD.
+            updated_mr.merge_commit_sha = Some(merge_commit_sha.clone());
             updated_mr.updated_at = now;
             // Transition: Approved -> Merged. If already Open, transition to Approved first.
             if updated_mr.status == MrStatus::Open {
@@ -1906,7 +1937,7 @@ async fn recover_from_post_merge_failure(
 
     // Circuit breaker (platform-model.md §6): the same MR reverted 3 times
     // is removed from the merge queue permanently and escalated to a human.
-    if let Ok(revert_count) = increment_revert_count(state, mr.id.as_str()).await {
+    if let Ok(revert_count) = increment_revert_count(state, mr).await {
         if revert_count >= 3 {
             if let Err(e) =
                 trip_circuit_breaker(state, &mr.workspace_id, repo.id.as_str(), mr.id.as_str())
@@ -2128,7 +2159,7 @@ async fn recover_atomic_group_from_post_merge_failure(
     // Circuit breaker (platform-model.md §6): per member, 3 reverts →
     // permanent queue removal + human escalation.
     for (_, mr) in merged_entries {
-        if let Ok(revert_count) = increment_revert_count(state, mr.id.as_str()).await {
+        if let Ok(revert_count) = increment_revert_count(state, mr).await {
             if revert_count >= 3 {
                 if let Err(e) =
                     trip_circuit_breaker(state, &mr.workspace_id, repo.id.as_str(), mr.id.as_str())
