@@ -202,7 +202,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                 warn!(
                                                     "UserPresence session_id mismatch with Subscribe session_id — ignoring"
                                                 );
-                                                continue; // use `continue` to skip to next select! iteration — but we're in a match, so we need to break out
+                                                continue; // match is inside the select! loop — continue the next iteration
                                             }
                                             None => presence_session_id.clone(),
                                         };
@@ -214,12 +214,21 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             .as_millis() as u64;
 
                                         // Graceful disconnect: client sends view="disconnected" on beforeunload.
+                                        // Remove the map entry and rebroadcast the departure to other
+                                        // workspace subscribers (HSI §7 Presence Awareness).
                                         if view == "disconnected" {
                                             state
                                                 .presence
                                                 .write()
                                                 .await
-                                                .remove(&(verified_user_str, canonical_session_id));
+                                                .remove(&(verified_user_str.clone(), canonical_session_id.clone()));
+                                            broadcast_presence_departure(
+                                                &state,
+                                                &verified_user_str,
+                                                &canonical_session_id,
+                                                &workspace_id.to_string(),
+                                            )
+                                            .await;
                                         } else {
                                             // Update presence map.
                                             {
@@ -237,27 +246,29 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                 );
 
                                                 // Enforce 5-session cap per user: evict oldest if exceeded.
+                                                // The departure is rebroadcast to other workspace subscribers.
                                                 let user_sessions: Vec<_> = map
                                                     .iter()
                                                     .filter(|((uid, _), _)| uid == &verified_user_str)
                                                     .map(|((_, sid), entry)| {
-                                                        (sid.clone(), entry.server_last_seen, entry.connection_id)
+                                                        (sid.clone(), entry.server_last_seen, entry.connection_id, entry.workspace_id.clone())
                                                     })
                                                     .collect();
 
                                                 if user_sessions.len() > 5 {
                                                     // Find oldest by server_last_seen.
-                                                    if let Some((evict_sid, _, evict_conn_id)) =
-                                                        user_sessions.iter().min_by_key(|(_, ts, _)| ts)
+                                                    if let Some((evict_sid, _, evict_conn_id, evict_ws_id)) =
+                                                        user_sessions.iter().min_by_key(|(_, ts, _, _)| ts)
                                                     {
                                                         let evict_conn_id = *evict_conn_id;
                                                         let evict_sid = evict_sid.clone();
+                                                        let evict_ws_id = evict_ws_id.clone();
                                                         map.remove(&(verified_user_str.clone(), evict_sid.clone()));
                                                         drop(map); // release lock before async work
 
                                                         // Send PresenceEvicted to the evicted connection.
                                                         let evict_msg = WsMessage::PresenceEvicted {
-                                                            session_id: evict_sid,
+                                                            session_id: evict_sid.clone(),
                                                         };
                                                         if let Ok(payload) = serde_json::to_string(&evict_msg) {
                                                             let conns = state.ws_connections.read().await;
@@ -265,6 +276,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                                                 let _ = tx.try_send(payload);
                                                             }
                                                         }
+
+                                                        // Notify other workspace subscribers of the departure.
+                                                        broadcast_presence_departure(
+                                                            &state,
+                                                            &verified_user_str,
+                                                            &evict_sid,
+                                                            &evict_ws_id,
+                                                        )
+                                                        .await;
                                                     } else {
                                                         drop(map);
                                                     }
@@ -414,21 +434,71 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     }
 
     // Cleanup: deregister connection and remove presence entries for this session.
+    // The departure is broadcast BEFORE deregistering this connection so other
+    // workspace subscribers learn of it (HSI §7 Presence Awareness).
+    if let (Some(user_id), Some(session_id)) = (&caller.user_id, &connection_session_id) {
+        let removed = state
+            .presence
+            .write()
+            .await
+            .remove(&(user_id.to_string(), session_id.clone()));
+        if let Some(entry) = removed {
+            broadcast_presence_departure(
+                &state,
+                &user_id.to_string(),
+                session_id,
+                &entry.workspace_id,
+            )
+            .await;
+        }
+    }
     state.ws_connections.write().await.remove(&connection_id);
     state
         .ws_connection_workspaces
         .write()
         .await
         .remove(&connection_id);
-    if let (Some(user_id), Some(session_id)) = (&caller.user_id, &connection_session_id) {
-        state
-            .presence
-            .write()
-            .await
-            .remove(&(user_id.to_string(), session_id.clone()));
-    }
 
     info!("WebSocket connection closed");
+}
+
+/// Broadcast a presence departure to every other subscriber of the workspace.
+///
+/// HSI §7 Presence Awareness: every presence-removal path (graceful disconnect,
+/// socket close, 5-session cap eviction, idle sweeper) must notify other
+/// workspace subscribers, not only the "update" branch. We synthesize a
+/// `UserPresence { view: "disconnected" }` from the removed entry so clients
+/// (ConcurrentEditBanner, PresenceAvatars) drop it from their live views.
+pub(crate) async fn broadcast_presence_departure(
+    state: &Arc<AppState>,
+    user_id: &str,
+    session_id: &str,
+    workspace_id: &str,
+) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let msg = WsMessage::UserPresence {
+        user_id: gyre_common::Id::new(user_id),
+        session_id: session_id.to_string(),
+        workspace_id: gyre_common::Id::new(workspace_id),
+        view: "disconnected".to_string(),
+        timestamp: now_ms,
+        editing_entity: None,
+    };
+    if let Ok(payload) = serde_json::to_string(&msg) {
+        let ws_id = gyre_common::Id::new(workspace_id);
+        let conn_workspaces = state.ws_connection_workspaces.read().await;
+        let conns = state.ws_connections.read().await;
+        for (conn_id, workspaces) in conn_workspaces.iter() {
+            if workspaces.contains(&ws_id) {
+                if let Some(tx) = conns.get(conn_id) {
+                    let _ = tx.try_send(payload.clone());
+                }
+            }
+    }
+    }
 }
 
 /// Validate the Auth message. Returns `Some(AuthenticatedAgent)` on success.
@@ -579,6 +649,310 @@ mod tests {
         } else {
             panic!("expected text message");
         }
+    }
+
+    // ── Presence departure rebroadcast (HSI §7 Presence Awareness) ────────
+    // Every removal path must notify other workspace subscribers (task-092 F4):
+    // graceful disconnect message, socket close, 5-session cap eviction, and
+    // the idle sweeper. Test helper: a second subscribed connection asserts it
+    // receives the departure UserPresence.
+
+    /// Create a user + API key in the state so a WS connection authenticating
+    /// with `raw_key` has user_id Some(...) — required for presence tracking
+    /// (shared-token connections have user_id None and are excluded).
+    async fn seed_api_key_user(state: &Arc<AppState>, user_id: &str, raw_key: &str) {
+        use gyre_domain::{User, Workspace};
+        let ws = Workspace::new(
+            gyre_common::Id::new("ws-presence"),
+            gyre_common::Id::new("default"),
+            "presence-test",
+            "presence-test",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let user = User::new(
+            gyre_common::Id::new(user_id),
+            &format!("ext-{user_id}"),
+            &format!("user-{user_id}"),
+            1000,
+        );
+        state.users.create(&user).await.unwrap();
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key(raw_key),
+                &user.id,
+                "presence-test-key",
+            )
+            .await
+            .unwrap();
+    }
+
+    fn user_presence_msg(session_id: &str, workspace_id: &str, view: &str) -> String {
+        serde_json::to_string(&WsMessage::UserPresence {
+            user_id: gyre_common::Id::new("ignored"), // server uses verified identity
+            session_id: session_id.to_string(),
+            workspace_id: gyre_common::Id::new(workspace_id),
+            view: view.to_string(),
+            timestamp: 0,
+            editing_entity: None,
+        })
+        .unwrap()
+    }
+
+    /// Subscribe a connection to the workspace, asserting the subscribe ack.
+    async fn subscribe_ws(ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >, workspace_id: &str, session_id: Option<&str>) {
+        let sub = WsMessage::Subscribe {
+            scopes: vec![gyre_common::SubscribeScope {
+                workspace_id: gyre_common::Id::new(workspace_id),
+            }],
+            last_seen: None,
+            session_id: session_id.map(|s| s.to_string()),
+        };
+        ws.send(tungstenite::Message::Text(
+            serde_json::to_string(&sub).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    /// Read messages until a UserPresence with view == expected_view for
+    /// session_id arrives (skipping unrelated broadcasts). Times out via the
+    /// test deadline.
+    async fn expect_presence(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        session_id: &str,
+        expected_view: &str,
+    ) -> WsMessage {
+        loop {
+            let msg = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                ws.next(),
+            )
+            .await
+            .expect("timed out waiting for presence message")
+            .unwrap()
+            .unwrap();
+            if let tungstenite::Message::Text(text) = msg {
+                let decoded: WsMessage = serde_json::from_str(&text).unwrap();
+                if let WsMessage::UserPresence {
+                    session_id: sid,
+                    view,
+                    ..
+                } = &decoded
+                {
+                    if sid == session_id && view == expected_view {
+                        return decoded;
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_graceful_disconnect_rebroadcasts_departure() {
+        let (url, state) = start_test_server("tok").await;
+        seed_api_key_user(&state, "u-disc", "key-disc").await;
+
+        // Observer: shared-token connection subscribed to the workspace.
+        let (mut observer, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut observer, "tok").await;
+        subscribe_ws(&mut observer, "ws-presence", None).await;
+
+        // Subject: API-key user connection with presence.
+        let (mut subject, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut subject, "key-disc").await;
+        subscribe_ws(&mut subject, "ws-presence", Some("sess-disc")).await;
+        subject
+            .send(tungstenite::Message::Text(user_presence_msg(
+                "sess-disc", "ws-presence", "specs",
+            )))
+            .await
+            .unwrap();
+
+        // Observer sees the subject's live presence rebroadcast.
+        let live = expect_presence(&mut observer, "sess-disc", "specs").await;
+        let WsMessage::UserPresence { user_id, .. } = &live else {
+            unreachable!("expect_presence returns UserPresence")
+        };
+        assert_eq!(
+            user_id.to_string(),
+            "u-disc",
+            "rebroadcast must carry the server-verified user id"
+        );
+
+        // Subject disconnects gracefully (beforeunload leg).
+        subject
+            .send(tungstenite::Message::Text(user_presence_msg(
+                "sess-disc", "ws-presence", "disconnected",
+            )))
+            .await
+            .unwrap();
+
+        // Observer must be told about the departure.
+        let departure = expect_presence(&mut observer, "sess-disc", "disconnected").await;
+        let WsMessage::UserPresence { user_id, .. } = &departure else {
+            unreachable!()
+        };
+        assert_eq!(user_id.to_string(), "u-disc");
+
+        // Entry is gone from the presence map.
+        assert!(
+            !state
+                .presence
+                .read()
+                .await
+                .contains_key(&("u-disc".to_string(), "sess-disc".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_socket_close_rebroadcasts_departure() {
+        let (url, state) = start_test_server("tok").await;
+        seed_api_key_user(&state, "u-close", "key-close").await;
+
+        let (mut observer, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut observer, "tok").await;
+        subscribe_ws(&mut observer, "ws-presence", None).await;
+
+        let (mut subject, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut subject, "key-close").await;
+        subscribe_ws(&mut subject, "ws-presence", Some("sess-close")).await;
+        subject
+            .send(tungstenite::Message::Text(user_presence_msg(
+                "sess-close", "ws-presence", "specs",
+            )))
+            .await
+            .unwrap();
+        expect_presence(&mut observer, "sess-close", "specs").await;
+
+        // Abrupt close (tab killed / network drop) — no disconnect message.
+        subject.close(None).await.unwrap();
+
+        let departure = expect_presence(&mut observer, "sess-close", "disconnected").await;
+        let WsMessage::UserPresence { user_id, .. } = &departure else { unreachable!() };
+        assert_eq!(user_id.to_string(), "u-close");
+
+        assert!(
+            !state
+                .presence
+                .read()
+                .await
+                .contains_key(&("u-close".to_string(), "sess-close".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_session_cap_eviction_rebroadcasts_departure() {
+        let (url, state) = start_test_server("tok").await;
+        seed_api_key_user(&state, "u-cap", "key-cap").await;
+
+        let (mut observer, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut observer, "tok").await;
+        subscribe_ws(&mut observer, "ws-presence", None).await;
+
+        // Open 5 sessions for the user (the cap). Each is a separate WS
+        // connection with its own session_id.
+        let mut subjects = Vec::new();
+        for i in 0..5 {
+            let (mut s, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            auth_ws(&mut s, "key-cap").await;
+            let sid = format!("sess-cap-{i}");
+            subscribe_ws(&mut s, "ws-presence", Some(&sid)).await;
+            s.send(tungstenite::Message::Text(user_presence_msg(
+                &sid, "ws-presence", "specs",
+            )))
+            .await
+            .unwrap();
+            subjects.push(s);
+        }
+        // Drain the observer until all 5 live presences arrived.
+        for i in 0..5 {
+            expect_presence(&mut observer, &format!("sess-cap-{i}"), "specs").await;
+        }
+
+        // 6th session: oldest (sess-cap-0) is evicted by the 5-session cap.
+        let (mut sixth, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut sixth, "key-cap").await;
+        subscribe_ws(&mut sixth, "ws-presence", Some("sess-cap-5")).await;
+        sixth
+            .send(tungstenite::Message::Text(user_presence_msg(
+                "sess-cap-5", "ws-presence", "specs",
+            )))
+            .await
+            .unwrap();
+
+        // Observer must learn about the evicted session's departure…
+        let departure = expect_presence(&mut observer, "sess-cap-0", "disconnected").await;
+        let WsMessage::UserPresence { user_id, .. } = &departure else { unreachable!() };
+        assert_eq!(user_id.to_string(), "u-cap");
+        // …and the 6th session's arrival.
+        expect_presence(&mut observer, "sess-cap-5", "specs").await;
+
+        // The evicted entry is gone from the presence map; the other 5 remain.
+        let map = state.presence.read().await;
+        assert!(!map.contains_key(&("u-cap".to_string(), "sess-cap-0".to_string())));
+        assert!(map.contains_key(&("u-cap".to_string(), "sess-cap-5".to_string())));
+        assert_eq!(
+            map.values()
+                .filter(|e| e.workspace_id == "ws-presence")
+                .count(),
+            5
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_idle_sweeper_rebroadcasts_departure() {
+        let (url, state) = start_test_server("tok").await;
+        seed_api_key_user(&state, "u-idle", "key-idle").await;
+
+        let (mut observer, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut observer, "tok").await;
+        subscribe_ws(&mut observer, "ws-presence", None).await;
+
+        let (mut subject, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        auth_ws(&mut subject, "key-idle").await;
+        subscribe_ws(&mut subject, "ws-presence", Some("sess-idle")).await;
+        subject
+            .send(tungstenite::Message::Text(user_presence_msg(
+                "sess-idle", "ws-presence", "specs",
+            )))
+            .await
+            .unwrap();
+        expect_presence(&mut observer, "sess-idle", "specs").await;
+
+        // Backdate the entry past the 60s idle threshold, then run one sweep.
+        {
+            let mut map = state.presence.write().await;
+            let entry = map
+                .get_mut(&("u-idle".to_string(), "sess-idle".to_string()))
+                .expect("presence entry should exist");
+            entry.server_last_seen -= 61_000;
+        }
+        crate::evict_stale_presence(&state).await;
+
+        let departure = expect_presence(&mut observer, "sess-idle", "disconnected").await;
+        let WsMessage::UserPresence { user_id, .. } = &departure else { unreachable!() };
+        assert_eq!(user_id.to_string(), "u-idle");
+
+        assert!(
+            !state
+                .presence
+                .read()
+                .await
+                .contains_key(&("u-idle".to_string(), "sess-idle".to_string()))
+        );
     }
 
     #[tokio::test]

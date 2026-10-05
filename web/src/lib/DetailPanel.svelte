@@ -50,6 +50,7 @@
     wsStore = null,
     workspaceId = null,
     selfUserId = null,
+    oneditingentity = undefined,
   } = $props();
 
   let activeTab = $state('info');
@@ -982,17 +983,20 @@
   let specWorkspaceId = $derived(workspaceId ?? entity?.data?.workspace_id ?? null);
   // Optimistic-concurrency token: the current_sha the editor loaded.
   let specBaseSha = $derived(specDetail?.current_sha ?? entity?.data?.current_sha ?? null);
-
   // Announce that this tab is editing the spec whenever the Edit tab is active
   // or the split editor is open; clear the announcement otherwise so other
-  // editors' warning banners disappear when we leave.
+  // editors' warning banners disappear when we leave. The entity is also
+  // reported upward (oneditingentity) so App's presence heartbeat re-sends
+  // the CURRENT editing entity on each 30s beat instead of clobbering it.
   $effect(() => {
     if (entity?.type !== 'spec' || !specWorkspaceId || !wsStore) return;
     const isEditing = activeTab === 'edit' || showEditorSplit;
     const editingEntity = isEditing ? specEditingEntity(entity.id) : null;
     sendEditingPresence(wsStore, { workspaceId: specWorkspaceId, editingEntity, view: 'specs' });
+    oneditingentity?.(editingEntity);
     return () => {
       sendEditingPresence(wsStore, { workspaceId: specWorkspaceId, editingEntity: null, view: 'specs' });
+      oneditingentity?.(null);
     };
   });
 
