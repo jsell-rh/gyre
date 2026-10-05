@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gyre loop</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="masthead">
+  <span class="brand" data-nav="overview"><span class="gy">◉</span> Gyre</span>
+  <nav class="views" id="nav">
+    <button data-nav="overview" class="active">Overview</button>
+    <button data-nav="tasks">Tasks</button>
+    <button data-nav="dependencies">Dependencies</button>
+    <button data-nav="incidents">Incidents</button>
+  </nav>
+  <span class="spacer"></span>
+  <input id="global-search" type="search" placeholder="Search tasks  ( / )" autocomplete="off">
+</header>
+
+<section class="health" id="health" hidden></section>
+
+<main id="main">
+  <div id="view-overview" class="view"></div>
+  <div id="view-tasks" class="view" hidden></div>
+  <div id="view-dependencies" class="view" hidden></div>
+  <div id="view-incidents" class="view" hidden></div>
+</main>
+
+<div id="drawer-backdrop"></div>
+<aside id="drawer" aria-label="Task detail">
+  <header>
+    <span class="id" id="drawer-id"></span>
+    <span class="title" id="drawer-title"></span>
+    <span id="drawer-badges"></span>
+    <button id="drawer-close" title="Close (Esc)">×</button>
+  </header>
+  <div class="tabs" id="drawer-tabs">
+    <button data-tab="activity" class="on">Activity</button>
+    <button data-tab="raw">Raw log</button>
+  </div>
+  <div class="body" id="drawer-body"></div>
+</aside>
+
+<div class="kbd-hint">/ search · j/k move · Enter open · [ ] prev/next task · Esc close</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
