@@ -218,20 +218,25 @@ pub async fn repo_status(
     let gates = post_merge_gates(&state, &repo_id).await?;
 
     // main_green: run post-merge gates against current default-branch HEAD.
+    // Fail CLOSED (task-095 R3-F3): when the HEAD ref does not resolve there
+    // is no tree to validate — report `main_green: false` with the failure in
+    // `pause_reason` context, never a green reading from an unvalidated tree.
     let main_green = if gates.is_empty() {
         None
     } else {
-        let head_sha = crate::git_refs::resolve_ref(
+        match crate::git_refs::resolve_ref(
             &repo.path,
             &format!("refs/heads/{}", repo.default_branch),
         )
         .await
-        .unwrap_or_default();
-        Some(
-            crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
-                .await
-                .is_ok(),
-        )
+        {
+            Some(head_sha) => Some(
+                crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
+                    .await
+                    .is_ok(),
+            ),
+            None => Some(false),
+        }
     };
 
     Ok(Json(QueueStatusResponse {
@@ -271,19 +276,49 @@ pub async fn revert_mr(
         )));
     }
 
-    // Resolve the merge commit: the target branch HEAD (the merge landed it).
-    let merge_sha = crate::git_refs::resolve_ref(
-        &repo.path,
-        &format!("refs/heads/{}", mr.target_branch),
-    )
-    .await
-    .unwrap_or_default();
+    // The MR must belong to the repo in the path: a mismatch would revert
+    // one repo's history while marking another repo's MR (task-095 R3-F1).
+    if mr.repository_id != repo.id {
+        return Err(ApiError::Forbidden(format!(
+            "merge request {mr_id} does not belong to repo {repo_id}"
+        )));
+    }
+
+    // Revert the MR's OWN merge commit, recorded at merge time (task-095
+    // R3-F1). The current target-branch HEAD is NOT the MR's merge commit
+    // once any later merge or revert landed.
+    let Some(merge_sha) = mr.merge_commit_sha.clone() else {
+        return Err(ApiError::Conflict(format!(
+            "merge request {mr_id} has no recorded merge commit (merged before task-095 R3-F1?) — \
+             cannot identify which commit to revert"
+        )));
+    };
 
     let revert_commit_sha = state
         .git_ops
         .revert_commit(&repo.path, &repo.default_branch, &merge_sha)
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("revert failed: {e}")))?;
+
+    // Manual reverts count toward the circuit breaker (task-095 R3-F1):
+    // the breaker keyed on the resubmission-stable key fires after 3
+    // reverts of the same work no matter who initiated them.
+    if let Ok(revert_count) =
+        crate::merge_processor::increment_revert_count(&state, &mr).await
+    {
+        if revert_count >= 3 {
+            if let Err(e) = crate::merge_processor::trip_circuit_breaker(
+                &state,
+                &mr.workspace_id,
+                repo.id.as_str(),
+                mr.id.as_str(),
+            )
+            .await
+            {
+                tracing::error!(mr_id = %mr.id, error = %e, "failed to trip circuit breaker");
+            }
+        }
+    }
 
     // Steps 4–7 of the recovery protocol (mark Reverted, RevertNotification,
     // remediation task, gate-result invalidation).

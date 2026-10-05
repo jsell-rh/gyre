@@ -89,6 +89,7 @@ diesel::table! {
         atomic_group -> Nullable<Text>,
         workspace_id -> Text,
         reverted_at -> Nullable<BigInt>,
+        merge_commit_sha -> Nullable<Text>,
         revert_commit_sha -> Nullable<Text>,
         spec_ref -> Nullable<Text>,
     }
