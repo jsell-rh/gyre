@@ -89,11 +89,22 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
 done
 
 cleanup() {
+  # Delete the sandbox ONLY when the driver finished cleanly (complete, PR
+  # opened, or genuinely done). On transient failures (flaky egress clone,
+  # relay timeouts) the sandbox is healthy — deleting it forces a 1.6 GB
+  # image re-pull per fleet respawn cycle, which is exactly the churn that
+  # burned 60+ spawns per task. Let the next driver reuse it (clone resuming
+  # the pushed worker branch makes the reuse cheap).
+  if [ "$KEEP_SANDBOX_ON_FAILURE" = 1 ] && [ "$?" != 0 ]; then
+    log "=== Driver failed — keeping sandbox $SANDBOX for reuse"
+    return 0
+  fi
   reauth
   "$OPENSHELL_BIN" -g gyre-gyre sandbox delete "$SANDBOX" >/dev/null 2>&1
   log "=== Sandbox $SANDBOX deleted"
 }
 trap cleanup EXIT
+KEEP_SANDBOX_ON_FAILURE=1
 
 # ---- Stage: repo clone, omp config, worker script ----
 WORKDIR=$(mktemp -d /tmp/sbxwk-$TASK_NAME-XXXX)
@@ -121,7 +132,18 @@ CONFIG_YML="${CONFIG_YML:-$HOME/.pi/agent/config.yml}"
 [ -f "$WORKDIR/10-clone.sh" ] && stage "$WORKDIR/10-clone.sh"
 
 log ">>> Cloning repo into sandbox"
-osexec "$WORKDIR/10-clone.sh" || { log "!!! clone/branch failed"; exit 1; }
+# Egress connections on freshly-provisioned sandboxes intermittently hang
+# (observed curl 56 getpeername errno 95; recovers within a minute). A single
+# clone attempt would kill the driver — retry with backoff instead.
+clone_ok=""
+for clone_try in 1 2 3 4 5; do
+  osexec "$WORKDIR/10-clone.sh" && { clone_ok=1; break; }
+  log "    clone attempt $clone_try failed — retrying in 30s"
+  sleep 30
+  reauth
+  stage "$WORKDIR/10-clone.sh"
+done
+[ -n "$clone_ok" ] || { log "!!! clone/branch failed after 5 attempts"; exit 1; }
 
 log ">>> Staging omp config + worker scripts"
 stage "$MODELS_YML" models.yml
@@ -230,13 +252,26 @@ ensure_sandbox() {
     [ "$create_try" = 3 ] && { log "!!! recreated sandbox never reached Ready"; return 1; }
   done
     # Restore staged state: clone, resume branch, reinstall configs/scripts.
+    # NOTE: 20-install.sh is generated in the bootstrap phase but was never
+    # staged here — the recreate path executed a script that did not exist
+    # in the sandbox ("bash: /tmp/stage/20-install.sh: No such file or
+    # directory"), failing every recreation. Also retry the re-clone: fresh
+    # sandboxes have a flaky egress window (see bootstrap clone loop).
     stage "$WORKDIR/10-clone.sh" || return 1
-    osexec "$WORKDIR/10-clone.sh" >/dev/null || { log "!!! re-clone failed"; return 1; }
+    clone_ok=""
+    for clone_try in 1 2 3 4 5; do
+      osexec "$WORKDIR/10-clone.sh" >/dev/null && { clone_ok=1; break; }
+      log "    re-clone attempt $clone_try failed — retrying in 30s"
+      sleep 30
+      reauth
+    done
+    [ -n "$clone_ok" ] || { log "!!! re-clone failed after 5 attempts"; return 1; }
     stage "$MODELS_YML" models.yml
     stage "$CONFIG_YML" config.yml
     stage scripts/worker.sh worker.sh
     stage scripts/task-field.sh task-field.sh
     stage scripts/fmt-omp-jsonl.mjs fmt-omp-jsonl.mjs
+    stage "$WORKDIR/20-install.sh"
     stage "$WORKDIR/30-run.sh"
     stage "$WORKDIR/40-push.sh"
     osexec "$WORKDIR/20-install.sh" >/dev/null || return 1
