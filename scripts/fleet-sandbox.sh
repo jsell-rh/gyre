@@ -201,6 +201,16 @@ adopt_orphans
 # merge above completed (or found nothing) before this runs.
 OMP_BIN="${OMP_BIN:-$(command -v omp || echo /home/linuxbrew/.linuxbrew/Cellar/omp/18.0.4/bin/omp)}"
 run_auditor() {
+  # The auditor commits into the shared checkout's HEAD. If the checkout
+  # is not on main (human mid-task, leftover rewrite branch), those commits
+  # strand on the wrong branch — seen once when a task-092-rewrite branch
+  # was checked out during an auditor run. Refuse to run off-main instead.
+  local current_branch
+  current_branch=$(git branch --show-current 2>/dev/null)
+  if [ "$current_branch" != "main" ]; then
+    log "!!! auditor skipped: checkout on '$current_branch', not main"
+    return 1
+  fi
   local last_audit_sha code_changes_since
   last_audit_sha=$(git log -1 --format=%H --grep='audit(' 2>/dev/null || true)
   code_changes_since=0
