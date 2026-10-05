@@ -2,6 +2,7 @@
   import './lib/design-system.css';
   import { isLoading, t } from 'svelte-i18n';
   import { createWsStore } from './lib/ws.js';
+  import { createPresenceHeartbeat } from './lib/presence.js';
   import WorkspaceHome from './components/WorkspaceHome.svelte';
   import RepoMode from './components/RepoMode.svelte';
   import WorkspaceSettings from './components/WorkspaceSettings.svelte';
@@ -51,13 +52,31 @@
   // ── WebSocket ────────────────────────────────────────────────────────
   let wsStore = $state(null);
   let wsStatus = $state('disconnected');
+  // Spec entity this tab is actively editing (reported by the DetailPanel
+  // instances) — single source of truth for the heartbeat's editing_entity.
+  let activeEditingEntity = $state(null);
+  function setActiveEditingEntity(e) {
+    activeEditingEntity = e;
+  }
+  let presenceHeartbeat = null;
 
   $effect(() => {
     const store = createWsStore();
     wsStore = store;
     const unsub = store.onStatus((s) => (wsStatus = s));
+    // Presence heartbeat (HSI §1): send-on-connect, 30s timer, view-change
+    // re-send (5s debounce), and disconnect on beforeunload. Without it the
+    // server idle-evicts this tab after 60s and other users lose the
+    // concurrent-editing warning.
+    presenceHeartbeat = createPresenceHeartbeat(store, {
+      getWorkspaceId: () => currentWorkspace?.id ?? null,
+      getView: () => presenceViewLabel,
+      getEditingEntity: () => activeEditingEntity,
+    });
     return () => {
       unsub();
+      presenceHeartbeat.destroy();
+      presenceHeartbeat = null;
       store.destroy();
       wsStore = null;
     };
@@ -70,6 +89,22 @@
     if (wsStore && typeof wsStore.subscribe === 'function' && currentWorkspace?.id) {
       wsStore.subscribe(currentWorkspace.id);
     }
+  });
+
+  // Current view label for presence (HSI §1: view changes trigger a presence
+  // update — sidebar nav click or scope transition).
+  let presenceViewLabel = $derived(
+    mode === 'repo'
+      ? repoTab
+      : mode === 'workspace_home'
+        ? workspaceActiveSection
+        : mode
+  );
+
+  // Leg 3 of the heartbeat contract: re-send presence when the view changes.
+  $effect(() => {
+    presenceViewLabel; // track view changes (nav click / scope transition)
+    presenceHeartbeat?.notifyViewChange();
   });
 
   // ── UI state ─────────────────────────────────────────────────────────
@@ -1669,6 +1704,7 @@
               {wsStore}
               workspaceId={currentWorkspace?.id ?? null}
               {selfUserId}
+              oneditingentity={setActiveEditingEntity}
             />
           {:else}
             <RepoMode
@@ -1705,6 +1741,7 @@
       {wsStore}
       workspaceId={currentWorkspace?.id ?? null}
       {selfUserId}
+      oneditingentity={setActiveEditingEntity}
     />
     </div>
 
