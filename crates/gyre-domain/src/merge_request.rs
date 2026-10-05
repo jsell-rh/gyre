@@ -82,7 +82,11 @@ pub struct MergeRequest {
     pub created_at: u64,
     pub updated_at: u64,
     /// Workspace that governs this MR (ABAC boundary). Non-optional per M34 hierarchy enforcement.
-    pub workspace_id: Id,
+    /// SHA of the merge commit that landed this MR on the target branch
+    /// (task-095 R3-F1). Recorded at merge time; the manual revert endpoint
+    /// reverts THIS commit — never the current branch HEAD, which may be a
+    /// later merge or an unrelated revert.
+    pub merge_commit_sha: Option<String>,
     /// Unix timestamp when this MR was reverted via recovery protocol.
     pub reverted_at: Option<u64>,
     /// SHA of the revert commit that undid this MR's changes (task-095 R2-3:
@@ -117,6 +121,7 @@ impl MergeRequest {
             created_at,
             updated_at: created_at,
             workspace_id: Id::new("default"),
+            merge_commit_sha: None,
             revert_commit_sha: None,
             reverted_at: None,
         }
