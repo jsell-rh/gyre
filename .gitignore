@@ -12,6 +12,11 @@ worktrees/
 # by workers). Never tracked; ignoring keeps wt_guard from stashing 11k
 # build-artifact files (~500 MB) around every on-main agent run.
 /target-*/
+# Sandbox agent cargo registry cache (CARGO_HOME override landed in the
+# workdir during task-092; wip auto-commits swept 15.8k files onto the
+# worker branch). Never tracked.
+/.cargo-home/
+.cargo-home/
 .ralph-loop-status.md
 
 # Nix build outputs

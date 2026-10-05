@@ -60,6 +60,7 @@ pub(crate) mod ws;
 use axum::{routing::get, Router};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, TelemetryBuffer};
+use gyre_common::WsMessage;
 use gyre_common::Id;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
@@ -1089,46 +1090,59 @@ pub fn build_state(
     })
 }
 
-/// Spawn a background task that evicts stale presence entries every 30 seconds.
+/// Evict stale presence entries (server_last_seen older than 60 seconds).
 ///
-/// An entry is stale if server_last_seen is more than 60 seconds old.
-/// The evicted connection (if still open) receives a `PresenceEvicted` message.
+/// An entry is stale if `server_last_seen` is more than 60 seconds old.
+/// The evicted connection (if still open) receives a `PresenceEvicted` message,
+/// and other workspace subscribers receive a departure `UserPresence`
+/// (HSI §7 Presence Awareness — every removal path must notify others).
+pub(crate) async fn evict_stale_presence(state: &Arc<AppState>) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let stale: Vec<((String, String), u64, String)> = {
+        let map = state.presence.read().await;
+        map.iter()
+            .filter(|(_, entry)| entry.server_last_seen + 60_000 < now_ms)
+            .map(|(key, entry)| {
+                (
+                    key.clone(),
+                    entry.connection_id,
+                    entry.workspace_id.clone(),
+                )
+            })
+            .collect()
+    };
+
+    for ((user_id, session_id), conn_id, workspace_id) in stale {
+        state
+            .presence
+            .write()
+            .await
+            .remove(&(user_id.clone(), session_id.clone()));
+
+        let evict_msg = WsMessage::PresenceEvicted {
+            session_id: session_id.clone(),
+        };
+        if let Ok(payload) = serde_json::to_string(&evict_msg) {
+            let conns = state.ws_connections.read().await;
+    if let Some(tx) = conns.get(&conn_id) {
+        let _ = tx.try_send(payload);
+    }
+        }
+
+        crate::ws::broadcast_presence_departure(&state, &user_id, &session_id, &workspace_id).await;
+    }
+}
+
+/// Spawn a background task that evicts stale presence entries every 30 seconds.
 pub fn spawn_presence_eviction(state: Arc<AppState>) {
-    use gyre_common::WsMessage;
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-
-            let stale: Vec<((String, String), u64)> = {
-                let map = state.presence.read().await;
-                map.iter()
-                    .filter(|(_, entry)| entry.server_last_seen + 60_000 < now_ms)
-                    .map(|(key, entry)| (key.clone(), entry.connection_id))
-                    .collect()
-            };
-
-            for ((user_id, session_id), conn_id) in stale {
-                state
-                    .presence
-                    .write()
-                    .await
-                    .remove(&(user_id, session_id.clone()));
-
-                let evict_msg = WsMessage::PresenceEvicted {
-                    session_id: session_id.clone(),
-                };
-                if let Ok(payload) = serde_json::to_string(&evict_msg) {
-                    let conns = state.ws_connections.read().await;
-                    if let Some(tx) = conns.get(&conn_id) {
-                        let _ = tx.try_send(payload);
-                    }
-                }
-            }
+            evict_stale_presence(&state).await;
         }
     });
 }
