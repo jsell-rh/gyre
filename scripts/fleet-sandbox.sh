@@ -80,17 +80,31 @@ deps_satisfied() {
 # task must stay claimed, which ACTIVE_TASKS handles.
 declare -A ACTIVE_TASKS=()  # task_name -> pid
 
+# Coverage weight of a task: how many task-assigned coverage rows name it.
+# With more eligible tasks than sandbox slots, prefer the task whose
+# completion flips the most coverage rows (goal: spec coverage %).
+coverage_weight() {
+  local task_name="$1" rows
+  rows=$(grep -l "task-assigned" "$REPO_ROOT"/specs/coverage/system/*.md 2>/dev/null \
+    | xargs -r grep -c "$task_name\b" 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')
+  echo "$rows"
+}
+
 find_eligible_tasks() {
   local f
+  # needs-revision first (resume pushed branch work), then dep-satisfied
+  # not-started. Within each bucket: highest coverage weight first.
+  local -a rev_files=() new_files=()
   for f in "$REPO_ROOT"/specs/tasks/task-*.md; do
     [ -f "$f" ] || continue
-    [ "$(get_progress "$f")" = "needs-revision" ] && echo "$f"
+    case "$(get_progress "$f")" in
+      needs-revision) rev_files+=("$f");;
+      not-started) deps_satisfied "$f" && new_files+=("$f");;
+    esac
   done
-  for f in "$REPO_ROOT"/specs/tasks/task-*.md; do
-    [ -f "$f" ] || continue
-    [ "$(get_progress "$f")" != "not-started" ] && continue
-    deps_satisfied "$f" && echo "$f"
-  done
+  for f in "${rev_files[@]:-}" "${new_files[@]:-}"; do
+    [ -n "$f" ] && echo "$(coverage_weight "$(basename "$f" .md)") $f"
+  done | sort -rn | awk '{sub(/^[0-9]+ /,""); print}'
 }
 
 # --- Dispatch + reap ------------------------------------------------------
@@ -99,7 +113,12 @@ spawn_sandbox_worker() {
   task_name=$(basename "$task_file" .md)
   mkdir -p "$STATUS_DIR/$task_name"
   # Each worker driver is its own process; TOTAL_ROUNDS is per-task budget.
-  nohup bash "$REPO_ROOT/scripts/worker-sandbox.sh" "$task_file" \
+  # setsid: the driver gets its own session, so a fleet stop/restart
+  # (process-group signal) can't cascade SIGTERM into the driver — its
+  # EXIT trap would delete a healthy sandbox mid-round. nohup alone only
+  # shields SIGHUP; drivers must survive fleet restarts (their state is
+  # on the remote worker branch, so a fleet restart must be non-event).
+  setsid nohup bash "$REPO_ROOT/scripts/worker-sandbox.sh" "$task_file" \
     >> "$STATUS_DIR/$task_name/driver.log" 2>&1 &
   pid=$!
   ACTIVE_TASKS[$task_name]=$pid
@@ -107,27 +126,36 @@ spawn_sandbox_worker() {
 }
 
 reap_workers() {
-  # Remove finished drivers; merge completed tasks to main.
-  local task_name pid task_file
+  # Remove finished drivers from tracking.
+  local task_name pid rc
   for task_name in "${!ACTIVE_TASKS[@]}"; do
     pid=${ACTIVE_TASKS[$task_name]}
     if ! kill -0 "$pid" 2>/dev/null; then
       unset "ACTIVE_TASKS[$task_name]"
-      wait "$pid" 2>/dev/null
-      local rc=$?
-      log "<<< Driver for $task_name exited (rc=$rc)"
+      rc=0
+      wait "$pid" 2>/dev/null || rc=$?
+      # `wait` on an adopted pid (not our child) yields 127 — meaningless,
+      # the driver's own rc is in its driver.log. Only report real children.
+      if [ "$rc" -ne 127 ]; then
+        log "<<< Driver for $task_name exited (rc=$rc)"
+      else
+        log "<<< Driver for $task_name exited (adopted; rc in driver.log)"
+      fi
     fi
   done
 }
 
 merge_completed() {
   # Fetch remote worker branches; merge any whose task is complete.
+  # Scan ALL remote worker branches — not just ACTIVE_TASKS. A branch can
+  # reach `complete` from a driver the fleet no longer tracks (killed
+  # driver, fleet restart, adoption gap); the branch on origin is the
+  # source of truth and must merge regardless of local tracking state.
   git fetch -q origin '+refs/heads/worker/*:refs/remotes/origin/worker/*' 2>/dev/null
-  local task_name branch f status
-  for task_name in "${!ACTIVE_TASKS[@]}"; do
-    branch="origin/worker/$task_name"
-    git rev-parse -q --verify "refs/remotes/$branch" >/dev/null 2>&1 || continue
-    f="$REPO_ROOT/specs/tasks/$task_name.md"
+  local branch task_name status
+  while IFS= read -r branch; do
+    [ -z "$branch" ] && continue
+    task_name=${branch#origin/worker/}
     # The task file ON THE BRANCH is authoritative (sandbox updated it).
     status=$(git show "$branch:specs/tasks/$task_name.md" 2>/dev/null | \
       bash "$REPO_ROOT/scripts/task-field.sh" /dev/stdin progress 2>/dev/null || true)
@@ -141,7 +169,7 @@ merge_completed() {
         git merge --abort 2>/dev/null || true
       fi
     fi
-  done
+  done < <(git for-each-ref --format='%(refname:short)' refs/remotes/origin/worker/ 2>/dev/null)
 }
 
 # Orphan adoption: worker-sandbox.sh drivers started outside the fleet
@@ -165,6 +193,46 @@ adopt_orphans() {
 log "=== Sandbox fleet loop started (parallelism lever: $PARALLELISM_FILE) ==="
 adopt_orphans
 
+# --- Serial auditor (coverage matrix maintainer) --------------------------
+# loop.sh ran the spec-fidelity auditor as a serial agent on main; the
+# sandbox fleet originally dropped that step, so coverage rows never
+# flipped after merges. Runs locally (omp), one group per run, only when
+# code landed on main since the last audit. Never overlaps a merge: the
+# merge above completed (or found nothing) before this runs.
+OMP_BIN="${OMP_BIN:-$(command -v omp || echo /home/linuxbrew/.linuxbrew/Cellar/omp/18.0.4/bin/omp)}"
+run_auditor() {
+  local last_audit_sha code_changes_since
+  last_audit_sha=$(git log -1 --format=%H --grep='audit(' 2>/dev/null || true)
+  code_changes_since=0
+  if [ -n "$last_audit_sha" ]; then
+    code_changes_since=$(git log "$last_audit_sha"..HEAD --oneline \
+      --invert-grep --grep='audit(\|^merge:' 2>/dev/null | wc -l)
+  else
+    code_changes_since=1  # no audit yet — run it
+  fi
+  [ "$code_changes_since" -eq 0 ] && return 0
+  log ">>> Spec-Fidelity Auditor ($code_changes_since code change(s) since last audit)"
+  # Working-tree guard: the auditor commits its own edits; stash unrelated
+  # local dirt around the run (same pattern as loop.sh wt_guard).
+  local guarded=0
+  if ! git diff --quiet --ignore-submodules -- 2>/dev/null || \
+     ! git diff --cached --quiet --ignore-submodules -- 2>/dev/null || \
+     [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    git stash push --include-untracked --message "fleet-wt-guard" >/dev/null 2>&1 && guarded=1
+  fi
+  cat "$REPO_ROOT/specs/GOAL.md" "$REPO_ROOT/specs/prompts/spec-fidelity-auditor.md" \
+    | timeout 5400 "$OMP_BIN" -p --no-session --approval-mode yolo >/dev/null 2>&1
+  local rc=$?
+  [ "$guarded" = 1 ] && git stash pop >/dev/null 2>&1
+  if [ "$rc" -eq 0 ] && ! git diff --quiet HEAD -- specs/coverage 2>/dev/null; then
+    git add specs/coverage 2>/dev/null
+    # Auditor normally commits itself; safety net if it forgot.
+    git commit -q -m "audit(coverage): fleet serial auditor safety-net commit" --no-verify 2>/dev/null || true
+  fi
+  git push origin main >/dev/null 2>&1 || true
+  log "<<< Auditor done (rc=$rc)"
+}
+
 while true; do
   read_parallelism
   adopt_orphans
@@ -172,6 +240,9 @@ while true; do
 
   # Merge any completed work into local main + push.
   merge_completed
+
+  # Audit coverage after merges (serial, on main, only when code landed).
+  run_auditor
 
   # Rescan eligibility AFTER merges (completed deps unlock new tasks).
   # Spawn up to the live parallelism lever.
