@@ -510,6 +510,13 @@ fn method_to_action(method: &Method) -> &'static str {
 // ---------------------------------------------------------------------------
 // Built-in policy seed (M34 Slice 4)
 // ---------------------------------------------------------------------------
+/// Canonical id of the request-pipeline catch-all Deny. It is seeded as a
+/// built-in so the HTTP ABAC middleware can default-deny unmatched requests.
+/// Internal-service gates that must distinguish "no policy governs this
+/// action" from "a catch-all denied it" (e.g. the merge processor's trust
+/// gate, HSI §2) exclude this policy by id — see merge_processor.rs.
+pub const DEFAULT_DENY_POLICY_ID: &str = "builtin-default-deny";
+
 
 /// Built-in M34 ABAC policies that ship with the server.
 ///
@@ -679,7 +686,7 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
         // Priority 1: Default deny — lowest priority catchall.
         // Anything not explicitly allowed is denied.
         Policy {
-            id: Id::new("builtin-default-deny"),
+            id: Id::new(DEFAULT_DENY_POLICY_ID),
             name: "default-deny".to_string(),
             description: "Default deny — any request not matching an Allow policy is denied"
                 .to_string(),
