@@ -8,9 +8,10 @@ vi.mock('../lib/api.js', () => ({
   },
 }));
 
-// Fake ws store whose onMessage handler we can drive directly.
+// Fake ws store whose onMessage/onStatus handlers we can drive directly.
 function makeWsStore(sessionId = 's-self') {
   let cb = null;
+  let statusCb = null;
   return {
     sessionId,
     onMessage: (fn) => {
@@ -20,6 +21,16 @@ function makeWsStore(sessionId = 's-self') {
       };
     },
     emit: (msg) => cb && cb(msg),
+    // Mirrors the real store: onStatus fires synchronously with the current
+    // status at registration (here: already connected), then on transitions.
+    onStatus: (fn) => {
+      statusCb = fn;
+      fn('connected');
+      return () => {
+        statusCb = null;
+      };
+    },
+    emitStatus: (s) => statusCb && statusCb(s),
   };
 }
 
@@ -148,5 +159,33 @@ describe('ConcurrentEditBanner', () => {
 
     wsStore.emit({ type: 'PresenceEvicted', session_id: 's-maria' });
     await waitFor(() => expect(screen.queryByTestId('concurrent-edit-banner')).toBeNull());
+  });
+
+  it('re-seeds presence from the endpoint after a WebSocket reconnect', async () => {
+    const { api } = await import('../lib/api.js');
+    // Initial fetch (default []) shows nothing.
+    const wsStore = makeWsStore();
+    render(ConcurrentEditBanner, {
+      props: { specPath: 'specs/a.md', workspaceId: 'ws1', wsStore, selfUserId: null },
+    });
+    await waitFor(() => expect(api.workspacePresence).toHaveBeenCalledTimes(1));
+    // The synchronous 'connected' at registration must NOT trigger a second
+    // fetch — only a later transition counts as a reconnect.
+    expect(api.workspacePresence).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('concurrent-edit-banner')).toBeNull();
+
+    // Maria started editing while the socket was down — no live UserPresence
+    // reached us. Reconnect must re-fetch the authoritative snapshot.
+    api.workspacePresence.mockResolvedValueOnce([
+      { session_id: 's-maria', user_id: 'maria', editing_entity: 'spec:specs/a.md' },
+    ]);
+    wsStore.emitStatus('disconnected');
+    wsStore.emitStatus('connected');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('concurrent-edit-banner')).toBeTruthy();
+    });
+    expect(api.workspacePresence).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain('maria is also editing this spec');
   });
 });
