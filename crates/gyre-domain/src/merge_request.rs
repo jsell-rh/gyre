@@ -82,6 +82,7 @@ pub struct MergeRequest {
     pub created_at: u64,
     pub updated_at: u64,
     /// Workspace that governs this MR (ABAC boundary). Non-optional per M34 hierarchy enforcement.
+    pub workspace_id: Id,
     /// SHA of the merge commit that landed this MR on the target branch
     /// (task-095 R3-F1). Recorded at merge time; the manual revert endpoint
     /// reverts THIS commit — never the current branch HEAD, which may be a
