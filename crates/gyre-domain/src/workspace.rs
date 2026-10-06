@@ -226,9 +226,15 @@ mod tests {
 
     #[test]
     fn from_db_str_parses_all_four_levels() {
-        assert_eq!(TrustLevel::from_db_str("Supervised"), TrustLevel::Supervised);
+        assert_eq!(
+            TrustLevel::from_db_str("Supervised"),
+            TrustLevel::Supervised
+        );
         assert_eq!(TrustLevel::from_db_str("Guided"), TrustLevel::Guided);
-        assert_eq!(TrustLevel::from_db_str("Autonomous"), TrustLevel::Autonomous);
+        assert_eq!(
+            TrustLevel::from_db_str("Autonomous"),
+            TrustLevel::Autonomous
+        );
         assert_eq!(TrustLevel::from_db_str("Custom"), TrustLevel::Custom);
     }
 
@@ -239,6 +245,9 @@ mod tests {
         assert_eq!(TrustLevel::from_db_str("bogus"), TrustLevel::Supervised);
         assert_eq!(TrustLevel::from_db_str(""), TrustLevel::Supervised);
         // Case-sensitive: "supervised" is not a stored value.
-        assert_eq!(TrustLevel::from_db_str("supervised"), TrustLevel::Supervised);
+        assert_eq!(
+            TrustLevel::from_db_str("supervised"),
+            TrustLevel::Supervised
+        );
     }
 }
