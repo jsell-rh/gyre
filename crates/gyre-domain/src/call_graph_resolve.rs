@@ -203,10 +203,12 @@ fn resolve_node<'a>(
 ) -> Option<&'a GraphNode> {
     match language {
         Language::Go => resolve_go_node(qualified, by_qname, by_name),
-        _ => by_qname
-            .get(qualified)
-            .copied()
-            .or_else(|| by_name.get(qualified).map(|c| c[0])),
+        // `by_name` is keyed by `qualified_name`, so any name findable there
+        // was just probed in `by_qname` (which indexes every node). A
+        // `by_name` fallback here could never fire — the `candidates[0]` it
+        // used to carry was dead code containing an arbitrary tiebreak, which
+        // this module forbids outright (specs/prompts/implementation.md #146).
+        _ => by_qname.get(qualified).copied(),
     }
 }
 
@@ -214,17 +216,27 @@ fn resolve_node<'a>(
 /// node.
 ///
 /// One policy, applied to every branch: resolve exactly or refuse.
-/// 1. Exact qualified-name match (most reliable).
+/// 1. Exact qualified-name match (most reliable — both Pass 1 and the
+///    type checker build import-path names, so this is the normal case).
 /// 2. For methods (`Receiver.Method`), require the full `Receiver.Method`
 ///    suffix to match — not just the bare method name, which causes false
 ///    positives like `FooService.Handle` matching `BarService.Handle`.
-/// 3. When multiple candidates match, disambiguate with the package path
-///    embedded in the raw qualified name (a candidate whose qualified name
-///    starts with that path, or whose file lives under it).
-/// 4. Still ambiguous after the hint → return `None`. Guessing `candidates[0]`
-///    would silently link the caller to the wrong callee: a wrong edge is
-///    worse than a missing one. This holds for methods and plain functions
-///    alike — there is exactly one ambiguity policy in this module.
+/// 3. A suffix match is only accepted when the package path embedded in the
+///    raw qualified name corroborates it: [`node_in_pkg`] must match exactly
+///    one candidate. Single candidates are checked too — a lone
+///    `…/svc10.Process` suffix hit does NOT license `…/svc1.Process`
+///    resolving to it; prefix-similar packages look unambiguous but are the
+///    wrong callee.
+/// 4. Anything left ambiguous or uncorroborated → `None`. Guessing
+///    `candidates[0]` would silently link the caller to the wrong callee: a
+///    wrong edge is worse than a missing one. This holds for methods and
+///    plain functions alike — there is exactly one ambiguity policy in this
+///    module, the `select` closure below.
+///
+/// [`node_in_pkg`]: Go qualified names use the import path (module +
+/// directory, see `go_extractor` module docs); the hint is corroborated when
+/// the node's qualified name nests inside the package or its file path
+/// contains the package path.
 pub fn resolve_go_node<'a>(
     qualified: &str,
     by_qname: &HashMap<&str, &'a GraphNode>,
@@ -233,11 +245,19 @@ pub fn resolve_go_node<'a>(
     if let Some(n) = by_qname.get(qualified) {
         return Some(n);
     }
-    if let Some(candidates) = by_name.get(qualified) {
-        return Some(candidates[0]);
-    }
 
     let pkg_prefix = qualified.rsplit_once('.').map(|(prefix, _)| prefix);
+
+    // The single ambiguity policy for this module: a suffix match survives
+    // only if exactly one candidate lies inside the raw name's package hint.
+    // No ordering is ever consulted — HashMap iteration order cannot
+    // influence which node (if any) is returned.
+    let select = |candidates: Vec<&'a GraphNode>| -> Option<&'a GraphNode> {
+        let pkg = pkg_prefix?;
+        let mut hits = candidates.into_iter().filter(|n| node_in_pkg(n, pkg));
+        let hit = hits.next()?;
+        hits.next().is_none().then_some(hit)
+    };
 
     // Try TypeName.MethodName pattern first (more specific than bare name).
     let parts: Vec<&str> = qualified.rsplitn(3, '.').collect();
@@ -251,24 +271,13 @@ pub fn resolve_go_node<'a>(
             .filter(|(qn, _)| **qn == combined.as_str() || qn.ends_with(&suffix))
             .flat_map(|(_, nodes)| nodes.iter().copied())
             .collect();
-        if candidates.len() == 1 {
-            return Some(candidates[0]);
-        }
-        if candidates.len() > 1 {
-            if let Some(pkg) = pkg_prefix {
-                if let Some(best) = candidates
-                    .iter()
-                    .find(|n| n.qualified_name.starts_with(pkg) || n.file_path.contains(pkg))
-                {
-                    return Some(best);
-                }
-            }
-            return None;
+        if !candidates.is_empty() {
+            return select(candidates);
         }
     }
 
-    // Plain functions (no receiver): match by full qualified_name suffix, but
-    // only when there is a single unambiguous match.
+    // Plain functions (no receiver): match by full qualified_name suffix,
+    // subject to the same corroboration policy.
     if let Some(short) = qualified.rsplit('.').next() {
         let exact_suffix = format!(".{}", short);
         let candidates: Vec<&GraphNode> = by_name
@@ -276,24 +285,26 @@ pub fn resolve_go_node<'a>(
             .filter(|(qn, _)| **qn == short || qn.ends_with(&exact_suffix))
             .flat_map(|(_, nodes)| nodes.iter().copied())
             .collect();
-        if candidates.len() == 1 {
-            return Some(candidates[0]);
-        }
-        if candidates.len() > 1 {
-            if let Some(pkg) = pkg_prefix {
-                if let Some(best) = candidates
-                    .iter()
-                    .find(|n| n.qualified_name.starts_with(pkg) || n.file_path.contains(pkg))
-                {
-                    return Some(best);
-                }
-            }
-            // Ambiguous with no package hint → do not guess (wrong edges are
-            // worse than missing ones).
-            return None;
+        if !candidates.is_empty() {
+            return select(candidates);
         }
     }
     None
+}
+
+/// True when `node` lies inside the package path `pkg`:
+/// - the node's qualified name nests inside `pkg` at a `.` boundary
+///   (`<pkg>.Type.Method` / `<pkg>.Func`), or
+/// - the package path appears literally in the file path (vendored trees).
+///
+/// The boundary is load-bearing: without it the hint `…/svc1` would also
+/// claim `…/svc10.Func` — a prefix-similar package, and exactly the
+/// wrong-edge harm the refuse-on-ambiguity policy exists to prevent.
+fn node_in_pkg(node: &GraphNode, pkg: &str) -> bool {
+    node.qualified_name
+        .strip_prefix(pkg)
+        .map_or(false, |rest| rest.starts_with('.'))
+        || node.file_path.contains(pkg)
 }
 
 #[cfg(test)]
@@ -606,5 +617,72 @@ mod tests {
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].source_id, Id::new("a"));
         assert_eq!(edges[0].target_id, Id::new("b"));
+    }
+
+    #[test]
+    fn resolve_go_prefix_similar_package_is_not_guessed() {
+        // Raw names target package `svc1`; the graph only contains the
+        // prefix-similar `svc10` package. A lone suffix hit looks
+        // unambiguous, but the old branches accepted it: a single candidate
+        // was returned without any package corroboration, emitting a wrong
+        // edge into `svc10`. Both branches (method and plain function) must
+        // now demand that the hint corroborate even the only candidate.
+        let nodes = vec![
+            func_node("c", "example.com/app/caller.Call", "caller/c.go"),
+            func_node(
+                "wrong-fn",
+                "example.com/app/svc10.Process",
+                "svc10/process.go",
+            ),
+            func_node(
+                "wrong-m",
+                "example.com/app/svc10.Handler.Handle",
+                "svc10/handler.go",
+            ),
+        ];
+        let raw = vec![
+            CallEdge {
+                from: callgraph_name("example.com/app", "caller", "Call"),
+                to: callgraph_name("example.com/app", "svc1", "Process"),
+            },
+            CallEdge {
+                from: callgraph_name("example.com/app", "caller", "Call"),
+                to: callgraph_name("example.com/app", "svc1", "Handler.Handle"),
+            },
+        ];
+        let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
+        assert!(
+            edges.is_empty(),
+            "names for package svc1 must not resolve into prefix-similar svc10, \
+             got edges to {:?}",
+            edges.iter().map(|e| e.target_id.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn resolve_go_function_hint_boundary_picks_the_real_package() {
+        // Suffix path with the true package present (exact qualified-name
+        // match forced to miss by an empty by_qname): the naive
+        // `starts_with(pkg)` hint matched BOTH `…/svc1.Process` and
+        // `…/svc10.Process` — HashMap iteration order then decided which
+        // node got the edge. The boundary-aware hint leaves exactly one hit.
+        let nodes = vec![
+            func_node("p1", "example.com/app/svc1.Process", "svc1/process.go"),
+            func_node("p10", "example.com/app/svc10.Process", "svc10/process.go"),
+        ];
+        let mut by_name: HashMap<&str, Vec<&GraphNode>> = HashMap::new();
+        for n in &nodes {
+            by_name
+                .entry(n.qualified_name.as_str())
+                .or_default()
+                .push(n);
+        }
+        let empty_qnames: HashMap<&str, &GraphNode> = HashMap::new();
+        let hit = resolve_go_node("example.com/app/svc1.Process", &empty_qnames, &by_name);
+        assert_eq!(
+            hit.map(|n| n.id.as_str()),
+            Some("p1"),
+            "hint …/svc1 must claim only the svc1 node, never the svc10 row"
+        );
     }
 }
