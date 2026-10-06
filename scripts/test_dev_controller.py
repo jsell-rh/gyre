@@ -13,6 +13,7 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location("dev_controller", Path(__file__).with_name("dev-controller.py"))
 controller = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(controller)
+REAL_HOST_TEST = controller.host_test_verified
 
 
 def git(cwd, *args):
@@ -250,6 +251,30 @@ elif 'delete' in args:
         self.host_gate.assert_called_once_with(merge, "check1")
         self.assertEqual(git(self.remote, "rev-parse", "main"), base)
         self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "failed")
+
+    def test_host_gate_runs_frontend_suite_and_rejects_its_failure(self):
+        self.candidate()
+        (self.work / "web").mkdir()
+        (self.work / "web/package.json").write_text('{}\n')
+        git(self.work, "add", ".")
+        git(self.work, "commit", "-m", "add frontend")
+        sha = git(self.work, "rev-parse", "HEAD")
+        git(self.work, "push", "origin", "worker/task-001")
+        controller.sync(self.db)
+        fake_bin = Path(self.temp.name) / "bin"
+        fake_bin.mkdir()
+        for name, script in (("cargo", "#!/bin/sh\nexit 0\n"),
+                             ("npm", "#!/bin/sh\n[ \"$1\" != test ]\n")):
+            path = fake_bin / name
+            path.write_text(script)
+            path.chmod(0o755)
+        with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}"}), \
+             patch.object(controller, "host_test_verified", REAL_HOST_TEST):
+            self.assertFalse(controller.host_test_verified(sha, "check1"))
+        log = (controller.STATE / "attempts/check1/host-tests.log").read_text()
+        self.assertIn("$ cargo test --all --quiet", log)
+        self.assertIn("$ npm test", log)
+        self.assertFalse((controller.STATE / "attempts/check1/host-tests.ok").exists())
 
     def test_ambiguous_push_timeout_checks_remote_before_retrying(self):
         sha = self.candidate()

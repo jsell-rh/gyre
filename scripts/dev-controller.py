@@ -317,7 +317,7 @@ def promote(db):
 
 
 def host_test_verified(merge_sha, check_id):
-    """Run socket-using integration tests on the exact verified merge tree."""
+    """Run full Rust and frontend suites on the exact verified merge tree."""
     attempt_dir = STATE / "attempts" / check_id
     attempt_dir.mkdir(parents=True, exist_ok=True)
     marker = attempt_dir / "host-tests.ok"
@@ -336,13 +336,23 @@ def host_test_verified(merge_sha, check_id):
         env = {**os.environ, "SKIP_WEB_BUILD": "1",
                "CARGO_TARGET_DIR": str(STATE / "host-target")}
         with (attempt_dir / "host-tests.log").open("wb") as log:
-            try:
-                result = subprocess.run(["cargo", "test", "--all", "--quiet"],
-                                        cwd=worktree, env=env, stdout=log,
-                                        stderr=subprocess.STDOUT, timeout=1800)
-                passed = result.returncode == 0
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                log.write(f"\nhost test execution failed: {exc}\n".encode())
+            passed = True
+            for command, cwd, timeout in (
+                (["cargo", "test", "--all", "--quiet"], worktree, 1800),
+                (["npm", "ci", "--no-audit", "--no-fund"], worktree / "web", 600),
+                (["npm", "test"], worktree / "web", 1800),
+            ):
+                log.write(f"\n$ {' '.join(command)}\n".encode())
+                try:
+                    result = subprocess.run(command, cwd=cwd, env=env, stdout=log,
+                                            stderr=subprocess.STDOUT, timeout=timeout)
+                    if result.returncode:
+                        passed = False
+                        break
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    log.write(f"\nhost test execution failed: {exc}\n".encode())
+                    passed = False
+                    break
     finally:
         run("git", "worktree", "remove", "--force", str(worktree), check=False)
     if passed:

@@ -34,6 +34,6 @@ done
 # tests. Clippy above compiles every Rust target; the controller executes the
 # full test suite on the exact merge SHA on the host before promotion.
 (cd web && timeout --signal=INT --kill-after=30s "${GYRE_DEV_GATE_TIMEOUT:-1800}" \
-  bash -c 'npm ci && npm run build && npm test')
+  bash -c 'npm ci && npm run build')
 git restore --worktree -- web/dist
 git clean -fd -- web/dist
