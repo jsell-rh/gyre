@@ -121,12 +121,8 @@ pub async fn create_interrogation_policies(
     state: &AppState,
     agent_id: &str,
 ) -> Result<Vec<String>, anyhow::Error> {
-    let created_ids = create_interrogation_policies_in(
-        state.policies.as_ref(),
-        agent_id,
-        now_secs(),
-    )
-    .await?;
+    let created_ids =
+        create_interrogation_policies_in(state.policies.as_ref(), agent_id, now_secs()).await?;
 
     // Store policy IDs in kv_store for cleanup on complete/kill/stale.
     if let Ok(ids_json) = serde_json::to_string(&created_ids) {
@@ -2979,10 +2975,7 @@ mod tests {
             async fn create(&self, policy: &gyre_domain::Policy) -> anyhow::Result<()> {
                 let mut store = self.policies.lock().await;
                 if store.contains_key(&policy.id.to_string()) {
-                    anyhow::bail!(
-                        "policy id already exists: {}",
-                        policy.id.to_string()
-                    );
+                    anyhow::bail!("policy id already exists: {}", policy.id.to_string());
                 }
                 store.insert(policy.id.to_string(), policy.clone());
                 Ok(())

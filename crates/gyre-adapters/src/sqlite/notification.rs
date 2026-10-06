@@ -351,12 +351,9 @@ mod tests {
             .unwrap();
         // old + unread → only deleted past the 365d unread cutoff; this one
         // is past 90d but within 365d → kept.
-        NotificationRepository::create(
-            &s,
-            &make("mid-unread", (read_cutoff - 1) as i64, false),
-        )
-        .await
-        .unwrap();
+        NotificationRepository::create(&s, &make("mid-unread", (read_cutoff - 1) as i64, false))
+            .await
+            .unwrap();
         // ancient + unread → deleted (past the 365d unread cutoff).
         NotificationRepository::create(
             &s,
@@ -371,7 +368,9 @@ mod tests {
         // dismissed counts as read too.
         let mut dismissed = make("old-dismissed", (read_cutoff - 1) as i64, false);
         dismissed.dismissed_at = Some(read_cutoff as i64 - 5);
-        NotificationRepository::create(&s, &dismissed).await.unwrap();
+        NotificationRepository::create(&s, &dismissed)
+            .await
+            .unwrap();
 
         let deleted = NotificationRepository::delete_older_than(&s, read_cutoff, unread_cutoff)
             .await
