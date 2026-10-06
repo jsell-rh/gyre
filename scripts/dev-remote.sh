@@ -142,11 +142,21 @@ elif [ "$MODE" = check ]; then
   { cat /tmp/stage/dev-integration-review.md; printf '\nTask: %s\nBase SHA: %s\nCandidate SHA: %s\n' "$TASK" "$BASE" "$CANDIDATE"; } \
     | omp -p --no-session --mode=json --approval-mode yolo \
     | node /tmp/stage/dev-stream.mjs integration-review "$verdict_file"
-  [ "$(tail -n 1 "$verdict_file")" = 'VERDICT: PASS' ]
+  [ "$(tail -n 1 "$verdict_file")" = 'VERDICT: PASS' ] || {
+    echo "integration review did not pass" >&2; exit 1;
+  }
   [ "$(git rev-parse HEAD)" = "$INTEGRATION" ]
   [ "$(git rev-parse HEAD^1)" = "$BASE" ]
-  git diff --quiet HEAD
-  [ -z "$(git ls-files --others --exclude-standard)" ]
+  # Reviewers may run Rust tests; build.rs regenerates the committed web/dist
+  # bundle. Remove that build output before asserting the reviewed tree stayed
+  # unchanged. Keep any other changes visible as a hard failure.
+  git restore --worktree -- web/dist
+  git clean -fd -- web/dist
+  if ! git diff --quiet HEAD || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    git status --short >&2
+    echo "review changed the integration tree" >&2
+    exit 1
+  fi
   # Push a ref named for this exact merge SHA; controller validates both parents.
   MERGE=$(git rev-parse HEAD)
   git push origin "$MERGE:refs/heads/devloop/verified/$ARG3"
