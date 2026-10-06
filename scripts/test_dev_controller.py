@@ -4,6 +4,7 @@ import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 import time
@@ -114,6 +115,23 @@ class ControllerGitTest(unittest.TestCase):
         controller.sync(self.db)
         task = self.db.execute("SELECT seed FROM tasks WHERE name='task-001'").fetchone()
         self.assertEqual(task["seed"], base)
+
+    def test_retry_refreshes_stale_candidate_from_latest_completed_attempt(self):
+        old = self.candidate()
+        controller.sync(self.db)
+        (self.work / "implementation.txt").write_text("fixed work\n")
+        git(self.work, "add", ".")
+        git(self.work, "commit", "-m", "fix")
+        latest = git(self.work, "rev-parse", "HEAD")
+        git(self.work, "push", "origin", "HEAD:refs/heads/devloop/task-001/attempt-2")
+        self.db.execute("UPDATE tasks SET state='failed',candidate=?,attempts=2 WHERE name='task-001'", (old,))
+        self.db.commit()
+        subprocess.run([sys.executable, str(Path(__file__).with_name("dev-controller.py")),
+                        "retry", "task-001"], cwd=self.temp.name,
+                       env={**os.environ, "GYRE_DEV_STATE": str(controller.STATE)}, check=True,
+                       capture_output=True)
+        task = self.db.execute("SELECT state,seed,candidate FROM tasks WHERE name='task-001'").fetchone()
+        self.assertEqual(tuple(task), ("candidate", latest, latest))
 
     def test_controller_survives_remote_fetch_failure(self):
         git(self.temp.name, "-C", str(controller.SOURCE), "remote", "set-url", "origin", "/nonexistent/gyre.git")
