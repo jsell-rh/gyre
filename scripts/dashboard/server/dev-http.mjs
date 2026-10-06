@@ -5,7 +5,7 @@ import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { attemptLog, collectController, controllerPaths, coverageHistory, coverageMetrics, retryTask, setSlots, taskPullRequests, taskTitles } from "./dev-controller.mjs";
+import { attemptLog, collectController, controllerPaths, coverageHistory, coverageMetrics, retryAllTasks, retryTask, setSlots, taskPullRequests, taskTitles } from "./dev-controller.mjs";
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
@@ -123,6 +123,11 @@ export function createDashboardServer({ root }) {
         await retryTask(paths, task);
         await refreshSnapshot();
         return json(200, { ok: true, task });
+      }
+      if (url.pathname === "/api/retry-all" && req.method === "POST") {
+        const retried = await retryAllTasks(paths);
+        await refreshSnapshot();
+        return json(200, { ok: true, retried });
       }
       if (url.pathname === "/api/log" && req.method === "GET") {
         return json(200, { content: await attemptLog(paths, url.searchParams.get("attempt") || "") });

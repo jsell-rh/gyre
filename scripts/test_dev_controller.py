@@ -159,6 +159,21 @@ class ControllerGitTest(unittest.TestCase):
         task = self.db.execute("SELECT state,seed,candidate FROM tasks WHERE name='task-001'").fetchone()
         self.assertEqual(tuple(task), ("candidate", latest, latest))
 
+    def test_retry_all_grants_new_attempts_after_limit(self):
+        controller.sync(self.db)
+        self.db.execute("UPDATE tasks SET state='failed',attempts=3 WHERE name='task-001'")
+        self.db.commit()
+        result = subprocess.run([sys.executable, str(Path(__file__).with_name("dev-controller.py")),
+                                 "retry-all"], cwd=self.temp.name,
+                                env={**os.environ, "GYRE_DEV_STATE": str(controller.STATE)}, check=True,
+                                capture_output=True, text=True)
+        self.assertIn("retried 1 failed tasks", result.stdout)
+        task = self.db.execute("SELECT state,attempts,retry_baseline FROM tasks WHERE name='task-001'").fetchone()
+        self.assertEqual(tuple(task), ("ready", 3, 3))
+        with patch.object(controller, "spawn") as spawn:
+            controller.schedule(self.db, slots=1, max_attempts=3)
+        self.assertEqual(spawn.call_args.kwargs["branch"], "devloop/task-001/attempt-4")
+
     def test_controller_survives_remote_fetch_failure(self):
         git(self.temp.name, "-C", str(controller.SOURCE), "remote", "set-url", "origin", "/nonexistent/gyre.git")
         (controller.STATE / "slots").write_text("0\n")

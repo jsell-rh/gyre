@@ -81,6 +81,8 @@ test("cockpit reads the durable ledger and controls only its own slot file", asy
   assert.equal(await readFile(paths.slots, "utf8"), "0\n");
   const bad = await fetch(base + "/api/slots", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   assert.equal(bad.status, 400);
+  const retryAll = await (await fetch(base + "/api/retry-all", { method: "POST" })).json();
+  assert.deepEqual(retryAll, { ok: true, retried: 0 });
   const invalidStream = await fetch(base + "/api/attempt-stream?attempt=../../etc/passwd");
   assert.equal(invalidStream.status, 400);
   const abort = new AbortController();

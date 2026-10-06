@@ -57,7 +57,8 @@ def db_open():
     db.executescript("""
     CREATE TABLE IF NOT EXISTS tasks (
       name TEXT PRIMARY KEY, progress TEXT NOT NULL, deps TEXT NOT NULL,
-      state TEXT NOT NULL, seed TEXT, candidate TEXT, attempts INTEGER NOT NULL DEFAULT 0);
+      state TEXT NOT NULL, seed TEXT, candidate TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+      retry_baseline INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS attempts (
       id TEXT PRIMARY KEY, task TEXT NOT NULL, kind TEXT NOT NULL,
       branch TEXT, sha TEXT, base TEXT, merge_sha TEXT,
@@ -66,6 +67,8 @@ def db_open():
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY, at INTEGER NOT NULL, task TEXT, message TEXT NOT NULL);
     """)
+    if "retry_baseline" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
+        db.execute("ALTER TABLE tasks ADD COLUMN retry_baseline INTEGER NOT NULL DEFAULT 0")
     return db
 
 
@@ -389,7 +392,7 @@ def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
             running += 1
             launches += 1
         elif task["state"] == "ready" and task["progress"] in ("not-started", "needs-revision") and set(json.loads(task["deps"])) <= merged:
-            if task["attempts"] >= max_attempts:
+            if task["attempts"] - task["retry_baseline"] >= max_attempts:
                 db.execute("UPDATE tasks SET state='failed' WHERE name=?", (task["name"],))
                 event(db, task["name"], f"attempt limit {max_attempts} reached; inspect logs and retry explicitly")
                 continue
@@ -454,9 +457,30 @@ def status_snapshot(db):
             "slots": configured_slots()}
 
 
+def retry_failed_task(db, task):
+    latest = run("git", "for-each-ref", "--format=%(refname:short) %(objectname)",
+                 f"refs/remotes/origin/devloop/{task['name']}/attempt-*").stdout.splitlines()
+    branches = []
+    for line in latest:
+        match = re.fullmatch(rf"origin/devloop/{re.escape(task['name'])}/attempt-(\d+) ([0-9a-f]{{40}})", line)
+        if match:
+            branches.append((int(match.group(1)), match.group(2)))
+    number, seed = max(branches, default=(task["attempts"], task["seed"] or ""))
+    seed = seed or task["seed"]
+    candidate = seed if seed and task_progress(seed, task["name"]) == "complete" else None
+    attempt_number = max(number, task["attempts"])
+    updated = db.execute("UPDATE tasks SET state=?,candidate=?,attempts=?,retry_baseline=?,seed=? WHERE name=? AND state='failed'",
+                         ("candidate" if candidate else "ready", candidate, attempt_number, attempt_number, seed, task["name"]))
+    if updated.rowcount != 1:
+        db.rollback()
+        return False
+    event(db, task["name"], f"operator requested retry from {seed or task['seed']}")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("sync", "status", "run", "retry"))
+    parser.add_argument("command", choices=("sync", "status", "run", "retry", "retry-all"))
     parser.add_argument("task", nargs="?", help="task name for retry")
     parser.add_argument("--slots", type=int, default=1)
     parser.add_argument("--launch-burst", type=int, default=int(os.environ.get("GYRE_DEV_LAUNCH_BURST", "8")),
@@ -480,28 +504,24 @@ def main():
         return
     if args.json:
         parser.error("--json is only valid with status")
-    if args.command == "retry":
-        if not args.task or not re.fullmatch(r"task-\d+", args.task):
-            parser.error("retry requires task-NNN")
-        task = db.execute("SELECT * FROM tasks WHERE name=? AND state='failed'", (args.task,)).fetchone()
-        if task is None:
-            raise RuntimeError(f"{args.task} is not a failed task")
+    if args.command in ("retry", "retry-all"):
+        if args.command == "retry":
+            if not args.task or not re.fullmatch(r"task-\d+", args.task):
+                parser.error("retry requires task-NNN")
+            tasks = db.execute("SELECT * FROM tasks WHERE name=? AND state='failed'", (args.task,)).fetchall()
+            if not tasks:
+                raise RuntimeError(f"{args.task} is not a failed task")
+        else:
+            if args.task:
+                parser.error("retry-all takes no task name")
+            tasks = db.execute("SELECT * FROM tasks WHERE state='failed' ORDER BY name").fetchall()
+            if not tasks:
+                print("retried 0 failed tasks")
+                return
         source()
-        latest = run("git", "for-each-ref", "--format=%(refname:short) %(objectname)",
-                     f"refs/remotes/origin/devloop/{args.task}/attempt-*").stdout.splitlines()
-        branches = []
-        for line in latest:
-            match = re.fullmatch(rf"origin/devloop/{re.escape(args.task)}/attempt-(\d+) ([0-9a-f]{{40}})", line)
-            if match:
-                branches.append((int(match.group(1)), match.group(2)))
-        number, seed = max(branches, default=(task["attempts"], task["seed"] or ""))
-        seed = seed or task["seed"]
-        candidate = seed if seed and task_progress(seed, args.task) == "complete" else None
-        db.execute("UPDATE tasks SET state=?,candidate=?,attempts=?,seed=? WHERE name=?",
-                   ("candidate" if candidate else "ready", candidate,
-                    max(number, task["attempts"]), seed, args.task))
-        db.commit()
-        event(db, args.task, f"operator requested retry from {seed or task['seed']}")
+        count = sum(retry_failed_task(db, task) for task in tasks)
+        if args.command == "retry-all":
+            print(f"retried {count} failed tasks")
         return
     if args.command == "sync":
         sync(db)

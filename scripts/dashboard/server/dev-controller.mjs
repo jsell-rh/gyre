@@ -199,6 +199,14 @@ export async function retryTask(paths, task) {
   return stdout.trim();
 }
 
+export async function retryAllTasks(paths) {
+  const { stdout } = await execFileP("python3", [paths.command, "retry-all"],
+    { cwd: paths.root, timeout: 120000, maxBuffer: 1024 * 1024 });
+  const match = stdout.trim().match(/retried (\d+) failed tasks$/);
+  if (!match) throw new Error("retry-all did not report a task count");
+  return Number(match[1]);
+}
+
 export async function attemptLog(paths, id) {
   if (!/^[a-f0-9]{16}$/.test(id)) throw new Error("invalid attempt id");
   const file = join(paths.attempts, id, "output.log");

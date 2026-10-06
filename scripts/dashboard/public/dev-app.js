@@ -23,6 +23,7 @@ let streamFollowing = true;
 let streamUnread = 0;
 let streamExpansion = "default";
 let errorText = "";
+let retryAllPending = false;
 
 function e(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -83,6 +84,14 @@ async function slots(value) {
 async function retry(name) {
   try { await post("/api/retry", { task: name }); errorText = ""; await poll(); }
   catch (error) { errorText = String(error.message || error); render(); }
+}
+async function retryAll() {
+  if (retryAllPending) return;
+  retryAllPending = true;
+  renderOverview();
+  try { await post("/api/retry-all", {}); errorText = ""; await poll(); }
+  catch (error) { errorText = String(error.message || error); render(); }
+  finally { retryAllPending = false; renderOverview(); }
 }
 
 function renderHealth() {
@@ -183,7 +192,10 @@ function renderOverview() {
       const a = latestAttempt(task.name);
       return taskButton(task, a ? `${a.kind} · ${ago(a.started)} · ${a.branch || a.sha?.slice(0, 12) || ""}` : "starting");
     }) : e("p", { class: "muted", text: s.online ? "No attempt is active. Eligible work starts on the next controller cycle." : "Controller is offline." }));
-  const attention = e("section", { class: "dev-panel" }, e("h2", { text: `Needs attention · ${failed.length}` }),
+  const attention = e("section", { class: "dev-panel" },
+    e("div", { class: "dev-panel-heading" }, e("h2", { text: `Needs attention · ${failed.length}` }),
+      failed.length ? e("button", { class: "dev-action", onclick: retryAll,
+        text: retryAllPending ? "Retrying…" : `Retry all ${failed.length}` }) : null),
     failed.length ? failed.slice(0, 12).map((task) => e("div", { class: "dev-attention-row" }, taskButton(task, latestAttempt(task.name)?.detail || ""),
       e("button", { class: "dev-action", onclick: () => retry(task.name), text: "Retry" })))
       : e("p", { class: "muted", text: "No failed tasks." }));

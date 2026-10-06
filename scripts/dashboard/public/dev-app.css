@@ -28,6 +28,7 @@
 .dev-overview-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
 .dev-panel { padding: 16px; margin-bottom: 18px; }
 .dev-panel h2 { font-size: 14px; margin: 0 0 12px; }
+.dev-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .dev-panel p { margin: 7px 0; }
 .dev-panel .muted,.muted { color: var(--pf-text-muted); }
 .dev-control-line { border-top: 1px solid var(--pf-border); padding-top: 10px; margin-top: 14px; color: var(--pf-text-muted); }

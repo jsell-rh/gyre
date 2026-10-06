@@ -280,6 +280,7 @@ python3 scripts/dev-controller.py run --slots 1         # dispatch cloud attempt
 python3 scripts/dev-controller.py run --slots 50 --launch-burst 8  # ramp a larger pool
 python3 scripts/dev-controller.py run --only-task task-151 --slots 1  # trace one task
 python3 scripts/dev-controller.py retry task-099        # retry a failed task
+python3 scripts/dev-controller.py retry-all             # retry every failed task
 node scripts/loop-dashboard.mjs                         # cockpit: http://127.0.0.1:7690
 ```
 
@@ -294,7 +295,9 @@ maximum concurrent attempts; `--launch-burst` limits new sandbox launches per
 The cockpit reads
 the ledger, shows task dependencies, attempt history and logs, and writes the
 live `.gyre-dev-controller/slots` control. Set slots to `0` to drain; running
-attempts finish. `--max-attempts` limits worker retries per task. A failed
+attempts finish. `--max-attempts` limits worker attempts per retry cycle.
+The cockpit's Needs attention section offers Retry and Retry all; an explicit
+retry grants a fresh attempt budget. A failed
 checker stays failed until explicitly retried, with its output in the attempt
 log. The overview shows current coverage from the coverage matrix and its
 history from `specs/coverage/SUMMARY.md` commits. The task table and detail
