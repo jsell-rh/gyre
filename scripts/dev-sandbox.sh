@@ -36,7 +36,7 @@ stage_bundle() {
   bundle=$(mktemp -d "${TMPDIR:-/tmp}/gyre-stage.XXXXXX")
   cp "$ROOT/scripts/dev-remote.sh" "$ROOT/scripts/dev-round.sh" \
     "$ROOT/scripts/dev-stream.mjs" "$ROOT/scripts/dev-check.sh" \
-    "$ROOT/scripts/check-rustfmt-diff.py" "$bundle/"
+    "$ROOT/scripts/check-rustfmt-diff.py" "$ROOT/scripts/check-clippy-diff.py" "$bundle/"
   for role in implementation review rebase integration-review; do
     cp "$ROOT/specs/prompts/dev-$role.md" "$bundle/dev-$role.md"
   done

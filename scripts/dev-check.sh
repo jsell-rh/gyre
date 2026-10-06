@@ -5,7 +5,7 @@ cd /tmp/gyre
 git diff --check HEAD^1 HEAD
 python3 /tmp/stage/check-rustfmt-diff.py HEAD^1
 timeout --signal=INT --kill-after=30s "${GYRE_DEV_GATE_TIMEOUT:-1800}" \
-  cargo clippy --all-targets --all-features -- -D warnings
+  python3 /tmp/stage/check-clippy-diff.py HEAD^1
 bash scripts/check-arch.sh
 GYRE_CHECK_HIERARCHY=1 bash scripts/check-hierarchy.sh
 for check in \
