@@ -665,9 +665,15 @@ async fn merge_atomic_group(
         // single-entry path; without it the atomic group path would be a
         // Supervised bypass. Human-approval escape: an MR already Approved
         // (by a human, via the status endpoint) proceeds.
+        // Hold only on an EXPLICIT Deny match (matched_policy set): the
+        // engine's default-deny (no policy governs system merge/mr) is the
+        // Guided/Autonomous state per HSI §2 — "The merge processor is NOT
+        // blocked — no trust:require-human-mr-review policy exists".
         if mr.status != MrStatus::Approved {
             let result = evaluate_merge_abac(state, &mr, &repo).await;
-            if result.effect == gyre_domain::policy::PolicyEffect::Deny {
+            if result.effect == gyre_domain::policy::PolicyEffect::Deny
+                && result.matched_policy.is_some()
+            {
                 warn!(
                     group = %group_name,
                     mr_id = %mr.id,
@@ -1475,9 +1481,16 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     // until a human approves the MR via the status endpoint. The processor's
     // own Open → Approved transition happens only after this gate, so it
     // cannot self-satisfy the escape.
+    // Hold only on an EXPLICIT Deny match (matched_policy set): the engine's
+    // default-deny (no policy governs system merge/mr) is precisely the
+    // Guided/Autonomous state per HSI §2 — "The merge processor is NOT
+    // blocked — no trust:require-human-mr-review policy exists". Holding on
+    // default-deny would stall every Guided/Autonomous merge.
     if mr.status != MrStatus::Approved {
         let result = evaluate_merge_abac(state, &mr, &repo).await;
-        if result.effect == gyre_domain::policy::PolicyEffect::Deny {
+        if result.effect == gyre_domain::policy::PolicyEffect::Deny
+            && result.matched_policy.is_some()
+        {
             warn!(
                 entry_id = %entry.id,
                 mr_id = %mr.id,
@@ -2603,10 +2616,15 @@ pub(crate) async fn report_cascade_test_result(
 /// is checked by identity (`subject.id == "gyre-system-token"`), and the
 /// processor's subject id is "merge-processor", so it IS subject to the
 /// Supervised trust policy (`trust:require-human-mr-review`, a Deny on
-/// `subject.type == "system"` for merge/mr). On Deny the merge is held until a
-/// human approves the MR (see the callers — the human-approval escape is
-/// `mr.status == MrStatus::Approved`, set by a human via the MR status
-/// endpoint, never by the processor before the gate).
+/// `subject.type == "system"` for merge/mr). On an EXPLICIT Deny match the
+/// merge is held until a human approves the MR (see the callers — the
+/// human-approval escape is `mr.status == MrStatus::Approved`, set by a human
+/// via the MR status endpoint, never by the processor before the gate).
+/// The engine's default-deny result (`matched_policy: None` — no policy
+/// governs system merge/mr) is NOT a hold: it is the Guided/Autonomous state
+/// per HSI §2 ("The merge processor is NOT blocked — no
+/// trust:require-human-mr-review policy exists"). Callers must gate on
+/// `matched_policy.is_some()`.
 ///
 /// Workspace-scoped policies from OTHER workspaces are filtered out: the
 /// engine's `evaluate` does not check scope_id, and one workspace's trust Deny
