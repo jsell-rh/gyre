@@ -875,6 +875,10 @@ mod tests {
             )))
             .await
             .unwrap();
+            // Ensure strictly increasing server_last_seen: min_by_key over a
+            // HashMap breaks ties by (random) iteration order, which would make
+            // the "oldest is evicted" assertion flaky on same-ms inserts.
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             subjects.push(s);
         }
         // Drain the observer until all 5 live presences arrived.
