@@ -8,7 +8,7 @@
 # scripts/check-task-commit-attribution.sh existed and are absent from
 # their task's `commits:` frontmatter (specs/reviews/task-095.md R3-F4).
 #
-# The file is FROZEN at 3 entries. It must SHRINK, never grow:
+# The file is FROZEN at 2 entries. It must SHRINK, never grow:
 #   - To clear an entry, add the SHA to the task's commits: frontmatter
 #     and delete the line here (lower FROZEN_EXEMPTION_COUNT in
 #     scripts/check-task-commit-attribution.sh to match).
@@ -16,9 +16,8 @@
 #     with its SHA in the task file's commits: list in the same change.
 #
 # (5aaded21 task-095 was cleared 2026-09-30: SHA recorded in task-095 frontmatter by the process revision round.)
+# (17c81d5a task-072 was cleared 2026-10-06: SHA recorded in task-072 frontmatter by the R3 revision round.)
 # 01493c88 task-097: secrets migration renumber; corrected task-097's frontmatter SHA but did not record itself.
 01493c88 task-097
-# 17c81d5a task-072: one-line graph_extraction.rs cleanup; style round absent from frontmatter.
-17c81d5a task-072
 # a8d036f4 task-091: verification bookkeeping that also touched crates/ surface; absent from frontmatter.
 a8d036f4 task-091
