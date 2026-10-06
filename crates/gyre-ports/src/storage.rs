@@ -6,6 +6,9 @@ use gyre_common::Id;
 #[async_trait::async_trait]
 pub trait StoragePort: Send + Sync {
     async fn health_check(&self) -> Result<()>;
+    /// Number of embedded migrations not yet applied to this database.
+    /// 0 once startup migrations have completed; readiness probes gate on it.
+    async fn migrations_pending(&self) -> Result<usize>;
 }
 
 /// Marker trait for repository ports.

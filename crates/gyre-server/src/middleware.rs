@@ -251,6 +251,7 @@ mod tests {
             speculative_results: base.speculative_results.clone(),
             spawn_log: base.spawn_log.clone(),
             db_storage: base.db_storage.clone(),
+            storage: base.storage.clone(),
             spec_approvals: base.spec_approvals.clone(),
             spec_policies: base.spec_policies.clone(),
             attestation_store: base.attestation_store.clone(),

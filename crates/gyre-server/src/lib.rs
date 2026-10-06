@@ -280,6 +280,10 @@ pub struct AppState {
     pub spawn_log: Arc<dyn SpawnLogRepository>,
     /// Base SQLite storage instance (the "default" tenant).
     pub db_storage: Option<Arc<gyre_adapters::SqliteStorage>>,
+    /// Durable storage backend handle for infrastructure health probes
+    /// (business-continuity.md §2). Covers SQLite and PostgreSQL; None in
+    /// pure in-memory mode (no DB backend configured).
+    pub storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
     /// Spec approval ledger (persisted).
     pub spec_approvals: Arc<dyn gyre_ports::SpecApprovalRepository>,
     /// Per-repo spec enforcement policies (persisted).
@@ -803,6 +807,14 @@ pub fn build_state(
         });
     let db_storage = sqlite_db.clone();
 
+    // Health-probe handle to whichever durable backend is configured
+    // (business-continuity.md §2): DB connectivity and migration state are
+    // evaluated against the real pool, SQLite or PostgreSQL alike.
+    let storage: Option<Arc<dyn gyre_ports::storage::StoragePort>> = sqlite_db
+        .clone()
+        .map(|s| s as Arc<dyn gyre_ports::storage::StoragePort>)
+        .or_else(|| pg_db.clone().map(|p| p as Arc<dyn gyre_ports::storage::StoragePort>));
+
     macro_rules! store {
         ($trait:ty, $mem:expr) => {
             if let Some(ref d) = pg_db {
@@ -899,6 +911,7 @@ pub fn build_state(
             mem::MemSpawnLogRepository::default()
         ),
         db_storage,
+        storage,
         spec_approvals: store!(
             dyn SpecApprovalRepository,
             mem::MemSpecApprovalRepository::default()
@@ -1303,6 +1316,7 @@ pub fn spawn_llm_rate_limiter_cleanup(state: Arc<AppState>) {
 /// Spawn a background task that resets budget daily counters at midnight UTC (M22.2).
 pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
     tokio::spawn(async move {
+        state.job_registry.mark_scheduled("spawn_budget_reset").await;
         loop {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1310,7 +1324,12 @@ pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
                 .as_secs();
             let secs_until_midnight = 86400 - (now % 86400);
             tokio::time::sleep(tokio::time::Duration::from_secs(secs_until_midnight)).await;
-            api::budget::reset_daily_counters(&state).await;
+            let started_at = jobs::now_secs();
+            let result = api::budget::reset_daily_counters(&state).await;
+            if let Err(error) = &result {
+                tracing::error!(%error, "failed to reset budget daily counters");
+            }
+            state.job_registry.record_cycle("spawn_budget_reset", started_at, &result).await;
         }
     });
 }
@@ -1479,11 +1498,50 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
+        // In-memory mode: no DB backend configured — check passes honestly.
+        assert_eq!(json["checks"]["database"], "not_configured");
+    }
+
+    // readyz must gate on the merge processor loop being real: a router
+    // whose scheduler never ran must report 503 (unauthenticated — reaching
+    // the probe at all, with 503 not 401, proves no auth is required).
+    #[tokio::test]
+    async fn readyz_503_until_merge_processor_running() {
+        let state = mem::test_state();
+        jobs::start_job_registry(state.clone()).await;
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["checks"]["merge_processor"], "not_scheduled");
     }
 
     #[tokio::test]
-    async fn readyz_returns_ok() {
-        let app = test_app();
+    async fn readyz_200_when_merge_processor_running() {
+        let state = mem::test_state();
+        jobs::start_job_registry(state.clone()).await;
+        state.job_registry.mark_scheduled("merge_processor").await;
+        state
+            .job_registry
+            .record_cycle(
+                "merge_processor",
+                jobs::now_secs(),
+                &Ok::<(), anyhow::Error>(()),
+            )
+            .await;
+        let app = build_router(state);
         let response = app
             .oneshot(
                 Request::builder()
@@ -1499,6 +1557,8 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "ok");
-        assert!(json["checks"].is_object());
+        assert_eq!(json["checks"]["merge_processor"], "ok");
+        assert_eq!(json["checks"]["database"], "not_configured");
+        assert_eq!(json["checks"]["migrations"], "not_configured");
     }
 }

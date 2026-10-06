@@ -338,13 +338,11 @@ pub async fn record_budget_usage(state: &AppState, project_id: &str, tokens: u64
 }
 
 /// Reset daily counters to zero. Called at midnight UTC by background job.
-pub async fn reset_daily_counters(state: &AppState) {
+pub async fn reset_daily_counters(state: &AppState) -> anyhow::Result<()> {
     let now = now_secs();
-    if let Err(e) = state.budget_usages.reset_daily_counters(now).await {
-        tracing::error!("Failed to reset budget daily counters: {e}");
-    } else {
-        tracing::info!("Budget daily counters reset at {now}");
-    }
+    state.budget_usages.reset_daily_counters(now).await?;
+    tracing::info!("Budget daily counters reset at {now}");
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

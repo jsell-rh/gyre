@@ -3187,7 +3187,17 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
+}
+
+/// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
+/// SQLite instance) so infrastructure health probes evaluate real storage.
+#[cfg(test)]
+pub fn test_state_with_storage(
+    storage: Arc<dyn gyre_ports::storage::StoragePort>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, Some(storage))
 }
 
 /// Build a test AppState whose workspace repo fails every `apply_trust_transition`,
@@ -3195,7 +3205,7 @@ pub fn test_state() -> Arc<crate::AppState> {
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
 }
 
 /// Construct a paired workspace + policy repo that share a single in-memory
@@ -3223,7 +3233,7 @@ fn shared_workspace_policy_pair(
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies)
+    test_state_inner(git_ops, workspaces, policies, None)
 }
 
 /// Shared builder for all in-memory test states. Callers supply the git ops
@@ -3233,6 +3243,7 @@ fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
+    storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
@@ -3286,6 +3297,7 @@ fn test_state_inner(
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
         spawn_log: Arc::new(MemSpawnLogRepository::default()),
         db_storage: None,
+        storage,
         spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
         spec_policies: Arc::new(MemSpecPolicyRepository::default()),
         attestation_store: Arc::new(MemAttestationRepository::default()),
