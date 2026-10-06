@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent, screen, waitFor } from '@testing-library/svelte';
 import DetailPanel from '../lib/DetailPanel.svelte';
 
@@ -500,5 +500,55 @@ describe('DetailPanel', () => {
       const impactBtn = container.querySelector('[data-testid="check-impact-btn"]');
       expect(impactBtn).toBeFalsy();
     });
+  });
+});
+
+describe('DetailPanel — Trace tab span status casing (HSI §3a)', () => {
+  // The server serializes span status per the spec's JSON example casing
+  // ("Ok"/"Error"). The waterfall bar must color Error spans red regardless
+  // of wire casing — a lowercase-only comparison silently renders errors as
+  // healthy bars.
+  function traceBody(statusError, statusOk) {
+    return {
+      id: 'trace-1',
+      mr_id: 'mr-uuid-1',
+      gate_run_id: 'gate-run-1',
+      commit_sha: 'abc',
+      captured_at: 1,
+      span_count: 2,
+      spans: [
+        { span_id: 's1', parent_span_id: null, operation_name: 'http request', service_name: 'svc', kind: 'Server', start_time: 1, duration_us: 1000, attributes: {}, status: statusError, graph_node_id: null },
+        { span_id: 's2', parent_span_id: null, operation_name: 'db query', service_name: 'svc', kind: 'Database', start_time: 1, duration_us: 500, attributes: {}, status: statusOk, graph_node_id: 'n1' },
+      ],
+      root_spans: ['s1', 's2'],
+    };
+  }
+  function stubTraceFetch(body) {
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (String(url).includes('/merge-requests/mr-uuid-1/trace')) {
+        return { ok: true, status: 200, json: async () => body };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    }));
+  }
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function waterfallStyles(body) {
+    stubTraceFetch(body);
+    const { container } = render(DetailPanel, { props: { entity: mrEntity } });
+    await fireEvent.click(screen.getByRole('tab', { name: /trace/i }));
+    await waitFor(() => expect(container.querySelector('.trace-waterfall-bar')).toBeTruthy());
+    return [...container.querySelectorAll('.trace-waterfall-bar')].map((b) => b.getAttribute('style'));
+  }
+
+  it('renders Error-status bars red and Ok-status bars healthy with spec PascalCase values', async () => {
+    const styles = await waterfallStyles(traceBody('Error', 'Ok'));
+    expect(styles.filter((s) => s.includes('background: var(--color-danger)'))).toHaveLength(1);
+    expect(styles.filter((s) => s.includes('background: var(--color-primary)'))).toHaveLength(1);
+  });
+
+  it('still renders legacy lowercase error values red', async () => {
+    const styles = await waterfallStyles(traceBody('error', 'ok'));
+    expect(styles.filter((s) => s.includes('background: var(--color-danger)'))).toHaveLength(1);
   });
 });
