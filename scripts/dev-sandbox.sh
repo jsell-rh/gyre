@@ -104,13 +104,22 @@ done
 stage_bundle
 transport_log="${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/transport.log"
 remote_rc=74
-for reconnect in 1 2 3; do
+for reconnect in 1 2 3 4; do
+  run_log=$(mktemp "${TMPDIR:-/tmp}/gyre-run.XXXXXX")
   set +e
-  osrun 2>&1 | tee -a "$transport_log"
+  osrun 2>&1 | tee -a "$transport_log" "$run_log"
   remote_rc=${PIPESTATUS[0]}
   set -e
-  [ "$remote_rc" -eq 74 ] || break
-  echo "sandbox transport interrupted; reconnecting to $SANDBOX ($reconnect/3)" >&2
+  retry_reason=""
+  if [ "$remote_rc" -eq 74 ]; then
+    retry_reason="transport interrupted"
+  elif [ "$remote_rc" -ne 0 ] &&
+       grep -Eq 'Failed to connect to (static|index)\.crates\.io|failed to download from .*static\.crates\.io' "$run_log"; then
+    retry_reason="Cargo registry unavailable"
+  fi
+  rm "$run_log"
+  [ -n "$retry_reason" ] && [ "$reconnect" -lt 4 ] || break
+  echo "$retry_reason; retrying in $SANDBOX ($reconnect/4)" >&2
   sleep "$((reconnect * 5))"
 done
 if [ "$remote_rc" -ne 0 ] && ! grep -q 'GYRE_BOOTSTRAP_COMPLETE' "$transport_log"; then

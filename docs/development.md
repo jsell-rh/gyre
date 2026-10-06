@@ -300,7 +300,8 @@ Transient source-fetch failures leave the controller alive and retry on the
 next cycle. Worker agent rounds are bounded to 30 minutes by default
 (`GYRE_DEV_ROUND_TIMEOUT` overrides this); the sandbox checkpoints and pushes
 the branch after each round, including a timed-out round. A disconnected
-sandbox exec is retried in the same sandbox rather than provisioning another.
+sandbox exec or failed Cargo registry download is retried in the same sandbox
+rather than provisioning another.
 Branch pushes use the remote's exact current SHA as their lease and retry
 transport failures in the same sandbox. If an attempt still exits with
 unpushed edits, the driver saves `attempts/<id>/recovery.patch` locally before

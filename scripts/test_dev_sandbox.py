@@ -100,6 +100,10 @@ elif 'exec' in args and '/tmp/stage/dev-remote.sh' in args:
     count = sum(line == 'remote' for line in record.read_text().splitlines())
     record.open('a').write('remote\\n')
     if count == 0:
+        if os.environ.get('GYRE_FAKE_REGISTRY'):
+            print('GYRE_BOOTSTRAP_COMPLETE task=task-001')
+            print('Failed to connect to static.crates.io:443')
+            sys.exit(1)
         sys.exit(74)
     print('GYRE_BOOTSTRAP_COMPLETE task=task-001')
 elif 'exec' in args:
@@ -119,6 +123,15 @@ elif 'delete' in args:
                 ["bash", str(Path(__file__).with_name("dev-sandbox.sh")), "worker", "task-001",
                  "devloop/task-001/attempt-1", "origin/main", "0123456789abcdef"],
                 env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "calls").read_text().splitlines(),
+                             ["create", "stage", "stage", "remote", "remote", "delete"])
+            (root / "calls").write_text("")
+            result = subprocess.run(
+                ["bash", str(Path(__file__).with_name("dev-sandbox.sh")), "worker", "task-001",
+                 "devloop/task-001/attempt-1", "origin/main", "0123456789abcdef"],
+                env={**env, "GYRE_FAKE_REGISTRY": "1"}, capture_output=True, text=True, timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual((root / "calls").read_text().splitlines(),
