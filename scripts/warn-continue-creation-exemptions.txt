@@ -11,5 +11,5 @@
 #
 # See: specs/reviews/task-077.md F6 (the finding that created this check)
 #
-# --- unowned; fix opportunistically when touching these files ---
-crates/gyre-server/src/abac_middleware.rs:728  # if let Err = state.policies.create in seed_builtin_policies — idempotent startup seeding, non-fatal by design
+# (none) — abac_middleware.rs seed_builtin_policies was the last entry; it now
+# panics on create/check failure (task-077 revision round, fail closed).

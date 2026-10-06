@@ -715,35 +715,39 @@ fn domain_builtin_policies() -> Vec<Policy> {
 }
 
 /// Seed built-in M34 policies into the policy store at startup. Idempotent.
+///
+/// Fail closed (task-077 F6 flaw class): a built-in policy that cannot be
+/// verified-or-created means the server would run WITHOUT the enforcement the
+/// built-in set exists to provide — most critically the immutable
+/// `builtin:require-human-spec-approval` Deny (HSI §2: spec approval is
+/// always human). Warn-and-continue here would silently boot an
+/// under-enforced server (the same silent-restriction-loss class as R1-F1 /
+/// F6), so a create or existence-check failure aborts startup instead.
 pub async fn seed_builtin_policies(state: &Arc<AppState>) {
     let mut policies = m34_builtin_policies();
     policies.extend(domain_builtin_policies());
     for policy in policies {
-        match state.policies.find_by_id(&policy.id.to_string()).await {
-            Ok(None) => {
-                if let Err(e) = state.policies.create(&policy).await {
-                    tracing::warn!(
-                        policy_id = %policy.id,
-                        err = %e,
-                        "Failed to seed built-in ABAC policy"
-                    );
-                } else {
-                    tracing::debug!(
-                        policy_id = %policy.id,
-                        name = %policy.name,
-                        "Seeded built-in ABAC policy"
-                    );
-                }
-            }
-            Ok(Some(_)) => {} // already exists → idempotent
-            Err(e) => {
-                tracing::warn!(
-                    policy_id = %policy.id,
-                    err = %e,
-                    "Error checking built-in policy existence"
+        let existing = state
+            .policies
+            .find_by_id(&policy.id.to_string())
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "FATAL: failed to check built-in ABAC policy {} ({}) — \
+                     cannot confirm built-in enforcement is present: {e}",
+                    policy.id, policy.name
                 );
-            }
+            });
+        if existing.is_some() {
+            continue; // already seeded → idempotent
         }
+        state.policies.create(&policy).await.unwrap_or_else(|e| {
+            panic!(
+                "FATAL: failed to seed built-in ABAC policy {} ({}) — \
+                     refusing to start with missing built-in enforcement: {e}",
+                policy.id, policy.name
+            );
+        });
     }
 }
 
