@@ -4,6 +4,7 @@ use gyre_common::Id;
 /// Storage port - abstracts persistence behind a trait.
 /// Implementations (SQLite, PostgreSQL) live in gyre-adapters.
 #[async_trait::async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait StoragePort: Send + Sync {
     async fn health_check(&self) -> Result<()>;
     /// Number of embedded migrations not yet applied to this database.
