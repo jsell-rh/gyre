@@ -90,7 +90,11 @@
     const pos = getSpanPosition(active, byId, positions, time);
     if (!pos) return null;
 
-    const isError = rootSpan.status === 'error' || active.status === 'error';
+    // API sends PascalCase ("Ok"/"Error") per HSI §3a; compare case-insensitively
+    // like the other span consumers (ExplorerCanvas, NodeDetailPanel).
+    const isError =
+      (rootSpan.status ?? '').toLowerCase() === 'error' ||
+      (active.status ?? '').toLowerCase() === 'error';
     const color = particleColor(testIndex, isError);
 
     return {

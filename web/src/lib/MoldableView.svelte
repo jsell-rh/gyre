@@ -132,7 +132,9 @@
               node_id: s.graph_node_id ?? null,
               start_time: s.start_time - minStart,
               duration_us: s.duration_us,
-              status: s.status,
+              // API emits PascalCase ("Ok"/"Error") per HSI §3a; the canvas
+              // span contract (FlowCanvas) compares lowercase status values.
+              status: (s.status ?? '').toLowerCase(),
               name: s.operation_name,
             }));
             return;
