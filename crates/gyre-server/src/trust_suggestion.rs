@@ -292,6 +292,7 @@ mod tests {
             updated_at: created_at,
             reverted_at: None,
             revert_commit_sha: None,
+            merge_commit_sha: None,
         }
     }
 
