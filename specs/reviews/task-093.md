@@ -33,3 +33,32 @@ Findings:
 Summary: the core lifecycle (agent types, scoped JWTs, one-live validation, single-cycle restart, MCP tool suite) is real and tested, but the REST authorization surface (F1-F3) and the restart semantics (F4-F6) have major gaps, and F7 is a security regression on a tool this task had no reason to touch. Revision required.
 
 — Verifier, 2026-09-30
+
+# Revision review — task-093 (round 2)
+
+Revision commit: `7ac4f681c778598d67d690ce5a398d12823ec42a` (product code is tree-identical to `c2f382b6fca1eb989d75599c59e66e716e9cb203`; later history touches only dev-controller scripts). Verdict: **complete**.
+
+Test runs (this round):
+
+- `cargo test -p gyre-server --lib api::orchestrator` → 16 passed, 0 failed (6 original + 10 revision tests).
+- `cargo test -p gyre-server --lib -- mcp::tests::mcp_message_send` → 9 passed, 0 failed.
+- `scripts/check-abac-route-registry.sh` → OK. `scripts/check-mcp-write-tools.sh` → OK (7 write-capable tools gated; exemption file emptied). `scripts/check-abac-exempt-handlers.sh` → OK (87 handlers).
+
+Resolution of round-1 findings:
+
+- **F1 (major) — resolved.** Both routes registered in the resolver: `/api/v1/repos/:id/orchestrator/spawn` → `("repo", Some("write"))` and `/api/v1/workspaces/:id/orchestrator/spawn` → `("workspace", Some("write"))` (`abac_middleware.rs` RouteResourceMapping table). Both entries removed from `scripts/abac-route-registry-exemptions.txt` and `FROZEN_EXEMPTION_COUNT` lowered 53 → 51 — the shrink is the honest direction (exemption file cannot grow back per the frozen check).
+- **F2 (major) — resolved.** `check_workspace_tenant` (`orchestrator.rs:209-227`) loads the workspace and returns `Forbidden` unless `ws.tenant_id == auth.tenant_id`; called first in `spawn_workspace_orchestrator` (`orchestrator.rs:240`). `auth.tenant_id` comes from the validated JWT claim (or "default" for legacy paths, matching the platform's single-default-tenant model; `system` tenant requires Admin — `auth.rs:364`). Tested: `workspace_spawn_wrapper_forbids_cross_tenant` asserts Forbidden, no agent persisted, plus a same-tenant positive control.
+- **F3 (major) — resolved.** `spawn_repo_orchestrator` now performs two layers (`orchestrator.rs:383-398`): `check_repo_abac` (per-repo policy) then a repo load + `check_workspace_tenant` on the repo's workspace — tenant containment independent of per-repo policy. Tested: `repo_spawn_wrapper_forbids_cross_tenant` + positive control.
+- **F4 (major) — resolved.** Stale Abort path decrements the budget before any restart (`stale_agents.rs:44-48`); `restart_orchestrator` runs `check_spawn_budget` first and returns `None` (orchestrator stays dead, no spin) when exhausted (`stale_agents.rs:157-166`). Tested: `abort_decrements_budget_and_replacement_reclaims_it` (net active_agents stays exactly 1 across the cycle) and `restart_under_exhausted_budget_leaves_orchestrator_dead`.
+- **F5 (major) — resolved.** `restart_orchestrator` copies `disconnected_behavior` from the dead orchestrator (`stale_agents.rs:188`); spawn path sets `Abort` for orchestrators (`orchestrator.rs:104`). Tested: `replacement_inherits_disconnect_behavior_and_restarts_again` kills the replacement too and asserts a second replacement (`-restart-2`) exists and restart-1 is Dead — the exactly-one-live invariant holds across the second death.
+- **F6 (major) — resolved.** Shared `handle_orchestrator_death` (`stale_agents.rs:242-255`) is called from all three terminal paths: stale Abort (`run_once`), `fail_agent`, and `stop_agent` (`spawn.rs`, both gated on `agent.is_orchestrator()`). Tested: `fail_agent_restarts_and_escalates_repo_orchestrator` and `stop_agent_restarts_orchestrator_with_restart_on_failure`. Budget symmetry holds on fail/stop too — both handlers already `decrement_active_agents` before the shared death handling, so restart's check-then-increment is correct.
+- **F7 (major) — resolved.** `"gyre_message_send"` restored to the `needs_write` gate (`mcp.rs` match arm). Tested: `mcp_message_send_denies_readonly_api_key` (ReadOnly API-key caller gets JSON-RPC error -32603, nothing persisted) and `mcp_message_send_allows_agent_role` positive control. `scripts/mcp-write-tools-exemptions.txt` emptied — the exemption is gone, not maintained.
+- **F8 (minor) — resolved.** `escalate_repo_orchestrator_death` takes `Option<&Agent>` replacement; when a replacement was spawned the payload carries `replacement_agent_id` and `informational: true` (`stale_agents.rs:298-301`). Tested in `escalation_payload_carries_replacement_and_informational_flag`.
+- **F9 (minor) — resolved.** `gyre_cross_repo_task` now delegates to `cross_repo_task_core` in `orchestrator.rs` (with `CrossRepoTaskRequest`), matching the module's `_core` wrapper-parity pattern; empty-string repo sentinel documented.
+- **F10 (minor) — resolved.** Four wrapper-level tests added (`workspace_spawn_wrapper_allows_same_tenant`, `workspace_spawn_wrapper_forbids_cross_tenant`, `repo_spawn_wrapper_allows_same_tenant`, `repo_spawn_wrapper_forbids_cross_tenant`) exercising the axum handlers directly including the Forbidden paths from F2/F3.
+
+One non-blocking observation (not a finding): `fail_agent`/`stop_agent` are themselves exemption-listed routes with per-handler authorization elsewhere in the platform's surface; their new orchestrator branch only triggers on agents the caller could already act on, and the restart re-validates budget — no new exposure introduced by this revision.
+
+All ten findings from round 1 are fixed with production code and kill-tested. No material gap remains against `platform-model.md` §3 (Workspace Orchestrator, Repo Orchestrator, Auto-Restart on Death, escalation).
+
+— Verifier, 2026-10-06
