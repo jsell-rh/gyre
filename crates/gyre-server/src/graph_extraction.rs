@@ -870,9 +870,15 @@ pub async fn extract_and_persist_call_graph(
     // would wipe the graph's call data.
     if extraction_ran {
         let mut resolved: HashMap<(String, String), HashSet<String>> = HashMap::new();
-        for e in known_edges.iter().filter(|e| e.edge_type == EdgeType::Calls) {
+        for e in known_edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+        {
             resolved
-                .entry((e.source_id.as_str().to_string(), e.target_id.as_str().to_string()))
+                .entry((
+                    e.source_id.as_str().to_string(),
+                    e.target_id.as_str().to_string(),
+                ))
                 .or_default()
                 .insert(e.id.as_str().to_string());
         }
@@ -885,8 +891,10 @@ pub async fn extract_and_persist_call_graph(
         };
         let mut reconciled = 0usize;
         for edge in live_calls {
-            let pair =
-                (edge.source_id.as_str().to_string(), edge.target_id.as_str().to_string());
+            let pair = (
+                edge.source_id.as_str().to_string(),
+                edge.target_id.as_str().to_string(),
+            );
             let stale = match resolved.get(&pair) {
                 None => true,
                 Some(ids) => !ids.contains(edge.id.as_str()),
@@ -1488,7 +1496,11 @@ mod tests {
             .list_edges(&repo_id, Some(EdgeType::Calls))
             .await
             .unwrap();
-        assert_eq!(second.len(), 1, "second run must not create a duplicate row");
+        assert_eq!(
+            second.len(),
+            1,
+            "second run must not create a duplicate row"
+        );
         assert_eq!(
             second[0].id, first.id,
             "edge id must be content-derived and stable across runs"
@@ -1552,11 +1564,17 @@ mod tests {
                 })
                 .collect();
 
-        let removed = sweep_stale_edges(&old_edge_map, &HashMap::new(), &store).await.unwrap();
+        let removed = sweep_stale_edges(&old_edge_map, &HashMap::new(), &store)
+            .await
+            .unwrap();
         assert_eq!(removed, 1, "only the non-Calls stale edge is removed");
 
         let live = store.list_edges(&repo_id, None).await.unwrap();
-        assert_eq!(live.len(), 1, "the Calls edge must survive the Pass 1 sweep");
+        assert_eq!(
+            live.len(),
+            1,
+            "the Calls edge must survive the Pass 1 sweep"
+        );
         assert_eq!(live[0].id, Id::new("pass2-edge"));
         assert!(live[0].deleted_at.is_none());
     }
@@ -1598,8 +1616,7 @@ mod tests {
                 },
             ],
         };
-        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake_two)
-            .await;
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake_two).await;
         let after_first = store
             .list_edges(&repo_id, Some(EdgeType::Calls))
             .await
@@ -1613,14 +1630,17 @@ mod tests {
                 to: "example.com/app/svc.DoWork".to_string(),
             }],
         };
-        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake_one)
-            .await;
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake_one).await;
 
         let after_second = store
             .list_edges(&repo_id, Some(EdgeType::Calls))
             .await
             .unwrap();
-        assert_eq!(after_second.len(), 1, "stale Calls edge must be reconciled away");
+        assert_eq!(
+            after_second.len(),
+            1,
+            "stale Calls edge must be reconciled away"
+        );
         assert_eq!(after_second[0].target_id, callee.id);
         assert_eq!(
             after_second[0].id, after_first[0].id,

@@ -392,19 +392,23 @@ mod tests {
         // import path (module + directory); go-callgraph's Pkg.Path() is also
         // the import path, so the edge resolves.
         let nodes = vec![
-            func_node("h", "example.com/app/svc1.Handler.Handle", "svc1/handler.go"),
             func_node(
-                "p",
-                "example.com/app/svc1.Process",
-                "svc1/proc.go",
+                "h",
+                "example.com/app/svc1.Handler.Handle",
+                "svc1/handler.go",
             ),
+            func_node("p", "example.com/app/svc1.Process", "svc1/proc.go"),
         ];
         let raw = vec![CallEdge {
             from: callgraph_name("example.com/app", "svc1", "Handler.Handle"),
             to: callgraph_name("example.com/app", "svc1", "Process"),
         }];
         let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
-        assert_eq!(edges.len(), 1, "import-path names resolve even when the package clause differs from the directory");
+        assert_eq!(
+            edges.len(),
+            1,
+            "import-path names resolve even when the package clause differs from the directory"
+        );
     }
 
     #[test]
@@ -416,8 +420,16 @@ mod tests {
         // import-path names (module + directory) disambiguate cleanly,
         // proving the two fixtures are built from different rules.
         let nodes = vec![
-            func_node("h1", "example.com/app/svc1.Handler.Handle", "svc1/handler.go"),
-            func_node("h2", "example.com/app/svc2.Handler.Handle", "svc2/handler.go"),
+            func_node(
+                "h1",
+                "example.com/app/svc1.Handler.Handle",
+                "svc1/handler.go",
+            ),
+            func_node(
+                "h2",
+                "example.com/app/svc2.Handler.Handle",
+                "svc2/handler.go",
+            ),
         ];
         let raw = vec![CallEdge {
             from: callgraph_name("example.com/app", "svc1", "Handler.Handle"),
@@ -573,8 +585,7 @@ mod tests {
 
         // Repo scoping: the same endpoints in a different repo are a
         // different edge (sqlite pk is the bare id string).
-        let other_repo =
-            resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo2"));
+        let other_repo = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo2"));
         assert_ne!(
             first[0].id, other_repo[0].id,
             "same endpoints in another repo derive a different edge id"
