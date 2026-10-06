@@ -2,7 +2,7 @@
 title: "LSP Call Graph — Core Pipeline + Go Extractor Integration"
 spec_ref: "lsp-call-graph.md §1–6, §10 Phase 1, §11"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-072.md
 coverage_sections:
   - "lsp-call-graph.md §1 Problem"
@@ -13,7 +13,7 @@ coverage_sections:
   - "lsp-call-graph.md §6 Extraction Pipeline"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 1)"
   - "lsp-call-graph.md §11 Prerequisites"
-commits: ["e909e835fdbbfee6aae1f93bc07ff6aadf712997", "dadff8262c21b2533f9ec1f59654eeefb38c70bf", "bac2af13c7d276259f7258c100190bd2a5d6d106", "bdff16cd459dba5d79407450baf1d7d04c17b385", "b986f56df081165a2c9ff67523d54bc3bc6d1339", "395a3b1bcab7c85d99ce0cfb57b3fd0e0d41bb4c"]
+commits: ["e909e835fdbbfee6aae1f93bc07ff6aadf712997", "dadff8262c21b2533f9ec1f59654eeefb38c70bf", "bac2af13c7d276259f7258c100190bd2a5d6d106", "bdff16cd459dba5d79407450baf1d7d04c17b385", "b986f56df081165a2c9ff67523d54bc3bc6d1339", "395a3b1bcab7c85d99ce0cfb57b3fd0e0d41bb4c", "17c81d5a4d8fe8dc93387ba2c8360187a8028737"]
 ---
 
 ## Spec Excerpt
@@ -62,3 +62,9 @@ The current extractors emit `Contains`, `Implements`, and basic `Calls` edges vi
 ## Agent Instructions
 
 Read `specs/system/lsp-call-graph.md` for full context. The Go binary already exists at `scripts/go-callgraph/` — do NOT rewrite it; integrate it. Follow the hexagonal architecture: port trait in `gyre-ports`, adapter in `gyre-adapters`, orchestration in `gyre-domain`. The `gyre-domain` crate MUST NOT import `gyre-adapters`. Check `crates/gyre-ports/src/lib.rs` for existing port patterns and `crates/gyre-domain/src/` for extraction pipeline code. The graph store is accessed via `GraphPort` — grep for existing usage patterns.
+
+## Round R3 Notes (implementation, 2026-10-06)
+
+- R2 findings F6/F7/F8 are fixed by product code on this branch: Pass 1 qnames built from Go's import-path rule (`go_extractor.rs`); one ambiguity policy — hint-corroborated `select`, no ordering picks (`call_graph_resolve.rs`); `Calls` sweep exemption, content-derived edge ids, and Pass 2 self-reconciliation (`graph_extraction.rs`). Verified green at this HEAD: `cargo test -p gyre-domain go_extractor` 13/13, domain `call_graph_resolve` 14/14, `cargo test -p gyre-adapters call_graph` 2/2, `cargo test -p gyre-server --lib graph_extraction` 22/22 — including every R3 regression (`sync_go_repo_persists_calls_edges_in_graph_store`, `pass2_edge_ids_stable_across_runs`, `sweep_preserves_calls_edges_owned_by_pass2`, `pass2_reconciles_stale_calls_edges`, `pass2_reconcile_skipped_when_toolchain_unavailable`, `pass2_reconcile_removes_legacy_duplicate_id_rows`, `resolve_go_prefix_similar_package_is_not_guessed`). `check-task-commit-attribution.sh`, `check-arch.sh`, `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`, `check-relative-path-defaults.sh` all pass; `rustfmt --check` clean on every branch-touched file (repo-wide `cargo fmt --check` drift is pre-existing main baseline in files this branch never touches).
+- HTTP-bound in-process-server verification CANNOT run in this worker sandbox: loopback TCP data transfer is reset by the sandbox after accept for any process — demonstrated with a pure Python HTTP server/client pair (v4, v6, and raw socket, zero gyre code involved) getting `ConnectionResetError`. All 35 `graph_integration` and all 21 `auth_integration` tests consequently fail on the harness's first request (`reqwest IncompleteMessage`) irrespective of this branch, which touches neither binary nor the router (last change: d7940e8, already on main). Full deterministic gates must run on the integrated commit in an environment with working loopback; the pipeline's own storage-level integration is covered by the 22 lib tests above.
+- `17c81d5a` (task-072 surface style fix that landed on `main`) MUST stay in the `commits:` list: `check-task-commit-attribution.sh` scans full history, while the controller's `process: record task-072 branch commits` recorder regenerates the list from `main..HEAD` only — it dropped this SHA in 64ef557 and re-triggered the gate violation. If the recorder rewrites this frontmatter again, re-add `17c81d5a4d8fe8dc93387ba2c8360187a8028737`.
