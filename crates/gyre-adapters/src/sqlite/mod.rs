@@ -148,6 +148,21 @@ impl StoragePort for SqliteStorage {
         .await??;
         Ok(())
     }
+
+    #[instrument(skip(self), err)]
+    async fn migrations_pending(&self) -> Result<usize> {
+        let pool = Arc::clone(&self.pool);
+        let pending = tokio::task::spawn_blocking(move || -> Result<usize> {
+            let mut conn = pool.get()?;
+            let pending = conn
+                .pending_migrations(MIGRATIONS)
+                .map_err(|e| anyhow::anyhow!("migration state check failed: {e}"))?
+                .len();
+            Ok(pending)
+        })
+        .await??;
+        Ok(pending)
+    }
 }
 
 #[cfg(test)]
@@ -165,6 +180,13 @@ mod tests {
     async fn health_check_ok() {
         let (_tmp, storage) = tmp_storage();
         storage.health_check().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn migrations_pending_zero_after_startup() {
+        // Constructor runs all pending migrations, so a fresh DB must report 0.
+        let (_tmp, storage) = tmp_storage();
+        assert_eq!(storage.migrations_pending().await.unwrap(), 0);
     }
 
     #[test]

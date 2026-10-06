@@ -11,8 +11,6 @@
 # See: specs/reviews/task-106.md R2 F6 (the finding that created this check)
 #
 # --- task-106 revision round owns these (repos_root / repo.path) ---
-crates/gyre-server/src/lib.rs:1042        # repos_root default "./repos" — F6 root cause; stored verbatim into repo.path
-crates/gyre-server/src/main.rs:35         # GYRE_REPOS_PATH default "./repos" — F6 root cause; only create_dir_all'd, never canonicalized
 # --- unowned; fix opportunistically when touching these files ---
 crates/gyre-adapters/src/sqlite/conversation.rs:191   # GYRE_CONVERSATIONS_PATH default "./conversations" — relative at rest
 crates/gyre-server/src/api/spawn.rs:597   # comment quoting the "./repos/" default in prose — not a path value; canonicalize call lives at :598-600

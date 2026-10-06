@@ -13,10 +13,19 @@ use crate::AppState;
 
 pub fn spawn_merge_processor(state: Arc<AppState>) {
     tokio::spawn(async move {
+        // Record every cycle in the job registry so /healthz and /readyz can
+        // detect a dead processor loop (business-continuity.md §2).
+        state.job_registry.mark_scheduled("merge_processor").await;
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
-            if let Err(e) = process_next(&state).await {
+            let started_at = crate::jobs::now_secs();
+            let result = process_next(&state).await;
+            state
+                .job_registry
+                .record_cycle("merge_processor", started_at, &result)
+                .await;
+            if let Err(e) = result {
                 error!("merge processor error: {e:#}");
             }
         }
@@ -881,7 +890,13 @@ async fn rollback_atomic_group(
         }
     }
 
-    let ws_id = workspace_id.unwrap_or_else(|| Id::new("default"));
+    let Some(ws_id) = workspace_id else {
+        warn!(
+            group = %group_name,
+            "atomic group rolled back, but workspace lookup failed; skipping scoped notifications"
+        );
+        return Ok(());
+    };
 
     // Step 4: Notify all distinct authors (spec says "notify all authors" — no broader audience).
     let body_json = serde_json::json!({

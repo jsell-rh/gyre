@@ -32,9 +32,12 @@ async fn main() -> Result<()> {
     });
 
     // Ensure the git repos root directory exists on startup.
-    let repos_dir = std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string());
+    let repos_dir = gyre_server::configured_repos_path();
     if let Err(e) = std::fs::create_dir_all(&repos_dir) {
-        tracing::warn!("failed to create repos directory '{repos_dir}': {e}");
+        tracing::warn!(
+            "failed to create repos directory '{}': {e}",
+            repos_dir.display()
+        );
     }
 
     let state = build_state(&auth_token, &base_url, jwt_config);
@@ -48,10 +51,7 @@ async fn main() -> Result<()> {
 
     // Load persisted retention policies from KV (or seed defaults on first
     // boot) before the job registry registers the nightly cleanup handler.
-    state
-        .retention_store
-        .init(state.kv_store.clone())
-        .await;
+    state.retention_store.init(state.kv_store.clone()).await;
 
     // M25: Auto-register default container compute target if Docker/Podman is available.
     register_default_compute_target(&state).await;

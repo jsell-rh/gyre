@@ -108,6 +108,21 @@ impl StoragePort for PgStorage {
         .await??;
         Ok(())
     }
+
+    #[instrument(skip(self), err)]
+    async fn migrations_pending(&self) -> Result<usize> {
+        let pool = Arc::clone(&self.pool);
+        let pending = tokio::task::spawn_blocking(move || -> Result<usize> {
+            let mut conn = pool.get()?;
+            let pending = conn
+                .pending_migrations(MIGRATIONS)
+                .map_err(|e| anyhow::anyhow!("migration state check failed: {e}"))?
+                .len();
+            Ok(pending)
+        })
+        .await??;
+        Ok(pending)
+    }
 }
 
 // SpawnLogRepository for PgStorage is implemented in spawn_log.rs (merged via PR #136).

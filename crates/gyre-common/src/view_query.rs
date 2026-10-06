@@ -994,8 +994,7 @@ impl ViewQuery {
             return false;
         }
         // Hex colors
-        if s.starts_with('#') {
-            let hex = &s[1..];
+        if let Some(hex) = s.strip_prefix('#') {
             return matches!(hex.len(), 3 | 4 | 6 | 8)
                 && hex.chars().all(|c| c.is_ascii_hexdigit());
         }

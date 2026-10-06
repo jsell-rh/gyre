@@ -1177,15 +1177,18 @@ impl AuditRepository for MemAuditRepository {
         let mut events: Vec<AuditEvent> = store
             .iter()
             .filter(|e| {
-                filter.agent_id.as_ref().is_none_or(|a| {
-                    e.agent_id.as_ref().is_some_and(|id| id.as_str() == a)
-                }) && filter
-                    .event_type
+                filter
+                    .agent_id
                     .as_ref()
-                    .is_none_or(|t| e.event_type.as_str() == *t)
-                    && filter.workspace_id.as_ref().is_none_or(|w| {
-                        e.workspace_id.as_ref().is_some_and(|id| id.as_str() == w)
-                    })
+                    .is_none_or(|a| e.agent_id.as_ref().is_some_and(|id| id.as_str() == a))
+                    && filter
+                        .event_type
+                        .as_ref()
+                        .is_none_or(|t| e.event_type.as_str() == *t)
+                    && filter
+                        .workspace_id
+                        .as_ref()
+                        .is_none_or(|w| e.workspace_id.as_ref().is_some_and(|id| id.as_str() == w))
                     && filter
                         .user_id
                         .as_ref()
@@ -3187,7 +3190,17 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
+}
+
+/// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
+/// SQLite instance) so infrastructure health probes evaluate real storage.
+#[cfg(test)]
+pub fn test_state_with_storage(
+    storage: Arc<dyn gyre_ports::storage::StoragePort>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, Some(storage))
 }
 
 /// Build a test AppState whose workspace repo fails every `apply_trust_transition`,
@@ -3195,7 +3208,7 @@ pub fn test_state() -> Arc<crate::AppState> {
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
 }
 
 /// Construct a paired workspace + policy repo that share a single in-memory
@@ -3223,7 +3236,7 @@ fn shared_workspace_policy_pair(
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies)
+    test_state_inner(git_ops, workspaces, policies, None)
 }
 
 /// Shared builder for all in-memory test states. Callers supply the git ops
@@ -3233,6 +3246,7 @@ fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
+    storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
@@ -3286,6 +3300,7 @@ fn test_state_inner(
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
         spawn_log: Arc::new(MemSpawnLogRepository::default()),
         db_storage: None,
+        storage,
         spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
         spec_policies: Arc::new(MemSpecPolicyRepository::default()),
         attestation_store: Arc::new(MemAttestationRepository::default()),
@@ -3376,10 +3391,17 @@ fn mem_now_secs() -> u64 {
 #[async_trait]
 impl gyre_ports::SecretRepository for MemSecretRepository {
     async fn create(&self, secret: &gyre_common::Secret, value: &[u8]) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .push((secret.tenant_id.clone(), secret.clone(), value.to_vec()));
+        let mut store = self.store.lock().await;
+        if store.iter().any(|(tenant_id, existing, _)| {
+            tenant_id == &secret.tenant_id
+                && (existing.id == secret.id
+                    || (existing.scope == secret.scope
+                        && existing.scope_id == secret.scope_id
+                        && existing.name == secret.name))
+        }) {
+            anyhow::bail!("secret id or scope/name already exists in tenant");
+        }
+        store.push((secret.tenant_id.clone(), secret.clone(), value.to_vec()));
         Ok(())
     }
 
@@ -3466,6 +3488,40 @@ impl gyre_ports::SecretRepository for MemSecretRepository {
         let mut resolved: Vec<(String, Vec<u8>)> = by_name.into_iter().collect();
         resolved.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(resolved)
+    }
+}
+
+#[cfg(test)]
+mod secret_contract_tests {
+    use super::*;
+    use gyre_ports::SecretRepository;
+
+    #[tokio::test]
+    async fn create_rejects_duplicate_id_and_scope_name() {
+        let repo = MemSecretRepository::default();
+        let original = gyre_common::Secret {
+            id: Id::new("secret-1"),
+            name: "API_KEY".into(),
+            scope: gyre_common::SecretScope::Repo,
+            scope_id: "repo-1".into(),
+            secret_type: gyre_common::SecretType::Static,
+            created_by: "user-1".into(),
+            created_at: 1,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: "tenant-1".into(),
+        };
+        repo.create(&original, b"first").await.unwrap();
+        let mut duplicate_id = original.clone();
+        duplicate_id.name = "OTHER_KEY".into();
+        assert!(repo.create(&duplicate_id, b"second").await.is_err());
+        let mut duplicate_name = original.clone();
+        duplicate_name.id = Id::new("secret-2");
+        assert!(repo.create(&duplicate_name, b"third").await.is_err());
+        assert_eq!(
+            repo.get_value(&original.id, "tenant-1").await.unwrap(),
+            Some(b"first".to_vec())
+        );
     }
 }
 
