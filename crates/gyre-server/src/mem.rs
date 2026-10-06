@@ -3527,6 +3527,24 @@ mod secret_contract_tests {
 
 // ── In-memory TraceRepository ────────────────────────────────────────────────
 
+/// Mirror of `sqlite/trace.rs` / `postgres/trace.rs` `MAX_SUMMARY_BYTES`:
+/// stored (column-side) span summaries are capped at 4KB. The full values
+/// live in the payload rows (mirroring the SQLite blob columns).
+const MAX_SUMMARY_BYTES: usize = 4096;
+
+/// Mirror of the adapters' `truncate_summary`: cap at 4KB on a char boundary
+/// (same clamped-`end` idiom as `sqlite/trace.rs:122-133`).
+fn truncate_summary(s: &str) -> String {
+    if s.len() <= MAX_SUMMARY_BYTES {
+        return s.to_string();
+    }
+    let mut end = MAX_SUMMARY_BYTES;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 #[derive(Default)]
 pub struct MemTraceRepository {
     store: Arc<Mutex<HashMap<String, gyre_common::GateTrace>>>,
@@ -3579,7 +3597,16 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
                 );
             }
         }
-        guard.insert(trace.mr_id.as_str().to_string(), trace.clone());
+        // SQLite stores the truncated summary in the columns (full value only
+        // in the payload blob). Without mirroring here, in-memory mode would
+        // return >4KB summaries from GET /merge-requests/:id/trace while the
+        // SQL adapters return 4KB.
+        let mut stored = trace.clone();
+        for span in &mut stored.spans {
+            span.input_summary = span.input_summary.as_deref().map(truncate_summary);
+            span.output_summary = span.output_summary.as_deref().map(truncate_summary);
+        }
+        guard.insert(trace.mr_id.as_str().to_string(), stored);
         Ok(())
     }
 
@@ -3762,6 +3789,34 @@ mod trace_contract_tests {
             .expect("replacement trace payload");
         assert_eq!(p.input, Some(b"new-in".to_vec()));
         assert_eq!(p.output, None);
+    }
+
+    /// The stored (trace-side) summaries must be capped at 4KB like the SQL
+    /// adapters' columns, while the payload rows keep the full value.
+    /// Pre-fix, mem stored raw summaries and only the adapters truncated.
+    #[tokio::test]
+    async fn store_truncates_stored_summaries_but_keeps_full_payload() {
+        let repo = MemTraceRepository::default();
+        let big = "x".repeat(5000);
+        TraceRepository::store(
+            &repo,
+            &trace("mr-t", "gr-t", vec![span("s-t", Some(&big), Some(&big))]),
+        )
+        .await
+        .unwrap();
+        let got = TraceRepository::get_by_mr(&repo, &Id::new("mr-t"))
+            .await
+            .unwrap()
+            .expect("trace stored");
+        let s = &got.spans[0];
+        assert_eq!(s.input_summary.as_deref().map(str::len), Some(MAX_SUMMARY_BYTES));
+        assert_eq!(s.output_summary.as_deref().map(str::len), Some(MAX_SUMMARY_BYTES));
+        let p = TraceRepository::get_span_payload(&repo, &Id::new("gr-t"), "s-t")
+            .await
+            .unwrap()
+            .expect("payload row exists");
+        assert_eq!(p.input.as_deref().map(<[u8]>::len), Some(5000));
+        assert_eq!(p.output.as_deref().map(<[u8]>::len), Some(5000));
     }
 }
 
