@@ -255,9 +255,9 @@ pub async fn update_workspace(
             .apply_trust_transition(&ws, !is_now_custom, &new_policies)
             .await
             .map_err(|_| {
+                // Verbatim HSI §2 message — the UI surfaces this string.
                 ApiError::Conflict(
-                    "Trust level transition failed and was rolled back; no changes were applied"
-                        .to_string(),
+                    "Trust level transition failed — policies could not be created".to_string(),
                 )
             })?;
     } else {
