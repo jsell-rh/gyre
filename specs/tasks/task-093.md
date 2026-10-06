@@ -7,7 +7,7 @@ coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
   - "platform-model.md §3 Repo Orchestrator"
-commits: ["c2f382b6fca1eb989d75599c59e66e716e9cb203"]
+commits: ["7ac4f681c778598d67d690ce5a398d12823ec42a"]
 review: specs/reviews/task-093.md
 ---
 
