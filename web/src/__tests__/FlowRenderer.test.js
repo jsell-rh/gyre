@@ -411,3 +411,42 @@ describe('FlowRenderer', () => {
     expect(container.innerHTML).toContain('Pause');
   });
 });
+
+// ============================================================
+// Span status casing (HSI §3a: the API emits PascalCase "Ok"/"Error")
+// ============================================================
+
+describe('FlowCanvas — span status casing', () => {
+  // The error ring is the only 2px stroke at alpha 0.4 in drawParticle
+  // (trail strokes use lineWidth 3), so stroke calls with that style pair
+  // are an unambiguous observable for "span rendered as error".
+  function errorRingsRendered(spans) {
+    const rings = [];
+    mockCtx.stroke = vi.fn(() => {
+      if (mockCtx.lineWidth === 2 && mockCtx.globalAlpha === 0.4) rings.push(mockCtx.strokeStyle);
+    });
+    render(FlowCanvas, { props: { nodes: NODES, edges: EDGES, spans, currentTime: 5000 } });
+    return rings;
+  }
+
+  it('draws the error ring for the spec PascalCase status ("Error")', () => {
+    const spans = [
+      { id: 'r-err', parent_id: null, node_id: 'n1', start_time: 0, duration_us: 10000, status: 'Error' },
+    ];
+    expect(errorRingsRendered(spans).length).toBeGreaterThan(0);
+  });
+
+  it('still draws the error ring for legacy lowercase status', () => {
+    const spans = [
+      { id: 'r-err', parent_id: null, node_id: 'n1', start_time: 0, duration_us: 10000, status: 'error' },
+    ];
+    expect(errorRingsRendered(spans).length).toBeGreaterThan(0);
+  });
+
+  it('draws no error ring for non-error spans', () => {
+    const spans = [
+      { id: 'r-ok', parent_id: null, node_id: 'n1', start_time: 0, duration_us: 10000, status: 'Ok' },
+    ];
+    expect(errorRingsRendered(spans).length).toBe(0);
+  });
+});
