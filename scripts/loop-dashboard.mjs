@@ -1,8 +1,6 @@
 #!/usr/bin/env node
-// Loop dashboard — redesigned (see scripts/dashboard/).
-// Thin entry point: wires paths + port, starts the server.
-// Launch stays `node scripts/loop-dashboard.mjs`.
-import { createDashboardServer } from "./dashboard/server/http.mjs";
+// Durable controller cockpit. Launch stays `node scripts/loop-dashboard.mjs`.
+import { createDashboardServer } from "./dashboard/server/dev-http.mjs";
 
 const PORT = Number(process.env.GYRE_DASHBOARD_PORT || 7690);
 

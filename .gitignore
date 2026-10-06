@@ -41,6 +41,7 @@ worktrees/
 *.db
 *.sqlite
 *.sqlite3
+.gyre-dev-controller/
 
 # Web app
 web/node_modules/

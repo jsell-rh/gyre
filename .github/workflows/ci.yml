@@ -17,16 +17,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: python3 scripts/check-rustfmt-diff.py HEAD^1
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - name: Install mold linker
         run: sudo apt-get install -y mold
       - uses: dtolnay/rust-toolchain@stable
@@ -36,7 +40,7 @@ jobs:
         with:
           cache-on-failure: true
           prefix-key: v0-clippy
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: python3 scripts/check-clippy-diff.py HEAD^1
 
   arch-lint:                                                                                                                                  
     name: Architecture lint                                                                                                                     

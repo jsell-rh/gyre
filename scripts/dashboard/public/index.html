@@ -3,18 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Gyre loop</title>
+<title>Gyre development cockpit</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/dev-app.css">
 </head>
 <body>
 <header class="masthead">
-  <span class="brand" data-nav="overview"><span class="gy">◉</span> Gyre</span>
+  <span class="brand" data-nav="overview"><span class="gy">◉</span> Gyre · Development cockpit</span>
   <nav class="views" id="nav">
     <button data-nav="overview" class="active">Overview</button>
     <button data-nav="tasks">Tasks</button>
     <button data-nav="dependencies">Dependencies</button>
-    <button data-nav="incidents">Incidents</button>
+    <button data-nav="incidents">Events</button>
   </nav>
   <span class="spacer"></span>
   <input id="global-search" type="search" placeholder="Search tasks  ( / )" autocomplete="off">
@@ -38,14 +39,23 @@
     <button id="drawer-close" title="Close (Esc)">×</button>
   </header>
   <div class="tabs" id="drawer-tabs">
-    <button data-tab="activity" class="on">Activity</button>
+    <button data-tab="stream" class="on">Agent stream</button>
+    <button data-tab="activity">Attempt history</button>
     <button data-tab="raw">Raw log</button>
   </div>
+  <div id="stream-controls" class="dev-stream-controls" hidden>
+    <span>Events</span>
+    <button id="stream-expand" type="button">Expand all</button>
+    <button id="stream-collapse" type="button">Collapse all</button>
+  </div>
   <div class="body" id="drawer-body"></div>
+  <button id="stream-bottom" class="dev-stream-bottom" type="button" hidden>
+    ↓ Return to bottom <span id="stream-unread" class="dev-stream-count" hidden></span>
+  </button>
 </aside>
 
-<div class="kbd-hint">/ search · j/k move · Enter open · [ ] prev/next task · Esc close</div>
+<div class="kbd-hint">Search tasks · Select a task for attempts and PRs · Esc close</div>
 
-<script type="module" src="/app.js"></script>
+<script type="module" src="/dev-app.js"></script>
 </body>
 </html>
