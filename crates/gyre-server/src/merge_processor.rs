@@ -84,21 +84,35 @@ pub(crate) fn revert_breaker_key(mr: &MergeRequest) -> String {
 }
 
 
-/// Circuit breaker tripped: cancel the MR's queue entries permanently and
-/// escalate to a human (platform-model.md §6 Circuit Breaker).
+/// Circuit breaker tripped: remove the reverted work from the merge queue
+/// permanently and escalate to a human (platform-model.md §6 Circuit
+/// Breaker).
+///
+/// Queue removal covers EVERY MR sharing the breaker key (task-095 R3-F2):
+/// the counter accumulates across the fix-and-resubmit cycle the remediation
+/// flow prescribes, so when it fires, a resubmitted MR for the same spec is
+/// already over threshold — cancelling only the triggering MR's entries
+/// would let its resubmission ride the queue with a stale pre-trip entry.
 pub(crate) async fn trip_circuit_breaker(
     state: &AppState,
-    workspace_id: &Id,
     repo_id: &str,
-    mr_id: &str,
+    mr: &MergeRequest,
 ) -> anyhow::Result<()> {
-    warn!(mr_id, "circuit breaker tripped: MR reverted 3 times");
+    let mr_id = mr.id.as_str();
+    let key = revert_breaker_key(mr);
+    warn!(mr_id, key = %key, "circuit breaker tripped: work reverted 3 times");
 
-    // Cancel all queue entries for this MR (permanent removal).
+    // Cancel queue entries of every MR sharing the breaker key.
+    let all_mrs = state.merge_requests.list().await?;
+    let tripped_mr_ids: std::collections::HashSet<String> = all_mrs
+        .iter()
+        .filter(|m| revert_breaker_key(m) == key)
+        .map(|m| m.id.to_string())
+        .collect();
     let queue = state.merge_queue.list_queue().await?;
     for entry in queue
         .iter()
-        .filter(|e| e.merge_request_id.as_str() == mr_id)
+        .filter(|e| tripped_mr_ids.contains(e.merge_request_id.as_str()))
     {
         let _ = state
             .merge_queue
@@ -110,10 +124,20 @@ pub(crate) async fn trip_circuit_breaker(
             .await;
     }
 
+    // Spec Circuit Breaker item 3: name the spec the human must revisit.
+    let spec_note = mr
+        .spec_ref
+        .as_deref()
+        .map(|s| format!(" (spec {s} may need revisiting)"))
+        .unwrap_or_default();
+    let escalation_title = format!(
+        "MR {mr_id} has failed post-merge validation 3 times{spec_note}"
+    );
+
     // Escalate to humans.
     let members = state
         .workspace_memberships
-        .list_by_workspace(workspace_id)
+        .list_by_workspace(&mr.workspace_id)
         .await
         .unwrap_or_default();
     for member in &members {
@@ -122,12 +146,13 @@ pub(crate) async fn trip_circuit_breaker(
             member.workspace_id.clone(),
             member.user_id.clone(),
             gyre_common::NotificationType::AgentEscalation,
-            format!("MR {mr_id} has failed post-merge validation 3 times"),
+            escalation_title.clone(),
             "default",
             Some(
                 serde_json::json!({
                     "repo_id": repo_id,
                     "mr_id": mr_id,
+                    "spec_ref": mr.spec_ref,
                     "circuit_breaker": true,
                 })
                 .to_string(),
@@ -141,19 +166,19 @@ pub(crate) async fn trip_circuit_breaker(
     // Escalation task: the referenced spec may need revisiting.
     let now = crate::api::now_secs();
     let task_id = Id::new(Uuid::new_v4().to_string());
-    let mut task = gyre_domain::Task::new(
-        task_id,
-        format!("MR {mr_id} has failed post-merge validation 3 times"),
-        now,
-    );
+    let mut task = gyre_domain::Task::new(task_id, escalation_title, now);
     task.priority = TaskPriority::Critical;
     task.labels = vec!["circuit-breaker".to_string(), "auto-created".to_string()];
     task.description = Some(format!(
         "MR {mr_id} in repo {repo_id} was reverted 3 times by the post-merge \
-         recovery protocol. The MR has been removed from the merge queue. \
-         The spec it references may need revisiting."
+         recovery protocol (breaker key {key}). All queue entries for this \
+         key have been cancelled. {}",
+        mr.spec_ref
+            .as_deref()
+            .map(|s| format!("The spec it references ({s}) may need revisiting."))
+            .unwrap_or_else(|| "No spec is bound to this MR.".to_string())
     ));
-    task.workspace_id = workspace_id.clone();
+    task.workspace_id = mr.workspace_id.clone();
     task.repo_id = Id::new(repo_id.to_string());
     if let Err(e) = state.tasks.create(&task).await {
         warn!(mr_id, error = %e, "failed to create circuit-breaker task");
@@ -1070,6 +1095,34 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     continue;
                 }
             };
+            // Step 4b'': platform-model.md §6 — only a mergeable MR may
+            // merge. A queue entry that references an MR reverted, closed,
+            // or already merged after enqueue (e.g. the recovery protocol
+            // reverted it while the entry sat queued) must not silently
+            // re-merge it (task-095 R3-F2). Fail the entry explicitly.
+            if !matches!(
+                candidate_mr.status,
+                MrStatus::Open | MrStatus::Approved
+            ) {
+                warn!(
+                    entry_id = %candidate.id,
+                    mr_id = %candidate_mr.id,
+                    status = ?candidate_mr.status,
+                    "queue entry references non-mergeable MR, failing entry"
+                );
+                state
+                    .merge_queue
+                    .update_status(
+                        &candidate.id,
+                        MergeQueueEntryStatus::Failed,
+                        Some(format!(
+                            "merge request status {:?} cannot be merged",
+                            candidate_mr.status
+                        )),
+                    )
+                    .await?;
+                continue;
+            }
 
             // Step 4b': Recovery protocol — skip entries in paused repos
             // (broken main; queue stays paused until main is green).
@@ -1955,7 +2008,7 @@ async fn recover_from_post_merge_failure(
     if let Ok(revert_count) = increment_revert_count(state, mr).await {
         if revert_count >= 3 {
             if let Err(e) =
-                trip_circuit_breaker(state, &mr.workspace_id, repo.id.as_str(), mr.id.as_str())
+                trip_circuit_breaker(state, repo.id.as_str(), mr)
                     .await
             {
                 error!(mr_id = %mr.id, error = %e, "failed to trip circuit breaker");
@@ -2058,10 +2111,25 @@ pub(crate) async fn apply_revert_side_effects(
     task.labels = vec!["reverted-mr".to_string(), "auto-created".to_string()];
     task.workspace_id = updated.workspace_id.clone();
     task.repo_id = updated.repository_id.clone();
+    // The remediation instruction must not silently discard the breaker
+    // identity (task-095 R3-F2): the counter keys on spec_ref, so the
+    // resubmitted MR has to carry the same spec binding or "reverted 3
+    // times" could never accumulate across the resubmission cycle.
+    let spec_carry = updated
+        .spec_ref
+        .as_deref()
+        .map(|s| {
+            format!(
+                " Bind the new merge request to the same spec ({s}) — the \
+                 recovery protocol counts repeated post-merge failures of \
+                 the same spec toward the circuit breaker."
+            )
+        })
+        .unwrap_or_default();
     task.description = Some(format!(
         "MR '{}' ({}) was merged to {} but failed post-merge validation: {}. \
          The merge was reverted via commit {}. Re-do the work on a fresh branch \
-         and re-open a merge request.",
+         and re-open a merge request.{spec_carry}",
         updated.title,
         updated.id,
         repo.default_branch,
@@ -2177,7 +2245,7 @@ async fn recover_atomic_group_from_post_merge_failure(
         if let Ok(revert_count) = increment_revert_count(state, mr).await {
             if revert_count >= 3 {
                 if let Err(e) =
-                    trip_circuit_breaker(state, &mr.workspace_id, repo.id.as_str(), mr.id.as_str())
+                    trip_circuit_breaker(state, repo.id.as_str(), mr)
                         .await
                 {
                     error!(mr_id = %mr.id, error = %e, "failed to trip circuit breaker");
@@ -5925,7 +5993,7 @@ mod tests {
         // Revert count reached 3 → circuit breaker tripped.
         let count = state
             .kv_store
-            .kv_get(REVERT_COUNTS_NS, "mr-recov")
+            .kv_get(REVERT_COUNTS_NS, "mr:mr-recov")
             .await
             .unwrap()
             .expect("revert count recorded");
@@ -5946,6 +6014,92 @@ mod tests {
             tasks.iter().any(|t| t.priority == TaskPriority::Critical
                 && t.labels.contains(&"circuit-breaker".to_string())),
             "circuit-breaker critical task must be created"
+        );
+    }
+
+    /// TASK-095 R3-F2: the remediation task tells the author to re-do the
+    /// work on a fresh branch as a NEW MR. A per-MR-id counter could never
+    /// fire for spec-bound work ("same MR reverted 3 times" across MRs is
+    /// impossible when the MR id is the key). Two MRs bound to the same
+    /// spec share one breaker; a different spec is unaffected.
+    #[tokio::test]
+    async fn revert_breaker_accumulates_across_resubmitted_mrs() {
+        let state = test_state();
+        let (repo, _mr) = setup_recovery_mr(&state).await;
+
+        let mk = |id: &str, spec: &str| {
+            let mut m = gyre_domain::MergeRequest::new(
+                Id::new(id),
+                repo.id.clone(),
+                "resubmitted work",
+                "feat/resub",
+                "main",
+                1000,
+            );
+            m.workspace_id = Id::new("ws-1");
+            m.spec_ref = Some(spec.to_string());
+            m
+        };
+        let mr_a = mk("mr-resub-a", "specs/system/foo.md");
+        let mr_b = mk("mr-resub-b", "specs/system/foo.md");
+        let mr_other = mk("mr-resub-other", "specs/system/bar.md");
+        for m in [&mr_a, &mr_b, &mr_other] {
+            state.merge_requests.create(m).await.unwrap();
+        }
+
+        assert_eq!(increment_revert_count(&state, &mr_a).await.unwrap(), 1);
+        assert_eq!(increment_revert_count(&state, &mr_a).await.unwrap(), 2);
+        // The resubmission of the same spec must INHERIT the count — with
+        // the old per-MR-id key this would return 1 and the breaker could
+        // never fire through the prescribed resubmission path.
+        assert_eq!(
+            increment_revert_count(&state, &mr_b).await.unwrap(),
+            3,
+            "resubmitted MR must accumulate on the shared spec key"
+        );
+        // Different spec → its own counter.
+        assert_eq!(increment_revert_count(&state, &mr_other).await.unwrap(), 1);
+    }
+
+    /// TASK-095 R3-F2: a queue entry referencing an MR that became
+    /// non-mergeable after enqueue (the recovery protocol reverted it, or
+    /// it was closed/merged elsewhere) must fail the entry — silently
+    /// re-merging a Reverted MR voids the breaker's "removed permanently"
+    /// and the Reverted terminal state.
+    #[tokio::test]
+    async fn process_next_fails_entry_for_reverted_mr() {
+        let state = test_state();
+        let (_repo, mut mr) = setup_recovery_mr(&state).await;
+
+        // The MR was reverted after enqueueing (Open→…→Reverted persisted).
+        mr.transition_status(MrStatus::Approved).unwrap();
+        mr.transition_status(MrStatus::Merged).unwrap();
+        mr.transition_status(MrStatus::Reverted).unwrap();
+        state.merge_requests.update(&mr).await.unwrap();
+
+        process_next(&state).await.unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-recov"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Failed,
+            "stale entry for a Reverted MR must be failed, not merged"
+        );
+        let stored = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.status,
+            MrStatus::Reverted,
+            "process_next must NOT re-merge a Reverted MR"
         );
     }
 
