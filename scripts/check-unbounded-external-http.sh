@@ -26,7 +26,7 @@
 # Exemptions are legacy debt in
 # scripts/unbounded-external-http-exemptions.txt (path:line form,
 # frozen count). Fix by bounding the client; never add entries.
-FROZEN_EXEMPTION_COUNT=6
+FROZEN_EXEMPTION_COUNT=5
 #
 # Run by pre-commit and CI.
 

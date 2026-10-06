@@ -13,4 +13,3 @@ crates/gyre-server/src/auth.rs:773: JWT claims.tenant_id fallback — validated 
 crates/gyre-server/src/git_http.rs:1495: ws_id fallback for push event emission
 crates/gyre-server/src/speculative_merge.rs:372: ws_id fallback for speculative result notification
 crates/gyre-server/src/gate_executor.rs:111: ws_id fallback for gate event emission
-crates/gyre-server/src/merge_processor.rs:884: ws_id fallback for group failure notification

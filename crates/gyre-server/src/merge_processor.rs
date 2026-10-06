@@ -890,7 +890,13 @@ async fn rollback_atomic_group(
         }
     }
 
-    let ws_id = workspace_id.unwrap_or_else(|| Id::new("default"));
+    let Some(ws_id) = workspace_id else {
+        warn!(
+            group = %group_name,
+            "atomic group rolled back, but workspace lookup failed; skipping scoped notifications"
+        );
+        return Ok(());
+    };
 
     // Step 4: Notify all distinct authors (spec says "notify all authors" — no broader audience).
     let body_json = serde_json::json!({

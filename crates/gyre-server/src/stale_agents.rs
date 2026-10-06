@@ -251,7 +251,10 @@ pub fn spawn_stale_agent_detector(state: Arc<AppState>) {
     tokio::spawn(async move {
         // Record every cycle in the job registry so /healthz can detect a
         // dead detector loop (business-continuity.md §2).
-        state.job_registry.mark_scheduled("stale_agent_detector").await;
+        state
+            .job_registry
+            .mark_scheduled("stale_agent_detector")
+            .await;
         let mut interval =
             tokio::time::interval(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECS));
         loop {

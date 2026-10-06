@@ -32,7 +32,7 @@
 # Exemptions are legacy debt in
 # scripts/mem-port-contracts-exemptions.txt (path:line form,
 # frozen count). Fix by adding the guard; never add entries.
-FROZEN_EXEMPTION_COUNT=1
+FROZEN_EXEMPTION_COUNT=0
 #
 # Run by pre-commit and CI.
 

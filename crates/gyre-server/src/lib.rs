@@ -758,6 +758,20 @@ fn build_cors_layer() -> tower_http::cors::CorsLayer {
 /// Build application state. When `GYRE_DATABASE_URL` is set (e.g. `sqlite://gyre.db`),
 /// uses SQLite-backed repositories; otherwise falls back to in-memory stores.
 /// Used by both production (main) and integration tests.
+/// Resolve the repositories root once against this process's working directory
+/// so persisted repo paths and child processes see the same absolute path.
+pub fn configured_repos_path() -> std::path::PathBuf {
+    let cwd = std::env::current_dir().expect("Gyre requires a valid working directory");
+    let configured = std::env::var_os("GYRE_REPOS_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| cwd.join("repos"));
+    if configured.is_absolute() {
+        configured
+    } else {
+        cwd.join(configured)
+    }
+}
+
 pub fn build_state(
     auth_token: &str,
     base_url: &str,
@@ -813,7 +827,11 @@ pub fn build_state(
     let storage: Option<Arc<dyn gyre_ports::storage::StoragePort>> = sqlite_db
         .clone()
         .map(|s| s as Arc<dyn gyre_ports::storage::StoragePort>)
-        .or_else(|| pg_db.clone().map(|p| p as Arc<dyn gyre_ports::storage::StoragePort>));
+        .or_else(|| {
+            pg_db
+                .clone()
+                .map(|p| p as Arc<dyn gyre_ports::storage::StoragePort>)
+        });
 
     macro_rules! store {
         ($trait:ty, $mem:expr) => {
@@ -867,7 +885,10 @@ pub fn build_state(
         users: store!(dyn UserRepository, mem::MemUserRepository::default()),
         api_keys: store!(dyn ApiKeyRepository, mem::MemApiKeyRepository::default()),
         jwt_config,
-        http_client: reqwest::Client::new(),
+        http_client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("valid outbound HTTP client configuration"),
         metrics,
         started_at_secs,
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -1052,7 +1073,7 @@ pub fn build_state(
             dyn ConversationRepository,
             mem::MemConversationRepository::default()
         ),
-        repos_root: std::env::var("GYRE_REPOS_PATH").unwrap_or_else(|_| "./repos".to_string()),
+        repos_root: configured_repos_path().to_string_lossy().into_owned(),
         prompt_templates: store!(
             dyn gyre_ports::PromptRepository,
             mem::MemPromptRepository::default()
@@ -1316,7 +1337,10 @@ pub fn spawn_llm_rate_limiter_cleanup(state: Arc<AppState>) {
 /// Spawn a background task that resets budget daily counters at midnight UTC (M22.2).
 pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
     tokio::spawn(async move {
-        state.job_registry.mark_scheduled("spawn_budget_reset").await;
+        state
+            .job_registry
+            .mark_scheduled("spawn_budget_reset")
+            .await;
         loop {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1329,7 +1353,10 @@ pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
             if let Err(error) = &result {
                 tracing::error!(%error, "failed to reset budget daily counters");
             }
-            state.job_registry.record_cycle("spawn_budget_reset", started_at, &result).await;
+            state
+                .job_registry
+                .record_cycle("spawn_budget_reset", started_at, &result)
+                .await;
         }
     });
 }
@@ -1481,7 +1508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn healthz_returns_ok() {
+    async fn healthz_503_until_required_jobs_running() {
         let app = test_app();
         let response = app
             .oneshot(
@@ -1492,14 +1519,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["status"], "ok");
+        assert_eq!(json["status"], "error");
         // In-memory mode: no DB backend configured — check passes honestly.
         assert_eq!(json["checks"]["database"], "not_configured");
+        assert_eq!(json["checks"]["merge_processor"], "not_scheduled");
     }
 
     // readyz must gate on the merge processor loop being real: a router
