@@ -1,0 +1,97 @@
+# Sandbox policy for Gyre worker sandboxes.
+# Filesystem: default (read-only system, rw /workspace + /tmp).
+# Network: everything the build+push loop needs.
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /bin
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /etc
+    - /var/log
+  read_write:
+    - /tmp
+    - /dev/null
+landlock:
+  compatibility: best_effort
+network_policies:
+  # Anthropic-Messages inference via PriceTag gateway (provider gyre-pricetag
+  # composes its own rules; this explicit rule is the fallback for curl/node
+  # direct calls not covered by provider binaries).
+  pricetag_inference:
+    endpoints:
+      - host: ai-gateway-unified-ai-gateway-dogfood.dogfood-us-south-1-bxf-4x-f196230f74f7ff44a5b4eeb1003c5bd5-0000.us-south.containers.appdomain.cloud
+        port: 443
+        protocol: rest
+        access: read-write
+        enforcement: enforce
+    binaries:
+      - path: /usr/local/bin/omp
+      - path: /usr/bin/curl
+      - path: /usr/bin/node
+  # GitHub: git transport (clone/fetch/push) + REST API (PR creation).
+  github_git:
+    endpoints:
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        access: read-write
+        enforcement: enforce
+    binaries:
+      - path: /usr/bin/git
+      - path: /usr/bin/ssh
+      - path: /usr/local/bin/omp
+      - path: /usr/bin/curl
+      - path: /usr/bin/node
+  # Cargo crates (static.crates.io serves artifacts; index via sparse HTTP on index.crates.io).
+  cargo_registry:
+    endpoints:
+      - host: index.crates.io
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+      - host: static.crates.io
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+      - host: crates.io
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+    binaries:
+      - path: /usr/local/bin/cargo
+      - path: /usr/local/cargo/bin/cargo
+      - path: /usr/local/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo
+      - path: /usr/local/bin/rustc
+      - path: /usr/local/bin/omp
+      - path: /usr/bin/curl
+  # npm registry (omp runtime deps + web build via build.rs).
+  npm_registry:
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+    binaries:
+      - path: /usr/bin/node
+      - path: /usr/local/bin/npm
+      - path: /usr/local/bin/omp
+      - path: /usr/bin/curl
+  # NodeSource/deb would be needed for image build only — not in runtime policy.
+  keycloak:
+    endpoints:
+      - host: keycloak.hyp2.infra.hypershell.app
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+    binaries:
+      - path: /usr/local/bin/omp
+      - path: /usr/bin/curl

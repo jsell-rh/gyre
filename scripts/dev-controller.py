@@ -389,7 +389,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("sync", "status", "run", "retry"))
     parser.add_argument("task", nargs="?", help="task name for retry")
-    parser.add_argument("--slots", type=int, default=4)
+    parser.add_argument("--slots", type=int, default=1)
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--interval", type=int, default=30)
     parser.add_argument("--once", action="store_true")

@@ -87,7 +87,7 @@ reauth
 timeout 600 "$OS" -g gyre-gyre sandbox create --name "$SANDBOX" \
   --from "${GYRE_DEV_IMAGE:-ghcr.io/jsell-rh/gyre-worker@sha256:0c4a04a340e20c91e89f855c5d75d940b8550798441990ca823c7b8ebb8cbcec}" \
   --provider gyre-pricetag --provider gyre-github-rw \
-  --policy "${GYRE_DEV_POLICY:-/tmp/gyre-sandbox/policy.yaml}" \
+  --policy "${GYRE_DEV_POLICY:-$ROOT/docker/dev-worker/policy.yaml}" \
   --detach -- bash -c 'while true; do sleep 3600; done'
 CREATED=1
 ready=0

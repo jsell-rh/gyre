@@ -272,14 +272,14 @@ controller rejects an obsolete loop process if one is still running.
 ```bash
 python3 scripts/dev-controller.py sync                 # inspect imported state
 python3 scripts/dev-controller.py status               # inspect ledger and logs
-python3 scripts/dev-controller.py run --slots 8         # dispatch cloud attempts
+python3 scripts/dev-controller.py run --slots 1         # dispatch cloud attempts
 python3 scripts/dev-controller.py run --only-task task-151 --slots 1  # trace one task
 python3 scripts/dev-controller.py retry task-099        # retry a failed task
 node scripts/loop-dashboard.mjs                         # cockpit: http://127.0.0.1:7690
 ```
 
 It requires the OpenShell `gyre-gyre` gateway, `gyre-pricetag` and
-`gyre-github-rw` providers, `/tmp/gyre-sandbox/policy.yaml`, the worker image,
+`gyre-github-rw` providers, `docker/dev-worker/policy.yaml`, the worker image,
 `OPENSHELL_OIDC_CLIENT_SECRET`, and local OMP model configuration. Runtime state is kept in
 `.gyre-dev-controller/state.sqlite3` (SQLite WAL); attempts and logs are in
 `.gyre-dev-controller/attempts/`. Keep this directory when restarting the
