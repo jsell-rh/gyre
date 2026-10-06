@@ -295,16 +295,28 @@ pub fn resolve_go_node<'a>(
 /// True when `node` lies inside the package path `pkg`:
 /// - the node's qualified name nests inside `pkg` at a `.` boundary
 ///   (`<pkg>.Type.Method` / `<pkg>.Func`), or
-/// - the package path appears literally in the file path (vendored trees).
+/// - the file path contains the package path as a whole path segment
+///   (vendored trees store `vendor/<pkg>/...`).
 ///
-/// The boundary is load-bearing: without it the hint `…/svc1` would also
-/// claim `…/svc10.Func` — a prefix-similar package, and exactly the
+/// The boundary is load-bearing in both branches: without it the hint
+/// `…/svc1` would also claim `…/svc10.Func` and the vendored file
+/// `vendor/…/svc10/a.go` — a prefix-similar package, and exactly the
 /// wrong-edge harm the refuse-on-ambiguity policy exists to prevent.
 fn node_in_pkg(node: &GraphNode, pkg: &str) -> bool {
     node.qualified_name
         .strip_prefix(pkg)
         .map_or(false, |rest| rest.starts_with('.'))
-        || node.file_path.contains(pkg)
+        || path_contains_segment(&node.file_path, pkg)
+}
+
+/// True when `haystack` (a `/`-separated path) contains `pkg` (itself a
+/// `/`-separated path, e.g. a Go import path) as a consecutive whole-segment
+/// run. `vendor/example.com/svc1/a.go` contains `example.com/svc1`;
+/// `vendor/example.com/svc10/a.go` does not contain `example.com/svc1`.
+fn path_contains_segment(haystack: &str, pkg: &str) -> bool {
+    let needle = format!("/{}/", pkg);
+    let padded = format!("/{}", haystack.trim_matches('/'));
+    padded.contains(&needle)
 }
 
 #[cfg(test)]
@@ -687,5 +699,56 @@ mod tests {
             Some("p1"),
             "hint …/svc1 must claim only the svc1 node, never the svc10 row"
         );
+    }
+    #[test]
+    fn resolve_go_vendored_prefix_similar_path_is_not_guessed() {
+        // The file-path corroboration branch of `node_in_pkg`: a vendored
+        // node whose FILE PATH is prefix-similar to the hint must not be
+        // claimed. Hint `example.com/app/svc1` used to substring-match the
+        // vendored file `vendor/example.com/app/svc10/a.go`, resolving the
+        // raw name into the wrong (svc10) callee.
+        let nodes = vec![
+            func_node("c", "example.com/app/caller.Call", "caller/c.go"),
+            func_node(
+                "wrong-fn",
+                "vendor.example.com/app/svc10.Process",
+                "vendor/example.com/app/svc10/a.go",
+            ),
+        ];
+        let raw = vec![CallEdge {
+            from: callgraph_name("example.com/app", "caller", "Call"),
+            to: callgraph_name("example.com/app", "svc1", "Process"),
+        }];
+        let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
+        assert!(
+            edges.is_empty(),
+            "hint …/svc1 must not claim vendored …/svc10 file path, got {:?}",
+            edges
+                .iter()
+                .map(|e| e.target_id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn node_in_pkg_matches_vendored_file_path_at_segment_boundary() {
+        // Positive control for the same branch: the vendored node whose
+        // path genuinely contains the hint as a whole-segment run IS
+        // corroborated (single candidate, unambiguous).
+        let nodes = vec![
+            func_node("c", "example.com/app/caller.Call", "caller/c.go"),
+            func_node(
+                "vend",
+                "vendored.svc1.Process",
+                "vendor/example.com/app/svc1/a.go",
+            ),
+        ];
+        let raw = vec![CallEdge {
+            from: callgraph_name("example.com/app", "caller", "Call"),
+            to: callgraph_name("example.com/app", "svc1", "Process"),
+        }];
+        let edges = resolve_call_edges(Language::Go, &raw, &nodes, &[], &Id::new("repo1"));
+        assert_eq!(edges.len(), 1, "genuine vendored package is corroborated");
+        assert_eq!(edges[0].target_id, Id::new("vend"));
     }
 }
