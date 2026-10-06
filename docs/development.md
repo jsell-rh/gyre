@@ -319,8 +319,8 @@ the next model request. Implementation rounds use the configured Qwen Flash
 model by default (`GYRE_DEV_IMPLEMENTATION_MODEL` overrides it); review rounds
 remain on the independent default model.
 Bootstrap files are staged as one retryable bundle. Sandbox Cargo commands use
-`cc`/`lld` and `/tmp/gyre-target`, overriding the checkout's host-only
-`clang`/`mold` linker and target directory settings.
+`cc`/`lld` and `/tmp/gyre-target`, overriding the checkout's `clang`/`mold`
+linker settings.
 The pinned worker image is built from `docker/dev-worker/Dockerfile`; it includes
 `rustfmt`, Clippy, and `jj`.
 OpenShell cannot accept loopback sockets, including those used by library
@@ -340,12 +340,14 @@ sandbox automatically. Set slots to `0` while diagnosing gateway outages.
 Each worker gets a unique `devloop/task-NNN/attempt-N` branch and may resume
 from an old worker branch or a previous attempt. It checkpoints after each
 agent round. Completion only nominates a candidate. A separate sandbox merges
-that exact candidate with the current
-remote `main`, runs Rust tests, format, Clippy, architecture gates, and frontend
-build and tests, then reviews the integration tree. Long Rust and web gates
-have a 30-minute timeout each (`GYRE_DEV_GATE_TIMEOUT` overrides it), so a
-hung test cannot retain a checker sandbox indefinitely. It publishes a verified
-merge commit only after all gates pass. The controller checks the candidate
+that exact candidate with the current remote `main`, checks changed-line Rust
+format and Clippy diagnostics, runs static architecture gates and the frontend
+build, then reviews the integration tree. Long Clippy and web build
+gates have a 30-minute timeout each (`GYRE_DEV_GATE_TIMEOUT` overrides it), so a
+hung build cannot retain a checker sandbox indefinitely. The sandbox publishes
+a verified merge commit after those gates and review pass. The controller then
+runs the full Rust and frontend suites on that exact merge SHA on the host and
+blocks promotion if either fails. The controller checks the candidate
 and base SHAs again before a non-force push to `main`; if `main` moved, it
 checks again on the new base. An attempt whose process exits while the
 controller is down is recovered from its recorded exit status and remote branch
