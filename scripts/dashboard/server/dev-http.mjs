@@ -3,10 +3,21 @@ import { createHash } from "node:crypto";
 import { open, readFile } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { attemptLog, collectController, controllerPaths, coverageHistory, coverageMetrics, retryTask, setSlots, taskPullRequests, taskTitles } from "./dev-controller.mjs";
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
+const execFileP = promisify(execFile);
+
+async function githubRepository(root) {
+  try {
+    const { stdout } = await execFileP("git", ["remote", "get-url", "origin"], { cwd: root, timeout: 5000 });
+    const match = stdout.trim().match(/^(?:https:\/\/github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?$/);
+    return match ? `https://github.com/${match[1]}` : "";
+  } catch { return ""; }
+}
 
 export async function followAttemptEvents(paths, id, req, res) {
   if (!/^[a-f0-9]{16}$/.test(id)) throw new Error("invalid attempt id");
@@ -66,6 +77,7 @@ export async function followAttemptEvents(paths, id, req, res) {
 
 export function createDashboardServer({ root }) {
   const paths = controllerPaths(root);
+  const repository = githubRepository(root);
   const publicDir = resolve(dirname(fileURLToPath(import.meta.url)), "../public");
   let snapshot = { present: false, online: false, tasks: [], attempts: [], events: [], titles: {} };
   let refreshing = null;
@@ -73,9 +85,9 @@ export function createDashboardServer({ root }) {
     if (refreshing) return refreshing;
     refreshing = (async () => {
       try {
-        const [ledger, titles, coverage, prs] = await Promise.all([collectController(paths), taskTitles(root), coverageMetrics(root), taskPullRequests(root)]);
+        const [ledger, titles, coverage, prs, repositoryUrl] = await Promise.all([collectController(paths), taskTitles(root), coverageMetrics(root), taskPullRequests(root), repository]);
         const trend = await coverageHistory(root, coverage);
-        snapshot = { ...ledger, titles, coverage: { ...coverage, trend }, prs: prs.value, prsError: prs.error, when: Date.now() };
+        snapshot = { ...ledger, titles, coverage: { ...coverage, trend }, prs: prs.value, prsError: prs.error, repositoryUrl, when: Date.now() };
       } catch (error) {
         snapshot = { ...snapshot, error: String(error.message || error), when: Date.now() };
       }

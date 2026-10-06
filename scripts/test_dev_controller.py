@@ -233,6 +233,7 @@ elif 'delete' in args:
         self.host_gate.assert_called_once_with(merge, "check1")
         self.assertEqual(git(self.remote, "rev-parse", "main"), merge)
         self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "merged")
+        self.assertEqual(controller.status_snapshot(self.db)["tasks"][0]["merge_sha"], merge)
 
     def test_host_full_suite_failure_blocks_promotion(self):
         sha = self.candidate()

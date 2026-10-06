@@ -345,7 +345,11 @@ format and Clippy diagnostics, runs static architecture gates and the frontend
 build, then reviews the integration tree. Long Clippy and web build
 gates have a 30-minute timeout each (`GYRE_DEV_GATE_TIMEOUT` overrides it), so a
 hung build cannot retain a checker sandbox indefinitely. The sandbox publishes
-a verified merge commit after those gates and review pass. The controller then
+a verified merge commit after those gates and review pass. Its GitHub commit
+page shows the task title, spec, candidate SHA, and the reviewed `## Shipped`
+summary from the task file (or existing implementation notes for older tasks).
+The cockpit task drawer links the shipped commit directly to GitHub.
+The controller then
 runs the full Rust and frontend suites on that exact merge SHA on the host and
 blocks promotion if either fails. The controller checks the candidate
 and base SHAs again before a non-force push to `main`; if `main` moved, it

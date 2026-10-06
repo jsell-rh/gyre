@@ -19,6 +19,8 @@
 .dev-pr-links { display: inline-flex; flex-wrap: wrap; gap: 6px 10px; }
 .dev-pr-links a { color: var(--pf-link); white-space: nowrap; }
 .dev-pr-links a:hover { text-decoration: underline; }
+.dev-detail-grid a { color: var(--pf-link); }
+.dev-detail-grid a:hover { text-decoration: underline; }
 .dev-metric,.dev-panel { background: var(--pf-surface); border: 1px solid var(--pf-border); border-radius: 12px; }
 .dev-metric { padding: 14px 18px; }
 .dev-metric .label { color: var(--pf-text-muted); text-transform: uppercase; letter-spacing: .07em; font-size: 11px; }

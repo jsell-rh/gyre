@@ -278,7 +278,7 @@ def promote(db):
         main = ref_sha("origin/main")
         if main == check["merge_sha"]:
             db.execute("UPDATE tasks SET state='merged' WHERE name=?", (task["name"],))
-            db.commit()
+            event(db, task["name"], f"merged {main}")
             continue
         if main != check["base"]:
             db.execute("UPDATE tasks SET state='candidate' WHERE name=?", (task["name"],))
@@ -419,8 +419,14 @@ def configured_slots(default=None):
 
 def status_snapshot(db):
     tasks = [dict(row) for row in db.execute("SELECT * FROM tasks ORDER BY name")]
+    shipped = {}
+    for row in db.execute("SELECT task,message FROM events WHERE message LIKE 'merged %' ORDER BY id"):
+        match = re.fullmatch(r"merged ([0-9a-f]{40})", row["message"])
+        if match:
+            shipped[row["task"]] = match.group(1)
     for task in tasks:
         task["deps"] = json.loads(task["deps"])
+        task["merge_sha"] = shipped.get(task["name"]) if task["state"] == "merged" else None
     attempts = [dict(row) for row in db.execute(
         "SELECT * FROM attempts WHERE state='running' ORDER BY rowid DESC")]
     attempts += [dict(row) for row in db.execute(

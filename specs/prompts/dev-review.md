@@ -12,3 +12,7 @@ file. If any material gap remains, set `progress: needs-revision` and leave a
 clear repair path. Set `progress: complete` only when the task really meets the
 spec. Do not add generic checklist prose to prompts; turn mechanically
 detectable failure classes into scripts or focused tests.
+
+Before marking a task complete, add a `## Shipped` section to its task file
+with 2–4 concise bullets describing the behavior actually delivered. Base
+these on the reviewed code; this section becomes the GitHub merge description.

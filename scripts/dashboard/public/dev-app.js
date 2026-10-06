@@ -121,6 +121,12 @@ function prLinks(task) {
     e("a", { href: pr.url, target: "_blank", rel: "noopener noreferrer", title: pr.title,
       onclick: (event) => event.stopPropagation(), text: `PR #${pr.number}` }))) : e("span", { class: "muted", text: "—" });
 }
+function mergeLink(task) {
+  const sha = task.merge_sha;
+  return /^[0-9a-f]{40}$/.test(sha || "") && snapshot?.repositoryUrl ?
+    e("a", { href: `${snapshot.repositoryUrl}/commit/${sha}`, target: "_blank", rel: "noopener noreferrer",
+      text: sha.slice(0, 12) }) : e("span", { class: "muted", text: "—" });
+}
 
 function coverageChart(trend) {
   const wrap = e("div", { class: "dev-coverage-chart" });
@@ -410,6 +416,7 @@ function renderDrawer() {
     e("div", { class: "dev-detail-grid" },
       e("span", { text: "Spec" }), e("span", { text: spec(task) || "—" }),
       e("span", { text: "Pull requests" }), prLinks(task),
+      e("span", { text: "Shipped commit" }), mergeLink(task),
       e("span", { text: "Candidate" }), e("span", { class: "mono", text: task.candidate || "—" }),
       e("span", { text: "Seed" }), e("span", { class: "mono", text: task.seed || "—" }),
       e("span", { text: "Prerequisites" }), e("span", { text: (task.deps || []).join(", ") || "none" })),

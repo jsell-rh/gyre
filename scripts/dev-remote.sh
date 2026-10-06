@@ -130,7 +130,9 @@ elif [ "$MODE" = check ]; then
   [[ "$ARG3" =~ ^[a-f0-9]{16}$ ]] || exit 2
   git fetch --quiet origin "$CANDIDATE" "$BASE"
   git checkout -q --detach "$BASE"
-  git merge --no-ff --no-edit "$CANDIDATE"
+  git merge --no-ff --no-commit "$CANDIDATE"
+  python3 /tmp/stage/dev-merge-message.py "$TASK" "$CANDIDATE" > /tmp/stage/merge-message.txt
+  git commit -F /tmp/stage/merge-message.txt
   echo "GYRE_BOOTSTRAP_COMPLETE task=$TASK"
   INTEGRATION=$(git rev-parse HEAD)
   [ "$(git rev-parse HEAD^1)" = "$BASE" ]
