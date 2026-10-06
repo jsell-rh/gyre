@@ -25,6 +25,8 @@
 #   - Functions that use a transactional domain method for the dependent creation.
 #
 # Exempt a line with: // non-atomic-create:ok — <reason>
+# Pre-existing sites are baselined in scripts/non-atomic-creation-exemptions.txt
+# (`path:line` of the reported function, one per line); never add entries.
 #
 # See: specs/reviews/task-077.md F2 (workspace creation policy seeding)
 #
@@ -34,6 +36,7 @@ set -euo pipefail
 
 SERVER_SRC="crates/gyre-server/src"
 FAIL=0
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 if [ ! -d "$SERVER_SRC" ]; then
     echo "Skipping non-atomic creation check: $SERVER_SRC not found"
@@ -51,10 +54,18 @@ echo "Checking for non-atomic entity creation with dependent records..."
 # match(), which made this check abort on mawk — a red gate on any host
 # without gawk, regardless of the code.
 
-python3 - "$SERVER_SRC" <<'PYEOF'
+GYRE_SCRIPT_DIR="$SCRIPT_DIR" python3 - "$SERVER_SRC" <<'PYEOF'
+import os
 import re
 import sys
 from pathlib import Path
+EXEMPT_FILE = Path(os.environ.get('GYRE_SCRIPT_DIR', '.')) / 'non-atomic-creation-exemptions.txt'
+EXEMPTED = set()
+if EXEMPT_FILE.exists():
+    for _raw in EXEMPT_FILE.read_text().splitlines():
+        _raw = _raw.split('#', 1)[0].strip()
+        if _raw:
+            EXEMPTED.add(_raw)
 
 FN_RE = re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)')
 CREATE_RE = re.compile(r'state\.([a-z_]+)\.create\(')
@@ -86,6 +97,8 @@ def check_file(path):
 
     def flush(out):
         nonlocal violations
+        if f"{path}:{fn_start}" in EXEMPTED:
+            return
         if fn_name and not has_exempt and len(repos_seen) > 1 and not has_transaction:
             out.append(f"NON-ATOMIC CREATION: {fn_name} in {path}:{fn_start}")
             out.append(f"  Creates entities via {len(repos_seen)} different repositories without a transaction:")
@@ -146,6 +159,7 @@ def main():
     print("Fix: Wrap related entity creations in a single transaction or use a")
     print("     transactional domain service method.")
     print("     Exempt with: // non-atomic-create:ok — <reason>")
+    print("     Pre-existing sites: scripts/non-atomic-creation-exemptions.txt (frozen baseline)")
     print("See: specs/reviews/task-077.md F2 (non-atomic workspace+policy creation)")
     print(f"{total} violation(s) found.")
     return 1
