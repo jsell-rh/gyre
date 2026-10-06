@@ -2624,7 +2624,15 @@ pub(crate) async fn report_cascade_test_result(
 /// governs system merge/mr) is NOT a hold: it is the Guided/Autonomous state
 /// per HSI §2 ("The merge processor is NOT blocked — no
 /// trust:require-human-mr-review policy exists"). Callers must gate on
-/// `matched_policy.is_some()`.
+/// `matched_policy.is_some()` — which requires the request-pipeline catch-all
+/// `default-deny` policy to be EXCLUDED from this evaluation (below): it is
+/// seeded as a built-in at startup and matches every action unconditionally,
+/// so leaving it in scope would make the Guided/Autonomous state
+/// unrepresentable — every autonomous merge would return an explicit
+/// `Some(default-deny)` Deny and be held forever. The catch-all exists for
+/// the HTTP middleware pipeline (abac-policy-engine.md §Request Pipeline);
+/// the merge processor is an internal service whose merge authority is
+/// governed by trust-preset and user Denies, not the pipeline catch-all.
 ///
 /// Workspace-scoped policies from OTHER workspaces are filtered out: the
 /// engine's `evaluate` does not check scope_id, and one workspace's trust Deny
@@ -2655,8 +2663,11 @@ async fn evaluate_merge_abac(
     let policies: Vec<_> = policies
         .into_iter()
         .filter(|p| {
-            p.scope != gyre_domain::policy::PolicyScope::Workspace
-                || p.scope_id.as_deref() == Some(mr.workspace_id.as_str())
+            // Pipeline catch-all: unconditional deny for HTTP subjects — not a
+            // statement about system merge authority (see doc comment above).
+            p.id.as_str() != crate::abac_middleware::DEFAULT_DENY_POLICY_ID
+                && (p.scope != gyre_domain::policy::PolicyScope::Workspace
+                    || p.scope_id.as_deref() == Some(mr.workspace_id.as_str()))
         })
         .collect();
     crate::policy_engine::evaluate(policies, &ctx, "merge", "mr")
@@ -6544,5 +6555,124 @@ mod tests {
                 "rollback reason must name supervised trust, got: {reason}"
             );
         }
+    }
+
+    // ── Production-seed regression (task-077 revision): the merge gate must
+    // evaluate against the SAME policy set a deployed server has after
+    // `seed_builtin_policies` — including the tenant-scope catch-all
+    // `builtin-default-deny`, which matches every action unconditionally.
+    // If the catch-all is left in the gate's evaluation scope, the Guided
+    // state (no trust Deny) returns an EXPLICIT Deny match and every
+    // autonomous merge is held forever — while empty-store tests stay green.
+
+    #[tokio::test]
+    async fn guided_workspace_merge_proceeds_with_startup_seeded_builtins() {
+        let state = test_state();
+        // Exactly what main.rs does at startup.
+        crate::abac_middleware::seed_builtin_policies(&state).await;
+
+        seed_workspace_with_trust(
+            &state,
+            "ws-guided-seeded",
+            "Guided Seeded WS",
+            gyre_domain::TrustLevel::Guided,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "guided-seeded-repo", "ws-guided-seeded").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-guided-seeded"),
+            repo.id.clone(),
+            "MR in seeded guided workspace",
+            "feat/guided-seeded",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-guided-seeded");
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-guided-seeded", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-guided-seeded"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "pipeline catch-all default-deny must NOT hold Guided autonomous \
+             merges (HSI §2: Guided = no trust Deny → processor proceeds)"
+        );
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-guided-seeded"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Merged,
+            "queue entry must be Merged, not requeued on the catch-all"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_hold_survives_startup_seeded_builtins() {
+        let state = test_state();
+        crate::abac_middleware::seed_builtin_policies(&state).await;
+
+        seed_workspace_with_trust(
+            &state,
+            "ws-sup-seeded",
+            "Supervised Seeded WS",
+            gyre_domain::TrustLevel::Supervised,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "sup-seeded-repo", "ws-sup-seeded").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-sup-seeded"),
+            repo.id.clone(),
+            "MR in seeded supervised workspace",
+            "feat/sup-seeded",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-sup-seeded");
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-sup-seeded", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-sup-seeded"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Open,
+            "excluding the catch-all must not weaken the trust:require-human-mr-review Deny"
+        );
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-sup-seeded"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Queued);
+        assert!(
+            entry
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("supervised trust"),
+            "hold must name supervised trust, got: {:?}",
+            entry.error_message
+        );
     }
 }

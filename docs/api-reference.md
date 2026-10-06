@@ -32,7 +32,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST/GET` | `/api/v1/tenants/{id}/trust-anchors` | Create (**Admin only**) / list trust anchors for a tenant; body: `{id, issuer, jwks_uri, anchor_type: "user"|"agent"|"addon", constraints?}`; trust anchors are identity issuers the verification algorithm trusts (TASK-006, authorization-provenance §1.1) |
 | `GET/PUT/DELETE` | `/api/v1/tenants/{id}/trust-anchors/{aid}` | Get / update / delete a specific trust anchor (**Admin only**); PUT body: `{issuer?, jwks_uri?, anchor_type?, constraints?}` — partial update (TASK-006) |
 | `POST/GET` | `/api/v1/workspaces` | Create (**Admin only**, H-15) / list workspaces (`?tenant_id=` filter); workspace groups repos under a shared budget and quota (M22.1) |
-| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1) |
+| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1); `trust_level` (`Supervised`\|`Guided`\|`Autonomous`\|`Custom`, default `Supervised`) in create/update body — a change atomically replaces the workspace's `trust:` ABAC policies in one transaction, **409** on transition failure (HSI §2, TASK-077) |
 | `POST/GET` | `/api/v1/workspaces/{id}/repos` | Add / list repos in a workspace (M22.1) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/tasks` | List tasks scoped to a workspace (M34 Slice 6 — preferred access pattern) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/agents` | List agents scoped to a workspace (M34 Slice 6) |
@@ -251,8 +251,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/budget/summary` | Tenant-wide `BudgetConfig` + `BudgetUsage` plus per-workspace breakdown; **Admin only** (M22.2) |
 | `GET` | `/api/v1/search` | Full-text search (`?q=&entity_type=&workspace_id=&limit=20`); results: `[{entity_type, id, title, snippet, score}]` (M22.7) |
 | `POST` | `/api/v1/search/reindex` | Trigger full entity reindex; **Admin only** (H-14, M22.7) |
-| `POST/GET` | `/api/v1/policies` | Create / list declarative ABAC policies; 8 operators (Equals, NotEquals, In, NotIn, GreaterThan, LessThan, Contains, Exists); first-match-wins; default-deny (M22.6) |
-| `GET/PUT/DELETE` | `/api/v1/policies/{id}` | Read / update / delete policy (M22.6) |
+| `POST/GET` | `/api/v1/policies` | Create / list declarative ABAC policies; 8 operators (Equals, NotEquals, In, NotIn, GreaterThan, LessThan, Contains, Exists); first-match-wins (immutable Deny evaluated first); default-deny (M22.6); **400** on create for reserved name prefixes `trust:` / `builtin:` — server-managed (HSI §2, TASK-077) |
+| `GET/PUT/DELETE` | `/api/v1/policies/{id}` | Read / update / delete policy (M22.6); update rejected (400) for `built_in` or `immutable` policies; delete rejected (400) for `built_in`; reserved-prefix rename rejected (400) (TASK-077) |
 | `POST` | `/api/v1/policies/evaluate` | Dry-run evaluation: `{context}` -> `{decision: Allow|Deny, matched_policy?, reason}` (M22.6) |
 | `GET` | `/api/v1/policies/decisions` | Decision audit log (`?policy_id=&effect=&since=`) (M22.6) |
 | `GET` | `/api/v1/policies/effective` | Effective permissions explorer for a given attribute context (M22.6) |
