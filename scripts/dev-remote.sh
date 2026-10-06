@@ -84,7 +84,13 @@ const hashes = branch.filter(sha => {
   const paths = execFileSync('git', ['diff-tree', '--no-commit-id', '--name-only', '-r', sha], {encoding:'utf8'}).trim().split('\n');
   return paths.some(path => path.startsWith('crates/') || path.startsWith('web/src/') || path.startsWith('web/tests/'));
 });
-lines.splice(start, end - start, `commits: [${hashes.map(h => JSON.stringify(h)).join(', ')}]`);
+// Union with entries already recorded: check-task-commit-attribution.sh scans
+// ALL history, so SHAs from earlier rounds (now merged to main, hence outside
+// origin/main..HEAD) must survive every rebuild. Replacing the list re-created
+// attribution drift on every round (task-077 R1 SHAs were dropped twice).
+const existing = (lines.slice(start, end).join(' ').match(/[0-9a-f]{7,40}/g)) || [];
+const all = [...new Set([...existing, ...hashes])];
+lines.splice(start, end - start, `commits: [${all.map(h => JSON.stringify(h)).join(', ')}]`);
 parts[1] = lines.join('\n');
 if (!parts[1].endsWith('\n')) parts[1] += '\n';
 fs.writeFileSync(file, parts.join('---'));
