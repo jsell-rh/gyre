@@ -6,7 +6,6 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TASKS_DIR="$REPO_ROOT/specs/tasks"
 REVIEWS_DIR="$REPO_ROOT/specs/reviews"
-WORKTREE_BASE="$REPO_ROOT/worktrees/workers"
 JSON_MODE=false
 [[ "${1:-}" == "--json" ]] && JSON_MODE=true
 
@@ -130,16 +129,6 @@ for f in "$TASKS_DIR"/task-*.md; do
     name=$(basename "$f" .md)
     status="${_task_status_map[$name]:-unknown}"
 
-    # Override with live worktree status if a worker is active for this task
-    wt_file="$WORKTREE_BASE/$name/specs/tasks/$name.md"
-    if [[ -d "$WORKTREE_BASE/$name" ]] && [[ -f "$wt_file" ]]; then
-        wt_status=$(awk '/^---$/{c++; if(c==2) exit} c==1 && /^progress:/{s=$2; gsub(/^[ \t"]+|[ \t"]+$/, "", s); print s}' "$wt_file" 2>/dev/null)
-        [[ -z "$wt_status" ]] && wt_status="$status"
-        # Worktree exists but task not yet updated — treat as in-progress
-        [[ "$wt_status" == "not-started" ]] && wt_status="in-progress"
-        _task_status_map[$name]="$wt_status"
-        status="$wt_status"
-    fi
     title="${_task_title_map[$name]:-}"
     [[ -z "$title" ]] && title=$(head -1 "$f" | sed -E 's/^# (TASK-[0-9]+|Task [0-9]+): //')
     # Replace em-dashes with plain dashes for consistent column width
@@ -461,39 +450,14 @@ if [ -f "$REPO_ROOT/specs/coverage/SUMMARY.md" ]; then
     echo ""
 fi
 
-# Loop status
-echo "${BOLD}Loop${RESET}"
-if [ -f /tmp/gyre-loop.log ]; then
-    active_workers=0
-    worker_names=""
-    if [ -d "$WORKTREE_BASE" ]; then
-        for wt in "$WORKTREE_BASE"/task-*/; do
-            [ -d "$wt" ] || continue
-            wt_name=$(basename "$wt")
-            if [ ! -f "$wt/.done" ]; then
-                active_workers=$((active_workers + 1))
-                phase=$(grep "\[$wt_name\]" /tmp/gyre-loop.log 2>/dev/null | tail -1 | grep -oP '>>>\s*\K\w+' || echo "working")
-                worker_names+="    ${CYAN}$wt_name${RESET}  ${DIM}($phase)${RESET}\n"
-            fi
-        done
-    fi
-
-    if [ $active_workers -gt 0 ]; then
-        echo "  Mode:               ${CYAN}parallel${RESET} ($active_workers workers)"
-        echo -e "$worker_names"
-    else
-        last_line=$(tail -1 /tmp/gyre-loop.log)
-        echo "  Last action:        $last_line"
-    fi
-
-    iterations=$(grep "Orchestrator cycle" /tmp/gyre-loop.log 2>/dev/null | wc -l)
-    echo "  Iterations:         $iterations"
-
-    merges=$(grep -E "Merge successful|Conflict auto-resolved" /tmp/gyre-loop.log 2>/dev/null | wc -l)
-    [ "$merges" -gt 0 ] && echo "  Worktree merges:    $merges"
+# Controller status
+echo "${BOLD}Development Controller${RESET}"
+if [ -f "$REPO_ROOT/.gyre-dev-controller/state.sqlite3" ]; then
+    python3 "$REPO_ROOT/scripts/dev-controller.py" status | head -8 | sed 's/^/  /'
 else
-    echo "  ${DIM}(loop not running — start with: tmux new-session -d -s gyre-loop && bash scripts/loop.sh)${RESET}"
+    echo "  ${DIM}(no ledger — run: python3 scripts/dev-controller.py sync)${RESET}"
 fi
+echo "  ${DIM}Cockpit: http://127.0.0.1:7690${RESET}"
 echo ""
 
 # Experiment comparison
