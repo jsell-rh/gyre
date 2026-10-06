@@ -497,7 +497,7 @@ pub(crate) async fn broadcast_presence_departure(
                     let _ = tx.try_send(payload.clone());
                 }
             }
-    }
+        }
     }
 }
 

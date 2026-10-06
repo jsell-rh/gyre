@@ -1162,9 +1162,9 @@ pub(crate) async fn evict_stale_presence(state: &Arc<AppState>) {
         };
         if let Ok(payload) = serde_json::to_string(&evict_msg) {
             let conns = state.ws_connections.read().await;
-    if let Some(tx) = conns.get(&conn_id) {
-        let _ = tx.try_send(payload);
-    }
+            if let Some(tx) = conns.get(&conn_id) {
+                let _ = tx.try_send(payload);
+            }
         }
 
         crate::ws::broadcast_presence_departure(&state, &user_id, &session_id, &workspace_id).await;
