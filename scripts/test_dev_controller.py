@@ -107,6 +107,18 @@ class ControllerGitTest(unittest.TestCase):
             spawn.assert_called_once()
             self.assertEqual(spawn.call_args.args[1]["name"], "task-001")
 
+    def test_spawn_snapshots_driver_before_launch(self):
+        controller.sync(self.db)
+        task = self.db.execute("SELECT * FROM tasks WHERE name='task-001'").fetchone()
+        with patch.object(controller.subprocess, "Popen") as popen:
+            popen.return_value.pid = 12345
+            controller.spawn(self.db, task, "worker", branch="devloop/task-001/attempt-1")
+        command = popen.call_args.args[0]
+        snapshot = Path(command[2])
+        self.assertEqual(snapshot.read_bytes(),
+                         (controller.ROOT / "scripts/dev-sandbox.sh").read_bytes())
+        self.assertEqual(popen.call_args.kwargs["env"]["GYRE_DEV_ROOT"], str(controller.ROOT))
+
     def test_sync_keeps_checkpoint_seed_for_ready_task(self):
         controller.sync(self.db)
         base = git(self.work, "rev-parse", "main")

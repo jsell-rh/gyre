@@ -164,10 +164,16 @@ def spawn(db, task, kind, branch=None, sha=None, base=None):
     else:
         script = ROOT / "scripts/dev-sandbox.sh"
         args = ["check", task["name"], sha, base, ident]
+    # Bash reads scripts incrementally. Snapshot the driver before launch so
+    # edits to the repo cannot corrupt a running attempt's parse stream.
+    snapshot = directory / "dev-sandbox.sh"
+    snapshot.write_bytes(script.read_bytes())
+    snapshot.chmod(0o700)
     # The wrapper records exit status even if the controller itself exits.
     wrapper = ROOT / "scripts/dev-process.sh"
-    p = subprocess.Popen([str(wrapper), str(directory / "exit"), str(script), *args],
-                         cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    p = subprocess.Popen([str(wrapper), str(directory / "exit"), str(snapshot), *args],
+                         cwd=ROOT, env={**os.environ, "GYRE_DEV_ROOT": str(ROOT)},
+                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     db.execute("INSERT INTO attempts(id,task,kind,branch,sha,base,state,pid,started) VALUES(?,?,?,?,?,?,?,?,?)",
                (ident, task["name"], kind, branch, sha, base, "running", p.pid, int(time.time())))
     db.execute("UPDATE tasks SET state=? WHERE name=?", ("running" if kind == "worker" else "checking", task["name"]))

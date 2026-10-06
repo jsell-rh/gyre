@@ -6,7 +6,7 @@ case "$MODE:$TASK" in
   worker:task-[0-9]*|check:task-[0-9]*) ;;
   *) echo "invalid mode/task" >&2; exit 2;;
 esac
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=${GYRE_DEV_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 [[ "$ARG3" =~ ^[a-f0-9]{16}$ ]] || { echo "invalid attempt id" >&2; exit 2; }
 SANDBOX="gyre-${TASK#task-}-${MODE:0:1}-${ARG3:0:8}"
 OS=${OPENSHELL:-openshell}
