@@ -29,7 +29,7 @@
 # count must never rise; it must shrink as routes are moved into the
 # resolver (delete the entry when you register a route).
 FROZEN_EXEMPTION_COUNT=53
-FROZEN_DUPLICATE_COUNT=22
+FROZEN_DUPLICATE_COUNT=17
 
 #
 # Run by pre-commit and CI.
@@ -64,13 +64,13 @@ grep -o '"/api/v1/[^"]*"' "$API_MOD" | tr -d '"' | sort -u > /tmp/.abac-router-p
 # covers the route).
 grep -o '"/api/v1/[^"]*"' "$ABAC" | tr -d '"' | sort -u > /tmp/.abac-resolver-paths.$$
 
-# Duplicate-resolver detection (task-095 R3-F4 cosmetic sub-finding): the
-# five recovery routes are registered twice in the resolver — the first
-# match wins in `resolve()`, so every later duplicate entry is dead code,
-# including its resource mapping (the duplicate post-merge-gates entry
-# maps to "gate" but the first-match entry maps it differently). 22 paths
-# are currently duplicated; frozen so the count must shrink as duplicates
-# are removed, never grow.
+# Duplicate-resolver detection (task-095 R3-F4): resolve() is first-match,
+# so every duplicate entry after the first is dead code whose resource
+# mapping silently never runs (the duplicate post-merge-gates entry mapped
+# to "gate" but the first-match entry mapped it to "repo"). The five
+# recovery routes were registered twice until task-095 R3-F4 removed the
+# dead duplicates — 17 legacy paths remain duplicated; frozen so the count
+# must shrink as duplicates are removed, never grow.
 grep -o '"/api/v1/[^"]*"' "$ABAC" | tr -d '"' | sort | uniq -d > /tmp/.abac-dup-paths.$$
 DUPLICATE_COUNT=$(wc -l < /tmp/.abac-dup-paths.$$)
 if [ "$DUPLICATE_COUNT" -gt "$FROZEN_DUPLICATE_COUNT" ]; then

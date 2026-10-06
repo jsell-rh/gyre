@@ -182,6 +182,25 @@ impl GitOpsPort for NoopGitOps {
 #[cfg(test)]
 pub struct ConfigurableGitOps {
     pub conflict_branches: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// SHAs passed to `revert_commit`, in call order (task-095 R3-F1:
+    /// tests must be able to observe WHICH commit was reverted).
+    pub revert_calls: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// When true, `revert_commit` fails — the double must be able to fail,
+    /// so error paths of the revert flow are testable (task-095 F8 lesson).
+    pub revert_fails: bool,
+}
+
+#[cfg(test)]
+impl Default for ConfigurableGitOps {
+    fn default() -> Self {
+        Self {
+            conflict_branches: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+            revert_calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            revert_fails: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -191,6 +210,7 @@ impl ConfigurableGitOps {
             branches.into_iter().map(|s| s.to_string()).collect();
         Self {
             conflict_branches: Arc::new(std::sync::Mutex::new(set)),
+            ..Default::default()
         }
     }
 }
@@ -326,9 +346,15 @@ impl GitOpsPort for ConfigurableGitOps {
         &self,
         _repo_path: &str,
         _branch: &str,
-        _sha_to_revert: &str,
+        sha_to_revert: &str,
     ) -> Result<String> {
-        Ok("0000000000000000000000000000000000000000".to_string())
+        if self.revert_fails {
+            return Err(anyhow::anyhow!(
+                "revert_commit failed (ConfigurableGitOps revert_fails)"
+            ));
+        }
+        self.revert_calls.lock().push(sha_to_revert.to_string());
+        Ok(format!("revert-of-{sha_to_revert}"))
     }
 }
 
