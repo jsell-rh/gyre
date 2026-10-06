@@ -212,6 +212,7 @@ pub async fn get_span_payload(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use base64::Engine as _;
     use gyre_common::{GateTrace, Id, SpanKind, SpanStatus, TraceSpan};
     use gyre_domain::{MergeRequest, Workspace};
     use http::{Request, StatusCode};
