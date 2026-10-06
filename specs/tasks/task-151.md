@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "business-continuity.md §2.2 Health Checks / Liveness Probes"
-commits: []
+commits: ["1e8141f4945d73af255d3f18605f6246731f923c"]
 ---
 
 ## Spec Excerpt
