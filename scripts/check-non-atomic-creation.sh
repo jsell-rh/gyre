@@ -45,139 +45,110 @@ echo "Checking for non-atomic entity creation with dependent records..."
 # Strategy: For each non-test .rs file, find functions that contain
 # `state.<repo1>.create(` AND `state.<repo2>.create(` where repo1 != repo2,
 # without a transaction wrapper between them.
+#
+# Implemented in python3 (like the sibling checks) so behavior is identical
+# on gawk and mawk hosts: the previous embedded awk used gawk-only 3-arg
+# match(), which made this check abort on mawk — a red gate on any host
+# without gawk, regardless of the code.
 
-check_non_atomic_creation() {
-    local file="$1"
+python3 - "$SERVER_SRC" <<'PYEOF'
+import re
+import sys
+from pathlib import Path
 
-    # Skip test files
-    if echo "$file" | grep -qE '(/tests/|_test\.rs)'; then
+FN_RE = re.compile(r'^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)')
+CREATE_RE = re.compile(r'state\.([a-z_]+)\.create\(')
+TX_RE = re.compile(r'transaction|begin_transaction|apply_trust_transition|\.atomic\(')
+EXEMPT = 'non-atomic-create:ok'
+TEST_MOD_RE = re.compile(r'^\s*(#\[[^\]]*\]\s*)?(pub )?mod tests\b')
+
+def fix_options():
+    return (
+        "\n"
+        "  Fix options:\n"
+        "    1. Use a transactional domain service method for the entire creation\n"
+        "    2. Wrap all creations in a single database transaction\n"
+        "    3. If intentional: add '// non-atomic-create:ok — <reason>' on each create line\n"
+        "\n"
+    )
+
+def check_file(path):
+    try:
+        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
         return 0
-    fi
+    violations = 0
+    fn_name = ''
+    fn_start = 0
+    has_exempt = False
+    has_transaction = False
+    repos_seen = {}
 
-    # Find all create calls: state.<repo>.create(
-    local create_calls
-    create_calls=$(grep -n 'state\.[a-z_]*\.create(' "$file" 2>/dev/null \
-        | grep -v '// non-atomic-create:ok\|#\[test\]\|#\[cfg(test)\]' \
-        || true)
+    def flush(out):
+        nonlocal violations
+        if fn_name and not has_exempt and len(repos_seen) > 1 and not has_transaction:
+            out.append(f"NON-ATOMIC CREATION: {fn_name} in {path}:{fn_start}")
+            out.append(f"  Creates entities via {len(repos_seen)} different repositories without a transaction:")
+            for repo, line_no in repos_seen.items():
+                out.append(f"    - state.{repo}.create() at line {line_no}")
+            out.append("")
+            out.append("  If any creation fails mid-sequence, the parent entity exists without")
+            out.append("  all its required dependent records — silently violating domain invariants.")
+            out.append(fix_options())
+            violations += 1
 
-    if [ -z "$create_calls" ]; then
+    out = []
+    for idx, line in enumerate(lines, 1):
+        # Test modules are outside the check's scope (mirrors the awk
+        # pre-filter that dropped #[cfg(test)] create calls).
+        if TEST_MOD_RE.match(line):
+            flush(out)
+            fn_name = ''
+            break
+        m = FN_RE.match(line)
+        if m:
+            flush(out)
+            fn_name = m.group(1)
+            fn_start = idx
+            has_exempt = False
+            has_transaction = False
+            repos_seen = {}
+            if fn_name.startswith('test_'):
+                fn_name = ''
+            continue
+        if fn_name:
+            if EXEMPT in line:
+                has_exempt = True
+            if TX_RE.search(line):
+                has_transaction = True
+            cm = CREATE_RE.search(line)
+            if cm and cm.group(1) not in repos_seen:
+                repos_seen[cm.group(1)] = idx
+    flush(out)
+    for line in out:
+        print(line)
+    return violations
+
+def main():
+    root = Path(sys.argv[1])
+    total = 0
+    for path in sorted(root.rglob('*.rs')):
+        sp = str(path)
+        if '/tests/' in sp or sp.endswith('_test.rs'):
+            continue
+        total += check_file(path)
+    if total == 0:
+        print("")
+        print("Non-atomic creation check passed.")
+        print("No handlers found with multi-repository creation without transaction wrapping.")
         return 0
-    fi
+    print("")
+    print("Fix: Wrap related entity creations in a single transaction or use a")
+    print("     transactional domain service method.")
+    print("     Exempt with: // non-atomic-create:ok — <reason>")
+    print("See: specs/reviews/task-077.md F2 (non-atomic workspace+policy creation)")
+    print(f"{total} violation(s) found.")
+    return 1
 
-    # Extract unique repository names from create calls
-    local repo_names
-    repo_names=$(echo "$create_calls" | grep -oP 'state\.(\K[a-z_]+)(?=\.create\()' | sort -u || true)
-
-    local repo_count
-    repo_count=$(echo "$repo_names" | grep -c '.' || true)
-
-    if [ "$repo_count" -lt 2 ]; then
-        return 0
-    fi
-
-    # Multiple distinct repos have .create() calls in this file.
-    # Now check per-function: find functions with 2+ distinct repo create calls.
-
-    awk -v file="$file" '
-    /^\s*(pub\s+)?(async\s+)?fn\s+/ {
-        # Emit previous function results if any
-        if (fn_name != "" && !has_exempt && distinct_repos > 1 && !has_transaction) {
-            printf "NON-ATOMIC CREATION: %s in %s:%d\n", fn_name, file, fn_start
-            printf "  Creates entities via %d different repositories without a transaction:\n", distinct_repos
-            for (r in repos_seen) {
-                printf "    - state.%s.create() at line %s\n", r, repos_seen[r]
-            }
-            printf "\n"
-            printf "  If any creation fails mid-sequence, the parent entity exists without\n"
-            printf "  all its required dependent records — silently violating domain invariants.\n"
-            printf "\n"
-            printf "  Fix options:\n"
-            printf "    1. Use a transactional domain service method for the entire creation\n"
-            printf "    2. Wrap all creations in a single database transaction\n"
-            printf "    3. If intentional: add '\''// non-atomic-create:ok — <reason>'\'' on each create line\n"
-            printf "\n"
-            violations++
-        }
-
-        # Reset for new function
-        match($0, /fn ([a-zA-Z_][a-zA-Z0-9_]*)/, m)
-        fn_name = m[1]
-        fn_start = NR
-        has_exempt = 0
-        has_transaction = 0
-        distinct_repos = 0
-        delete repos_seen
-
-        # Skip test functions
-        if (fn_name ~ /^test_/) fn_name = ""
-        next
-    }
-    fn_name != "" {
-        if ($0 ~ /non-atomic-create:ok/) has_exempt = 1
-
-        # Detect transaction wrappers
-        if ($0 ~ /transaction|begin_transaction|apply_trust_transition|\.atomic\(/) {
-            has_transaction = 1
-        }
-
-        # Detect state.<repo>.create( calls
-        if (match($0, /state\.([a-z_]+)\.create\(/, m)) {
-            repo = m[1]
-            if (!(repo in repos_seen)) {
-                repos_seen[repo] = NR
-                distinct_repos++
-            }
-        }
-    }
-    END {
-        # Check last function
-        if (fn_name != "" && !has_exempt && distinct_repos > 1 && !has_transaction) {
-            printf "NON-ATOMIC CREATION: %s in %s:%d\n", fn_name, file, fn_start
-            printf "  Creates entities via %d different repositories without a transaction:\n", distinct_repos
-            for (r in repos_seen) {
-                printf "    - state.%s.create() at line %s\n", r, repos_seen[r]
-            }
-            printf "\n"
-            printf "  If any creation fails mid-sequence, the parent entity exists without\n"
-            printf "  all its required dependent records — silently violating domain invariants.\n"
-            printf "\n"
-            printf "  Fix options:\n"
-            printf "    1. Use a transactional domain service method for the entire creation\n"
-            printf "    2. Wrap all creations in a single database transaction\n"
-            printf "    3. If intentional: add '\''// non-atomic-create:ok — <reason>'\'' on each create line\n"
-            printf "\n"
-            violations++
-        }
-        printf "VIOLATIONS:%d\n", violations
-    }
-    ' "$file"
-}
-
-# Collect violations
-TOTAL_VIOLATIONS=0
-while read -r file; do
-    output=$(check_non_atomic_creation "$file")
-    if [ -n "$output" ]; then
-        # Extract violation count from last line
-        v=$(echo "$output" | grep '^VIOLATIONS:' | cut -d: -f2)
-        if [ -n "$v" ] && [ "$v" -gt 0 ]; then
-            # Print everything except the VIOLATIONS: line
-            echo "$output" | grep -v '^VIOLATIONS:'
-            TOTAL_VIOLATIONS=$((TOTAL_VIOLATIONS + v))
-        fi
-    fi
-done < <(find "$SERVER_SRC" -name '*.rs' -type f | sort)
-
-echo ""
-if [ "$TOTAL_VIOLATIONS" -eq 0 ]; then
-    echo "Non-atomic creation check passed."
-    echo "No handlers found with multi-repository creation without transaction wrapping."
-    exit 0
-else
-    echo "Fix: Wrap related entity creations in a single transaction or use a"
-    echo "     transactional domain service method."
-    echo "     Exempt with: // non-atomic-create:ok — <reason>"
-    echo "See: specs/reviews/task-077.md F2 (non-atomic workspace+policy creation)"
-    echo "${TOTAL_VIOLATIONS} violation(s) found."
-    exit 1
-fi
+sys.exit(main())
+PYEOF
