@@ -78,8 +78,8 @@ if [ "$DUPLICATE_COUNT" -gt "$FROZEN_DUPLICATE_COUNT" ]; then
     echo ""
     echo "ResourceResolver::resolve() is first-match, so every duplicate entry"
     echo "after the first is dead — its resource mapping silently never runs"
-    echo "(task-095 R3-F4: the duplicate post-merge-gates mapping to \"gate\""
-    echo "is shadowed by the earlier entry). Remove the duplicate entries;"
+    echo "(task-095 R3-F4: the duplicate post-merge-gates entries disagreed on"
+    echo "resource type — only the first-match mapping ever ran). Remove the duplicate entries;"
     echo "if you removed all duplicates of a path, the count shrinks — lower"
     echo "FROZEN_DUPLICATE_COUNT to match; never raise it."
     FAIL=1
