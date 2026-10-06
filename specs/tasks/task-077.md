@@ -10,7 +10,7 @@ coverage_sections:
   - "human-system-interface.md §11 Trust Levels"
   - "human-system-interface.md §12 What Each Level Controls"
   - "human-system-interface.md §13 Mechanical Implementation"
-commits: ["a7ca36f1336a46ae55dcf3676648d9d35b16066b", "2ac914490c6f68062cdda74594c645479580df37", "5380070bb1e35b1637d18d1a680ac6d36cbd6066", "61cbd8cd3fda197ff06a1533d4b53a0e6b888e1b", "dc06839cca4f3d3aadd576c2d0ef748c570a7b99", "26b3cff8fcb66eb807a59f88d1fbe3fdde00acb3"]
+commits: ["2db3f1efe11140eadb6dbe704eda86ba94d2e1b0", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "a7ca36f1336a46ae55dcf3676648d9d35b16066b", "2ac914490c6f68062cdda74594c645479580df37", "5380070bb1e35b1637d18d1a680ac6d36cbd6066", "61cbd8cd3fda197ff06a1533d4b53a0e6b888e1b", "dc06839cca4f3d3aadd576c2d0ef748c570a7b99", "26b3cff8fcb66eb807a59f88d1fbe3fdde00acb3"]
 ---
 
 ## Spec Excerpt
@@ -68,20 +68,68 @@ Trust is a **workspace-level setting** (`trust_level: TrustLevel` enum: `Supervi
 
 ## Acceptance Criteria
 
-- [ ] `TrustLevel` enum exists in `gyre-common`
-- [ ] Workspace entity has `trust_level` field, default `Supervised`
-- [ ] DB migration adds `trust_level` to workspaces, `immutable` to policies
-- [ ] Trust preset policy sets defined for Supervised, Guided, Autonomous
-- [ ] Trust transitions run in a single DB transaction (atomic)
-- [ ] ABAC engine evaluates immutable Deny policies first
-- [ ] `builtin:require-human-spec-approval` seeded at startup
-- [ ] Policy CRUD rejects `trust:` and `builtin:` prefixes (400)
-- [ ] `PUT /api/v1/workspaces/:id` accepts `trust_level`, applies transition
-- [ ] 409 returned on failed trust transition
-- [ ] ABAC cache invalidated after trust transition commit
-- [ ] Unit tests for trust policy generation and transition logic
-- [ ] Integration test: change trust level → verify policies created/deleted
-- [ ] `cargo test --all` passes, `cargo fmt --all` clean
+- [x] `TrustLevel` enum exists in `gyre-common` (see R4 note 1 — lives in `gyre-domain` with the Workspace entity)
+- [x] Workspace entity has `trust_level` field, default `Supervised`
+- [x] DB migration adds `trust_level` to workspaces, `immutable` to policies
+- [x] Trust preset policy sets defined for Supervised, Guided, Autonomous
+- [x] Trust transitions run in a single DB transaction (atomic)
+- [x] ABAC engine evaluates immutable Deny policies first
+- [x] `builtin:require-human-spec-approval` seeded at startup
+- [x] Policy CRUD rejects `trust:` and `builtin:` prefixes (400)
+- [x] `PUT /api/v1/workspaces/:id` accepts `trust_level`, applies transition
+- [x] 409 returned on failed trust transition
+- [x] ABAC cache invalidated after trust transition commit (see R4 note 2)
+- [x] Unit tests for trust policy generation and transition logic
+- [x] Integration test: change trust level → verify policies created/deleted
+- [x] `cargo test --all` passes, `cargo fmt --all` clean
+
+## R4 Revision Notes (2026-10-06, addresses R2 F5–F8)
+
+**F5 (merge-time enforcement):** `merge_processor.rs` now evaluates ABAC before every
+merge with the specced identity — `subject.type: "system"`, `subject.id: "merge-processor"`,
+`action: "merge"`, `resource_type: "mr"` (`merge_processor.rs:2626-2628`). On Deny
+(i.e. a Supervised workspace's `trust:require-human-mr-review`) the entry is HELD
+(requeued with reason, not failed) until a human sets `Approved` via the MR status
+endpoint; the endpoint rejects agent subjects (403) and the processor's own
+`Open → Approved` transition happens only after the gate, so it cannot self-satisfy.
+Covered by `merge_processor.rs` trust-gate tests (hold on Supervised, proceed after
+human approval) and the endpoint guard tests (human 200 / agent 403 + MR stays Open).
+`system-full-access` matches by `subject.id == "gyre-system-token"`, not type
+(policy_engine test `system_full_access_matches_by_id_not_type`);
+`hierarchy-enforcement.md` §4 amended to match (identity bypass).
+`scripts/inert-enforcement-exemptions.txt` merge_processor entries deleted.
+
+**F6 (fail-closed restriction creation):** `create_interrogation_policies_in`
+(spawn.rs:252-263) propagates the first create error; the spawn handler rolls back
+the agent record + token on failure (spawn.rs:493-497). `cleanup_interrogation_policies`
+keeps the kv id record on partial delete failure so the next pass retries
+(spawn.rs:286-310). `scripts/warn-continue-creation-exemptions.txt` is now empty.
+
+**F7 (Custom transition directions):** `trust_transition_preset_to_custom_preserves_trust_policies`
+and the Custom → Guided test (workspaces.rs:942-1104) assert preservation and
+delete+reseed respectively, including that a non-trust user policy survives.
+
+**F8 (field-level generator tests):** `gyre-domain/src/policy.rs` test module asserts
+effect/priority(150, band 100-199)/actions/resource_types/`subject.type == "system"`
+condition per level; `workspace.rs` covers `from_db_str` four arms + unknown →
+Supervised fallback. `cargo test -p gyre-domain --lib`: 369 passed.
+
+**Note 1 (AC wording):** the plan text said `gyre-common`, but the `Workspace` entity
+itself lives in `gyre-domain` (the plan's "workspace entity is in gyre-common" is
+factually wrong for this repo); `TrustLevel` is colocated with its entity and
+re-exported through the domain crate. HSI §2 mandates the field, not the crate.
+
+**Note 2 (AC 11):** there is no ABAC policy-result cache (only JWKS/graph/dep-staleness
+caches). Every evaluation loads `state.policies.list()` fresh
+(abac_middleware.rs:836-842), and the transition commits through the same store in one
+transaction, so a transition is visible on the next request — the spec's
+"invalidate after commit" requirement holds vacuously; documented at the load site.
+
+**Note 3 (attribution tooling):** the `commits:` list had dropped the five R1 revision
+SHAs twice. Root cause: `scripts/dev-remote.sh` rebuilt the field from
+`origin/main..HEAD` only — R1 SHAs merged to main fall outside that range, and
+`check-task-commit-attribution.sh` scans ALL history. Fixed by unioning existing
+frontmatter entries with the branch-range list (verified idempotent).
 
 ## Agent Instructions
 
