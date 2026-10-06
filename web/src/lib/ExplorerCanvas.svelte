@@ -791,7 +791,7 @@
       const st = statsMap.get(nid);
       st.durations.push(s.duration_us);
       st.total++;
-      if (s.status === 'error' || s.status === 'ERROR') st.errors++;
+      if ((s.status ?? '').toLowerCase() === 'error') st.errors++;
     }
     // Compute percentiles
     const result = new Map();
@@ -867,7 +867,7 @@
 
       if (currentTime >= spanStart && currentTime <= spanEnd) {
         const progress = (currentTime - spanStart) / (span.duration_us || 1);
-        const isError = span.status === 'error' || span.status === 'ERROR';
+        const isError = (span.status ?? '').toLowerCase() === 'error';
         newParticles.push({
           fromId: parent.graph_node_id,
           toId: span.graph_node_id,
