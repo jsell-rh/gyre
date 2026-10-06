@@ -29,7 +29,7 @@
 //!   - Spec approvals (approve, list, revoke)
 //!   - Auth: missing/invalid token → 401
 
-use gyre_server::{abac_middleware, build_router, build_state};
+use gyre_server::{abac_middleware, build_router, build_state, jobs, AppState};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -40,6 +40,7 @@ const TOKEN: &str = "api-integration-token";
 struct Ctx {
     client: reqwest::Client,
     base: String,
+    state: Arc<AppState>,
 }
 
 impl Ctx {
@@ -56,6 +57,7 @@ impl Ctx {
         Self {
             client: reqwest::Client::new(),
             base: base_url,
+            state,
         }
     }
 
@@ -145,8 +147,27 @@ async fn health_returns_ok() {
 }
 
 #[tokio::test]
-async fn healthz_returns_ok() {
+async fn healthz_reports_missing_jobs_then_recovers() {
     let ctx = Ctx::new().await;
+    let resp = ctx.get("/healthz").await;
+    assert_eq!(resp.status(), 503);
+    let j: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(j["status"], "error");
+    assert_eq!(j["checks"]["merge_processor"], "not_scheduled");
+
+    jobs::start_job_registry(ctx.state.clone()).await;
+    for name in [
+        "merge_processor",
+        "stale_agent_detector",
+        "retention_cleanup",
+        "spawn_budget_reset",
+    ] {
+        ctx.state.job_registry.mark_scheduled(name).await;
+        ctx.state
+            .job_registry
+            .record_cycle(name, ctx.state.started_at_secs, &Ok(()))
+            .await;
+    }
     let resp = ctx.get("/healthz").await;
     assert_eq!(resp.status(), 200);
     let j: serde_json::Value = resp.json().await.unwrap();
@@ -154,8 +175,22 @@ async fn healthz_returns_ok() {
 }
 
 #[tokio::test]
-async fn readyz_returns_ok() {
+async fn readyz_reports_missing_merge_loop_then_recovers() {
     let ctx = Ctx::new().await;
+    let resp = ctx.get("/readyz").await;
+    assert_eq!(resp.status(), 503);
+    let j: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(j["checks"]["merge_processor"], "not_scheduled");
+
+    jobs::start_job_registry(ctx.state.clone()).await;
+    ctx.state
+        .job_registry
+        .mark_scheduled("merge_processor")
+        .await;
+    ctx.state
+        .job_registry
+        .record_cycle("merge_processor", ctx.state.started_at_secs, &Ok(()))
+        .await;
     let resp = ctx.get("/readyz").await;
     assert_eq!(resp.status(), 200);
     let j: serde_json::Value = resp.json().await.unwrap();
