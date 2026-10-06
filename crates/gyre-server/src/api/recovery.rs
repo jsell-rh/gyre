@@ -110,7 +110,10 @@ fn gate_type_to_str(t: &GateType) -> &'static str {
     }
 }
 
-async fn post_merge_gates(state: &AppState, repo_id: &str) -> Result<Vec<PostMergeGateDto>, ApiError> {
+async fn post_merge_gates(
+    state: &AppState,
+    repo_id: &str,
+) -> Result<Vec<PostMergeGateDto>, ApiError> {
     let gates = state
         .quality_gates
         .list_by_repo_id_and_phase(repo_id, GatePhase::PostMerge)
@@ -272,12 +275,10 @@ pub async fn revert_mr(
     }
 
     // Resolve the merge commit: the target branch HEAD (the merge landed it).
-    let merge_sha = crate::git_refs::resolve_ref(
-        &repo.path,
-        &format!("refs/heads/{}", mr.target_branch),
-    )
-    .await
-    .unwrap_or_default();
+    let merge_sha =
+        crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.target_branch))
+            .await
+            .unwrap_or_default();
 
     let revert_commit_sha = state
         .git_ops
@@ -381,5 +382,8 @@ pub async fn set_post_merge_gates(
 
     let gates = post_merge_gates(&state, &repo_id).await?;
 
-    Ok((StatusCode::OK, Json(PostMergeGatesResponse { repo_id, gates })))
+    Ok((
+        StatusCode::OK,
+        Json(PostMergeGatesResponse { repo_id, gates }),
+    ))
 }
