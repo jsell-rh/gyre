@@ -369,13 +369,22 @@ def host_test_verified(merge_sha, check_id):
 
 
 def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
+    rows = db.execute("SELECT * FROM tasks ORDER BY CASE progress WHEN 'needs-revision' THEN 0 ELSE 1 END,name").fetchall()
+    # Surface exhausted tasks even when every slot is occupied or dispatch is
+    # drained; otherwise they stay misleadingly ready until a slot opens.
+    exhausted = {task["name"] for task in rows if task["state"] == "ready" and
+                 task["attempts"] - task["retry_baseline"] >= max_attempts}
+    for name in sorted(exhausted):
+        db.execute("UPDATE tasks SET state='failed' WHERE name=? AND state='ready'", (name,))
+        event(db, name, f"attempt limit {max_attempts} reached; inspect logs and retry explicitly")
     running = db.execute("SELECT count(*) FROM attempts WHERE state='running'").fetchone()[0]
     launches = 0
     if running >= slots:
         return
-    rows = db.execute("SELECT * FROM tasks ORDER BY CASE progress WHEN 'needs-revision' THEN 0 ELSE 1 END,name").fetchall()
     merged = {r["name"] for r in rows if r["state"] == "merged"}
     for task in rows:
+        if task["name"] in exhausted:
+            continue
         if only_task and task["name"] != only_task:
             continue
         if running >= slots or launches >= launch_burst:
@@ -392,10 +401,6 @@ def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
             running += 1
             launches += 1
         elif task["state"] == "ready" and task["progress"] in ("not-started", "needs-revision") and set(json.loads(task["deps"])) <= merged:
-            if task["attempts"] - task["retry_baseline"] >= max_attempts:
-                db.execute("UPDATE tasks SET state='failed' WHERE name=?", (task["name"],))
-                event(db, task["name"], f"attempt limit {max_attempts} reached; inspect logs and retry explicitly")
-                continue
             attempt_no = task["attempts"] + 1
             branch = f"devloop/{task['name']}/attempt-{attempt_no}"
             db.execute("UPDATE tasks SET attempts=? WHERE name=?", (attempt_no, task["name"]))

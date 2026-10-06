@@ -174,6 +174,14 @@ class ControllerGitTest(unittest.TestCase):
             controller.schedule(self.db, slots=1, max_attempts=3)
         self.assertEqual(spawn.call_args.kwargs["branch"], "devloop/task-001/attempt-4")
 
+    def test_exhausted_ready_task_needs_attention_even_when_drained(self):
+        controller.sync(self.db)
+        self.db.execute("UPDATE tasks SET attempts=3 WHERE name='task-001'")
+        self.db.commit()
+        controller.schedule(self.db, slots=0, max_attempts=3)
+        task = self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()
+        self.assertEqual(task["state"], "failed")
+
     def test_controller_survives_remote_fetch_failure(self):
         git(self.temp.name, "-C", str(controller.SOURCE), "remote", "set-url", "origin", "/nonexistent/gyre.git")
         (controller.STATE / "slots").write_text("0\n")
