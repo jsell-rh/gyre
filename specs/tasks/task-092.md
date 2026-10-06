@@ -6,10 +6,7 @@ progress: needs-revision
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
-commits:
-  - 1ac15418
-  - eee00dba
-  - 330f8d61
+commits: ["64416104721ab61f44834b20d60abeaabd737ee5", "f5061128c4d3753625835bed4f19e7352eafa98d"]
 ---
 
 ## Spec Excerpt
