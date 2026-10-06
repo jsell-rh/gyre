@@ -10,7 +10,7 @@ coverage_sections:
   - "human-system-interface.md §11 Trust Levels"
   - "human-system-interface.md §12 What Each Level Controls"
   - "human-system-interface.md §13 Mechanical Implementation"
-commits: ["5f46866418d96905c6ec07bb271d4f5662a20f94", "9f7fbe8790a2b2947e1ebe5475c7ea207b4639df", "a55eaf7efdc66aad548db572b7441b2ad2768592", "fcbede8465c7f6715bdf784800ec68ec3d7e38d1"]
+commits: ["3c1e588f2304ebb78c16deed53762360fdfe2593", "5f46866418d96905c6ec07bb271d4f5662a20f94", "9f7fbe8790a2b2947e1ebe5475c7ea207b4639df", "a55eaf7efdc66aad548db572b7441b2ad2768592", "fcbede8465c7f6715bdf784800ec68ec3d7e38d1"]
 ---
 
 ## Spec Excerpt
