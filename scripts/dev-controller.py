@@ -424,8 +424,11 @@ def main():
             if match:
                 branches.append((int(match.group(1)), match.group(2)))
         number, seed = max(branches, default=(task["attempts"], task["seed"] or ""))
-        db.execute("UPDATE tasks SET state=CASE WHEN candidate IS NULL THEN 'ready' ELSE 'candidate' END,attempts=?,seed=? WHERE name=?",
-                   (max(number, task["attempts"]), seed or task["seed"], args.task))
+        seed = seed or task["seed"]
+        candidate = seed if seed and task_progress(seed, args.task) == "complete" else None
+        db.execute("UPDATE tasks SET state=?,candidate=?,attempts=?,seed=? WHERE name=?",
+                   ("candidate" if candidate else "ready", candidate,
+                    max(number, task["attempts"]), seed, args.task))
         db.commit()
         event(db, args.task, f"operator requested retry from {seed or task['seed']}")
         return

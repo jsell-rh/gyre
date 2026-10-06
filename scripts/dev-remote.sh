@@ -65,7 +65,7 @@ if [ "$MODE" = worker ]; then
     fi
     # Rebasing rewrites task commit IDs. Rebuild attribution from the exact
     # branch range after each round, including commits the agent made itself.
-    node - "specs/tasks/$TASK.md" <<'JS'
+    TASK="$TASK" node - "specs/tasks/$TASK.md" <<'JS'
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 const [file] = process.argv.slice(2);
@@ -77,9 +77,13 @@ let start = lines.findIndex(line => /^commits:/.test(line));
 if (start < 0) { start = lines.length; lines.push('commits: []'); }
 let end = start + 1;
 while (end < lines.length && !/^[a-z_][\w-]*:/.test(lines[end])) end++;
-const hashes = [...lines.slice(start, end).join('\n').matchAll(/\b[0-9a-f]{7,40}\b/g)].map(m => m[0]);
-const branch = execFileSync('git', ['log', '--no-merges', '--abbrev=8', '--format=%h', 'origin/main..HEAD'], {encoding:'utf8'}).trim().split('\n').filter(Boolean);
-for (const sha of branch) if (!hashes.includes(sha)) hashes.push(sha);
+const branch = execFileSync('git', ['log', '--no-merges', '--format=%H', 'origin/main..HEAD'], {encoding:'utf8'}).trim().split('\n').filter(Boolean);
+const hashes = branch.filter(sha => {
+  const subject = execFileSync('git', ['show', '-s', '--format=%s', sha], {encoding:'utf8'}).trim();
+  if (!subject.includes(process.env.TASK)) return false;
+  const paths = execFileSync('git', ['diff-tree', '--no-commit-id', '--name-only', '-r', sha], {encoding:'utf8'}).trim().split('\n');
+  return paths.some(path => path.startsWith('crates/') || path.startsWith('web/src/') || path.startsWith('web/tests/'));
+});
 lines.splice(start, end - start, `commits: [${hashes.map(h => JSON.stringify(h)).join(', ')}]`);
 parts[1] = lines.join('\n');
 if (!parts[1].endsWith('\n')) parts[1] += '\n';
