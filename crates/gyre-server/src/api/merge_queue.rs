@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{MergeQueueEntry, MergeQueueEntryStatus};
+use gyre_domain::{MergeQueueEntry, MergeQueueEntryStatus, MrStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
@@ -70,6 +70,18 @@ pub async fn enqueue(
         .find_by_id(&mr_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {} not found", mr_id)))?;
+    // Only a mergeable MR may enter the queue (task-095 R3-F2,
+    // platform-model.md §6): the recovery protocol marks an MR `Reverted`,
+    // and §6's "removed from the merge queue permanently" is silently
+    // void if a Reverted / Merged / Closed MR can be re-enqueued and
+    // re-merged. Resubmission goes through a fresh Open MR instead.
+    if !matches!(mr.status, MrStatus::Open | MrStatus::Approved) {
+        return Err(ApiError::Conflict(format!(
+            "merge request {} cannot be enqueued (status: {:?}); only Open or Approved MRs may enter the merge queue",
+            mr_id, mr.status
+        )));
+    }
+
     let entry = MergeQueueEntry::new(new_id(), mr_id.clone(), priority, now_secs());
     state.merge_queue.enqueue(&entry).await?;
 
@@ -292,5 +304,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// TASK-095 R3-F2: only a mergeable MR may enter the queue. A
+    /// `Reverted` MR enqueued here would be silently RE-MERGED by the
+    /// processor — voiding the recovery protocol's Reverted terminal state
+    /// and §6's permanent queue removal.
+    #[tokio::test]
+    async fn enqueue_rejects_non_mergeable_mr() {
+        let (app, state) = make_app().await;
+        let mut mr = MergeRequest::new(
+            Id::new("mr-rev"),
+            Id::new("repo-1"),
+            "Reverted MR",
+            "feat/rev",
+            "main",
+            0,
+        );
+        mr.status = gyre_domain::MrStatus::Reverted;
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-queue/enqueue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "merge_request_id": "mr-rev"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(
+            state.merge_queue.list_queue().await.unwrap().is_empty(),
+            "no queue entry may be created for a non-mergeable MR"
+        );
     }
 }
