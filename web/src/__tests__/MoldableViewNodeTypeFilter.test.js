@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from '@testing-library/svelte';
 
 vi.mock('../lib/api.js', () => ({
@@ -20,6 +20,14 @@ const NODES = [
   { id: 'n4', name: 'AuthTrait', node_type: 'Trait', file_path: 'src/auth.rs' },
 ];
 const EDGES = [];
+
+beforeEach(() => {
+  global.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+});
 
 describe('MoldableView nodeTypeFilter', () => {
   it('renders all nodes when nodeTypeFilter is null', async () => {

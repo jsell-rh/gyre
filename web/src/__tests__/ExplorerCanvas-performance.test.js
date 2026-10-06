@@ -189,7 +189,7 @@ describe('ExplorerCanvas — large graph performance', () => {
     });
     const canvas = container.querySelector('canvas');
     expect(canvas).toBeTruthy();
-  });
+  }, 30000);
 
   it('10k graph shows correct node count in stats', () => {
     const { nodes, edges } = generateLargeGraph(10000, 20000);
@@ -277,7 +277,7 @@ describe('ExplorerCanvas — large graph performance', () => {
     // jsdom regression guard for 15k graph. Typical: 3-8s.
     // Real browser target would be <200ms; jsdom is orders of magnitude slower.
     expect(elapsed).toBeLessThan(20000);
-  });
+  }, 30000);
 
   it('text width cache prevents redundant measureText calls', () => {
     // With 10k nodes, many will share the same labels (node_type names).

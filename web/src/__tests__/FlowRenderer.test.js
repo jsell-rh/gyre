@@ -43,6 +43,7 @@ beforeEach(() => {
     beginPath: vi.fn(),
     arc: vi.fn(),
     fill: vi.fn(),
+    fillText: vi.fn(),
     stroke: vi.fn(),
     moveTo: vi.fn(),
     lineTo: vi.fn(),
