@@ -53,8 +53,8 @@ struct MergeRequestRow {
     depends_on: String,
     atomic_group: Option<String>,
     workspace_id: String,
-    merge_commit_sha: Option<String>,
     reverted_at: Option<i64>,
+    merge_commit_sha: Option<String>,
     revert_commit_sha: Option<String>,
     spec_ref: Option<String>,
 }

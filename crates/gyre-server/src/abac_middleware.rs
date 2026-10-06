@@ -108,7 +108,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/pause", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/resume", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/revert/:mr_id", "repo", Some("write")),
-                RouteResourceMapping::api("/api/v1/repos/:id/post-merge-gates", "repo", None),
+                RouteResourceMapping::api("/api/v1/repos/:id/post-merge-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/provenance", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/aibom", "repo", None),
                 RouteResourceMapping::api(
