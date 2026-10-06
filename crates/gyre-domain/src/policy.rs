@@ -377,7 +377,11 @@ mod tests {
     fn trust_policies_for_level_supervised_generates_merge_hold_deny() {
         let policies = trust_policies_for_level(&TrustLevel::Supervised, "ws-1", "creator-1");
 
-        assert_eq!(policies.len(), 1, "Supervised must generate exactly one policy");
+        assert_eq!(
+            policies.len(),
+            1,
+            "Supervised must generate exactly one policy"
+        );
         let p = &policies[0];
 
         assert_eq!(p.name, "trust:require-human-mr-review");
@@ -408,7 +412,10 @@ mod tests {
         assert_eq!(p.scope, PolicyScope::Workspace);
         assert_eq!(p.scope_id.as_deref(), Some("ws-1"));
         assert!(p.enabled, "trust policy must be enabled");
-        assert!(!p.immutable, "trust policies are overridable by user Allows");
+        assert!(
+            !p.immutable,
+            "trust policies are overridable by user Allows"
+        );
         assert!(!p.built_in);
         assert_eq!(p.created_by, "creator-1");
     }

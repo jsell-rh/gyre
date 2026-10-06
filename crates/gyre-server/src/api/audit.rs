@@ -396,7 +396,10 @@ mod tests {
             "user_agent",
             "timestamp",
         ] {
-            assert!(json.get(key).is_some(), "response missing envelope field {key}");
+            assert!(
+                json.get(key).is_some(),
+                "response missing envelope field {key}"
+            );
         }
     }
 
@@ -429,8 +432,14 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["detail"]["path"].as_str().unwrap(), "/etc/hosts");
         assert_eq!(json["detail"]["pid"].as_u64().unwrap(), 1234);
-        assert!(json.get("path").is_none(), "path must not be a top-level field");
-        assert!(json.get("pid").is_none(), "pid must not be a top-level field");
+        assert!(
+            json.get("path").is_none(),
+            "path must not be a top-level field"
+        );
+        assert!(
+            json.get("pid").is_none(),
+            "pid must not be a top-level field"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

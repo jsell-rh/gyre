@@ -170,7 +170,10 @@ async fn emit(
         None,
         None,
         "container".to_string(),
-        details.get("container_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        details
+            .get("container_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         outcome,
         details,
         None,
