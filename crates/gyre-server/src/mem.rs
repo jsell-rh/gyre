@@ -3556,27 +3556,29 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
             for grid in replaced_gate_run_ids {
                 payloads.retain(|(g, _), _| g != &grid);
             }
-            // Mirror sqlite/trace.rs build_payload_blob: the payload carries
-            // the RAW (untruncated) summaries, and a side that is absent or
-            // empty decodes back to None. A span with neither side captured
-            // stores no payload row (SQLite blob is None → get returns None).
+            // Mirror sqlite/trace.rs build_payload_blob: a payload row exists
+            // whenever either summary side is Some (SQLite builds a blob from
+            // Some("") too), carries the RAW (untruncated) summaries, and an
+            // empty side decodes back to None. A span with neither side
+            // captured stores no payload row (SQLite blob is None → 404).
             for span in &trace.spans {
-                let input = match &span.input_summary {
-                    Some(s) if !s.is_empty() => Some(s.as_bytes().to_vec()),
-                    _ => None,
-                };
-                let output = match &span.output_summary {
-                    Some(s) if !s.is_empty() => Some(s.as_bytes().to_vec()),
-                    _ => None,
-                };
-                if input.is_none() && output.is_none() {
+                if span.input_summary.is_none() && span.output_summary.is_none() {
                     continue;
                 }
+                let payload_side = |s: &Option<String>| {
+                    s.as_deref()
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v.as_bytes().to_vec())
+                };
                 payloads.insert(
                     (trace.gate_run_id.as_str().to_string(), span.span_id.clone()),
-                    gyre_ports::trace::SpanPayload { input, output },
+                    gyre_ports::trace::SpanPayload {
+                        input: payload_side(&span.input_summary),
+                        output: payload_side(&span.output_summary),
+                    },
                 );
             }
+        }
         guard.insert(trace.mr_id.as_str().to_string(), trace.clone());
         Ok(())
     }
