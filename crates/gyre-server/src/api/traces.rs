@@ -245,10 +245,14 @@ mod tests {
         }
     }
 
-    async fn seed_mr_with_trace(state: &std::sync::Arc<crate::AppState>, workspace_id: &str) {
+    async fn seed_mr_with_trace(
+        state: &std::sync::Arc<crate::AppState>,
+        workspace_id: &str,
+        tenant_id: &str,
+    ) {
         let ws = Workspace::new(
             Id::new(workspace_id),
-            Id::new(&format!("{workspace_id}-tenant")),
+            Id::new(tenant_id),
             format!("{workspace_id} name"),
             format!("{workspace_id}-slug"),
             1000,
@@ -301,7 +305,7 @@ mod tests {
     async fn span_payload_returns_base64_payload_for_same_tenant_caller() {
         let state = test_state();
         // Workspace tenant "default" matches the global dev token's tenant.
-        seed_mr_with_trace(&state, "ws-default").await;
+        seed_mr_with_trace(&state, "ws-default", "default").await;
 
         let resp = get_payload(&state, "ws-default-span-1").await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -327,7 +331,7 @@ mod tests {
     #[tokio::test]
     async fn span_payload_returns_404_for_unknown_span() {
         let state = test_state();
-        seed_mr_with_trace(&state, "ws-default").await;
+        seed_mr_with_trace(&state, "ws-default", "default").await;
 
         let resp = get_payload(&state, "does-not-exist").await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -338,7 +342,7 @@ mod tests {
         let state = test_state();
         // Seed a span with neither input nor output captured — the mem
         // adapter stores no payload row for it (SQLite: NULL blob).
-        seed_mr_with_trace(&state, "ws-default").await;
+        seed_mr_with_trace(&state, "ws-default", "default").await;
         let mut mr = state
             .merge_requests
             .find_by_id(&Id::new("ws-default-mr"))
@@ -365,7 +369,7 @@ mod tests {
     async fn span_payload_forbids_cross_tenant_access() {
         let state = test_state();
         // Workspace tenant "ws-other-tenant" ≠ global dev token's "default".
-        seed_mr_with_trace(&state, "ws-other").await;
+        seed_mr_with_trace(&state, "ws-other", "ws-other-tenant").await;
 
         let resp = get_payload(&state, "ws-other-span-1").await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -374,7 +378,7 @@ mod tests {
     #[tokio::test]
     async fn span_payload_requires_authentication() {
         let state = test_state();
-        seed_mr_with_trace(&state, "ws-default").await;
+        seed_mr_with_trace(&state, "ws-default", "default").await;
 
         let resp = app(&state)
             .oneshot(
@@ -391,7 +395,7 @@ mod tests {
     #[tokio::test]
     async fn span_payload_survives_replacement_trace_for_same_mr() {
         let state = test_state();
-        seed_mr_with_trace(&state, "ws-default").await;
+        seed_mr_with_trace(&state, "ws-default", "default").await;
 
         // A fresh gate run replaces the trace; old payload keys must not leak.
         let mr = state

@@ -8,20 +8,28 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// The kind of span (operation type).
+// Variant-name (PascalCase) serialization matches `as_str` and the HSI §3a
+// JSON example (`"kind": "Server"`). `alias` keeps deserialization lenient
+// toward the lowercase values emitted before the casing fix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum SpanKind {
     /// Inbound HTTP request (server-side).
+    #[serde(alias = "server")]
     Server,
     /// Outbound HTTP request (client-side).
+    #[serde(alias = "client")]
     Client,
     /// Internal function call.
+    #[serde(alias = "internal")]
     Internal,
     /// Database query or operation.
+    #[serde(alias = "database")]
     Database,
     /// Message producer (e.g., queue publish).
+    #[serde(alias = "producer")]
     Producer,
     /// Message consumer (e.g., queue subscribe).
+    #[serde(alias = "consumer")]
     Consumer,
 }
 
@@ -57,14 +65,19 @@ impl SpanKind {
 }
 
 /// Status of a span (did the operation succeed?).
+// Variant-name (PascalCase) serialization matches `as_str` and the HSI §3a
+// JSON example (`"status": "Ok"`). `alias` keeps deserialization lenient
+// toward the lowercase values emitted before the casing fix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum SpanStatus {
     /// Operation completed successfully.
+    #[serde(alias = "ok")]
     Ok,
     /// Operation encountered an error.
+    #[serde(alias = "error")]
     Error,
     /// Status not explicitly set.
+    #[serde(alias = "unset")]
     Unset,
 }
 
@@ -186,5 +199,45 @@ mod tests {
         // Unknown values keep the historical defaults.
         assert_eq!(SpanKind::parse("nonsense"), SpanKind::Internal);
         assert_eq!(SpanStatus::parse("nonsense"), SpanStatus::Unset);
+    }
+
+    #[test]
+    fn trace_span_json_uses_spec_casing_and_accepts_legacy_aliases() {
+        let span = TraceSpan {
+            span_id: "abc".into(),
+            parent_span_id: None,
+            operation_name: "GET /health".into(),
+            service_name: "svc".into(),
+            kind: SpanKind::Server,
+            start_time: 1,
+            duration_us: 2,
+            attributes: Default::default(),
+            input_summary: None,
+            output_summary: None,
+            status: SpanStatus::Ok,
+            graph_node_id: None,
+        };
+        let json = serde_json::to_value(&span).unwrap();
+        // HSI §3a response example: "kind": "Server", "status": "Ok".
+        assert_eq!(json["kind"], "Server");
+        assert_eq!(json["status"], "Ok");
+        // Legacy lowercase payloads must still deserialize.
+        let legacy = json
+            .as_object()
+            .cloned()
+            .unwrap()
+            .into_iter()
+            .map(|(k, v)| {
+                let v = match k.as_str() {
+                    "kind" => serde_json::json!("server"),
+                    "status" => serde_json::json!("ok"),
+                    _ => v,
+                };
+                (k, v)
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let back: TraceSpan = serde_json::from_value(serde_json::Value::Object(legacy)).unwrap();
+        assert_eq!(back.kind, SpanKind::Server);
+        assert_eq!(back.status, SpanStatus::Ok);
     }
 }
