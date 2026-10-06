@@ -28,7 +28,7 @@
     if (nodeSpans.length === 0) return null;
     const durations = nodeSpans.map(s => s.duration_us ?? 0).sort((a, b) => a - b);
     const total = durations.length;
-    const errors = nodeSpans.filter(s => s.status === 'error' || s.status === 'ERROR').length;
+    const errors = nodeSpans.filter(s => (s.status ?? '').toLowerCase() === 'error').length;
 
     const percentile = (arr, p) => {
       if (arr.length === 0) return 0;
@@ -1539,7 +1539,7 @@
             <span class="detail-muted">Duration</span>
             <code>{node.duration_us != null ? (node.duration_us > 1000 ? `${(node.duration_us / 1000).toFixed(1)}ms` : `${node.duration_us}\u00B5s`) : '?'}</code>
             <span class="detail-muted">Status</span>
-            <code class:span-error={node.status === 'error' || node.status === 'ERROR'}>{node.status}</code>
+            <code class:span-error={(node.status ?? '').toLowerCase() === 'error'}>{node.status}</code>
             {#if node.span_id}
               <span class="detail-muted">Span ID</span>
               <code class="detail-small">{node.span_id}</code>
@@ -1791,7 +1791,7 @@
             {#each nodeSpans as span (span.span_id)}
               <button
                 class="eval-span-row"
-                class:eval-span-error={span.status === 'error' || span.status === 'ERROR'}
+                class:eval-span-error={(span.status ?? '').toLowerCase() === 'error'}
                 class:eval-span-expanded={expandedSpanId === span.span_id}
                 onclick={() => {
                   onSpanSelect(span);
@@ -1802,8 +1802,8 @@
                 <div class="eval-span-header">
                   <span class="eval-span-name" title={span.operation_name}>{span.operation_name ?? 'unknown'}</span>
                   <span class="eval-span-duration">{formatDuration(span.duration_us ?? 0)}</span>
-                  <span class="eval-span-status" class:eval-status-ok={span.status !== 'error' && span.status !== 'ERROR'} class:eval-status-error={span.status === 'error' || span.status === 'ERROR'}>
-                    {(span.status === 'error' || span.status === 'ERROR') ? 'ERR' : 'OK'}
+                  <span class="eval-span-status" class:eval-status-ok={(span.status ?? '').toLowerCase() !== 'error'} class:eval-status-error={(span.status ?? '').toLowerCase() === 'error'}>
+                    {((span.status ?? '').toLowerCase() === 'error') ? 'ERR' : 'OK'}
                   </span>
                 </div>
 

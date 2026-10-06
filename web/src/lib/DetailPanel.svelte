@@ -4905,7 +4905,7 @@
               <div class="trace-waterfall">
                 {#each spanTree as span}
                   {@const isRoot = span._depth === 0}
-                  {@const statusColor = span.status === 'error' ? 'var(--color-danger)' : span.graph_node_id ? 'var(--color-primary)' : 'var(--color-success)'}
+                  {@const statusColor = (span.status ?? '').toLowerCase() === 'error' ? 'var(--color-danger)' : span.graph_node_id ? 'var(--color-primary)' : 'var(--color-success)'}
                   <div class="trace-waterfall-row" class:trace-waterfall-root={isRoot} style="padding-left: {span._depth * 20 + 8}px">
                     <div class="trace-waterfall-info">
                       {#if span._depth > 0}<span class="trace-tree-guide" aria-hidden="true"></span>{/if}
