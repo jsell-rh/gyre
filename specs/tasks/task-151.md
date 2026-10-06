@@ -5,7 +5,7 @@ depends_on: []
 progress: complete
 coverage_sections:
   - "business-continuity.md §2.2 Health Checks / Liveness Probes"
-commits: ["1e8141f4945d73af255d3f18605f6246731f923c", "f31bef8f5dcb87acbc90bf4d61e4d510697ad8d0", "40fd2b4f2b87bebe6f6e0e4bcf5579c9653e74a8", "9ee334f3ada35ec9521d2ae580aee932de7d6495"]
+commits: ["1e8141f4945d73af255d3f18605f6246731f923c", "f31bef8f5dcb87acbc90bf4d61e4d510697ad8d0", "40fd2b4f2b87bebe6f6e0e4bcf5579c9653e74a8", "9ee334f3ada35ec9521d2ae580aee932de7d6495", "ec755fdf861221701e3b1997cd4b5667a4a74d73"]
 ---
 
 ## Spec Excerpt
