@@ -10,10 +10,15 @@ ROOT=${GYRE_DEV_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 [[ "$ARG3" =~ ^[a-f0-9]{16}$ ]] || { echo "invalid attempt id" >&2; exit 2; }
 SANDBOX="gyre-${TASK#task-}-${MODE:0:1}-${ARG3:0:8}"
 OS=${OPENSHELL:-openshell}
+GATEWAY_LOCK="${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/gateway-login.lock"
 export OPENSHELL_GATEWAY_INSECURE=true OPENSHELL_WORKSPACE=default
 reauth() {
-  OPENSHELL_OIDC_CLIENT_SECRET="${OPENSHELL_OIDC_CLIENT_SECRET:?}" OPENSHELL_NO_BROWSER=1 \
-    "$OS" gateway login gyre-gyre >/dev/null
+  # OpenShell writes shared credentials; serialize logins across attempts.
+  (
+    flock -x 8
+    OPENSHELL_OIDC_CLIENT_SECRET="${OPENSHELL_OIDC_CLIENT_SECRET:?}" OPENSHELL_NO_BROWSER=1 \
+      "$OS" gateway login gyre-gyre >/dev/null
+  ) 8>"$GATEWAY_LOCK"
 }
 osrun() {
   reauth
@@ -85,12 +90,12 @@ cleanup() {
 trap cleanup EXIT
 CREATED=0
 reauth
+CREATED=1 # create may provision compute before its response fails
 timeout 600 "$OS" -g gyre-gyre sandbox create --name "$SANDBOX" \
   --from "${GYRE_DEV_IMAGE:-ghcr.io/jsell-rh/gyre-worker@sha256:0c4a04a340e20c91e89f855c5d75d940b8550798441990ca823c7b8ebb8cbcec}" \
   --provider gyre-pricetag --provider gyre-github-rw \
   --policy "${GYRE_DEV_POLICY:-$ROOT/docker/dev-worker/policy.yaml}" \
   --detach -- bash -c 'while true; do sleep 3600; done'
-CREATED=1
 ready=0
 for try in $(seq 1 40); do
   reauth
@@ -115,6 +120,9 @@ for reconnect in 1 2 3 4; do
   if [ "$remote_rc" -eq 74 ]; then
     retry_reason="transport interrupted"
   elif [ "$remote_rc" -ne 0 ] &&
+       grep -Eiq 'h2 protocol error|tls handshake eof|peer closed connection|failed to connect to gateway|OIDC credentials are missing' "$run_log"; then
+    retry_reason="gateway transport interrupted"
+  elif [ "$remote_rc" -ne 0 ] &&
        grep -Eq 'Failed to connect to (static|index)\.crates\.io|failed to download from .*static\.crates\.io' "$run_log"; then
     retry_reason="Cargo registry unavailable"
   fi
@@ -123,6 +131,10 @@ for reconnect in 1 2 3 4; do
   echo "$retry_reason; retrying in $SANDBOX ($reconnect/4)" >&2
   sleep "$((reconnect * 5))"
 done
+if [ -n "$retry_reason" ]; then
+  echo "$retry_reason persisted after four reconnects; retry task explicitly" >&2
+  exit 77
+fi
 if [ "$remote_rc" -ne 0 ] && ! grep -q 'GYRE_BOOTSTRAP_COMPLETE' "$transport_log"; then
   echo "sandbox bootstrap or transport failed before agent work" >&2
   exit 75

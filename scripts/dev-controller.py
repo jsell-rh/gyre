@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Durable, parallel sandbox development controller."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import json
 import os
@@ -198,12 +199,12 @@ def reap(db):
         task = db.execute("SELECT * FROM tasks WHERE name=?", (attempt["task"],)).fetchone()
         db.execute("UPDATE attempts SET state=?,ended=?,detail=? WHERE id=?",
                    ("done" if rc == 0 else "failed", int(time.time()), f"exit={rc}", attempt["id"]))
-        if attempt["kind"] == "worker" and rc in (75, 76):
+        if attempt["kind"] == "worker" and rc in (75, 76, 77):
             # Bootstrap and push failures already retried inside this sandbox.
             # A push failure may have a local recovery.patch; never provision
             # another heavy sandbox automatically for the same outage.
             db.execute("UPDATE tasks SET state='failed' WHERE name=?", (task["name"],))
-            reason = "sandbox bootstrap" if rc == 75 else "branch push"
+            reason = {75: "sandbox bootstrap", 76: "branch push", 77: "gateway transport"}[rc]
             event(db, task["name"], f"{reason} failed; inspect log/recovery.patch and retry explicitly")
         elif attempt["kind"] == "worker":
             # A crashed driver may have pushed useful progress. Always inspect its exact ref.
@@ -235,8 +236,10 @@ def gc_sandboxes(db):
                OPENSHELL_WORKSPACE="default")
     openshell = os.environ.get("OPENSHELL", "openshell")
     try:
-        login = subprocess.run([openshell, "gateway", "login", "gyre-gyre"], env=env,
-                               capture_output=True, text=True, timeout=30)
+        with (STATE / "gateway-login.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            login = subprocess.run([openshell, "gateway", "login", "gyre-gyre"], env=env,
+                                   capture_output=True, text=True, timeout=30)
         if login.returncode:
             event(db, None, "sandbox cleanup: gateway login failed")
             return
@@ -254,16 +257,18 @@ def gc_sandboxes(db):
         known[name] = attempt["state"]
     stale = [line.strip() for line in listing.stdout.splitlines()
              if known.get(line.strip()) in ("done", "failed")]
-    for name in stale[:8]:
+    def delete(name):
         try:
             deleted = subprocess.run([openshell, "-g", "gyre-gyre", "sandbox", "delete", name],
                                      env=env, capture_output=True, text=True, timeout=120)
-            if deleted.returncode == 0:
-                event(db, None, f"deleted orphaned sandbox {name}")
-            else:
-                event(db, None, f"sandbox cleanup will retry {name}")
+            return name, deleted.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
-            event(db, None, f"sandbox cleanup timed out; will retry {name}")
+            return name, False
+    # Deletion is slow; a bounded pool clears failed attempts promptly without
+    # letting cleanup itself flood the gateway or stall dispatch for minutes.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for name, deleted in pool.map(delete, stale[:16]):
+            event(db, None, f"{'deleted orphaned sandbox' if deleted else 'sandbox cleanup will retry'} {name}")
 
 
 def promote(db):
@@ -360,8 +365,9 @@ def host_test_verified(merge_sha, check_id):
     return passed
 
 
-def schedule(db, slots, max_attempts, only_task=None):
+def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
     running = db.execute("SELECT count(*) FROM attempts WHERE state='running'").fetchone()[0]
+    launches = 0
     if running >= slots:
         return
     rows = db.execute("SELECT * FROM tasks ORDER BY CASE progress WHEN 'needs-revision' THEN 0 ELSE 1 END,name").fetchall()
@@ -369,7 +375,7 @@ def schedule(db, slots, max_attempts, only_task=None):
     for task in rows:
         if only_task and task["name"] != only_task:
             continue
-        if running >= slots:
+        if running >= slots or launches >= launch_burst:
             break
         if task["state"] == "candidate" and set(json.loads(task["deps"])) <= merged:
             source()
@@ -381,6 +387,7 @@ def schedule(db, slots, max_attempts, only_task=None):
                 continue
             spawn(db, task, "check", sha=sha, base=base)
             running += 1
+            launches += 1
         elif task["state"] == "ready" and task["progress"] in ("not-started", "needs-revision") and set(json.loads(task["deps"])) <= merged:
             if task["attempts"] >= max_attempts:
                 db.execute("UPDATE tasks SET state='failed' WHERE name=?", (task["name"],))
@@ -392,6 +399,7 @@ def schedule(db, slots, max_attempts, only_task=None):
             db.commit()
             spawn(db, task, "worker", branch=branch)
             running += 1
+            launches += 1
 
 
 def status(db):
@@ -451,14 +459,16 @@ def main():
     parser.add_argument("command", choices=("sync", "status", "run", "retry"))
     parser.add_argument("task", nargs="?", help="task name for retry")
     parser.add_argument("--slots", type=int, default=1)
+    parser.add_argument("--launch-burst", type=int, default=int(os.environ.get("GYRE_DEV_LAUNCH_BURST", "8")),
+                        help="maximum new sandboxes to start per scheduling cycle")
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--interval", type=int, default=30)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--json", action="store_true", help="machine-readable status")
     parser.add_argument("--only-task", help="dispatch only this task (task-NNN)")
     args = parser.parse_args()
-    if args.slots < 0 or args.interval < 1 or args.max_attempts < 1:
-        parser.error("slots must be nonnegative; interval and max-attempts must be positive")
+    if args.slots < 0 or args.interval < 1 or args.max_attempts < 1 or args.launch_burst < 1:
+        parser.error("slots must be nonnegative; interval, max-attempts, and launch-burst must be positive")
     if args.only_task and not re.fullmatch(r"task-\d+", args.only_task):
         parser.error("--only-task requires task-NNN")
     db = db_open()
@@ -524,7 +534,7 @@ def main():
             promote(db)
             if args.only_task and not db.execute("SELECT 1 FROM tasks WHERE name=?", (args.only_task,)).fetchone():
                 raise RuntimeError(f"unknown task: {args.only_task}")
-            schedule(db, configured_slots(), args.max_attempts, args.only_task)
+            schedule(db, configured_slots(), args.max_attempts, args.only_task, args.launch_burst)
         except SourceUnavailable as exc:
             db.rollback()
             if str(exc) != source_error:

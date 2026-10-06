@@ -87,7 +87,7 @@ class ControllerGitTest(unittest.TestCase):
 
     def test_bootstrap_and_push_failures_require_explicit_retry(self):
         controller.sync(self.db)
-        for code in (75, 76):
+        for code in (75, 76, 77):
             with self.subTest(exit_code=code):
                 ident = f"failure{code}"
                 directory = controller.STATE / "attempts" / ident
@@ -110,6 +110,16 @@ class ControllerGitTest(unittest.TestCase):
             controller.schedule(self.db, 1, 3, only_task="task-001")
             spawn.assert_called_once()
             self.assertEqual(spawn.call_args.args[1]["name"], "task-001")
+
+    def test_launch_burst_ramps_sandbox_creation(self):
+        controller.sync(self.db)
+        for name in ("task-002", "task-003"):
+            self.db.execute("INSERT INTO tasks(name,progress,deps,state,attempts) VALUES(?, 'not-started', '[]', 'ready', 0)",
+                            (name,))
+        self.db.commit()
+        with patch.object(controller, "spawn") as spawn:
+            controller.schedule(self.db, slots=50, max_attempts=3, launch_burst=2)
+        self.assertEqual([call.args[1]["name"] for call in spawn.call_args_list], ["task-001", "task-002"])
 
     def test_spawn_snapshots_driver_before_launch(self):
         controller.sync(self.db)

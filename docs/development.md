@@ -277,6 +277,7 @@ controller rejects an obsolete loop process if one is still running.
 python3 scripts/dev-controller.py sync                 # inspect imported state
 python3 scripts/dev-controller.py status               # inspect ledger and logs
 python3 scripts/dev-controller.py run --slots 1         # dispatch cloud attempts
+python3 scripts/dev-controller.py run --slots 50 --launch-burst 8  # ramp a larger pool
 python3 scripts/dev-controller.py run --only-task task-151 --slots 1  # trace one task
 python3 scripts/dev-controller.py retry task-099        # retry a failed task
 node scripts/loop-dashboard.mjs                         # cockpit: http://127.0.0.1:7690
@@ -287,7 +288,10 @@ It requires the OpenShell `gyre-gyre` gateway, `gyre-pricetag` and
 `OPENSHELL_OIDC_CLIENT_SECRET`, and local OMP model configuration. Runtime state is kept in
 `.gyre-dev-controller/state.sqlite3` (SQLite WAL); attempts and logs are in
 `.gyre-dev-controller/attempts/`. Keep this directory when restarting the
-controller. Only one controller process may run at a time. The cockpit reads
+controller. Only one controller process may run at a time. `--slots` is the
+maximum concurrent attempts; `--launch-burst` limits new sandbox launches per
+30-second scheduling cycle so a high slot limit does not flood the gateway.
+The cockpit reads
 the ledger, shows task dependencies, attempt history and logs, and writes the
 live `.gyre-dev-controller/slots` control. Set slots to `0` to drain; running
 attempts finish. `--max-attempts` limits worker retries per task. A failed
