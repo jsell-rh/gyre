@@ -655,7 +655,10 @@ mod tests {
             edges.is_empty(),
             "names for package svc1 must not resolve into prefix-similar svc10, \
              got edges to {:?}",
-            edges.iter().map(|e| e.target_id.as_str()).collect::<Vec<_>>()
+            edges
+                .iter()
+                .map(|e| e.target_id.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
