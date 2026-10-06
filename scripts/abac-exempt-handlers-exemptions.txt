@@ -14,9 +14,6 @@
 #
 # See: specs/reviews/task-087.md F1b/F1c (the finding that created this check)
 #
-# --- task-087 revision round owns these (span payload endpoint) ---
-crates/gyre-server/src/api/traces.rs:150   # get_span_payload: span → gate_run → MR → workspace resolution deferred to a follow-up; "tenant-scoped so cross-tenant access returns None naturally" claim unbacked (shared AppState repo is not tenant-scoped). Fix: resolve the span's MR and check workspace/tenant, return Forbidden on mismatch.
-
 # --- task-093 revision round owns these (orchestrator spawn routes) ---
 # Routes retro-exempted into abac-route-registry-exemptions.txt (F1); the
 # handlers shipped without per-handler tenant containment:
