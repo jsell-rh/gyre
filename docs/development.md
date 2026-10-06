@@ -30,6 +30,10 @@ gyre-cli    --> gyre-common
 
 ## Key Commands
 
+Cargo uses each checkout's `target/` by default. To share build artifacts
+across local worktrees, set `CARGO_TARGET_DIR` to an absolute path in your
+shell; do not commit a machine-specific path to `.cargo/config.toml`.
+
 ```bash
 # Build everything
 cargo build --all
