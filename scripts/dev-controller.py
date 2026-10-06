@@ -157,7 +157,6 @@ def spawn(db, task, kind, branch=None, sha=None, base=None):
     ident = uuid.uuid4().hex[:16]
     directory = STATE / "attempts" / ident
     directory.mkdir(parents=True)
-    log = (directory / "output.log").open("ab", buffering=0)
     if kind == "worker":
         script = ROOT / "scripts/dev-sandbox.sh"
         args = ["worker", task["name"], branch, task["seed"] or "origin/main", ident]
@@ -171,9 +170,10 @@ def spawn(db, task, kind, branch=None, sha=None, base=None):
     snapshot.chmod(0o700)
     # The wrapper records exit status even if the controller itself exits.
     wrapper = ROOT / "scripts/dev-process.sh"
-    p = subprocess.Popen([str(wrapper), str(directory / "exit"), str(snapshot), *args],
-                         cwd=ROOT, env={**os.environ, "GYRE_DEV_ROOT": str(ROOT)},
-                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    with (directory / "output.log").open("ab", buffering=0) as log:
+        p = subprocess.Popen([str(wrapper), str(directory / "exit"), str(snapshot), *args],
+                             cwd=ROOT, env={**os.environ, "GYRE_DEV_ROOT": str(ROOT)},
+                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     db.execute("INSERT INTO attempts(id,task,kind,branch,sha,base,state,pid,started) VALUES(?,?,?,?,?,?,?,?,?)",
                (ident, task["name"], kind, branch, sha, base, "running", p.pid, int(time.time())))
     db.execute("UPDATE tasks SET state=? WHERE name=?", ("running" if kind == "worker" else "checking", task["name"]))
@@ -297,6 +297,11 @@ def promote(db):
             raise RuntimeError("verified integration ref does not match checked base/candidate")
         db.execute("UPDATE attempts SET merge_sha=? WHERE id=?", (merge_sha, check["id"]))
         db.commit()
+        event(db, task["name"], f"host full-suite gate for {merge_sha}")
+        if not host_test_verified(merge_sha, check["id"]):
+            db.execute("UPDATE tasks SET state='failed' WHERE name=?", (task["name"],))
+            event(db, task["name"], f"host full-suite gate failed; see attempts/{check['id']}/host-tests.log")
+            continue
         try:
             push = run("git", "push", "origin", f"{merge_sha}:refs/heads/main", check=False, timeout=90)
         except subprocess.TimeoutExpired as exc:
@@ -309,6 +314,40 @@ def promote(db):
         else:
             db.execute("UPDATE tasks SET state='merged' WHERE name=?", (task["name"],))
             event(db, task["name"], f"merged {merge_sha}")
+
+
+def host_test_verified(merge_sha, check_id):
+    """Run socket-using integration tests on the exact verified merge tree."""
+    attempt_dir = STATE / "attempts" / check_id
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    marker = attempt_dir / "host-tests.ok"
+    if marker.exists() and marker.read_text().strip() == merge_sha:
+        return True
+    worktree = STATE / "host-check" / check_id
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    if worktree.exists():
+        run("git", "worktree", "remove", "--force", str(worktree), check=False)
+    added = run("git", "worktree", "add", "--detach", str(worktree), merge_sha, check=False)
+    if added.returncode:
+        (attempt_dir / "host-tests.log").write_text(added.stderr or added.stdout)
+        return False
+    passed = False
+    try:
+        env = {**os.environ, "SKIP_WEB_BUILD": "1",
+               "CARGO_TARGET_DIR": str(STATE / "host-target")}
+        with (attempt_dir / "host-tests.log").open("wb") as log:
+            try:
+                result = subprocess.run(["cargo", "test", "--all", "--quiet"],
+                                        cwd=worktree, env=env, stdout=log,
+                                        stderr=subprocess.STDOUT, timeout=1800)
+                passed = result.returncode == 0
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                log.write(f"\nhost test execution failed: {exc}\n".encode())
+    finally:
+        run("git", "worktree", "remove", "--force", str(worktree), check=False)
+    if passed:
+        marker.write_text(merge_sha + "\n")
+    return passed
 
 
 def schedule(db, slots, max_attempts, only_task=None):

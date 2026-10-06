@@ -318,6 +318,12 @@ Bootstrap files are staged as one retryable bundle. Sandbox Cargo commands use
 `clang`/`mold` linker and target directory settings.
 The pinned worker image is built from `docker/dev-worker/Dockerfile`; it includes
 `rustfmt`, Clippy, and `jj`.
+OpenShell cannot accept loopback sockets, so the sandbox checker compiles every
+Rust target and runs library and binary tests there. Before promotion, the
+controller runs the full `cargo test --all` suite, including HTTP and WebSocket
+integration tests, in an isolated host worktree at the exact verified merge SHA.
+Its result is recorded in `attempts/<id>/host-tests.log`; a failure blocks the
+push to `main`.
 
 Every finished sandbox is deleted, including failed attempts. The controller
 periodically retries deletion if a driver crashes or gateway deletion fails.

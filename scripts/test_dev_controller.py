@@ -43,6 +43,9 @@ class ControllerGitTest(unittest.TestCase):
         git(root, "clone", "--no-checkout", str(self.remote), str(controller.SOURCE))
         self.db = controller.db_open()
         self.addCleanup(self.db.close)
+        host_gate = patch.object(controller, "host_test_verified", return_value=True)
+        self.host_gate = host_gate.start()
+        self.addCleanup(host_gate.stop)
 
     def write_task(self, progress):
         (self.work / "specs/tasks/task-001.md").write_text(
@@ -226,8 +229,27 @@ elif 'delete' in args:
         self.db.execute("UPDATE tasks SET state='promoting' WHERE name='task-001'")
         self.db.commit()
         controller.promote(self.db)
+        self.host_gate.assert_called_once_with(merge, "check1")
         self.assertEqual(git(self.remote, "rev-parse", "main"), merge)
         self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "merged")
+
+    def test_host_full_suite_failure_blocks_promotion(self):
+        sha = self.candidate()
+        controller.sync(self.db)
+        base = git(self.work, "rev-parse", "main")
+        git(self.work, "checkout", "main")
+        git(self.work, "merge", "--no-ff", "--no-edit", "worker/task-001")
+        merge = git(self.work, "rev-parse", "HEAD")
+        git(self.work, "push", "origin", f"{merge}:refs/heads/devloop/verified/check1")
+        self.db.execute("""INSERT INTO attempts(id,task,kind,sha,base,state,started)
+                           VALUES('check1','task-001','check',?,?,'done',1)""", (sha, base))
+        self.db.execute("UPDATE tasks SET state='promoting' WHERE name='task-001'")
+        self.db.commit()
+        self.host_gate.return_value = False
+        controller.promote(self.db)
+        self.host_gate.assert_called_once_with(merge, "check1")
+        self.assertEqual(git(self.remote, "rev-parse", "main"), base)
+        self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "failed")
 
     def test_ambiguous_push_timeout_checks_remote_before_retrying(self):
         sha = self.candidate()
