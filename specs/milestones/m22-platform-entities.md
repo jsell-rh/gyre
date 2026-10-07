@@ -69,9 +69,9 @@
 - `Notification` — 16 `NotificationType` variants, 4 `NotificationPriority` levels; auto-fired on: agent complete → `MrNeedsReview`, gate failure → `GateFailure`, MR merged → `MrMerged`
 - 12 REST endpoints:
   - `GET/PUT /api/v1/users/me`
-  - `GET /api/v1/users/me/agents`
-  - `GET /api/v1/users/me/tasks`
-  - `GET /api/v1/users/me/mrs`
+  - ~~`GET /api/v1/users/me/agents`~~ — Removed 2026-10-07 per `human-system-interface.md` §12 "What the Profile Is NOT" (task-208)
+  - ~~`GET /api/v1/users/me/tasks`~~ — Removed 2026-10-07 per `human-system-interface.md` §12 "What the Profile Is NOT" (task-208)
+  - ~~`GET /api/v1/users/me/mrs`~~ — Removed 2026-10-07 per `human-system-interface.md` §12 "What the Profile Is NOT" (task-208)
   - `GET /api/v1/users/me/notifications`
   - `PUT /api/v1/users/me/notifications/{id}/read`
   - `POST/GET /api/v1/workspaces/{id}/members`

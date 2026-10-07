@@ -2,10 +2,10 @@
 title: "Remove My Tasks/MRs/Agents from profile; amend user-management 'My Stuff'"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is NOT"
-commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5"]
+commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5", "ad1121c5093cd2f1f2b3824ed88352ac4e181fd9"]
 ---
 
 ## Spec Excerpt
@@ -91,3 +91,8 @@ After both parts, run the acceptance-criteria greps yourself and fix any straggl
 - Backend: `my_stuff_endpoints_are_removed` regression test (users.rs test mod) asserts 404 on all three URIs — passes. `check-abac-route-registry.sh` and `check-abac-exempt-handlers.sh` pass.
 - Frontend: UserProfile.test.js 23/23, including the exact-six-tab guard (`[role="tab"]` data-id list — fails if any removed tab is reintroduced). `ExplorerCanvas.test.js` / `ExplorerCanvas-performance.test.js` failed only in full-suite runs racing concurrent cargo builds (100ms timing budgets); 147/147 pass in isolation at HEAD and the same files pass at the base commit — pre-existing load flakes, unrelated to this task.
 
+## Revision Round (2026-10-07, review round 1)
+
+- **F1 (major) fixed:** the committed `web/dist/` bundle still shipped the removed surface (`spa.rs` RustEmbeds it; `SKIP_WEB_BUILD=1` serves it). `cd web && npm run build` regenerated the dist from current sources → commit `ad1121c` (bundle hash `index-KSqzVjd3.js`; deterministic — matches independent build). F1 acceptance grep `grep -o "my-agents\|my-tasks\|my-mrs\|users/me/agents\|users/me/tasks\|users/me/mrs" web/dist/assets/*.js` → no matches; kept-surface check (`users/me/tokens`, `notif-prefs`, `users/me/judgments` present in bundle) → pass. The earlier round's note claiming the stale dist was "out of scope" was wrong — the reviewer is right that the violation survived on the shipped Rust-only build path.
+- **Minor (M22 milestone) addressed:** `specs/milestones/m22-platform-entities.md` M22.8 endpoint list now strikes the three `users/me/{agents,tasks,mrs}` rows with a removal annotation pointing at HSI §12 / task-208. Historical count ("12 REST endpoints") left intact as the M22-era record.
+- Optional reviewer hardening (dist-freshness gate) deliberately not added: it requires a general source↔bundle staleness oracle the repo doesn't have; the F1 class is now closed for this surface, and the source-level guards (six-tab test, 404 route test) fail on reintroduction.
