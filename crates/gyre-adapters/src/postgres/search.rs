@@ -15,7 +15,6 @@ use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Double, Nullable, Text};
 use gyre_ports::search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::PgStorage;
@@ -131,7 +130,7 @@ impl SearchPort for PgStorage {
 
     async fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         let pool = Arc::clone(&self.pool);
-        tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
+        Ok(tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
             let mut conn = pool.get().context("get db connection")?;
             if query.query.trim().is_empty() {
                 return Ok(vec![]);
@@ -178,7 +177,7 @@ impl SearchPort for PgStorage {
                 })
                 .collect())
         })
-        .await??
+        .await??)
     }
 
     async fn delete(&self, entity_type: &str, entity_id: &str) -> Result<()> {
@@ -202,7 +201,7 @@ impl SearchPort for PgStorage {
         // were dropped. The rebuild-from-domain-entities half of reindex is the
         // server coordinator's job (task-202) — not faked here.
         let pool = Arc::clone(&self.pool);
-        tokio::task::spawn_blocking(move || -> Result<u64> {
+        Ok(tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
             let count = diesel::sql_query("SELECT COUNT(*) AS cnt FROM search_index")
                 .get_result::<CountRow>(&mut conn)?
@@ -210,6 +209,6 @@ impl SearchPort for PgStorage {
             diesel::sql_query("DELETE FROM search_index").execute(&mut *conn)?;
             Ok(count as u64)
         })
-        .await??
+        .await??)
     }
 }
