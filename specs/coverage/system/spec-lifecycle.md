@@ -2,7 +2,7 @@
 
 **Spec:** [`system/spec-lifecycle.md`](../../system/spec-lifecycle.md)
 **Last audited:** 2026-09-30 (full re-audit at HEAD da8d91e8 — audited code path (git_http.rs spec-lifecycle block + sqlite/spec_approval.rs) unchanged since d7940e85 (2026-04-13, git log), so anchors re-read directly at HEAD. No status changes: rows 4/5/7 Partial re-confirmed with fresh evidence (generic task description at git_http.rs:1482-1484 omits SHA delta + affected-references; dedup at :1470-1476 title-keyed and skips silently). Verified rows 1/2/3/6/9 re-confirmed: wiring at :667, A/M/D/R classification + watched-path filter with tests :3770-3828, revoke_all_for_path real diesel::update (sqlite/spec_approval.rs:206-234). n/a rows 10/12/13 spot-checked correct.)
-**Coverage:** 8/13 (3 n/a)
+**Coverage:** 9/13 (3 n/a)
 
 | # | Section | Depth | Status | Task | Notes |
 |---|---------|-------|--------|------|-------|

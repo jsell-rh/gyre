@@ -283,8 +283,9 @@ impl ResourceResolver {
                 // (not in scripts/abac-route-registry-exemptions.txt, which is
                 // frozen) so the route gets real policy evaluation. It mutates
                 // state — every finding is persisted as an orchestrator
-                // escalation — so it maps to the `write` action, like the other
-                // spec-write routes.
+                // escalation — and needs the same write-level policy as the other
+                // spec-write routes; POST derives the `write` action
+                // (`method_to_action`), so no `action_override` is needed.
                 RouteResourceMapping::api("/api/v1/patrol/spec-lifecycle", "spec", None),
                 // ── Spec editing backend (S3.3) ────────────────────────────
                 RouteResourceMapping::api(
