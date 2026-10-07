@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 pub use gyre_domain::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
+pub use gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType};
 
 // ---------------------------------------------------------------------------
 // Manifest structs (parsed from specs/manifest.yaml)
@@ -54,30 +55,6 @@ fn default_true() -> bool {
     true
 }
 
-/// Link type between specs — drives mechanical enforcement.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum SpecLinkType {
-    Implements,
-    Supersedes,
-    DependsOn,
-    ConflictsWith,
-    Extends,
-    References,
-}
-
-impl std::fmt::Display for SpecLinkType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SpecLinkType::Implements => write!(f, "implements"),
-            SpecLinkType::Supersedes => write!(f, "supersedes"),
-            SpecLinkType::DependsOn => write!(f, "depends_on"),
-            SpecLinkType::ConflictsWith => write!(f, "conflicts_with"),
-            SpecLinkType::Extends => write!(f, "extends"),
-            SpecLinkType::References => write!(f, "references"),
-        }
-    }
-}
 
 /// A link declared in the manifest between specs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -219,32 +196,6 @@ pub type SpecLedger = Arc<Mutex<HashMap<String, SpecLedgerEntry>>>;
 /// Type alias for the shared approval history store (in-memory).
 pub type SpecApprovalHistory = Arc<Mutex<Vec<SpecApprovalEvent>>>;
 
-/// A resolved link entry stored in the forge's spec link graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SpecLinkEntry {
-    pub id: String,
-    /// Source spec path (the spec that declares this link).
-    pub source_path: String,
-    /// Repo ID that owns the source spec (for cross-workspace link scoping).
-    pub source_repo_id: Option<String>,
-    pub link_type: SpecLinkType,
-    /// Target spec path (within the target repo, without leading @workspace/repo prefix).
-    pub target_path: String,
-    /// Resolved target repo UUID. None for unresolved cross-workspace links.
-    pub target_repo_id: Option<String>,
-    /// Human-readable composite path preserved from the manifest `target` field
-    /// (e.g. "@platform-core/api-svc/system/auth.md"). Used for display and staleness checking.
-    /// None for same-repo links.
-    pub target_display: Option<String>,
-    /// SHA the link was pinned to.
-    pub target_sha: Option<String>,
-    pub reason: Option<String>,
-    /// Link health: "active" | "stale" | "broken" | "conflicted" | "unresolved"
-    pub status: String,
-    pub created_at: u64,
-    pub stale_since: Option<u64>,
-}
-
 /// Type alias for the shared spec links store.
 pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>;
 
@@ -318,6 +269,10 @@ pub fn parse_cross_workspace_target(target: &str) -> CrossWorkspaceTarget {
 pub async fn sync_spec_ledger(
     ledger: &Arc<dyn gyre_ports::SpecLedgerRepository>,
     links_store: &SpecLinksStore,
+    // Durable spec-link graph repository (spec-links.md §Forge-Maintained Spec
+    // Graph). All link mutations below are written through so the SQL table is
+    // the authoritative graph across restarts.
+    link_repo: &Arc<dyn gyre_ports::SpecLinkRepository>,
     repo_path: &str,
     new_sha: &str,
     now: u64,
