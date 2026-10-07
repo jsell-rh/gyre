@@ -353,6 +353,11 @@ impl MessageKind {
     /// surfaced verbatim to the caller (REST 400 body / MCP `tool_error`).
     pub fn validate_payload(&self, payload: Option<&Value>) -> Result<(), String> {
         let required = self.required_payload_fields();
+        // An explicit JSON `null` payload means the same thing as an absent one.
+        // The REST body types it `Option<Value>` (serde maps `null` -> `None`) while
+        // the MCP argument map hands us `Some(Value::Null)`; without this
+        // normalization the two receipt paths disagree on the same wire payload.
+        let payload = payload.filter(|v| !v.is_null());
 
         let obj = match payload {
             None if !required.is_empty() => {
@@ -626,6 +631,24 @@ mod tests {
         assert!(MessageKind::DataSeeded
             .validate_payload(Some(&json!({"anything": true})))
             .is_ok());
+    }
+
+    #[test]
+    fn validate_payload_treats_explicit_null_as_absent() {
+        // An explicit `"payload": null` arrives as `Some(Value::Null)` on the MCP
+        // receipt path and as `None` on the REST path (the body field is
+        // `Option<Value>`). Both must mean "no payload", or the same wire payload
+        // is rejected on one path and accepted on the other.
+        let null_value = Value::Null;
+        let null = Some(&null_value);
+        assert!(MessageKind::QueueUpdated.validate_payload(null).is_ok());
+        assert!(MessageKind::Custom("e".to_string()).validate_payload(null).is_ok());
+        // A kind with required fields is still unsatisfied by a null payload,
+        // whether the payload itself is null or the required key holds null.
+        assert!(MessageKind::TaskAssignment.validate_payload(null).is_err());
+        assert!(MessageKind::TaskAssignment
+            .validate_payload(Some(&json!({"task_id": null})))
+            .is_err());
     }
 
     fn make_telemetry(workspace_id: Option<Id>) -> Message {
