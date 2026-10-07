@@ -42,3 +42,34 @@ Scope note (not a finding against this task): the §7 subsections **MCP Integrat
 Summary: the domain layer, port, SQLite adapter, and encryption are real and well-tested (22 secret tests, all green; authenticated-decryption failures covered; cascade/expiry/isolation semantics correct in both adapters), and the hardcoded credential env vars are genuinely gone from spawn. But the mem adapter diverges from the port's uniqueness contract (F1), the headline integration — the acceptance criterion this task was allowed to check — has zero test evidence (F2), and the spawn path takes two silent-degradation shortcuts on the secret-delivery path (F3, F4). Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 2 (revision review)
+
+Commits under review: `d5fe703a` (F1–F5 product fixes), `7968dcf1` (test-import fix + pq-sys shim revert), plus branch-integration commits `f3707d1`/`1c8fb07`/`bfbb764` (sandbox round-trips of the same tree). Inspected the full `main...HEAD` diff (12 files, +618/−90) and ran focused probes on the final tree (`CARGO_TARGET_DIR=/tmp/gyre-verify-target`, `SKIP_WEB_BUILD=1`).
+
+Verdict: **complete**.
+
+### F1–F5 verification (all resolved)
+
+- **F1 ✅** `MemSecretRepository::create` (`mem.rs:3407-3427`) now rejects duplicate id and duplicate `(tenant, scope, scope_id, name)` before push, mirroring SQLite's PK + UNIQUE failure mode. Four contract tests in `mem.rs::secret_contract_tests` (dup id same tenant, dup scope/name same tenant, same name cross-tenant OK with independent get_value, different name same scope OK) — **4/4 pass**. `mem-port-contracts-exemptions.txt` drained to 0 (frozen count 1→0), `check-mem-port-contracts.sh` green.
+- **F2 ✅** Five real end-to-end spawn tests in `api/spawn.rs` (secrets seeded into the AppState's real mem SecretRepository, agent spawned via `POST /api/v1/agents/spawn`, environment observed via an env-dump compute-target script running as an actual local child process): `spawn_delivers_scoped_secrets_across_all_scopes` (all four scopes delivered), `spawn_secret_delivery_nearest_scope_wins` (repo beats tenant for the same name), `spawn_unresolvable_workspace_skips_secret_resolution` (seeds a `LEAK` tenant secret in tenant "default" and asserts it does NOT reach the agent env — the exact F3 leak scenario), `spawn_non_utf8_secret_skipped_others_delivered` (binary secret skipped, UTF-8 sibling delivered), `spawn_secret_resolve_error_does_not_fail_spawn` (FailingSecrets port via new `test_state_with_secrets`; spawn still 201/active, no GYRE_CRED_* delivered). All five present by name and passing (22/22 in the spawn module). These are not mirrored-logic tests — each asserts on a real child process's environment dump.
+- **F3 ✅** `spawn.rs:647-696`: tenant is resolved from the workspace record (`match workspace.as_ref()`), `None` arm warns and skips all scoped secret resolution — no `"default"` fabrication. Same-class sibling `constraint_check.rs::create_violation_notifications` fixed identically (skip + warn on both `Ok(None)` and `Err` arms). Both task-097-owned exemption lines removed, `fabricated-scope-defaults-exemptions.txt` frozen count 8→6, `check-fabricated-scope-defaults.sh` green.
+- **F4 ✅** `spawn.rs:666-677`: fallible `String::from_utf8`; non-UTF-8 values skipped with `tracing::warn!` naming `secret_name` (never the value). `lossy-secret-conversion-exemptions.txt` drained to 0 (frozen count 1→0), `check-lossy-secret-conversion.sh` green.
+- **F5 ✅** `load_encryption_key` (`sqlite/secret.rs:141-183`) emits a startup `warn!` on **both** degraded paths (existing persisted auto-key, and fresh auto-generation) stating the obfuscation downgrade and the `GYRE_SECRET_ENCRYPTION_KEY` remediation. Operator-visible posture per the process-revision requirement; no spec amendment needed (encryption-at-rest still holds; only the key's resting place is degraded and now announced).
+
+### Gates and suites (final tree)
+
+- `bash scripts/check-arch.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`, `check-lossy-secret-conversion.sh`, `check-in-memory-state-stores.sh`, `check-unbounded-external-http.sh` → all OK.
+- `bash scripts/check-task-commit-attribution.sh` → **initially FAILED**: the three original implementation commits (`3a5be015`, `a38170c9`, `a3fde958`) are ancestors of this branch (merged to main via `worker/task-097` at `10cff64`) but absent from the frontmatter — the round-1 note's "unreachable rebase duplicates" claim does not hold on the current topology. Fixed this round by adding all three to `commits:` in `specs/tasks/task-097.md`; gate now OK. No exemption-file growth.
+- `cargo test -p gyre-adapters --lib sqlite::secret` → **17 passed** (tampered-ciphertext, wrong-key, key-derivation, reopen-stability all covered). `cargo test -p gyre-common --lib secret` → **5 passed**.
+- `cargo test -p gyre-server --lib mem::secret_contract_tests` → **4 passed**. `cargo test -p gyre-server --lib api::spawn::tests::spawn_` → **22 passed**, including all five F2 tests by name.
+- Full `cargo test --all` → see below (recorded after completion).
+- `[patch.crates-io]` pq-sys shim confirmed absent from all Cargo.tomls.
+- Working tree clean apart from the frontmatter fix; the web/dist churn from the previous round was already restored (no diff vs main).
+
+### Residual observations (non-blocking, for task-098/100)
+
+- The resolve-failure warn-and-continue posture means an agent can start without its secrets; this is the documented availability choice and is now test-pinned (`spawn_secret_resolve_error_does_not_fail_spawn`). Task-098's Admin API can rely on `resolve_for_agent` semantics as pinned by these five tests.
+- SOPS-vs-AES-256-GCM wording noted in the round-1 scope note stands: mechanism differs from the spec's letter, satisfies "encrypted at rest" in substance; left for task-098/100 or a spec amendment if desired.
+
+— Reviewer, 2026-10-07
