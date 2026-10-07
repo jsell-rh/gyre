@@ -554,13 +554,7 @@ pub(crate) async fn spawn_agent_core(
     task.updated_at = now;
     state.tasks.update(&task).await?;
 
-    // Build clone URL: {base_url}/git/{workspace_slug}/{repo_name}
-    // Reuse the already-fetched workspace; fall back to workspace_id if not found.
-    let ws_slug = workspace
-        .as_ref()
-        .map(|ws| ws.slug.clone())
-        .unwrap_or_else(|| repo.workspace_id.to_string());
-    let clone_url = format!("{}/git/{}/{}", state.base_url, ws_slug, repo.name);
+    let clone_url = build_clone_url(state, workspace.as_ref(), &repo);
 
     // M19.1: Resolve the effective compute target.
     // Priority: request compute_target_id → workspace assignment → tenant default → local.
@@ -585,6 +579,209 @@ pub(crate) async fn spawn_agent_core(
             config: e.config.clone(),
         });
 
+    let outcome = launch_agent_process(AgentLaunchParams {
+        state,
+        agent: &agent,
+        repo: &repo,
+        workspace: workspace.as_ref(),
+        resolved_target_config,
+        token: &token,
+        branch: &req.branch,
+        repo_id: &req.repo_id,
+        worktree_path: &worktree_path,
+        task_id: Some(&req.task_id),
+        clone_url: &clone_url,
+        extra_env: std::collections::HashMap::new(),
+    })
+    .await?;
+
+    // G10 + M19.4: Create workload attestation now that we know the PID / container ID.
+    let att = {
+        // Retrieve the stack hash recorded by the agent (M14.1), if any.
+        let stack_hash = state
+            .kv_store
+            .kv_get("agent_stacks", &agent.id.to_string())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                serde_json::from_str::<super::stack_attest::AgentStack>(&s)
+                    .ok()
+                    .map(|st| st.fingerprint())
+            })
+            .unwrap_or_default();
+        workload_attestation::attest_agent_with_container(
+            &agent.id.to_string(),
+            outcome.pid,
+            &compute_target_label,
+            &stack_hash,
+            outcome.container_id.clone(),
+            outcome.container_image.clone(),
+        )
+    };
+    if let Ok(json) = serde_json::to_string(&att) {
+        let _ = state
+            .kv_store
+            .kv_set("workload_attestations", &agent.id.to_string(), json)
+            .await;
+    }
+
+    // Token was pre-minted above and already stored in agent_tokens.
+    // Workload attestation claims are stored in state.workload_attestations
+    // and queryable via GET /api/v1/agents/{id}/workload.
+
+    // Phase 3 (TASK-008, §7.4): Create workload KeyBinding and DerivedInput
+    // from the parent task's attestation chain, then inject into the agent's
+    // environment via KV store. The agent uses the KeyBinding to sign its
+    // output attestation at push time.
+    if !is_interrogation {
+        create_derived_input_for_agent(
+            &state,
+            &agent.id.to_string(),
+            &req.task_id,
+            &auth.agent_id,
+            now,
+        )
+        .await;
+    }
+
+    // Auto-track agent spawn
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.spawned",
+        Some(agent.id.to_string()),
+        serde_json::json!({ "task_id": req.task_id }),
+        now,
+    );
+    let _ = state.analytics.record(&ev).await;
+
+    // M22.2: Increment budget active-agent counter for the workspace.
+    super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
+
+    // M32: Capture meta-spec set SHA for provenance — workspace lookup via kv_store
+    // requires a reverse scan (repo_id → workspace_id) which is not directly indexed.
+    // Best-effort: omit when workspace cannot be efficiently determined.
+    let meta_spec_set_sha: Option<String> = None;
+
+    Ok(SpawnAgentResponse {
+        agent: {
+            let mut r = AgentResponse::from(agent);
+            r.repo_id = Some(req.repo_id.clone());
+            r.branch = Some(req.branch.clone());
+            r.task_id = Some(req.task_id.clone());
+            r
+        },
+        token,
+        worktree_path,
+        clone_url,
+        branch: req.branch,
+        compute_target_id: resolved_ct_entity.as_ref().map(|e| e.id.to_string()),
+        jj_change_id,
+        container_id: outcome.container_id,
+        meta_spec_set_sha,
+    })
+}
+
+/// Build the agent clone URL: `{base_url}/git/{workspace_slug}/{repo_name}`.
+/// Falls back to the workspace id when the workspace record is unavailable.
+pub(crate) fn build_clone_url(
+    state: &AppState,
+    workspace: Option<&gyre_domain::Workspace>,
+    repo: &gyre_domain::Repository,
+) -> String {
+    let ws_slug = workspace
+        .map(|ws| ws.slug.clone())
+        .unwrap_or_else(|| repo.workspace_id.to_string());
+    format!("{}/git/{}/{}", state.base_url, ws_slug, repo.name)
+}
+
+/// Everything the process-launch dispatch needs, decoupled from the task
+/// ledger so task-less agents (meta-spec previews, reconciliation §5) share
+/// exactly one launch path with normal agent spawns.
+pub(crate) struct AgentLaunchParams<'a> {
+    pub state: &'a Arc<AppState>,
+    pub agent: &'a Agent,
+    pub repo: &'a gyre_domain::Repository,
+    /// `None` when the workspace record could not be loaded: tenant-scoped
+    /// secret resolution is skipped rather than aimed at a fabricated tenant.
+    pub workspace: Option<&'a gyre_domain::Workspace>,
+    /// Resolved compute target. `None` = local process spawn.
+    pub resolved_target_config: Option<super::compute::ComputeTargetConfig>,
+    pub token: &'a str,
+    pub branch: &'a str,
+    pub repo_id: &'a str,
+    pub worktree_path: &'a str,
+    /// `None` for agents with no task — `GYRE_TASK_ID` is then not injected.
+    pub task_id: Option<&'a str>,
+    pub clone_url: &'a str,
+    /// Extra agent-context env (preview draft meta-spec). Merged before the
+    /// server-owned identity/credential vars so it can never shadow them.
+    pub extra_env: std::collections::HashMap<String, String>,
+}
+
+/// Handles captured by a launch, for workload attestation.
+#[derive(Default)]
+pub(crate) struct LaunchOutcome {
+    pub pid: Option<u32>,
+    pub container_id: Option<String>,
+    pub container_image: Option<String>,
+}
+
+/// Shared process-exit transition for every compute-target monitor.
+///
+/// Preview agents are killed on completion (reconciliation §5): they land in
+/// Stopped with their token revoked and budget slot released — never Idle,
+/// because an Idle preview agent could be re-targeted onto real work.
+/// Normal agents keep the Active→Idle transition.
+pub(crate) async fn on_agent_process_exit(state: &AppState, agent_id: &str) {
+    if super::meta_specs::finish_preview_agent(state, agent_id).await {
+        return;
+    }
+    if let Ok(Some(mut a)) = state.agents.find_by_id(&Id::new(agent_id)).await {
+        if a.status == AgentStatus::Active {
+            let _ = a.transition_status(AgentStatus::Idle);
+            let _ = state.agents.update(&a).await;
+        }
+    }
+}
+
+/// Force-kill the process behind a registered handle.
+///
+/// Container handles are killed by container id (`docker rm --force`), so they
+/// must not be dispatched to the local target — a container handle's pid (if
+/// any) belongs to the docker daemon's child, not to the agent.
+pub(crate) async fn kill_process_handle(handle: &gyre_ports::ProcessHandle) -> anyhow::Result<()> {
+    use gyre_ports::ComputeTarget;
+    if handle.target_type == "container" {
+        // The image is irrelevant to `docker rm --force`; the handle id is the
+        // container id recorded at spawn time.
+        let target = gyre_adapters::compute::ContainerTarget::new(String::new());
+        ComputeTarget::kill_process(&target, handle).await
+    } else {
+        ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, handle).await
+    }
+}
+
+/// Launch an agent process on its resolved compute target and install the
+/// liveness monitor. Extracted verbatim from `spawn_agent_core` so preview
+/// spawns get identical container/ssh/local behavior.
+pub(crate) async fn launch_agent_process(
+    params: AgentLaunchParams<'_>,
+) -> Result<LaunchOutcome, ApiError> {
+    let AgentLaunchParams {
+        state,
+        agent,
+        repo,
+        workspace,
+        resolved_target_config,
+        token,
+        branch,
+        repo_id,
+        worktree_path,
+        task_id,
+        clone_url,
+        extra_env,
+    } = params;
     // Launch a real process and monitor its lifecycle.
     // Capture the PID (local) or container ID (container) for workload attestation.
     let spawned_pid: Option<u32>;
@@ -594,11 +791,11 @@ pub(crate) async fn spawn_agent_core(
     {
         // Docker requires an absolute working directory path. Canonicalize the
         // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
-        // relative (e.g. the default "./repos/").
+        // relative (e.g. the configured repos root prefix).
         let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
             std::fs::canonicalize(&worktree_path)
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| worktree_path.clone())
+                .unwrap_or_else(|_| worktree_path.to_string())
         } else {
             // Worktree not yet on disk — fall back to /workspace (absolute).
             "/workspace".to_string()
@@ -625,13 +822,21 @@ pub(crate) async fn spawn_agent_core(
 
         // Inject agent context env vars so the container can bootstrap itself.
         let mut container_env = std::collections::HashMap::new();
+        // Caller-supplied extra context (preview agents inject their draft
+        // meta-spec here). Merged before the standard vars so a stray key can
+        // never shadow the server-owned identity/credential env vars.
+        for (key, value) in extra_env {
+            container_env.insert(key, value);
+        }
         container_env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
-        container_env.insert("GYRE_AUTH_TOKEN".to_string(), token.clone());
-        container_env.insert("GYRE_CLONE_URL".to_string(), clone_url.clone());
-        container_env.insert("GYRE_BRANCH".to_string(), req.branch.clone());
+        container_env.insert("GYRE_AUTH_TOKEN".to_string(), token.to_string());
+        container_env.insert("GYRE_CLONE_URL".to_string(), clone_url.to_string());
+        container_env.insert("GYRE_BRANCH".to_string(), branch.to_string());
         container_env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
-        container_env.insert("GYRE_TASK_ID".to_string(), req.task_id.clone());
-        container_env.insert("GYRE_REPO_ID".to_string(), req.repo_id.clone());
+        if let Some(task_id) = task_id {
+            container_env.insert("GYRE_TASK_ID".to_string(), task_id.to_string());
+        }
+        container_env.insert("GYRE_REPO_ID".to_string(), repo_id.to_string());
 
         // Platform Model §7 Secrets Delivery: resolve scoped secrets from the
         // repository (tenant → workspace → repo → task, nearest scope wins)
@@ -640,34 +845,48 @@ pub(crate) async fn spawn_agent_core(
         // process starts — raw values are never in the agent env.
         // Failure is logged and skipped: a missing/undecryptable secret must
         // not block spawning the agent itself.
-        let tenant_id = workspace
-            .as_ref()
-            .map(|ws| ws.tenant_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
-        match state
-            .secrets
-            .resolve_for_agent(
-                &tenant_id,
-                &repo.workspace_id.to_string(),
-                &req.repo_id,
-                Some(&req.task_id),
-            )
-            .await
-        {
-            Ok(resolved) => {
-                for (name, value) in resolved {
-                    container_env.insert(
-                        format!("GYRE_CRED_{name}"),
-                        String::from_utf8_lossy(&value).into_owned(),
+        // The tenant scope comes from the workspace record. When it cannot be
+        // resolved, tenant-scoped secret resolution is SKIPPED — never aimed
+        // at a fabricated "default" tenant (that silently re-targets secrets).
+        match workspace.map(|ws| ws.tenant_id.to_string()) {
+            None => tracing::warn!(
+                agent_id = %agent.id,
+                "workspace record unavailable; skipping tenant-scoped secret resolution"
+            ),
+            Some(tenant_id) => match state
+                .secrets
+                .resolve_for_agent(
+                    &tenant_id,
+                    &repo.workspace_id.to_string(),
+                    repo_id,
+                    task_id,
+                )
+                .await
+            {
+                Ok(resolved) => {
+                    for (name, value) in resolved {
+                        // Secret values are raw bytes: a lossy conversion hands
+                        // the agent a corrupted credential (U+FFFD) with no
+                        // error. Skip the secret and name it in the log.
+                        match String::from_utf8(value) {
+                            Ok(v) => {
+                                container_env.insert(format!("GYRE_CRED_{name}"), v);
+                            }
+                            Err(_) => tracing::warn!(
+                                agent_id = %agent.id,
+                                secret = %name,
+                                "secret value is not valid UTF-8; skipping GYRE_CRED_{name}"
+                            ),
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent_id = %agent.id,
+                        "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
                     );
                 }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %agent.id,
-                    "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
-                );
-            }
+            },
         }
 
         // M27: cred-proxy addresses for credential routing.
@@ -841,14 +1060,7 @@ pub(crate) async fn spawn_agent_core(
                                         )
                                         .await;
                                     }
-                                    if let Ok(Some(mut a)) =
-                                        state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
-                                    {
-                                        if a.status == AgentStatus::Active {
-                                            let _ = a.transition_status(AgentStatus::Idle);
-                                            let _ = state_mon.agents.update(&a).await;
-                                        }
-                                    }
+                                    on_agent_process_exit(&state_mon, &agent_id_str).await;
                                     break;
                                 }
                             }
@@ -951,14 +1163,7 @@ pub(crate) async fn spawn_agent_core(
                                         .lock()
                                         .await
                                         .remove(&agent_id_str);
-                                    if let Ok(Some(mut a)) =
-                                        state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
-                                    {
-                                        if a.status == AgentStatus::Active {
-                                            let _ = a.transition_status(AgentStatus::Idle);
-                                            let _ = state_mon.agents.update(&a).await;
-                                        }
-                                    }
+                                    on_agent_process_exit(&state_mon, &agent_id_str).await;
                                     break;
                                 }
                             }
@@ -1004,14 +1209,7 @@ pub(crate) async fn spawn_agent_core(
                                         .lock()
                                         .await
                                         .remove(&agent_id_str);
-                                    if let Ok(Some(mut a)) =
-                                        state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
-                                    {
-                                        if a.status == AgentStatus::Active {
-                                            let _ = a.transition_status(AgentStatus::Idle);
-                                            let _ = state_mon.agents.update(&a).await;
-                                        }
-                                    }
+                                    on_agent_process_exit(&state_mon, &agent_id_str).await;
                                     break;
                                 }
                             }
@@ -1027,91 +1225,10 @@ pub(crate) async fn spawn_agent_core(
             }
         }
     }
-
-    // G10 + M19.4: Create workload attestation now that we know the PID / container ID.
-    let att = {
-        // Retrieve the stack hash recorded by the agent (M14.1), if any.
-        let stack_hash = state
-            .kv_store
-            .kv_get("agent_stacks", &agent.id.to_string())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                serde_json::from_str::<super::stack_attest::AgentStack>(&s)
-                    .ok()
-                    .map(|st| st.fingerprint())
-            })
-            .unwrap_or_default();
-        workload_attestation::attest_agent_with_container(
-            &agent.id.to_string(),
-            spawned_pid,
-            &compute_target_label,
-            &stack_hash,
-            spawned_container_id.clone(),
-            spawned_container_image.clone(),
-        )
-    };
-    if let Ok(json) = serde_json::to_string(&att) {
-        let _ = state
-            .kv_store
-            .kv_set("workload_attestations", &agent.id.to_string(), json)
-            .await;
-    }
-
-    // Token was pre-minted above and already stored in agent_tokens.
-    // Workload attestation claims are stored in state.workload_attestations
-    // and queryable via GET /api/v1/agents/{id}/workload.
-
-    // Phase 3 (TASK-008, §7.4): Create workload KeyBinding and DerivedInput
-    // from the parent task's attestation chain, then inject into the agent's
-    // environment via KV store. The agent uses the KeyBinding to sign its
-    // output attestation at push time.
-    if !is_interrogation {
-        create_derived_input_for_agent(
-            &state,
-            &agent.id.to_string(),
-            &req.task_id,
-            &auth.agent_id,
-            now,
-        )
-        .await;
-    }
-
-    // Auto-track agent spawn
-    let ev = AnalyticsEvent::new(
-        new_id(),
-        "agent.spawned",
-        Some(agent.id.to_string()),
-        serde_json::json!({ "task_id": req.task_id }),
-        now,
-    );
-    let _ = state.analytics.record(&ev).await;
-
-    // M22.2: Increment budget active-agent counter for the workspace.
-    super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
-
-    // M32: Capture meta-spec set SHA for provenance — workspace lookup via kv_store
-    // requires a reverse scan (repo_id → workspace_id) which is not directly indexed.
-    // Best-effort: omit when workspace cannot be efficiently determined.
-    let meta_spec_set_sha: Option<String> = None;
-
-    Ok(SpawnAgentResponse {
-        agent: {
-            let mut r = AgentResponse::from(agent);
-            r.repo_id = Some(req.repo_id.clone());
-            r.branch = Some(req.branch.clone());
-            r.task_id = Some(req.task_id.clone());
-            r
-        },
-        token,
-        worktree_path,
-        clone_url,
-        branch: req.branch,
-        compute_target_id: resolved_ct_entity.as_ref().map(|e| e.id.to_string()),
-        jj_change_id,
+    Ok(LaunchOutcome {
+        pid: spawned_pid,
         container_id: spawned_container_id,
-        meta_spec_set_sha,
+        container_image: spawned_container_image,
     })
 }
 
