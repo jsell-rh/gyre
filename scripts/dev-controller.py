@@ -92,6 +92,19 @@ def health(db):
     return db.execute("SELECT * FROM controller_health WHERE id=1").fetchone()
 
 
+def effective_admission(db, slots, running, now=None):
+    """Existing work keeps its slots; a degraded gateway gets one probe."""
+    now = int(time.time()) if now is None else now
+    gate = health(db)
+    if gate["condition"] == "ConfigurationInvalid":
+        return running
+    if gate["failures"]:
+        probe = db.execute("""SELECT 1 FROM attempts WHERE state='running' AND started>=?
+                              LIMIT 1""", (gate["retry_at"],)).fetchone()
+        return running if now < gate["retry_at"] or probe else min(slots, running + 1)
+    return min(slots, max(running, gate["admission"]))
+
+
 def backoff_seconds(failures):
     return min(900, 30 * 2 ** min(max(failures - 1, 0), 5))
 
@@ -122,8 +135,9 @@ def observe_ready(db):
         if current["condition"] == "ConfigurationInvalid":
             db.commit()
             continue
+        running = db.execute("SELECT count(*) FROM attempts WHERE state='running'").fetchone()[0]
         db.execute("UPDATE controller_health SET failures=0,retry_at=0,admission=?,condition='Healthy' WHERE id=1",
-                   (min(current["admission"] + 1, 1000),))
+                   (min(max(current["admission"] + 1, running + 1), 1000),))
         event(db, attempt["task"], "sandbox Ready; gateway admission increased")
 
 
@@ -500,9 +514,11 @@ def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
         event(db, name, f"attempt limit {max_attempts} reached; inspect logs and retry explicitly")
     running = db.execute("SELECT count(*) FROM attempts WHERE state='running'").fetchone()[0]
     launches = 0
-    effective_slots = min(slots, gate["admission"])
-    if running >= effective_slots or now < gate["retry_at"] or gate["condition"] == "ConfigurationInvalid":
+    effective_slots = effective_admission(db, slots, running, now)
+    if running >= effective_slots:
         return
+    if gate["failures"]:
+        launch_burst = 1
     merged = {r["name"] for r in rows if r["state"] == "merged"}
     for task in rows:
         if task["name"] in exhausted:
@@ -580,10 +596,11 @@ def status_snapshot(db):
     for task in tasks:
         counts[task["state"]] = counts.get(task["state"], 0) + 1
     gate = dict(health(db))
-    gate["effective_slots"] = min(configured_slots() or 0, gate["admission"])
+    running = sum(a["state"] == "running" for a in attempts)
+    gate["effective_slots"] = effective_admission(db, configured_slots() or 0, running)
     return {"tasks": tasks, "attempts": attempts, "events": events,
             "counts": counts, "eligible": eligible,
-            "running": sum(a["state"] == "running" for a in attempts),
+            "running": running,
             "slots": configured_slots(), "health": gate}
 
 

@@ -292,9 +292,10 @@ It requires the OpenShell `gyre-gyre` gateway, `gyre-pricetag` and
 controller. Only one controller process may run at a time. `--slots` is the
 desired upper bound; `--launch-burst` limits starts per scheduling cycle.
 Gateway admission starts at one and increases by one whenever a sandbox
-reaches Ready. Provisioning timeouts and gateway transport failures cut
-admission back to one and impose durable, jittered exponential backoff
-(30 seconds to 15 minutes). The next launch probes gateway recovery.
+reaches Ready. Provisioning timeouts and gateway transport failures impose
+durable, jittered exponential backoff (30 seconds to 15 minutes). Existing
+sandboxes keep running; after the backoff, exactly one additional sandbox
+probes gateway recovery. A Ready signal resumes the gradual ramp.
 An explicit `ConfigurationInvalid` response pauses admission until the
 configuration is repaired and its failed task is retried.
 The cockpit reads

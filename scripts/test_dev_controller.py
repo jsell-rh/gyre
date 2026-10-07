@@ -159,6 +159,20 @@ class ControllerGitTest(unittest.TestCase):
             spawn.assert_called_once()
             self.assertEqual(spawn.call_args.kwargs["branch"], "devloop/task-001/attempt-2")
 
+    def test_capacity_probe_does_not_wait_for_existing_workers_to_finish(self):
+        controller.sync(self.db)
+        self.db.executemany("""INSERT INTO attempts(id,task,kind,state,started)
+                               VALUES(?,'task-001','worker','running',900)""",
+                            [(f"active{i}",) for i in range(28)])
+        self.db.execute("UPDATE controller_health SET failures=1,retry_at=1030,admission=1,condition='Capacity unavailable' WHERE id=1")
+        self.db.commit()
+        self.assertEqual(controller.effective_admission(self.db, 50, 28, 1029), 28)
+        self.assertEqual(controller.effective_admission(self.db, 50, 28, 1030), 29)
+        self.db.execute("""INSERT INTO attempts(id,task,kind,state,started)
+                           VALUES('probe','task-001','worker','running',1030)""")
+        self.db.commit()
+        self.assertEqual(controller.effective_admission(self.db, 50, 29, 1031), 29)
+
     def test_ready_signal_recovers_gateway_and_ramps_one_slot(self):
         controller.sync(self.db)
         directory = controller.STATE / "attempts" / "ready"
