@@ -446,6 +446,12 @@ impl ResourceResolver {
                     "meta_spec",
                     None,
                 ),
+                RouteResourceMapping::api("/api/v1/meta-specs/preview", "meta_spec", None),
+                RouteResourceMapping::api(
+                    "/api/v1/meta-specs/preview/:preview_id",
+                    "meta_spec",
+                    None,
+                ),
                 // ── Personas ───────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/personas", "persona", None),
                 RouteResourceMapping::api("/api/v1/personas/resolve", "persona", None),

@@ -505,6 +505,24 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register meta_spec_preview_gc job (§5 of meta-spec-reconciliation.md)
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_preview_gc".to_string(),
+                description:
+                    "Tears down meta-spec preview runs past their TTL: kills agents, \
+             removes worktrees, deletes preview branches, revokes tokens, releases \
+             budget slots"
+                        .to_string(),
+                interval_secs: crate::api::meta_specs::preview_gc_interval_secs_from_env(),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::api::meta_specs::run_once(&state).await },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.
