@@ -181,6 +181,14 @@ enum Commands {
         #[command(subcommand)]
         command: DepsCommands,
     },
+    /// Budget governance: show usage, set limits.
+    ///
+    /// The budget boundary is the workspace: default (repo) scope resolves
+    /// the workspace that owns the current repository via its git remote.
+    Budget {
+        #[command(subcommand)]
+        command: BudgetCommands,
+    },
     /// Repository operations (status, revert, merge queue control)
     Repo {
         #[command(subcommand)]
@@ -418,6 +426,56 @@ enum DepsCommands {
     Acknowledge {
         /// Breaking change ID
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BudgetCommands {
+    /// Show budget limits and live usage.
+    ///
+    /// With no flags, resolves the workspace owning the current repo (from
+    /// the git remote) — repo scope maps to the owning workspace budget,
+    /// there is no repo-keyed budget. --workspace-name <SLUG> targets a
+    /// named workspace; --tenant prints the tenant-wide summary (Admin only).
+    Show {
+        /// Workspace scope for the current repo's owning workspace
+        #[arg(long)]
+        workspace: bool,
+        /// Tenant-wide budget summary (Admin only)
+        #[arg(long)]
+        tenant: bool,
+        /// Target a named workspace by slug
+        #[arg(long = "workspace-name", value_name = "SLUG")]
+        workspace_name: Option<String>,
+    },
+    /// Set budget limits (Admin only).
+    ///
+    /// Repo scope (default) maps to the owning workspace's budget. Limits
+    /// not given keep their current values (the client fetch-merges before
+    /// the PUT). Cascade violations and permission errors surface the
+    /// server's response verbatim.
+    Set {
+        /// Max LLM tokens per day
+        #[arg(long = "llm-tokens", value_name = "N")]
+        llm_tokens: Option<u64>,
+        /// Max LLM cost per day in USD
+        #[arg(long = "llm-cost", value_name = "USD")]
+        llm_cost: Option<f64>,
+        /// Max concurrent agents
+        #[arg(long = "max-agents", value_name = "N")]
+        max_agents: Option<u32>,
+        /// Max agent lifetime in seconds
+        #[arg(long, value_name = "SECS")]
+        max_agent_lifetime_secs: Option<u64>,
+        /// Workspace scope for the current repo's owning workspace
+        #[arg(long)]
+        workspace: bool,
+        /// Tenant scope (set is not supported server-side)
+        #[arg(long)]
+        tenant: bool,
+        /// Target a named workspace by slug
+        #[arg(long = "workspace-name", value_name = "SLUG")]
+        workspace_name: Option<String>,
     },
 }
 
@@ -1359,6 +1417,74 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Budget { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            match command {
+                BudgetCommands::Show {
+                    workspace,
+                    tenant,
+                    workspace_name,
+                } => {
+                    if tenant && (workspace || workspace_name.is_some()) {
+                        anyhow::bail!(
+                            "--tenant cannot be combined with --workspace/--workspace-name"
+                        );
+                    }
+                    if tenant {
+                        let summary = api.budget_summary().await?;
+                        print_tenant_budget_summary(&summary);
+                    } else {
+                        let ws_id =
+                            resolve_budget_workspace(&api, workspace_name.as_deref()).await?;
+                        let budget = api.get_workspace_budget(&ws_id).await?;
+                        print_budget_response(&budget);
+                    }
+                }
+                BudgetCommands::Set {
+                    llm_tokens,
+                    llm_cost,
+                    max_agents,
+                    max_agent_lifetime_secs,
+                    workspace: _,
+                    tenant,
+                    workspace_name,
+                } => {
+                    if tenant {
+                        anyhow::bail!(
+                            "no tenant-level budget set endpoint exists \
+                             (tenant:global limits are provisioned server-side); \
+                             target a workspace with --workspace-name"
+                        );
+                    }
+                    if llm_tokens.is_none()
+                        && llm_cost.is_none()
+                        && max_agents.is_none()
+                        && max_agent_lifetime_secs.is_none()
+                    {
+                        anyhow::bail!(
+                            "no limits given: pass --llm-tokens, --llm-cost, \
+                             --max-agents, or --max-agent-lifetime-secs"
+                        );
+                    }
+                    let ws_id =
+                        resolve_budget_workspace(&api, workspace_name.as_deref()).await?;
+                    let budget = api
+                        .set_workspace_budget(
+                            &ws_id,
+                            llm_tokens,
+                            llm_cost,
+                            max_agents,
+                            max_agent_lifetime_secs,
+                        )
+                        .await?;
+                    print_budget_response(&budget);
+                }
+            }
+        }
+
         Commands::Divergence { workspace } => {
             let cfg = config::Config::load()?;
             let token = cfg.require_token()?;
@@ -2099,6 +2225,185 @@ fn print_dependency_graph_filtered(
             println!("{:<30} {:<30} {:<10} {}", source, target, etype, status);
         }
     }
+}
+
+/// Resolve the budget target workspace id: a named slug when given, else the
+/// workspace that owns the current repo (inferred from the git remote — the
+/// same resolution `gyre deps`/`gyre explore` use).
+async fn resolve_budget_workspace(
+    api: &client::GyreClient,
+    workspace_name: Option<&str>,
+) -> Result<String> {
+    let ws_slug = match workspace_name {
+        Some(slug) => slug.to_string(),
+        None => {
+            let (ws_slug, _repo) = infer_repo_from_git_remote().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not infer workspace from git remote. \
+                     Run from a gyre-cloned repository, or pass --workspace-name."
+                )
+            })?;
+            ws_slug
+        }
+    };
+    api.resolve_workspace_slug(&ws_slug).await
+}
+
+/// Format an optional numeric budget limit for display ("-" = unlimited).
+fn fmt_budget_limit(v: Option<u64>) -> String {
+    v.map(|n| n.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+/// Utilization percentage of used/limit; "-" when the limit is unset.
+fn budget_util(used: f64, limit: Option<f64>) -> String {
+    match limit {
+        Some(m) if m > 0.0 => format!("{:.0}%", used / m * 100.0),
+        Some(_) => "100%+".to_string(),
+        None => "-".to_string(),
+    }
+}
+
+/// Print a workspace budget (limits + live usage) as returned by
+/// GET/PUT /api/v1/workspaces/:id/budget.
+fn print_budget_response(b: &client::BudgetResponse) {
+    println!("Budget — {} {}", b.entity_type, b.entity_id);
+    println!();
+    println!(
+        "{:<22} {:>14} {:>14} {:>6}",
+        "METRIC", "USED TODAY", "LIMIT", "USE"
+    );
+    println!("{}", "-".repeat(60));
+    println!(
+        "{:<22} {:>14} {:>14} {:>6}",
+        "LLM tokens/day",
+        b.usage.tokens_used_today,
+        fmt_budget_limit(b.config.max_tokens_per_day),
+        budget_util(
+            b.usage.tokens_used_today as f64,
+            b.config.max_tokens_per_day.map(|m| m as f64)
+        )
+    );
+    println!(
+        "{:<22} {:>14.2} {:>14} {:>6}",
+        "LLM cost/day (USD)",
+        b.usage.cost_today,
+        b.config
+            .max_cost_per_day
+            .map(|m| format!("{m:.2}"))
+            .unwrap_or_else(|| "-".to_string()),
+        budget_util(b.usage.cost_today, b.config.max_cost_per_day)
+    );
+    println!(
+        "{:<22} {:>14} {:>14} {:>6}",
+        "Active agents",
+        b.usage.active_agents,
+        fmt_budget_limit(b.config.max_concurrent_agents.map(|m| m as u64)),
+        budget_util(
+            b.usage.active_agents as f64,
+            b.config.max_concurrent_agents.map(|m| m as f64)
+        )
+    );
+    println!(
+        "Max agent lifetime: {}",
+        b.config
+            .max_agent_lifetime_secs
+            .map(|s| format!("{s}s"))
+            .unwrap_or_else(|| "-".to_string())
+    );
+}
+
+/// Print the tenant-wide summary (GET /api/v1/budget/summary): tenant
+/// limits/usage rows, a per-workspace table, and summed workspace usage.
+fn print_tenant_budget_summary(s: &client::TenantBudgetSummary) {
+    println!("Tenant budget");
+    println!();
+    println!(
+        "{:<22} {:>14} {:>14} {:>6}",
+        "TENANT METRIC", "USED TODAY", "LIMIT", "USE"
+    );
+    println!("{}", "-".repeat(60));
+    println!(
+        "{:<22} {:>14} {:>14} {:>6}",
+        "LLM tokens/day",
+        s.tenant_usage.tokens_used_today,
+        fmt_budget_limit(s.tenant_config.max_tokens_per_day),
+        budget_util(
+            s.tenant_usage.tokens_used_today as f64,
+            s.tenant_config.max_tokens_per_day.map(|m| m as f64)
+        )
+    );
+    println!(
+        "{:<22} {:>14.2} {:>14} {:>6}",
+        "LLM cost/day (USD)",
+        s.tenant_usage.cost_today,
+        s.tenant_config
+            .max_cost_per_day
+            .map(|m| format!("{m:.2}"))
+            .unwrap_or_else(|| "-".to_string()),
+        budget_util(s.tenant_usage.cost_today, s.tenant_config.max_cost_per_day)
+    );
+    println!(
+        "{:<22} {:>14} {:>14} {:>6}",
+        "Active agents",
+        s.tenant_usage.active_agents,
+        fmt_budget_limit(
+            s.tenant_config
+                .max_concurrent_agents
+                .map(|m| m as u64)
+        ),
+        budget_util(
+            s.tenant_usage.active_agents as f64,
+            s.tenant_config.max_concurrent_agents.map(|m| m as f64)
+        )
+    );
+
+    println!();
+    println!("Workspaces:");
+    if s.workspaces.is_empty() {
+        println!("  (no workspace budget configs)");
+        return;
+    }
+    println!(
+        "{:<36} {:>19} {:>19} {:>10}",
+        "WORKSPACE", "TOKENS USED/LIMIT", "COST USED/LIMIT", "AGENTS/MAX"
+    );
+    println!("{}", "-".repeat(88));
+    let mut tot_tokens: u64 = 0;
+    let mut tot_cost: f64 = 0.0;
+    let mut tot_agents: u32 = 0;
+    for w in &s.workspaces {
+        tot_tokens += w.usage.tokens_used_today;
+        tot_cost += w.usage.cost_today;
+        tot_agents += w.usage.active_agents;
+        println!(
+            "{:<36} {:>19} {:>19} {:>10}",
+            w.entity_id,
+            format!(
+                "{}/{}",
+                w.usage.tokens_used_today,
+                fmt_budget_limit(w.config.max_tokens_per_day)
+            ),
+            format!(
+                "{:.2}/{}",
+                w.usage.cost_today,
+                w.config
+                    .max_cost_per_day
+                    .map(|m| format!("{m:.2}"))
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+            format!(
+                "{}/{}",
+                w.usage.active_agents,
+                fmt_budget_limit(w.config.max_concurrent_agents.map(|m| m as u64))
+            )
+        );
+    }
+    println!("{}", "-".repeat(88));
+    println!(
+        "{:<36} {:>19} {:>19} {:>10}",
+        "TOTAL (workspaces)", tot_tokens, format!("{tot_cost:.2}"), tot_agents
+    );
 }
 
 /// Render a dependency graph in Graphviz DOT format.
@@ -3497,5 +3802,147 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains(r#"a\"b.md"#));
         assert!(output.contains(r#"Test \"quotes\""#));
+    }
+
+    // ── Budget command tests ─────────────────────────────────────────────
+
+    #[test]
+    fn cli_budget_show_bare_parses() {
+        let args = Cli::try_parse_from(["gyre", "budget", "show"]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Show {
+                    workspace,
+                    tenant,
+                    workspace_name,
+                },
+        } = args.unwrap().command
+        {
+            assert!(!workspace);
+            assert!(!tenant);
+            assert!(workspace_name.is_none());
+        } else {
+            panic!("Expected Budget Show");
+        }
+    }
+
+    #[test]
+    fn cli_budget_show_tenant_parses() {
+        let args = Cli::try_parse_from(["gyre", "budget", "show", "--tenant"]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command: BudgetCommands::Show { tenant, .. },
+        } = args.unwrap().command
+        {
+            assert!(tenant);
+        } else {
+            panic!("Expected Budget Show with --tenant");
+        }
+    }
+
+    #[test]
+    fn cli_budget_show_workspace_name_parses() {
+        let args = Cli::try_parse_from(["gyre", "budget", "show", "--workspace-name", "core"]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Show {
+                    workspace_name, ..
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(workspace_name.as_deref(), Some("core"));
+        } else {
+            panic!("Expected Budget Show with --workspace-name");
+        }
+    }
+
+    #[test]
+    fn cli_budget_set_repo_tokens_parses() {
+        let args = Cli::try_parse_from(["gyre", "budget", "set", "--llm-tokens", "500000"]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Set {
+                    llm_tokens,
+                    llm_cost,
+                    max_agents,
+                    max_agent_lifetime_secs,
+                    workspace,
+                    tenant,
+                    workspace_name,
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(llm_tokens, Some(500000));
+            assert!(llm_cost.is_none());
+            assert!(max_agents.is_none());
+            assert!(max_agent_lifetime_secs.is_none());
+            assert!(!workspace);
+            assert!(!tenant);
+            assert!(workspace_name.is_none());
+        } else {
+            panic!("Expected Budget Set");
+        }
+    }
+
+    #[test]
+    fn cli_budget_set_workspace_cost_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "budget",
+            "set",
+            "--workspace",
+            "--llm-cost",
+            "100.00",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Set {
+                    llm_cost,
+                    workspace,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert!(workspace);
+            assert_eq!(llm_cost, Some(100.0));
+        } else {
+            panic!("Expected Budget Set with --workspace --llm-cost");
+        }
+    }
+
+    #[test]
+    fn cli_budget_set_agents_lifetime_and_name_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "budget",
+            "set",
+            "--workspace-name",
+            "core",
+            "--max-agents",
+            "4",
+            "--max-agent-lifetime-secs",
+            "3600",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Set {
+                    max_agents,
+                    max_agent_lifetime_secs,
+                    workspace_name,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(max_agents, Some(4));
+            assert_eq!(max_agent_lifetime_secs, Some(3600));
+            assert_eq!(workspace_name.as_deref(), Some("core"));
+        } else {
+            panic!("Expected Budget Set with --workspace-name");
+        }
     }
 }
