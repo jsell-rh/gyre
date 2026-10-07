@@ -825,7 +825,7 @@ async fn collect_architecture_narratives(
         return (None, Vec::new());
     }
     recent.sort_by_key(|d| std::cmp::Reverse(d.timestamp));
-    recent.truncate(BRIEFING_NARRATIVE_MAX_DELTAS);
+    recent.truncate(BRIEFING_NARRATIVE_MAX_DELTAS); // slice:ok — Vec<ArchitecturalDelta> length trim, index-typed not string bytes
 
     // One graph-grounding load per repo touched by the window.
     let mut groundings: std::collections::HashMap<String, gyre_domain::narrative::NarrativeGrounding> =
