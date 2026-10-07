@@ -1,11 +1,10 @@
-# fabricated-scope-defaults-exemptions.txt — legacy debt, frozen at 8 entries.
+# fabricated-scope-defaults-exemptions.txt — legacy debt, frozen at 6 entries.
 # Fix a flagged site by skipping the scope-scoped operation and logging
 # (see emit_reconciliation_completed in gyre-server/src/lib.rs); never add
 # entries. If you fix a site, delete its line and lower
 # FROZEN_EXEMPTION_COUNT in check-fabricated-scope-defaults.sh.
 #
 # task-097 F3 sites (owned by task-097's revision round):
-crates/gyre-server/src/api/spawn.rs:643: tenant fallback for secret resolution — task-097 F3, fix owned by revision round
 crates/gyre-server/src/constraint_check.rs:1357: tenant fallback for violation emission — same class as task-097 F3, unflagged by review
 # Pre-existing legacy sites (older than task-097; fix when touching):
 crates/gyre-server/src/api/specs.rs:959: tenant_id fallback in spec-rejected notification fanout

@@ -34,8 +34,16 @@ The Gyre server injects these automatically at spawn time — you do not need to
 | `GYRE_BRANCH` | Branch to clone |
 | `GYRE_AGENT_ID` | Agent UUID |
 | `GYRE_TASK_ID` | Assigned task UUID |
+| `GYRE_PREVIEW_ID` | Preview UUID — set instead of `GYRE_TASK_ID` for a meta-spec preview run |
+| `GYRE_META_SPEC_DRAFT_KIND` | _(preview only)_ Draft meta-spec kind, e.g. `meta:persona` |
+| `GYRE_META_SPEC_DRAFT_CONTENT` | _(preview only)_ Full draft meta-spec text — never committed, it lives only in the agent's environment |
+| `GYRE_TARGET_SPEC_PATH` | _(preview only)_ Repo-relative path of the spec the preview agent must implement |
 | `GYRE_REPO_ID` | Repository UUID |
 | `GYRE_AGENT_COMMAND` | _(optional)_ Command to exec after bootstrap (e.g. a CI script path inside the image) |
+
+## Preview Mode
+
+When a human previews a draft meta-spec (`POST /api/v1/meta-specs/preview`), the server spawns the agent with `GYRE_PREVIEW_ID` in place of `GYRE_TASK_ID`, plus the three `GYRE_META_SPEC_*` / `GYRE_TARGET_SPEC_PATH` vars above. The runner reads the draft meta-spec and target spec from those vars and builds the prompt itself, withholds the task-mutating MCP tools (`gyre_list_tasks`, `gyre_create_task`, `gyre_update_task`), and stops after the agent's query loop with a single log line. There is no task to read or update, no conversation upload, no `POST /api/v1/agents/{id}/complete` call and no merge request — the push to `preview/<preview_id>/<slug>` is the entire deliverable, and the server reads the diff off that branch, kills the agent and deletes the branch. Providing `GYRE_TASK_PROMPT` together with `GYRE_PREVIEW_ID` is an operator override and restores the normal (completing) path.
 
 ## What the Entrypoint Does
 
