@@ -183,10 +183,23 @@ pub struct DeltaResponse {
     pub spec_ref: Option<String>,
     pub agent_id: Option<String>,
     pub delta_json: String,
+    /// Template narrative grounded in the delta plus repo graph context
+    /// (realized-model.md §6). Empty when the delta has no renderable facts.
+    pub narrative: String,
 }
 
-impl From<ArchitecturalDelta> for DeltaResponse {
-    fn from(d: ArchitecturalDelta) -> Self {
+impl DeltaResponse {
+    /// Build a delta response with a grounded template narrative.
+    ///
+    /// `grounding` is the live graph index for the delta's repo;
+    /// `attribution` is the resolved provenance label (see `delta_attribution`).
+    fn from_delta(
+        d: ArchitecturalDelta,
+        grounding: &gyre_domain::narrative::NarrativeGrounding,
+        attribution: Option<&str>,
+    ) -> Self {
+        let narrative =
+            gyre_domain::narrative::generate_template_narrative(&d, grounding, attribution);
         Self {
             id: d.id.to_string(),
             repo_id: d.repo_id.to_string(),
@@ -195,6 +208,7 @@ impl From<ArchitecturalDelta> for DeltaResponse {
             spec_ref: d.spec_ref,
             agent_id: d.agent_id.map(|id| id.to_string()),
             delta_json: d.delta_json,
+            narrative,
         }
     }
 }
@@ -251,7 +265,9 @@ pub struct BriefingResponse {
     pub cross_workspace: Vec<BriefingItem>,
     pub exceptions: Vec<BriefingItem>,
     pub metrics: BriefingMetrics,
-    /// LLM-synthesized narrative (stubbed for now).
+    /// Activity counts plus the graph-grounded architecture narrative
+    /// (realized-model.md §6): LLM-synthesized when an LLM is configured,
+    /// template-rendered otherwise.
     pub summary: String,
     /// Completed agents with their decisions and uncertainties (HSI §4).
     pub completed_agents: Vec<BriefingCompletedAgent>,
@@ -663,6 +679,200 @@ pub async fn get_graph_concept(
     Ok(Json(response))
 }
 
+// ── Narrative generation (realized-model.md §6) ─────────────────────────────
+
+/// Max recent deltas synthesized into the briefing architecture narrative.
+const BRIEFING_NARRATIVE_MAX_DELTAS: usize = 10;
+
+/// Max wait for briefing narrative LLM synthesis before falling back to
+/// template narratives (briefing is a synchronous GET — keep it bounded).
+const NARRATIVE_LLM_TIMEOUT_SECS: u64 = 10;
+
+/// Build narrative grounding for a repo from the live graph.
+async fn load_narrative_grounding(
+    state: &AppState,
+    repo_id: &Id,
+) -> Result<gyre_domain::narrative::NarrativeGrounding, ApiError> {
+    let nodes = state
+        .graph_store
+        .list_nodes(repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    let edges = state
+        .graph_store
+        .list_edges(repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(gyre_domain::narrative::NarrativeGrounding::from_graph(&nodes, &edges))
+}
+
+/// Resolve a delta's provenance attribution label from its stored `agent_id`:
+/// `"agent {name}"`, extended with `" under persona {persona}"` when a persona
+/// binding exists. `None` only when the delta records no provenance — never a
+/// fabricated identity. `cache` amortizes lookups across a delta batch.
+async fn delta_attribution(
+    state: &AppState,
+    delta: &ArchitecturalDelta,
+    cache: &mut std::collections::HashMap<String, Option<String>>,
+) -> Option<String> {
+    let agent_id = delta.agent_id.as_ref()?;
+    let key = agent_id.to_string();
+    if let Some(cached) = cache.get(&key) {
+        return cached.clone();
+    }
+    // Prefer the human-readable agent name; fall back to the stored id, which
+    // is real recorded provenance even if the agent row was deleted.
+    let name = state
+        .agents
+        .find_by_id(agent_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|a| a.name)
+        .unwrap_or_else(|| key.clone());
+    let persona = state
+        .kv_store
+        .kv_get("agent_personas", &key)
+        .await
+        .ok()
+        .flatten()
+        .filter(|p| !p.is_empty());
+    let label = match persona {
+        Some(p) => format!("agent {name} under persona {p}"),
+        None => format!("agent {name}"),
+    };
+    let out = Some(label);
+    cache.insert(key, out.clone());
+    out
+}
+
+/// LLM-synthesized architecture narrative (realized-model.md §6) over a set of
+/// grounded delta facts. Falls back to `fallback` (the concatenated template
+/// narratives) when the LLM is unconfigured, errors, times out, or returns an
+/// empty completion — the briefing never regresses below template quality.
+async fn llm_architecture_narrative(
+    state: &AppState,
+    ws_id: &Id,
+    facts: &serde_json::Value,
+    fallback: String,
+) -> String {
+    let Some(factory) = state.llm.as_ref() else {
+        return fallback;
+    };
+    let facts_str = facts.to_string();
+    let template = state
+        .prompt_templates
+        .get_effective(ws_id, "graph-narrative")
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.content)
+        .unwrap_or_else(|| crate::llm_defaults::PROMPT_GRAPH_NARRATIVE.to_string());
+    let system_prompt = template.replace("{{facts}}", &facts_str);
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(state, ws_id, "graph-narrative").await;
+    let port = factory.for_model(&model);
+    match tokio::time::timeout(
+        Duration::from_secs(NARRATIVE_LLM_TIMEOUT_SECS),
+        port.complete(
+            &system_prompt,
+            gyre_domain::narrative::LLM_NARRATIVE_USER_PROMPT,
+            max_tokens,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(text)) if !text.trim().is_empty() => text.trim().to_string(),
+        Ok(Ok(_)) => fallback,
+        Ok(Err(e)) => {
+            tracing::warn!("graph narrative LLM call failed, using template narrative: {e:#}");
+            fallback
+        }
+        Err(_) => {
+            tracing::warn!("graph narrative LLM call timed out, using template narrative");
+            fallback
+        }
+    }
+}
+
+/// Collect grounded facts + template narratives for deltas recorded in a
+/// workspace's repos since `since` (most recent `BRIEFING_NARRATIVE_MAX_DELTAS`
+/// only). Returns `(facts, template_narratives)`; `(None, vec![])` when no
+/// deltas exist in the window.
+async fn collect_architecture_narratives(
+    state: &AppState,
+    ws_id: &Id,
+    since: u64,
+) -> (Option<serde_json::Value>, Vec<String>) {
+    let repos = match state.repos.list_by_workspace(ws_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("briefing narrative: repo listing failed, skipping: {e:#}");
+            return (None, Vec::new());
+        }
+    };
+    let mut recent: Vec<ArchitecturalDelta> = Vec::new();
+    for repo in &repos {
+        if let Ok(ds) = state
+            .graph_store
+            .list_deltas(&repo.id, Some(since), None)
+            .await
+        {
+            recent.extend(ds);
+        }
+    }
+    if recent.is_empty() {
+        return (None, Vec::new());
+    }
+    recent.sort_by_key(|d| std::cmp::Reverse(d.timestamp));
+    recent.truncate(BRIEFING_NARRATIVE_MAX_DELTAS);
+
+    // One graph-grounding load per repo touched by the window.
+    let mut groundings: std::collections::HashMap<String, gyre_domain::narrative::NarrativeGrounding> =
+        std::collections::HashMap::new();
+    for d in &recent {
+        let key = d.repo_id.to_string();
+        if !groundings.contains_key(&key) {
+            let g = match load_narrative_grounding(state, &d.repo_id).await {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::warn!(
+                        "briefing narrative: graph grounding failed for repo {key}, \
+                         rendering from delta facts only: {e:?}"
+                    );
+                    gyre_domain::narrative::NarrativeGrounding::default()
+                }
+            };
+            groundings.insert(key, g);
+        }
+    }
+
+    let empty_grounding = gyre_domain::narrative::NarrativeGrounding::default();
+    let mut attribution_cache = std::collections::HashMap::new();
+    let mut facts = Vec::new();
+    let mut narratives = Vec::new();
+    for d in &recent {
+        let grounding = groundings
+            .get(&d.repo_id.to_string())
+            .unwrap_or(&empty_grounding);
+        let attribution = delta_attribution(state, d, &mut attribution_cache).await;
+        facts.push(gyre_domain::narrative::build_narrative_facts(
+            d,
+            grounding,
+            attribution.as_deref(),
+        ));
+        let t = gyre_domain::narrative::generate_template_narrative(
+            d,
+            grounding,
+            attribution.as_deref(),
+        );
+        if !t.is_empty() {
+            narratives.push(t);
+        }
+    }
+    (Some(serde_json::Value::Array(facts)), narratives)
+}
+
 /// GET /api/v1/repos/{id}/graph/timeline
 /// Returns architectural deltas, optionally filtered by ?since=<epoch>&until=<epoch>.
 pub async fn get_graph_timeline(
@@ -679,7 +889,15 @@ pub async fn get_graph_timeline(
         .await
         .map_err(ApiError::Internal)?;
 
-    Ok(Json(deltas.into_iter().map(Into::into).collect()))
+    // Ground narratives in the repo's live graph (loaded once per request).
+    let grounding = load_narrative_grounding(&state, &repo_id).await?;
+    let mut attribution_cache = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(deltas.len());
+    for d in deltas {
+        let attribution = delta_attribution(&state, &d, &mut attribution_cache).await;
+        out.push(DeltaResponse::from_delta(d, &grounding, attribution.as_deref()));
+    }
+    Ok(Json(out))
 }
 
 /// GET /api/v1/repos/{id}/graph/risks
@@ -752,11 +970,20 @@ pub async fn get_graph_diff(
         .await
         .map_err(ApiError::Internal)?;
 
+    // Narratives grounded in the repo's live graph (same grounding as timeline).
+    let grounding = load_narrative_grounding(&state, &repo_id).await?;
+    let mut attribution_cache = std::collections::HashMap::new();
+    let mut delta_responses = Vec::with_capacity(deltas.len());
+    for d in deltas {
+        let attribution = delta_attribution(&state, &d, &mut attribution_cache).await;
+        delta_responses.push(DeltaResponse::from_delta(d, &grounding, attribution.as_deref()));
+    }
+
     Ok(Json(GraphDiffResponse {
         from,
         to,
         message: "full diff requires extraction pipeline; returning all deltas".to_string(),
-        deltas: deltas.into_iter().map(Into::into).collect(),
+        deltas: delta_responses,
     }))
 }
 
@@ -1097,6 +1324,28 @@ pub async fn assemble_briefing(
         format!(
             "{mrs_merged} {mr_word} merged, {task_count} {task_word} in progress since {since_str}",
         )
+    };
+
+    // Architecture narrative (realized-model.md §6): ground the summary in the
+    // workspace's recent graph deltas. LLM synthesis when configured; the
+    // concatenated template narratives are the quality floor (fallback on
+    // unconfigured/error/timeout/empty completion).
+    let summary = {
+        let (facts, template_narratives) =
+            collect_architecture_narratives(state, &ws_id, since).await;
+        match facts {
+            Some(facts) => {
+                let fallback = template_narratives.join(" ");
+                let narrative =
+                    llm_architecture_narrative(state, &ws_id, &facts, fallback).await;
+                if narrative.is_empty() {
+                    summary
+                } else {
+                    format!("{summary}. Architecture: {narrative}")
+                }
+            }
+            None => summary,
+        }
     };
 
     Ok(BriefingResponse {
@@ -2324,6 +2573,152 @@ mod tests {
         assert!(
             briefing.exceptions.is_empty(),
             "old MR reverts should be filtered out"
+        );
+    }
+
+    // ── Graph narrative generation (realized-model.md §6) ───────────────
+
+    /// Seed repo-1 graph: `billing::search` module containing `VectorIndex`
+    /// (spec-linked), implementing `FullTextPort`. Returns the added node's
+    /// delta_json entry.
+    async fn seed_narrative_graph(state: &Arc<AppState>) -> String {
+        let module = _new_node("repo-1", "search", NodeType::Module);
+        let module_qn = module.qualified_name.clone();
+        let mut ty = _new_node("repo-1", "VectorIndex", NodeType::Type);
+        ty.qualified_name = format!("{module_qn}::VectorIndex");
+        ty.spec_path = Some("specs/billing/indexing.md".to_string());
+        let trt = _new_node("repo-1", "FullTextPort", NodeType::Trait);
+        for n in [&module, &ty, &trt] {
+            state.graph_store.create_node(n.clone()).await.unwrap();
+        }
+        state
+            .graph_store
+            .create_edge(_new_edge("repo-1", &module.id, &ty.id, EdgeType::Contains))
+            .await
+            .unwrap();
+        state
+            .graph_store
+            .create_edge(_new_edge(
+                "repo-1",
+                &ty.id,
+                &trt.id,
+                EdgeType::Implements,
+            ))
+            .await
+            .unwrap();
+        format!(
+            r#"{{"nodes_added":[{{"name":"VectorIndex","node_type":"type","qualified_name":"{}"}}],"edges_added":1}}"#,
+            ty.qualified_name
+        )
+    }
+
+    #[tokio::test]
+    async fn timeline_endpoint_returns_grounded_narrative() {
+        let state = test_state();
+        let (_ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+        let delta_json = seed_narrative_graph(&state).await;
+
+        // Provenance: a real agent record plus a persona binding.
+        let agent = gyre_domain::Agent::new(Id::new("agent-narr-1"), "worker-9", 1000);
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set("agent_personas", "agent-narr-1", "backend-dev".to_string())
+            .await
+            .unwrap();
+
+        let mut delta = _new_delta("repo-1", "deadbeefcafe", 2000);
+        delta.agent_id = Some(Id::new("agent-narr-1"));
+        delta.delta_json = delta_json;
+        state.graph_store.record_delta(delta).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/repos/repo-1/graph/timeline")
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let narrative = json[0]["narrative"].as_str().unwrap();
+        assert!(
+            narrative.contains("New type `VectorIndex` added to module `qualified::search`."),
+            "{narrative}"
+        );
+        assert!(narrative.contains("Implements trait `FullTextPort`."), "{narrative}");
+        assert!(
+            narrative.contains("Governed by spec: specs/billing/indexing.md."),
+            "{narrative}"
+        );
+        assert!(
+            narrative.contains("Produced by agent worker-9 under persona backend-dev."),
+            "{narrative}"
+        );
+        assert!(narrative.contains("1 new relationship established."), "{narrative}");
+    }
+
+    /// Delta with no graph seeding: template still renders from the delta's
+    /// own qualified names.
+    fn narrative_delta() -> ArchitecturalDelta {
+        let mut delta = _new_delta("repo-1", "abc123", 2000);
+        delta.delta_json =
+            r#"{"nodes_added":[{"name":"VectorIndex","node_type":"type","qualified_name":"billing::search::VectorIndex"}]}"#
+                .to_string();
+        delta
+    }
+
+    #[tokio::test]
+    async fn briefing_summary_falls_back_to_template_narrative_without_llm() {
+        let mut s = (*test_state()).clone();
+        s.llm = None;
+        let state = std::sync::Arc::new(s);
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+        state.graph_store.record_delta(narrative_delta()).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(briefing.summary.contains("MRs merged"), "{}", briefing.summary);
+        assert!(
+            briefing
+                .summary
+                .contains("Architecture: New type `VectorIndex` added to module `billing::search`."),
+            "{}",
+            briefing.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_summary_uses_llm_narrative_when_configured() {
+        // test_state() wires the echo mock: a successful completion equals the
+        // user prompt, which only appears if the LLM path actually ran.
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+        state.graph_store.record_delta(narrative_delta()).await.unwrap();
+
+        let briefing = assemble_briefing(&state, &ws_id, 1500)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert!(briefing.summary.contains("MRs merged"), "{}", briefing.summary);
+        assert!(
+            briefing
+                .summary
+                .contains(gyre_domain::narrative::LLM_NARRATIVE_USER_PROMPT),
+            "LLM-synthesized narrative expected in summary: {}",
+            briefing.summary
+        );
+        assert!(
+            !briefing.summary.contains("New type `VectorIndex`"),
+            "template fallback text must not appear when the LLM path succeeds: {}",
+            briefing.summary
         );
     }
 }
