@@ -283,35 +283,16 @@ pub async fn resolve_persona(
     // into every level makes the parent lookups unreachable (platform-model.md
     // §2 Scope Resolution: nearest-scope-wins Repo > Workspace > Tenant).
     let scopes_to_try: Vec<PersonaScope> = match q.scope_kind.as_str() {
-        "Repo" => {
-            let repo = state.repos.find_by_id(&scope_id).await?.ok_or_else(|| {
-                ApiError::NotFound(format!("repo '{scope_id}' not found"))
-            })?;
-            let workspace = state
-                .workspaces
-                .find_by_id(&repo.workspace_id)
-                .await?
-                .ok_or_else(|| {
-                    ApiError::NotFound(format!("workspace '{}' not found", repo.workspace_id))
-                })?;
-            vec![
-                PersonaScope::Repo(repo.id),
-                PersonaScope::Workspace(workspace.id),
-                PersonaScope::Tenant(workspace.tenant_id),
-            ]
-        }
-        "Workspace" => {
-            let workspace = state
-                .workspaces
-                .find_by_id(&scope_id)
-                .await?
-                .ok_or_else(|| ApiError::NotFound(format!("workspace '{scope_id}' not found")))?;
-            vec![
-                PersonaScope::Workspace(workspace.id),
-                PersonaScope::Tenant(workspace.tenant_id),
-            ]
-        }
-        "Tenant" => vec![PersonaScope::Tenant(scope_id)],
+        "Repo" => vec![
+            PersonaScope::Repo(scope_id.clone()),
+            PersonaScope::Workspace(scope_id.clone()),
+            PersonaScope::Tenant(scope_id.clone()),
+        ],
+        "Workspace" => vec![
+            PersonaScope::Workspace(scope_id.clone()),
+            PersonaScope::Tenant(scope_id.clone()),
+        ],
+        "Tenant" => vec![PersonaScope::Tenant(scope_id.clone())],
         other => {
             return Err(ApiError::InvalidInput(format!(
                 "unknown scope_kind: {other}"
