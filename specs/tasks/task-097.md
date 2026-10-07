@@ -2,7 +2,7 @@
 title: "Platform Model Secrets Domain Types + Port"
 spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "platform-model.md §7 Secrets Delivery"
   - "platform-model.md §7 Principle"
@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §7 Secret Scoping"
   - "platform-model.md §7 Secret Types"
   - "platform-model.md §7 Storage Backend"
-commits: ["bfbb764f434e95bb84ee5e6543f66600e0e641ac", "1c8fb07cc8e7e80cb4d0cc012cd7d320cf519ae1", "f3707d176704666851bd1aa264cbbcc2fe3699aa", "7968dcf1102093b06a85b9c7d5c79cb91fe64012", "d5fe703aa9771f0c53f82e8091e936a9a1cc4e18"]
+commits: ["3a5be015d2fa96ef14a55109098fe869cf56ae13", "a38170c9bd9dd32749a57655e071503f6f6135de", "a3fde95850d96b0b97284564cc8345a684977bb5", "d5fe703aa9771f0c53f82e8091e936a9a1cc4e18", "7968dcf1102093b06a85b9c7d5c79cb91fe64012", "bfbb764f434e95bb84ee5e6543f66600e0e641ac", "1c8fb07cc8e7e80cb4d0cc012cd7d320cf519ae1", "f3707d176704666851bd1aa264cbbcc2fe3699aa", "8deb9ecc424c2593879368cd232c9753ff68360d"]
 review: specs/reviews/task-097.md
 ---
 
@@ -116,3 +116,9 @@ Product fixes in `d5fe703a` (+ `7968dcf1` test-import fix):
 - **F5 (silent key downgrade):** `load_encryption_key` emits a startup `warn!` (both fresh-generation and existing-persisted-key paths) stating that encryption-at-rest degrades to obfuscation when `GYRE_SECRET_ENCRYPTION_KEY` is unset, with remediation. No spec amendment needed — spec wording "encrypted at rest" still holds; the degraded default is now operator-visible.
 
 `commits:` now lists the five task-labeled product commits reachable from main (the previous entries were unreachable rebase duplicates, invisible to review scoping). A temporary `[patch.crates-io]` pq-sys build shim added during the round was reverted in `7968dcf1` (confirmed absent from Cargo.toml).
+
+## Shipped
+
+- Platform Model §7 secrets: `Secret`/`SecretScope`/`SecretType` domain types (no value field in metadata), `SecretRepository` port (create/get/list/delete/rotate/resolve_for_agent with nearest-scope-wins cascade and expired-secret exclusion), SQLite adapter with AES-256-GCM at rest via `ring` (per-value nonce, `GYRE_SECRET_ENCRYPTION_KEY` hex/passphrase or auto-generated persisted key with operator-visible degradation warning), and the `secrets` migration (000053) with scope index.
+- Agent spawn now resolves scoped secrets (tenant → workspace → repo → task) from the repository and injects them as `GYRE_CRED_*` env vars — the hardcoded `GYRE_AGENT_CREDENTIALS`/`GYRE_AGENT_GCP_SA_JSON` injection is gone; unresolvable workspace, resolve errors, and non-UTF-8 values each skip-and-warn (naming the secret, never the value) instead of fabricating tenants or corrupting values.
+- Both adapters enforce the port's duplicate-rejection contract (SQLite via UNIQUE constraints, mem via an in-code guard with contract tests), and five end-to-end spawn tests deliver secrets through a real spawned process and pin every fallback branch of the injection path.
