@@ -4753,6 +4753,7 @@ specs:
     async fn seed_drift_review_task(state: &crate::AppState, age_secs: u64) {
         let mut task = gyre_domain::Task::new(
             gyre_common::Id::new("drift-stale"),
+            "spec change drift review",
             crate::api::now_secs() - age_secs,
         );
         task.labels = vec!["spec-drift-review".to_string(), "auto-created".to_string()];

@@ -890,7 +890,6 @@ mod tests {
 
         let findings = run(&state).await;
         assert_eq!(types(&findings), vec!["stale_drift_review_task"]);
-        escalate_findings(&state, &findings).await;
 
         // Broadcast messages are not persisted (see AppState::emit_event), so
         // delivery is asserted on the dispatch channel itself — subscribed
