@@ -989,4 +989,150 @@ mod tests {
             "telemetry buffer should have at least one entry"
         );
     }
+
+    // ── Socket-free departure-notification tests (F4 core logic) ──────────
+    // The four socket tests above exercise the wiring (each removal path →
+    // broadcast). These two cover the shared primitives directly —
+    // broadcast_presence_departure's payload/fan-out and the idle sweeper's
+    // full effect (entry removal + PresenceEvicted to the evicted connection
+    // + departure to workspace subscribers) — without loopback TCP, so they
+    // run in environments where accept() is unavailable.
+
+    #[tokio::test]
+    async fn broadcast_presence_departure_reaches_only_workspace_subscribers() {
+        let state = Arc::new((*crate::mem::test_state()).clone());
+        // Fake connections: conn 1 subscribes to the workspace, conn 2 does not.
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel::<String>(8);
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel::<String>(8);
+        state.ws_connections.write().await.insert(1, tx1);
+        state.ws_connections.write().await.insert(2, tx2);
+        state
+            .ws_connection_workspaces
+            .write()
+            .await
+            .insert(1, vec![gyre_common::Id::new("ws-dep")]);
+        state
+            .ws_connection_workspaces
+            .write()
+            .await
+            .insert(2, vec![gyre_common::Id::new("ws-other")]);
+
+        broadcast_presence_departure(&state, "u-dep", "sess-dep", "ws-dep").await;
+
+        let payload = rx1
+            .recv()
+            .await
+            .expect("workspace subscriber must receive the departure");
+        match serde_json::from_str::<WsMessage>(&payload).unwrap() {
+            WsMessage::UserPresence {
+                user_id,
+                session_id,
+                workspace_id,
+                view,
+                editing_entity,
+                ..
+            } => {
+                assert_eq!(user_id.to_string(), "u-dep");
+                assert_eq!(session_id, "sess-dep");
+                assert_eq!(workspace_id.to_string(), "ws-dep");
+                assert_eq!(view, "disconnected");
+                assert!(
+                    editing_entity.is_none(),
+                    "a departure presence must not carry an editing entity"
+                );
+            }
+            other => panic!("expected UserPresence departure, got {other:?}"),
+        }
+        assert!(
+            rx2.try_recv().is_err(),
+            "a subscriber of a different workspace must not receive the departure"
+        );
+    }
+
+    #[tokio::test]
+    async fn evict_stale_presence_removes_stale_and_notifies_evictee_and_subscribers() {
+        let state = Arc::new((*crate::mem::test_state()).clone());
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        {
+            let mut map = state.presence.write().await;
+            map.insert(
+                ("u-old".to_string(), "sess-old".to_string()),
+                PresenceEntry {
+                    workspace_id: "ws-idle".to_string(),
+                    view: "specs".to_string(),
+                    editing_entity: Some("spec:specs/a.md".to_string()),
+                    timestamp: 0,
+                    server_last_seen: now_ms - 61_000,
+                    connection_id: 10,
+                },
+            );
+            map.insert(
+                ("u-new".to_string(), "sess-new".to_string()),
+                PresenceEntry {
+                    workspace_id: "ws-idle".to_string(),
+                    view: "specs".to_string(),
+                    editing_entity: None,
+                    timestamp: 0,
+                    server_last_seen: now_ms,
+                    connection_id: 11,
+                },
+            );
+        }
+        // Conn 10 = the stale session's own connection (targeted PresenceEvicted;
+        // not workspace-subscribed, so it must NOT also see the broadcast).
+        // Conn 20 = observer subscribed to ws-idle.
+        let (tx_old, mut rx_old) = tokio::sync::mpsc::channel::<String>(8);
+        let (tx_obs, mut rx_obs) = tokio::sync::mpsc::channel::<String>(8);
+        state.ws_connections.write().await.insert(10, tx_old);
+        state.ws_connections.write().await.insert(20, tx_obs);
+        state
+            .ws_connection_workspaces
+            .write()
+            .await
+            .insert(20, vec![gyre_common::Id::new("ws-idle")]);
+
+        crate::evict_stale_presence(&state).await;
+
+        {
+            let map = state.presence.read().await;
+            assert!(
+                !map.contains_key(&("u-old".to_string(), "sess-old".to_string())),
+                "stale entry must be removed"
+            );
+            assert!(
+                map.contains_key(&("u-new".to_string(), "sess-new".to_string())),
+                "fresh entry must survive the sweep"
+            );
+        }
+
+        let targeted = rx_old
+            .recv()
+            .await
+            .expect("evicted connection must receive PresenceEvicted");
+        match serde_json::from_str::<WsMessage>(&targeted).unwrap() {
+            WsMessage::PresenceEvicted { session_id } => assert_eq!(session_id, "sess-old"),
+            other => panic!("expected PresenceEvicted, got {other:?}"),
+        }
+
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(5), rx_obs.recv())
+            .await
+            .expect("workspace subscriber must receive the departure")
+            .expect("channel open");
+        match serde_json::from_str::<WsMessage>(&observed).unwrap() {
+            WsMessage::UserPresence {
+                user_id,
+                session_id,
+                view,
+                ..
+            } => {
+                assert_eq!(user_id.to_string(), "u-old");
+                assert_eq!(session_id, "sess-old");
+                assert_eq!(view, "disconnected");
+            }
+            other => panic!("expected UserPresence departure, got {other:?}"),
+        }
+    }
 }
