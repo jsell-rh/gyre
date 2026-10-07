@@ -45,14 +45,17 @@ pub(crate) fn ensure_fts_table(conn: &mut SqliteConnection) -> Result<()> {
 /// Build an FTS5 MATCH expression from a raw query.
 ///
 /// Tokens are split on every non-alphanumeric character (the same token
-/// boundaries the `unicode61` tokenizer uses on the index side) and joined
-/// with spaces — FTS5's implicit operator between adjacent phrases is AND,
-/// which is the spec's default for simple search. Raw punctuation that is
-/// FTS5 query syntax (`" * - ( ) ^ :`) never reaches the parser, so no
-/// user input can produce a MATCH syntax error.
+/// boundaries the `unicode61` tokenizer uses on the index side) and each one is
+/// quoted as a phrase. Adjacent phrases imply AND — the spec's default for
+/// simple search. Quoting is what makes this safe: FTS5 parses bare `AND`/`OR`/
+/// `NEAR` as boolean operators and raw `" * - ( ) ^ :` as query syntax, so an
+/// unquoted token stream lets user input produce MATCH syntax errors. Inside
+/// quotes every token is a literal term (operators folded by the query
+/// tokenizer), so no input can reach the parser as syntax.
 fn build_match_expr(raw: &str) -> String {
     raw.split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -228,8 +231,9 @@ impl SearchPort for SqliteStorage {
             let count = diesel::sql_query("SELECT COUNT(*) AS cnt FROM search_index")
                 .get_result::<CountRow>(&mut conn)?
                 .cnt;
-            diesel::sql_query("INSERT INTO search_index(search_index) VALUES('delete-all')")
-                .execute(&mut *conn)?;
+            // `delete-all` is rejected on a regular content table (it requires
+            // a contentless/external-content fts5 table); DELETE works on any.
+            diesel::sql_query("DELETE FROM search_index").execute(&mut *conn)?;
             Ok(count as u64)
         })
         .await??)
@@ -421,7 +425,8 @@ mod tests {
             })
             .await
             .unwrap();
-        // "AND" is a bare token here — indexed docs don't contain it.
+        // Every token is quoted into a literal phrase — bare AND/OR/NEAR can
+        // never reach the parser as a boolean operator. Docs match neither.
         assert!(hostile.is_empty());
     }
 
