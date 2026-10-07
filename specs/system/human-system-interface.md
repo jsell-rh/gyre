@@ -417,7 +417,7 @@ This linkage is heuristic (name matching) and may not resolve every span. Unreso
 
 **Storage:** Traces are stored per-MR, capped at the most recent gate run per MR. Old traces are evicted when the MR merges (the merged trace is preserved on the `MergeAttestation` for provenance). This bounds storage: at most one trace per open MR.
 
-**Input/output truncation:** `input_summary` and `output_summary` are truncated to 4KB each. The full payloads are stored as a separate blob (zstd-compressed, max 1MB per trace) retrievable via `GET /api/v1/merge-requests/:id/trace/spans/:span_id/payload`. This keeps the trace timeline lightweight while allowing drill-down into full payloads.
+**Input/output truncation:** `input_summary` and `output_summary` are truncated to 4KB each. The full payloads are stored as a separate blob (zstd-compressed, max 1MB per trace) retrievable via `GET /api/v1/trace-spans/:span_id/payload` (the flat route defined under "REST endpoints" below — it supersedes the originally-drafted nested route). This keeps the trace timeline lightweight while allowing drill-down into full payloads.
 
 **Crate placement:** `GateTrace` and `TraceSpan` live in `gyre-common` (shared wire types). `TraceRepository` lives in `gyre-ports`. The OTLP receiver lives in `gyre-server` (it's an ingestion endpoint, not domain logic).
 
