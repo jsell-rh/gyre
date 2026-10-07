@@ -2470,6 +2470,81 @@ pub fn compute_graph_summary(
     }
 }
 
+// ── Graph full-text search (explorer-implementation.md §9 `search` tool) ─────
+
+/// A node hit returned by [`search_graph_nodes`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphSearchHit {
+    pub id: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub node_type: String,
+    pub file_path: String,
+    pub spec_path: Option<String>,
+    /// Doc comment, truncated to 100 chars (char-boundary safe) so tool
+    /// payloads stay small.
+    pub doc_comment: Option<String>,
+}
+
+/// Case-insensitive substring search across the knowledge graph (§9 `search`):
+/// node name, qualified_name, file path, doc comment and spec path.
+/// Soft-deleted nodes are excluded. Hits are ranked most-relevant-first
+/// (exact name → name prefix → name substring → qualified_name → other field)
+/// and capped at `limit`.
+pub fn search_graph_nodes(query: &str, nodes: &[GraphNode], limit: usize) -> Vec<GraphSearchHit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut hits: Vec<(u8, GraphSearchHit)> = nodes
+        .iter()
+        .filter(|n| n.deleted_at.is_none())
+        .filter_map(|n| {
+            let name = n.name.to_lowercase();
+            let qname = n.qualified_name.to_lowercase();
+            let rank = if name == needle {
+                0
+            } else if name.starts_with(&needle) {
+                1
+            } else if name.contains(&needle) {
+                2
+            } else if qname.contains(&needle) {
+                3
+            } else if n.file_path.to_lowercase().contains(&needle)
+                || n.spec_path
+                    .as_ref()
+                    .map_or(false, |s| s.to_lowercase().contains(&needle))
+                || n.doc_comment
+                    .as_ref()
+                    .map_or(false, |d| d.to_lowercase().contains(&needle))
+            {
+                4
+            } else {
+                return None;
+            };
+            Some((
+                rank,
+                GraphSearchHit {
+                    id: n.id.to_string(),
+                    name: n.name.clone(),
+                    qualified_name: n.qualified_name.clone(),
+                    node_type: node_type_str(&n.node_type).to_string(),
+                    file_path: n.file_path.clone(),
+                    spec_path: n.spec_path.clone(),
+                    doc_comment: n
+                        .doc_comment
+                        .as_ref()
+                        .map(|d| d.chars().take(100).collect::<String>()),
+                },
+            ))
+        })
+        .collect();
+    // Stable sort preserves store order within a relevance tier.
+    hits.sort_by_key(|(rank, _)| *rank);
+    hits.truncate(limit);
+    hits.into_iter().map(|(_, h)| h).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5491,5 +5566,56 @@ mod tests {
             "Valid node_type='function' should pass, got: {:?}",
             errors
         );
+    }
+
+    // ── §9 `search`: graph full-text search ─────────────────────────────────
+
+    #[test]
+    fn test_search_graph_nodes_matches_all_fields_excludes_deleted() {
+        let mut by_name = make_node("s1", "AuthService", NodeType::Type);
+        let mut by_doc = make_node("s2", "CacheLayer", NodeType::Type);
+        by_doc.doc_comment = Some("Handles token auth refresh".to_string());
+        let mut by_spec = make_node("s3", "LogWriter", NodeType::Function);
+        by_spec.spec_path = Some("specs/system/auth-lifecycle.md".to_string());
+        let mut by_file = make_node("s4", "Runner", NodeType::Function);
+        by_file.file_path = "src/auth/runner.rs".to_string();
+        let mut deleted = make_node("s5", "auth_removed", NodeType::Type);
+        deleted.deleted_at = Some(2000);
+
+        let nodes = vec![
+            by_doc.clone(),
+            by_spec.clone(),
+            by_file.clone(),
+            deleted,
+            by_name.clone(),
+        ];
+
+        let hits = search_graph_nodes("auth", &nodes, 10);
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert!(
+            !names.contains(&"auth_removed"),
+            "soft-deleted nodes must not be searchable, got {names:?}"
+        );
+        assert_eq!(
+            names,
+            vec!["AuthService", "CacheLayer", "LogWriter", "Runner"],
+            "name match must outrank doc/spec/file matches"
+        );
+        // The name-ranked hit carries the node's own metadata.
+        let auth = hits.iter().find(|h| h.name == "AuthService").unwrap();
+        assert_eq!(auth.node_type, "type");
+        assert_eq!(auth.qualified_name, "pkg.AuthService");
+        let doc_hit = hits.iter().find(|h| h.name == "CacheLayer").unwrap();
+        assert!(doc_hit.doc_comment.as_deref().unwrap().contains("auth"));
+    }
+
+    #[test]
+    fn test_search_graph_nodes_limit_and_empty_query() {
+        let nodes: Vec<GraphNode> = (0..20)
+            .map(|i| make_node(&format!("t{i}"), &format!("auth_handler_{i}"), NodeType::Function))
+            .collect();
+        assert_eq!(search_graph_nodes("auth", &nodes, 5).len(), 5);
+        assert!(search_graph_nodes("   ", &nodes, 10).is_empty());
+        assert!(search_graph_nodes("nothing-matches-this", &nodes, 10).is_empty());
     }
 }
