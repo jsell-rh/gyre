@@ -3920,6 +3920,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_message_send_rejects_payload_missing_required_field() {
+        // message-bus.md §Payload Schemas: the MCP receipt path enforces the same
+        // required-field table as the REST path. `task_assignment` requires
+        // `task_id`; a payload carrying only `spec_ref` must be a tool error and
+        // must NOT reach the message store.
+        use gyre_ports::MessageRepository as _;
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-schema");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-schema-target"), "t", 0);
+        target.workspace_id = Id::new("ws-schema");
+        state.agents.create(&target).await.unwrap();
+
+        let call = |payload: Value| {
+            let state = state.clone();
+            async move {
+                mcp_post(
+                    crate::build_router(state),
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 73,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "gyre_message_send",
+                            "arguments": {
+                                "to": {"agent": "agent-schema-target"},
+                                "kind": "task_assignment",
+                                "payload": payload
+                            }
+                        }
+                    }),
+                )
+                .await
+            }
+        };
+
+        let (status, json) = call(json!({"spec_ref": "specs/x.md"})).await;
+        assert_eq!(status, StatusCode::OK, "JSON-RPC envelope is 200");
+        assert!(
+            json["result"]["isError"].as_bool().unwrap_or(false),
+            "invalid payload must be a tool error: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("task_id"),
+            "error must name the missing field, got: {text}"
+        );
+        assert_eq!(
+            gyre_ports::MessageRepository::list_unacked(&*state.messages, &Id::new("agent-schema-target"), 10)
+                .await
+                .unwrap()
+                .len(),
+            0,
+            "a rejected payload must not be persisted"
+        );
+
+        // Same kind with the required field present succeeds.
+        let (status, json) = call(json!({"task_id": "TASK-1"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(true),
+            "valid payload must succeed: {json}"
+        );
+        assert_eq!(
+            gyre_ports::MessageRepository::list_unacked(&*state.messages, &Id::new("agent-schema-target"), 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the accepted payload must be persisted"
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_message_send_broadcasts_to_websocket_channel() {
         let state = test_state();
         let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
