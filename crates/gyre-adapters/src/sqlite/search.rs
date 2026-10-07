@@ -159,20 +159,20 @@ impl SearchPort for SqliteStorage {
             // the index query itself (§Access Scoping: not post-filtered).
             // bm25 ordering: best (most negative) first. snippet() wraps matches
             // in ** markers per spec §Response Format.
-            let rows = diesel::sql_query(
+            let rows = diesel::sql_query(format!(
                 "SELECT entity_type,
                         entity_id,
                         title,
                         bm25(search_index) AS rank,
-                        snippet(search_index, 6, '**', '**', '…', 32) AS snip,
+                        snippet(search_index, {BODY_COL}, '**', '**', '…', 32) AS snip,
                         metadata
                  FROM search_index
                  WHERE search_index MATCH ?1
                    AND (?2 IS NULL OR entity_type = ?2)
                    AND (?3 IS NULL OR workspace_id = ?3)
                  ORDER BY rank
-                 LIMIT ?4",
-            )
+                 LIMIT ?4"
+            ))
             .bind::<Text, _>(&match_expr)
             .bind::<Nullable<Text>, _>(query.entity_type)
             .bind::<Nullable<Text>, _>(query.workspace_id)
