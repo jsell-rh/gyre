@@ -353,13 +353,24 @@
   let targetSpecs       = $state([]);
   let selectedSpecPaths = $state([]);
 
-  let previewId        = null;
-  let previewProgress  = $state([]);
-  let previewInterval  = null;
+  // Preview state is server-owned: this mirrors the agents POST /meta-specs/preview
+  // spawned and the diffs their preview/<id>/<slug> branches produced.
+  let previewId       = $state(null);
+  /** @type {{agent_id: string|null, repo_id: string|null, spec_path: string, branch: string|null, status: string, diff: object|null}[]} */
+  let previewAgents   = $state([]);
+  let previewAgentTab = $state(0);
+  let previewError    = $state(null);
+  // Set when we stop polling before the server reports completion (bounded timeout or
+  // repeated poll failures): agents are still running, so the panel shows live status.
+  let previewStalled  = $state(false);
+  let clearing        = $state(false);
+  let previewInterval = null;
+  let previewRun      = 0; // generation counter — invalidates in-flight POST/polls after a reset
 
-  let impactTab        = $state('architecture');
-  let previewApiResult = $state(null);
-  let isSimulatedPreview = $state(false);
+  const PREVIEW_POLL_MS = 2000;
+  const PREVIEW_POLL_TIMEOUT_MS = 600000; // preview agents take minutes, not hours
+  const PREVIEW_POLL_MAX_ERRORS = 3;
+  const AGENT_STATUSES = ['running', 'complete', 'failed', 'stopped', 'dead', 'unknown'];
 
   let wsSuggestions     = $state([]);
   let wsNextSuggId      = 0;

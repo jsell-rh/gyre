@@ -112,6 +112,10 @@ impl GitOpsPort for NoopGitOps {
         Ok(())
     }
 
+    async fn force_remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -138,6 +142,10 @@ impl GitOpsPort for NoopGitOps {
         _branch_name: &str,
         _from_ref: &str,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_branch(&self, _repo_path: &str, _branch_name: &str) -> Result<()> {
         Ok(())
     }
 
@@ -269,6 +277,10 @@ impl GitOpsPort for ConfigurableGitOps {
         Ok(())
     }
 
+    async fn force_remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -295,6 +307,10 @@ impl GitOpsPort for ConfigurableGitOps {
         _branch_name: &str,
         _from_ref: &str,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_branch(&self, _repo_path: &str, _branch_name: &str) -> Result<()> {
         Ok(())
     }
 
