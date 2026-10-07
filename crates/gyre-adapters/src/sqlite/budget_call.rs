@@ -101,9 +101,11 @@ impl BudgetCallRepository for SqliteStorage {
     ) -> Result<Vec<BudgetCallRecord>> {
         let pool = Arc::clone(&self.pool);
         let ws = workspace_id.to_string();
+        let tenant_id = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<BudgetCallRecord>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = budget_call_records::table
+                .filter(budget_call_records::tenant_id.eq(&tenant_id))
                 .filter(budget_call_records::workspace_id.eq(&ws))
                 .filter(budget_call_records::timestamp.ge(since as i64))
                 .order(budget_call_records::timestamp.desc())
@@ -123,7 +125,8 @@ mod tests {
 
     fn setup() -> (NamedTempFile, SqliteStorage) {
         let tmp = NamedTempFile::new().unwrap();
-        let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        let s =
+            SqliteStorage::new_for_tenant(tmp.path().to_str().unwrap(), "tenant-1").unwrap();
         (tmp, s)
     }
 
