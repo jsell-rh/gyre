@@ -451,16 +451,36 @@ This solves the "how does the human know?" problem. Agent escalations become pus
 
 ## "My Stuff" Views
 
-### My Dashboard (Landing Page After Login)
+### "My Stuff" Is Not a Surface (amended 2026-10-07, task-208)
 
-| Section | Content |
-|---|---|
-| My Tasks | Tasks assigned to me, grouped by status |
-| My MRs | MRs I authored (or was spawned to create), with gate/merge status |
-| My Agents | Agents I spawned, with status and budget usage |
-| Pending Approvals | Specs and personas waiting for my approval |
-| My Notifications | Unread notifications, prioritized |
-| Recent Activity | My recent activity across all workspaces |
+The M22-era "My Dashboard (Landing Page After Login)" table that stood here is
+**superseded**. No per-user dashboard page exists and none will be built.
+
+- **The landing page is the workspace home.** [`ui-navigation.md`](ui-navigation.md)
+  §2: "The workspace home is a **dashboard**, not a sidebar-driven view. It's the
+  landing page after selecting a workspace." `ui-navigation.md` §10 supersedes the
+  entrypoint flow this section assumed (`ui-layout.md` §1).
+- **My Tasks / My MRs / My Agents get no per-user surface anywhere.** Per
+  [`human-system-interface.md`](human-system-interface.md) §12 "What the Profile
+  Is NOT": tasks are agent work units, not human artifacts; humans don't author
+  MRs, they approve or reject them (that record lives in the judgment ledger);
+  agents are system machinery that humans interrogate (via the Inbox/Decisions),
+  not manage. These three views MUST NOT appear in `/profile` or any other
+  per-user surface. Humans who need agent, task, or MR state use the workspace
+  home, the repo tabs, and the judgment ledger. The
+  `GET /api/v1/users/me/{agents,tasks,mrs}` endpoints that backed them are
+  removed accordingly (see §Completeness Assessment below).
+- **The remaining dashboard needs are served by the workspace home** — nothing is
+  lost, and none of it gets a separate page:
+
+  | Old dashboard section | Where it is served |
+  |---|---|
+  | Pending Approvals | Workspace home **Decisions** section (`ui-navigation.md` §2), sourced from `GET /api/v1/users/me/notifications` |
+  | My Notifications | Top-bar notification bell with unread count (`ui-navigation.md` §1) → Decisions (§2) |
+  | Recent Activity | Workspace home **Briefing** section (`ui-navigation.md` §2) |
+
+The public profile page below is unaffected: it is a tenant-scoped public
+surface, not the per-user surface HSI §12 governs.
 
 ### User Profile Page (`/@{username}`)
 
@@ -576,7 +596,6 @@ gyre notifications preferences set --slack-url https://hooks.slack.com/...
 
 | Page | Purpose |
 |---|---|
-| My Dashboard | Landing page with my tasks, MRs, agents, approvals, notifications, pending invitations |
 | User Profile (`/@username`) | Public profile with activity feed |
 | User Settings | Edit display name, timezone, preferences, notification channels |
 | Session Management | Active sessions with revoke |
@@ -588,6 +607,11 @@ gyre notifications preferences set --slack-url https://hooks.slack.com/...
 | Team Management | Create/edit teams, manage membership |
 | Notification Drawer | Slide-out panel from bell icon |
 | Notification Preferences | Channel configuration, priority filters |
+
+> The M22-era **My Dashboard** landing page formerly listed here is superseded —
+> see §"My Stuff" Views. The workspace home (`ui-navigation.md` §2) is the landing
+> page, and My Tasks / My MRs / My Agents have no per-user surface anywhere
+> (`human-system-interface.md` §12 "What the Profile Is NOT").
 
 ---
 
@@ -625,7 +649,7 @@ As of M22, the following user management features are **implemented**:
 | Feature | Status |
 |---|---|
 | `GET/PUT /api/v1/users/me` — profile + preferences | ✅ Implemented |
-| `GET /api/v1/users/me/{agents,tasks,mrs}` — "my stuff" | ✅ Implemented |
+| ~~`GET /api/v1/users/me/{agents,tasks,mrs}` — "my stuff"~~ | 🗑 **Removed** (2026-10-07, task-208) — per-user "my stuff" surface forbidden by `human-system-interface.md` §12 "What the Profile Is NOT"; see §"My Stuff" Views |
 | `GET /api/v1/users/me/notifications` — notification list | ✅ Implemented |
 | `PUT /api/v1/users/me/notifications/{id}/read` — mark read | ✅ Implemented |
 | `POST/GET /api/v1/workspaces/{id}/members` — invite + list | ✅ Implemented |

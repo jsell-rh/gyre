@@ -3,9 +3,6 @@
 //! POST /api/v1/users                 (bootstrap admin user creation - Admin-only)
 //! GET  /api/v1/users/me
 //! PUT  /api/v1/users/me
-//! GET  /api/v1/users/me/agents
-//! GET  /api/v1/users/me/tasks
-//! GET  /api/v1/users/me/mrs
 //! GET  /api/v1/users/me/notifications?workspace_id=&min_priority=&max_priority=&limit=&offset=
 //! POST /api/v1/notifications/:id/dismiss
 //! POST /api/v1/notifications/:id/resolve
@@ -160,85 +157,6 @@ pub async fn update_me(
     user.updated_at = now;
     state.users.update(&user).await?;
     Ok(Json(UserProfileResponse::from(user)))
-}
-
-pub async fn get_my_agents(
-    auth: AuthenticatedAgent,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let agents = state.agents.list().await?;
-    let my_agents: Vec<_> = agents
-        .into_iter()
-        .filter(|a| {
-            if let Some(uid) = &auth.user_id {
-                a.spawned_by
-                    .as_ref()
-                    .map(|sb| sb == uid.as_str())
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        })
-        .map(|a| serde_json::json!({"id": a.id.to_string(), "name": a.name, "status": format!("{:?}", a.status)}))
-        .collect();
-    Ok(Json(serde_json::json!({"agents": my_agents})))
-}
-
-pub async fn get_my_tasks(
-    auth: AuthenticatedAgent,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let tasks = state.tasks.list().await?;
-    let my_tasks: Vec<_> = tasks
-        .into_iter()
-        .filter(|t| {
-            if let Some(uid) = &auth.user_id {
-                t.assigned_to
-                    .as_ref()
-                    .map(|at| at.as_str() == uid.as_str())
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        })
-        .map(|t| {
-            serde_json::json!({
-                "id": t.id.to_string(),
-                "title": t.title,
-                "status": format!("{:?}", t.status),
-                "priority": format!("{:?}", t.priority),
-            })
-        })
-        .collect();
-    Ok(Json(serde_json::json!({"tasks": my_tasks})))
-}
-
-pub async fn get_my_mrs(
-    auth: AuthenticatedAgent,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let mrs = state.merge_requests.list().await?;
-    let my_mrs: Vec<_> = mrs
-        .into_iter()
-        .filter(|mr| {
-            if let Some(uid) = &auth.user_id {
-                mr.author_agent_id
-                    .as_ref()
-                    .map(|a| a == uid)
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        })
-        .map(|mr| {
-            serde_json::json!({
-                "id": mr.id.to_string(),
-                "title": mr.title,
-                "status": format!("{:?}", mr.status),
-            })
-        })
-        .collect();
-    Ok(Json(serde_json::json!({"merge_requests": my_mrs})))
 }
 
 // ─── Notifications ────────────────────────────────────────────────────────────
@@ -1020,6 +938,35 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["notifications"].as_array().unwrap().len(), 0);
+    }
+
+    /// HSI §12 "What the Profile Is NOT": there is no per-user "My Tasks" /
+    /// "My MRs" / "My Agents" surface, so `/users/me/{agents,tasks,mrs}` must not
+    /// be routed at all. Regression guard against reintroducing the surface
+    /// (task-208).
+    #[tokio::test]
+    async fn my_stuff_endpoints_are_removed() {
+        for uri in [
+            "/api/v1/users/me/agents",
+            "/api/v1/users/me/tasks",
+            "/api/v1/users/me/mrs",
+        ] {
+            let resp = app()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("Authorization", "Bearer test-token")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{uri} must be unroutable (HSI §12 — no per-user my-stuff surface)"
+            );
+        }
     }
 
     #[tokio::test]
